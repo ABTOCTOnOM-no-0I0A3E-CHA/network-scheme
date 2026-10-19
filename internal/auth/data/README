@@ -1,0 +1,9 @@
+compromised.txt.gz - lowercased, deduplicated top-100000 common passwords (one per line, gzip).
+
+Source: https://github.com/danielmiessler/SecLists
+File:   Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt
+        (successor name of 10-million-password-list-top-100000.txt, same data)
+Commit: 75064ac792b5b554d17386abae3f0e38db7f923c
+License: MIT (SecLists)
+
+Fetched once at development time; the application never downloads it at runtime.
