@@ -43,7 +43,10 @@ jobs:
       - name: JS licenses
         run: scripts/check-licenses.sh js test/fixtures/licenses/js-clean
       - name: License check detects violations
-        run: "! scripts/check-licenses.sh js test/fixtures/licenses/js-gpl"
+        run: |
+          scripts/expect-license-failure.sh js test/fixtures/licenses/js-gpl evil-dep
+          scripts/expect-license-failure.sh js test/fixtures/licenses/js-private-gpl sneaky-dep
+          scripts/expect-license-failure.sh go test/fixtures/licenses/go-gpl example.com/gpldep
 
   sbom:
     runs-on: ubuntu-latest
