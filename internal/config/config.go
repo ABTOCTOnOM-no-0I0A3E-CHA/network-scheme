@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -88,4 +89,29 @@ func ReadSecretFile(path string) (secret.Secret, error) {
 		return secret.Secret{}, fmt.Errorf("secret file %s is empty", path)
 	}
 	return secret.New(v), nil
+}
+
+/*
+ReadKeyFile reads a 32-byte key secret (api_data_key, domain and sealing
+keys): exactly 32 raw bytes, or the base64 (standard or URL alphabet, padded
+or not) encoding of 32 bytes.
+*/
+func ReadKeyFile(path string) (*[32]byte, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- path comes from trusted configuration
+	if err != nil {
+		return nil, fmt.Errorf("read key file: %w", err)
+	}
+	key := new([32]byte)
+	if len(raw) == len(key) {
+		copy(key[:], raw)
+		return key, nil
+	}
+	text := string(bytes.TrimSpace(raw))
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(text); err == nil && len(b) == len(key) {
+			copy(key[:], b)
+			return key, nil
+		}
+	}
+	return nil, fmt.Errorf("key file %s: want 32 raw bytes or base64 of 32 bytes", path)
 }

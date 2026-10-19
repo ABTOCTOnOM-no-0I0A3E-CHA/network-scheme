@@ -7,6 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	nmscrypto "github.com/beekamai/network-scheme/internal/crypto"
+	"github.com/beekamai/network-scheme/internal/secret"
 )
 
 /* User management errors. */
@@ -98,6 +101,41 @@ func (*UserStore) ResetTOTP(ctx context.Context, tx pgx.Tx, id int64) error {
 		return err
 	}
 	return endSessions(ctx, tx, id)
+}
+
+/*
+EnrollTOTP gives the user a fresh TOTP secret and 10 backup codes, stored
+exactly as a completed web enrollment stores them (sealed with dataKey), and
+ends its sessions. nmsctl uses it to show the break-glass admin's QR code in
+the terminal. The secret and the codes are returned once and never stored in
+clear.
+*/
+func (*UserStore) EnrollTOTP(ctx context.Context, tx pgx.Tx, id int64, dataKey *[32]byte) (sec secret.Secret, otpauthURI string, backupCodes []string, err error) {
+	var name string
+	err = tx.QueryRow(ctx, `SELECT username FROM core."user" WHERE id = $1`, id).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return secret.Secret{}, "", nil, ErrUserNotFound
+	}
+	if err != nil {
+		return secret.Secret{}, "", nil, fmt.Errorf("auth: load user: %w", err)
+	}
+	sec, otpauthURI, err = NewTOTPSecret(totpIssuer, name)
+	if err != nil {
+		return secret.Secret{}, "", nil, fmt.Errorf("auth: new TOTP secret: %w", err)
+	}
+	enc, err := nmscrypto.Seal(dataKey, []byte(sec.Reveal()), loginAAD(id))
+	if err != nil {
+		return secret.Secret{}, "", nil, err
+	}
+	codes, hashes := GenerateBackupCodes()
+	if err := updateUser(ctx, tx, id,
+		`UPDATE core."user" SET totp_secret_enc = $2, totp_last_step = 0, backup_hashes = $3 WHERE id = $1`, enc, hashes); err != nil {
+		return secret.Secret{}, "", nil, err
+	}
+	if err := endSessions(ctx, tx, id); err != nil {
+		return secret.Secret{}, "", nil, err
+	}
+	return sec, otpauthURI, codes, nil
 }
 
 // SetPassword validates and stores a new password and ends all sessions of the user.

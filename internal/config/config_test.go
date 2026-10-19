@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -71,5 +73,26 @@ func TestReadSecretFileTrimsNewlineRejectsEmpty(t *testing.T) {
 	}
 	if _, err := config.ReadSecretFile(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestReadKeyFile(t *testing.T) {
+	want := bytes.Repeat([]byte{0xAB}, 32)
+	cases := map[string][]byte{
+		"raw":       want,
+		"raw-nl":    append(bytes.Clone(want), '\n'), /* 33 bytes: neither raw nor base64 */
+		"b64":       []byte(base64.StdEncoding.EncodeToString(want) + "\n"),
+		"b64url":    []byte(base64.RawURLEncoding.EncodeToString(want)),
+		"short-b64": []byte(base64.StdEncoding.EncodeToString(want[:16])),
+	}
+	for name, content := range cases {
+		key, err := config.ReadKeyFile(write(t, name, string(content)))
+		ok := name == "raw" || name == "b64" || name == "b64url"
+		if ok != (err == nil) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if ok && !bytes.Equal(key[:], want) {
+			t.Fatalf("%s: wrong key", name)
+		}
 	}
 }

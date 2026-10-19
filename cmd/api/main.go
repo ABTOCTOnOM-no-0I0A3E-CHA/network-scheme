@@ -2,9 +2,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -107,7 +105,7 @@ func serve(ctx context.Context, args []string) error {
 	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" {
 		return errors.New("config: listen_addr and data_key_file are required")
 	}
-	key, err := loadDataKey(cfg.DataKeyFile)
+	key, err := config.ReadKeyFile(cfg.DataKeyFile)
 	if err != nil {
 		return err
 	}
@@ -150,30 +148,6 @@ func serve(ctx context.Context, args []string) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
-}
-
-/*
-loadDataKey reads the api_data_key secret: exactly 32 raw bytes, or the
-base64 (standard or URL alphabet, padded or not) encoding of 32 bytes.
-*/
-func loadDataKey(path string) (*[32]byte, error) {
-	raw, err := os.ReadFile(path) // #nosec G304 -- path comes from trusted configuration
-	if err != nil {
-		return nil, fmt.Errorf("read data key: %w", err)
-	}
-	key := new([32]byte)
-	if len(raw) == len(key) {
-		copy(key[:], raw)
-		return key, nil
-	}
-	text := string(bytes.TrimSpace(raw))
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if b, err := enc.DecodeString(text); err == nil && len(b) == len(key) {
-			copy(key[:], b)
-			return key, nil
-		}
-	}
-	return nil, fmt.Errorf("data key %s: want 32 raw bytes or base64 of 32 bytes", path)
 }
 
 /* healthcheck probes the local API for the container health check: exit 0 or 1. */
