@@ -1,0 +1,148 @@
+# Rendered by nmsctl install. Secrets come only from files in {{.Paths.Etc}}/secrets.
+name: nms
+
+services:
+  postgres:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.DBImage}}"
+    restart: unless-stopped
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    cpus: "2.0"
+    mem_limit: 2g
+    environment:
+      POSTGRES_DB: "{{.DBName}}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
+    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - "{{.Paths.Etc}}/postgres/initdb:/docker-entrypoint-initdb.d:ro"
+    networks:
+      core: {}
+    healthcheck:
+      # TCP probe: the init-time server listens on the socket only, so this waits for the real start.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "{{.DBName}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  migrate:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.APIImage}}:{{.ImageTag}}"
+    command: ["migrate"]
+    restart: "no"
+    read_only: true
+    user: "65532:65532"
+    cpus: "0.5"
+    mem_limit: 256m
+    secrets: [db_migrator_password]
+    volumes:
+      - "{{.Paths.Etc}}/config/api.yaml:/etc/nms/api.yaml:ro"
+    networks:
+      core: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.APIImage}}:{{.ImageTag}}"
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cpus: "1.0"
+    mem_limit: 512m
+    secrets: [db_api_password, api_data_key]
+    volumes:
+      - "{{.Paths.Etc}}/config/api.yaml:/etc/nms/api.yaml:ro"
+    networks:
+      core: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/api", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  gateway:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.GatewayImage}}:{{.ImageTag}}"
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cpus: "1.0"
+    mem_limit: 256m
+    tmpfs: [/tmp]
+    ports: ["{{.HTTPSPort}}:8443"]
+    secrets:
+      - source: web_crt
+        target: /certs/web.crt
+      - source: web_key
+        target: /certs/web.key
+    volumes:
+      - caddy-data:/data
+      - "{{.Paths.Etc}}/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "{{.Paths.Var}}/gateway/keys.json:/srv/keys/keys.json:ro"
+    networks:
+      edge: {}
+      core:
+        ipv4_address: "{{.GatewayIP}}"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  nmsctl:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.APIImage}}:{{.ImageTag}}"
+    entrypoint: ["/nmsctl"]
+    profiles: [tools]
+    restart: "no"
+    read_only: true
+    user: "65532:65532"
+    cpus: "0.5"
+    mem_limit: 256m
+    secrets: [db_cli_password, api_data_key]
+    volumes:
+      - "{{.Paths.Etc}}/config/api.yaml:/etc/nms/api.yaml:ro"
+      - "{{.Paths.Var}}/anchors:/var/lib/nms/anchors"
+    networks:
+      core: {}
+
+networks:
+  edge: {}
+  core:
+    internal: true
+    ipam:
+      config:
+        - subnet: "{{.CoreSubnet}}"
+          ip_range: "{{.CoreIPRange}}"
+
+volumes:
+  pgdata: {}
+  caddy-data: {}
+
+secrets:
+  db_postgres_password:
+    file: "{{.Paths.Etc}}/secrets/db_postgres_password"
+  db_migrator_password:
+    file: "{{.Paths.Etc}}/secrets/db_migrator_password"
+  db_api_password:
+    file: "{{.Paths.Etc}}/secrets/db_api_password"
+  db_cli_password:
+    file: "{{.Paths.Etc}}/secrets/db_cli_password"
+  api_data_key:
+    file: "{{.Paths.Etc}}/secrets/api_data_key"
+  web_crt:
+    file: "{{.Paths.Etc}}/secrets/web.crt"
+  web_key:
+    file: "{{.Paths.Etc}}/secrets/web.key"

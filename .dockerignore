@@ -1,0 +1,12 @@
+# Keep the build context to sources: no VCS, controller scratch, secrets or local deps.
+.git
+.github
+docs
+test
+secrets
+**/*.pem
+**/*.key
+**/.env
+**/.env.*
+**/node_modules
+web/app/dist

@@ -1,0 +1,75 @@
+# Rendered by nmsctl install. Panel origin https://nms.example.org.
+{
+	admin off
+	persist_config off
+	auto_https disable_redirects
+	ocsp_stapling off
+	servers {
+		protocols h1 h2
+	}
+}
+
+:8443 {
+	tls /certs/web.crt /certs/web.key {
+		protocols tls1.3
+	}
+
+	header {
+		Content-Security-Policy "default-src 'self'; script-src https://nms.example.org/assets/; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		-Server
+		defer
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	root * /srv/app
+
+	@sw header Service-Worker *
+
+	# route keeps the written order: the service-worker check runs before any handler.
+	route {
+		respond @sw 403
+
+		handle /api/auth/* {
+			reverse_proxy api:8080 {
+				header_up X-Forwarded-For {remote_host}
+				header_down -Service-Worker-Allowed
+				header_down -Content-Security-Policy
+				header_down Content-Type "application/json; charset=utf-8"
+			}
+		}
+
+		handle /api/* {
+			reverse_proxy api:8080 {
+				header_up X-Forwarded-For {remote_host}
+				header_down -Service-Worker-Allowed
+				header_down -Content-Security-Policy
+				header_down Content-Type "application/json; charset=utf-8"
+				header_down -Set-Cookie
+			}
+		}
+
+		handle /keys.json {
+			root * /srv/keys
+			file_server
+		}
+
+		handle /assets/* {
+			header Cache-Control "public, max-age=31536000, immutable"
+			file_server
+		}
+
+		handle {
+			try_files {path} /index.html
+			file_server
+		}
+	}
+}
