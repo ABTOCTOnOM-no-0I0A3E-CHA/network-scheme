@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -25,21 +24,30 @@ var migrationsFS embed.FS
 /* The version table lives in core: the migrator has no CREATE on public. */
 const versionTable = "core.goose_db_version"
 
-func dsnQuote(v string) string {
-	return "'" + strings.NewReplacer(`\`, `\`, `'`, `'`).Replace(v) + "'"
-}
-
 func poolConfig(c config.DB, pw secret.Secret) (*pgxpool.Config, error) {
 	if pw.IsZero() {
 		return nil, errors.New("empty database password")
 	}
-	/* Built as a keyword DSN so pgx derives TLS/fallback settings consistently; the password is set afterwards and never enters the string. */
-	cfg, err := pgxpool.ParseConfig(fmt.Sprintf("host=%s port=%d dbname=%s user=%s connect_timeout=10",
-		dsnQuote(c.Host), c.Port, dsnQuote(c.Name), dsnQuote(c.User)))
+	/*
+	   Config values never enter a DSN string: a constant template is parsed and
+	   the values are assigned to the structured fields afterwards.
+	*/
+	cfg, err := pgxpool.ParseConfig("host=placeholder sslmode=prefer connect_timeout=10")
 	if err != nil {
 		return nil, fmt.Errorf("database config: %w", err)
 	}
-	cfg.ConnConfig.Password = pw.Reveal()
+	cc := cfg.ConnConfig
+	cc.Host, cc.Port = c.Host, uint16(c.Port) // #nosec G115 -- range checked by config validation
+	cc.Database, cc.User, cc.Password = c.Name, c.User, pw.Reveal()
+	if cc.TLSConfig != nil {
+		cc.TLSConfig.ServerName = c.Host
+	}
+	for _, fb := range cc.Fallbacks {
+		fb.Host, fb.Port = c.Host, cc.Port
+		if fb.TLSConfig != nil {
+			fb.TLSConfig.ServerName = c.Host
+		}
+	}
 	return cfg, nil
 }
 
