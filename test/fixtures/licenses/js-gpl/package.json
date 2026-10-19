@@ -1,0 +1,7 @@
+{
+  "name": "js-gpl",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "dependencies": { "evil-dep": "1.0.0" }
+}

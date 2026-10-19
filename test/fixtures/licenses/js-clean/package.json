@@ -1,0 +1,7 @@
+{
+  "name": "js-clean",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "dependencies": { "good-dep": "1.0.0" }
+}

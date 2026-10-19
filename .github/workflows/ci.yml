@@ -26,3 +26,44 @@ jobs:
         run: "! scripts/check-isolation.sh test/fixtures/isolation"
       - name: Vulnerability scan
         run: govulncheck ./...
+
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install tools
+        run: go install github.com/google/go-licenses/v2@v2.0.1
+      - name: Go licenses
+        run: scripts/check-licenses.sh go .
+      # web/app does not exist until Phase 0 Task 13; point this at web/app then
+      - name: JS licenses
+        run: scripts/check-licenses.sh js test/fixtures/licenses/js-clean
+      - name: License check detects violations
+        run: "! scripts/check-licenses.sh js test/fixtures/licenses/js-gpl"
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom.json
+      - name: Install osv-scanner
+        run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.0
+      - name: Vulnerability scan
+        run: osv-scanner --recursive .
