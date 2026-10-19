@@ -260,3 +260,32 @@ func (s *Store) SetBindings(ctx context.Context, tx pgx.Tx, userID int64, bindin
 	}
 	return nil
 }
+
+/*
+GuardNotLastAdmin returns ErrLastAdmin if userID is an enabled global admin
+and no other enabled user is one, so that disabling userID would leave the
+panel without an administrator. It takes the same advisory lock as
+SetBindings, held until the caller's transaction ends: run it in the
+transaction that disables the user so concurrent disables and binding changes
+cannot jointly remove the last two admins.
+*/
+func (s *Store) GuardNotLastAdmin(ctx context.Context, tx pgx.Tx, userID int64) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockBindings); err != nil {
+		return fmt.Errorf("rbac: lock bindings: %w", err)
+	}
+	var isAdmin, others bool
+	err := tx.QueryRow(ctx, `
+		SELECT
+		  EXISTS (SELECT 1 FROM core.role_binding rb JOIN core."user" u ON u.id = rb.user_id
+		          WHERE rb.user_id = $1 AND rb.role = 'admin' AND rb.group_id IS NULL AND NOT u.disabled),
+		  EXISTS (SELECT 1 FROM core.role_binding rb JOIN core."user" u ON u.id = rb.user_id
+		          WHERE rb.user_id <> $1 AND rb.role = 'admin' AND rb.group_id IS NULL AND NOT u.disabled)`,
+		userID).Scan(&isAdmin, &others)
+	if err != nil {
+		return fmt.Errorf("rbac: admin check: %w", err)
+	}
+	if isAdmin && !others {
+		return ErrLastAdmin
+	}
+	return nil
+}

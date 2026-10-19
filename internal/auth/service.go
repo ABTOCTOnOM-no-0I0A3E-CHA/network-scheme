@@ -209,7 +209,7 @@ func (s *Service) complete(ctx context.Context, challengeID, code, ip, ua, kind 
 	if err != nil {
 		return NewSession{}, err
 	}
-	ua = cleanUserAgent(ua)
+	ua = CleanUserAgent(ua)
 	var ns NewSession
 	err = s.inTx(ctx, func(tx pgx.Tx) (error, error) {
 		if err := lockIP(ctx, tx, addr); err != nil {
@@ -480,8 +480,8 @@ func parseIP(ip string) (netip.Addr, error) {
 	return a.Unmap().WithZone(""), nil
 }
 
-/* cleanUserAgent makes the untrusted header storable: valid UTF-8, no NUL, bounded. */
-func cleanUserAgent(ua string) string {
+/* CleanUserAgent makes the untrusted User-Agent header storable: valid UTF-8, no NUL, bounded. */
+func CleanUserAgent(ua string) string {
 	ua = strings.ReplaceAll(strings.ToValidUTF8(ua, ""), "\x00", "")
 	if len(ua) <= maxUserAgent {
 		return ua

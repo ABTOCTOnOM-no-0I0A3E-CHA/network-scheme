@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -143,6 +144,73 @@ func TestLastAdminConcurrent(t *testing.T) {
 	wg.Wait()
 	if ok.Load() != 1 {
 		t.Fatalf("%d concurrent removals succeeded, want exactly 1", ok.Load())
+	}
+}
+
+/*
+disable runs GuardNotLastAdmin and SetDisabled in one transaction, as the API
+does, pausing for pause between them to widen any race window.
+*/
+func disable(env *testdb.Env, st *rbac.Store, user int64, pause time.Duration) error {
+	ctx := context.Background()
+	return pgx.BeginFunc(ctx, env.Pool("nms_api"), func(tx pgx.Tx) error {
+		if err := st.GuardNotLastAdmin(ctx, tx, user); err != nil {
+			return err
+		}
+		time.Sleep(pause)
+		return auth.NewUserStore(env.Pool("nms_api")).SetDisabled(ctx, tx, user, true)
+	})
+}
+
+func TestGuardNotLastAdmin(t *testing.T) {
+	env := testdb.New(t)
+	st := rbac.NewStore(env.Pool("nms_api"))
+	resetBindings(t, env)
+	u1, u2, plain := newUser(t, env), newUser(t, env), newUser(t, env)
+	mustSet(t, env, st, u1, []rbac.Binding{{Role: rbac.RoleAdmin}})
+	if err := disable(env, st, u1, 0); !errors.Is(err, rbac.ErrLastAdmin) {
+		t.Fatalf("disable only admin: %v, want ErrLastAdmin", err)
+	}
+	if err := disable(env, st, plain, 0); err != nil {
+		t.Fatalf("disable non-admin: %v", err)
+	}
+	/* A disabled admin does not count as a remaining admin. */
+	mustSet(t, env, st, plain, []rbac.Binding{{Role: rbac.RoleAdmin}})
+	if err := disable(env, st, u1, 0); !errors.Is(err, rbac.ErrLastAdmin) {
+		t.Fatalf("disabled second admin must not count: %v", err)
+	}
+	mustSet(t, env, st, u2, []rbac.Binding{{Role: rbac.RoleAdmin}})
+	if err := disable(env, st, u1, 0); err != nil {
+		t.Fatalf("with a second admin: %v", err)
+	}
+}
+
+func TestGuardNotLastAdminConcurrentDisable(t *testing.T) {
+	env := testdb.New(t)
+	st := rbac.NewStore(env.Pool("nms_api"))
+	resetBindings(t, env)
+	u1, u2 := newUser(t, env), newUser(t, env)
+	mustSet(t, env, st, u1, []rbac.Binding{{Role: rbac.RoleAdmin}})
+	mustSet(t, env, st, u2, []rbac.Binding{{Role: rbac.RoleAdmin}})
+	var wg sync.WaitGroup
+	var ok atomic.Int32
+	start := make(chan struct{})
+	for _, u := range []int64{u1, u2} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := disable(env, st, u, 300*time.Millisecond); err == nil {
+				ok.Add(1)
+			} else if !errors.Is(err, rbac.ErrLastAdmin) {
+				t.Errorf("unexpected: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if ok.Load() != 1 {
+		t.Fatalf("%d concurrent disables succeeded, want exactly 1", ok.Load())
 	}
 }
 

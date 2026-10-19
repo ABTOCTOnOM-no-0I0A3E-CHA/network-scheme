@@ -78,6 +78,7 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 	pool := env.Pool("nms_api")
 	d := httpapi.Deps{
 		Auth:          auth.NewService(pool, key, clk.Now),
+		Users:         auth.NewUserStore(pool),
 		RBAC:          rbac.NewStore(pool),
 		Pool:          pool,
 		Cfg:           config.API{TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}},
@@ -241,6 +242,13 @@ func wantCookieAttrs(t *testing.T, raw string) {
 /* enroll performs the first login of a new user over HTTP and returns its secret and cookie. */
 func (f *fixture) enroll(name string) (sec, cookie string) {
 	f.t.Helper()
+	sec, cookie, _ = f.enrollCodes(name)
+	return sec, cookie
+}
+
+/* enrollCodes is enroll that also returns the backup codes. */
+func (f *fixture) enrollCodes(name string) (sec, cookie string, backup []string) {
+	f.t.Helper()
 	resp := f.do(req{method: "POST", path: "/api/auth/login", body: map[string]string{"username": name, "password": goodPW}})
 	if resp.StatusCode != http.StatusOK {
 		f.t.Fatalf("login status %d", resp.StatusCode)
@@ -266,7 +274,7 @@ func (f *fixture) enroll(name string) (sec, cookie string) {
 	}
 	cookie, raw := sessionCookie(f.t, resp)
 	wantCookieAttrs(f.t, raw)
-	return sec, cookie
+	return sec, cookie, codes.BackupCodes
 }
 
 type meResp struct {

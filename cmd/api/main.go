@@ -124,7 +124,7 @@ func serve(ctx context.Context, args []string) error {
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Auth: auth.NewService(pool, key, nil), RBAC: rbac.NewStore(pool), Pool: pool,
+			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
 			Cfg: cfg, Clock: time.Now, Logger: log,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,

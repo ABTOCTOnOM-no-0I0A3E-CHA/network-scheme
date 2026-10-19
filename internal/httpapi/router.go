@@ -21,10 +21,11 @@ import (
 // Deps are the dependencies of the API router.
 type Deps struct {
 	Auth          *auth.Service
+	Users         *auth.UserStore
 	RBAC          *rbac.Store
 	Pool          *pgxpool.Pool /* for handlers that open their own transactions */
 	Cfg           config.API
-	Clock         func() time.Time /* for handlers that timestamp records */
+	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
 	AuthRateLimit int              /* requests per minute per client IP on credential endpoints; 0: 10 */
 }
@@ -62,7 +63,10 @@ const (
 
 type server struct {
 	auth      *auth.Service
+	users     *auth.UserStore
 	rbac      *rbac.Store
+	pool      *pgxpool.Pool
+	now       func() time.Time
 	cfg       config.API
 	log       *slog.Logger
 	generalRL *httprate.RateLimiter
@@ -73,11 +77,14 @@ type server struct {
 
 func newServer(d Deps) *server {
 	s := &server{
-		auth: d.Auth, rbac: d.RBAC, cfg: d.Cfg, log: d.Logger,
+		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	authLimit := d.AuthRateLimit
 	if authLimit <= 0 {
@@ -106,6 +113,24 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPost, "/api/auth/stepup", self, s.stepUp)
 	s.route(r, http.MethodPost, "/api/auth/logout", self, s.logout)
 	s.route(r, http.MethodGet, "/api/auth/me", self, s.me)
+
+	/* Phase 0 permissions are global: Can(perm, nil, nil). */
+	users := Policy{Perm: rbac.PermUsersManage}
+	usersStepUp := Policy{Perm: rbac.PermUsersManage, StepUp: true}
+	groups := Policy{Perm: rbac.PermGroupsManage}
+	groupsStepUp := Policy{Perm: rbac.PermGroupsManage, StepUp: true}
+	bindings := Policy{Perm: rbac.PermBindingsManage}
+	bindingsStepUp := Policy{Perm: rbac.PermBindingsManage, StepUp: true}
+	s.route(r, http.MethodGet, "/api/users", users, s.listUsers)
+	s.route(r, http.MethodPost, "/api/users", usersStepUp, s.createUser)
+	s.route(r, http.MethodPatch, "/api/users/{id}", usersStepUp, s.updateUser)
+	s.route(r, http.MethodGet, "/api/users/{id}/bindings", bindings, s.getBindings)
+	s.route(r, http.MethodPut, "/api/users/{id}/bindings", bindingsStepUp, s.setBindings)
+	s.route(r, http.MethodGet, "/api/groups", groups, s.listGroups)
+	s.route(r, http.MethodPost, "/api/groups", groups, s.createGroup)
+	s.route(r, http.MethodPatch, "/api/groups/{id}", groups, s.updateGroup)
+	s.route(r, http.MethodDelete, "/api/groups/{id}", groupsStepUp, s.deleteGroup)
+	s.route(r, http.MethodGet, "/api/audit", Policy{Perm: rbac.PermAuditRead}, s.listAudit)
 	return r
 }
 
@@ -164,9 +189,11 @@ func (ph *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 Routes lists every registered route with its policy, sorted by pattern and
 method. It panics if a route was registered other than through route.
 */
-func Routes() []RouteSpec {
+func Routes() []RouteSpec { return routesOf(newServer(Deps{}).handler().(chi.Routes)) }
+
+func routesOf(routes chi.Routes) []RouteSpec {
 	var out []RouteSpec
-	err := chi.Walk(newServer(Deps{}).handler().(chi.Routes),
+	err := chi.Walk(routes,
 		func(method, pattern string, h http.Handler, _ ...func(http.Handler) http.Handler) error {
 			for {
 				ch, ok := h.(*chi.ChainHandler)
