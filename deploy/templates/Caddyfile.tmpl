@@ -9,11 +9,8 @@
 	}
 }
 
-:8443 {
-	tls /certs/web.crt /certs/web.key {
-		protocols tls1.3
-	}
-
+# Panel headers: imported by the site and by handle_errors, so error responses carry them too.
+(panel_headers) {
 	header {
 		Content-Security-Policy "default-src 'self'; script-src https://{{.Authority}}/assets/; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
 		Strict-Transport-Security "max-age=31536000"
@@ -25,6 +22,14 @@
 		-Server
 		defer
 	}
+}
+
+:8443 {
+	tls /certs/web.crt /certs/web.key {
+		protocols tls1.3
+	}
+
+	import panel_headers
 
 	request_body {
 		max_size 1MB
@@ -70,6 +75,21 @@
 		handle {
 			try_files {path} /index.html
 			file_server
+		}
+	}
+
+	# Errors raised by Caddy itself (404 from file_server, 502/504 from the proxy, 413 from
+	# request_body) bypass the normal response path; give them the same headers and,
+	# under /api/*, the forced JSON shape.
+	handle_errors {
+		import panel_headers
+		@api path /api/*
+		handle @api {
+			header Content-Type "application/json; charset=utf-8"
+			respond `{"error":{"code":"gateway_error"}}` {err.status_code}
+		}
+		handle {
+			respond "{err.status_code} {err.status_text}" {err.status_code}
 		}
 	}
 }

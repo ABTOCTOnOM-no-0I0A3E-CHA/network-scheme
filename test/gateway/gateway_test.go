@@ -43,6 +43,9 @@ const evilCaddyfile = `{
 	header Service-Worker-Allowed "/"
 	header Set-Cookie "x=1"
 	header Content-Security-Policy "script-src *"
+	# Read the whole request body like the real api does, so gateway body limits trigger.
+	@post method POST
+	respond @post "{http.request.body}" 200
 	respond "<script>navigator.serviceWorker.register('/api/evil')</script>" 200
 }
 `
@@ -61,6 +64,7 @@ var panelHeaders = map[string]string{
 type stack struct {
 	client *http.Client
 	base   string
+	bare   *stack /* same gateway without a reachable upstream */
 }
 
 var (
@@ -151,19 +155,39 @@ func start() (*stack, error) {
 		return nil, fmt.Errorf("evil upstream: %w", err)
 	}
 
+	/* Fresh readers per container: a ContainerFile reader is consumed by the copy. */
+	files := func() []testcontainers.ContainerFile {
+		return []testcontainers.ContainerFile{
+			file("/etc/caddy/Caddyfile", rendered["Caddyfile"]),
+			file("/certs/web.crt", webCert),
+			file("/certs/web.key", webKey),
+			file("/srv/app/index.html", []byte("<!doctype html><title>nms</title>")),
+			file("/srv/app/assets/app.js", []byte("console.log(1)")),
+			file("/srv/keys/keys.json", []byte(`{"domains":[]}`)),
+		}
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caCert) {
+		return nil, errors.New("bad test CA")
+	}
+	s, err := startGateway(ctx, []string{nw.Name}, files(), roots)
+	if err != nil {
+		return nil, err
+	}
+	/* A second gateway on the default bridge, where the name "api" does not resolve. */
+	if s.bare, err = startGateway(ctx, nil, files(), roots); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func startGateway(ctx context.Context, networks []string, files []testcontainers.ContainerFile, roots *x509.CertPool) (*stack, error) {
 	gw, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        caddyImage,
 			ExposedPorts: []string{"8443/tcp"},
-			Networks:     []string{nw.Name},
-			Files: []testcontainers.ContainerFile{
-				file("/etc/caddy/Caddyfile", rendered["Caddyfile"]),
-				file("/certs/web.crt", webCert),
-				file("/certs/web.key", webKey),
-				file("/srv/app/index.html", []byte("<!doctype html><title>nms</title>")),
-				file("/srv/app/assets/app.js", []byte("console.log(1)")),
-				file("/srv/keys/keys.json", []byte(`{"domains":[]}`)),
-			},
+			Networks:     networks,
+			Files:        files,
 			/* Log-based: the port probe dials the IPv6 loopback, which Docker Desktop on Windows may refuse. */
 			WaitingFor: wait.ForLog("serving initial configuration").WithStartupTimeout(time.Minute),
 		},
@@ -187,10 +211,6 @@ func start() (*stack, error) {
 	if err != nil {
 		return nil, err
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caCert) {
-		return nil, errors.New("bad test CA")
-	}
 	target := net.JoinHostPort(host, port.Port())
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	client := &http.Client{
@@ -213,7 +233,12 @@ func file(path string, content []byte) testcontainers.ContainerFile {
 
 func (s *stack) get(t *testing.T, path string, hdr map[string]string) (*http.Response, string) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.base+path, nil)
+	return s.do(t, http.MethodGet, path, nil, hdr)
+}
+
+func (s *stack) do(t *testing.T, method, path string, payload io.Reader, hdr map[string]string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, s.base+path, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +247,7 @@ func (s *stack) get(t *testing.T, path string, hdr map[string]string) (*http.Res
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
@@ -307,4 +332,46 @@ func TestSetCookieAllowedOnlyForAuth(t *testing.T) {
 			t.Errorf("%s: Set-Cookie leaked: %q", path, v)
 		}
 	}
+}
+
+func panelHeadersOnce(t *testing.T, h http.Header) {
+	t.Helper()
+	for k, v := range panelHeaders {
+		only(t, h, k, v)
+	}
+}
+
+/* Errors raised by Caddy itself must carry the panel headers too. */
+func TestErrorResponsesKeepPanelHeaders(t *testing.T) {
+	s := gateway(t)
+
+	t.Run("missing asset", func(t *testing.T) {
+		resp, _ := s.get(t, "/assets/missing.js", nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+		panelHeadersOnce(t, resp.Header)
+	})
+
+	t.Run("upstream unreachable", func(t *testing.T) {
+		resp, body := s.bare.get(t, "/api/users", nil)
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502", resp.StatusCode)
+		}
+		panelHeadersOnce(t, resp.Header)
+		only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
+		if body != `{"error":{"code":"gateway_error"}}` {
+			t.Errorf("body = %q", body)
+		}
+	})
+
+	t.Run("body over 1MB", func(t *testing.T) {
+		big := strings.NewReader(strings.Repeat("a", 2<<20))
+		resp, _ := s.do(t, http.MethodPost, "/api/users", big, map[string]string{"Content-Type": "application/json"})
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", resp.StatusCode)
+		}
+		panelHeadersOnce(t, resp.Header)
+		only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
+	})
 }
