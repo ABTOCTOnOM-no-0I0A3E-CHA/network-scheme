@@ -1,0 +1,21 @@
+# controller scratch
+
+# secrets
+secrets/
+*.pem
+*.key
+.env
+.env.*
+!*.example
+
+# build output
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
