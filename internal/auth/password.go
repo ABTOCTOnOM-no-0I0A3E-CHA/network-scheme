@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -55,23 +56,33 @@ func VerifyPassword(pw, phc string) (ok, needsRehash bool, err error) {
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return false, false, errBadPHC
 	}
-	var ver int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &ver); err != nil || ver != argon2.Version {
+	if !strings.HasPrefix(parts[2], "v=") {
 		return false, false, errBadPHC
 	}
-	var p Argon2Params
-	var th uint32
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.Memory, &p.Time, &th); err != nil || th == 0 || th > 255 {
+	if ver, err := strconv.ParseUint(parts[2][2:], 10, 32); err != nil || ver != argon2.Version {
 		return false, false, errBadPHC
 	}
-	p.Threads = uint8(th)
+	kv := strings.Split(parts[3], ",")
+	if len(kv) != 3 {
+		return false, false, errBadPHC
+	}
+	var vals [3]uint64
+	for i, key := range [3]string{"m", "t", "p"} {
+		v, found := strings.CutPrefix(kv[i], key+"=")
+		n, err := strconv.ParseUint(v, 10, 32)
+		if !found || err != nil {
+			return false, false, errBadPHC
+		}
+		vals[i] = n
+	}
+	/* Reject anything argon2.IDKey would panic on, and bound forged cost. */
+	if vals[2] < 1 || vals[2] > 255 || vals[1] < 1 || vals[1] > 20 || vals[0] < 8*vals[2] || vals[0] > 1<<20 {
+		return false, false, errBadPHC
+	}
+	p := Argon2Params{Memory: uint32(vals[0]), Time: uint32(vals[1]), Threads: uint8(vals[2])} //nolint:gosec // range-checked above
 	salt, err1 := b64.DecodeString(parts[4])
 	want, err2 := b64.DecodeString(parts[5])
 	if err1 != nil || err2 != nil || len(salt) == 0 || len(want) == 0 {
-		return false, false, errBadPHC
-	}
-	/* Bound attacker-influenced cost from a corrupted/forged hash. */
-	if p.Memory > 1<<20 || p.Time > 20 {
 		return false, false, errBadPHC
 	}
 	p.KeyLen, p.SaltLen = uint32(len(want)), uint32(len(salt)) //nolint:gosec // decoded slice lengths
