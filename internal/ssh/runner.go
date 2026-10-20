@@ -118,10 +118,10 @@ func (c ShowCommand) line() string {
 }
 
 /*
-Dialect describes a vendor CLI. ExecPrompt is matched against the last line
-of output with trailing spaces removed. PagerOff holds session-level commands
-sent once after login. Allowlist entries use AnyIfName/AnyVLANID to state the
-argument kinds a command accepts.
+Dialect describes a vendor CLI. ExecPrompt must match the whole last line of
+output (trailing spaces removed); Dial anchors it as ^(?:...)$. PagerOff
+holds session-level commands sent once after login. Allowlist entries use
+AnyIfName/AnyVLANID to state the argument kinds a command accepts.
 */
 type Dialect struct {
 	ExecPrompt *regexp.Regexp
@@ -202,6 +202,8 @@ func Dial(ctx context.Context, addr netip.AddrPort, deviceID int64, c creds.Cred
 	if err := d.validate(); err != nil {
 		return nil, err
 	}
+	/* Whole-line match only: "#$" must not accept "sw1(config)#". */
+	d.ExecPrompt = regexp.MustCompile(`^(?:` + d.ExecPrompt.String() + `)$`)
 	auth, err := authMethod(c)
 	if err != nil {
 		return nil, err

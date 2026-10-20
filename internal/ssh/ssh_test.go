@@ -161,6 +161,29 @@ func TestConfigPromptAborts(t *testing.T) {
 			t.Fatalf("device saw %q", got)
 		}
 	})
+	t.Run("unanchored dialect regexp", func(t *testing.T) {
+		d := dialect()
+		d.ExecPrompt = regexp.MustCompile(`#$`)
+		addr, log := emu(t, key, sshemu.Config{
+			Prompt:      "#",
+			Responses:   map[string]string{"terminal datadump": "", "show version": "v1"},
+			PromptAfter: map[string]string{"show version": "sw1(config)#"},
+		})
+		r, err := ssh.Dial(ctx, addr, newDevice(t, env), cred, hk, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = r.Close() }()
+		if _, err := r.Run(ctx, ssh.ShowCommand{Name: "show version"}); !errors.Is(err, ssh.ErrUnexpectedPrompt) {
+			t.Fatalf("got %v", err)
+		}
+		if _, err := r.Run(ctx, ssh.ShowCommand{Name: "show version"}); !errors.Is(err, ssh.ErrClosed) {
+			t.Fatalf("after abort: %v", err)
+		}
+		if got := log.Commands(); !slices.Equal(got, []string{"terminal datadump", "show version"}) {
+			t.Fatalf("device saw %q", got)
+		}
+	})
 	t.Run("at login", func(t *testing.T) {
 		addr, log := emu(t, key, sshemu.Config{Prompt: "sw1(config)#"})
 		if _, err := ssh.Dial(ctx, addr, newDevice(t, env), cred, hk, dialect()); !errors.Is(err, ssh.ErrUnexpectedPrompt) {
@@ -365,5 +388,99 @@ func TestHostKeyGrants(t *testing.T) {
 	denied(cli, `DELETE FROM ssh_hosts.mismatch`)
 	if _, err := cli.Exec(ctx, `DELETE FROM ssh_hosts.host_key WHERE device_id = $1`, id); err != nil {
 		t.Fatalf("nmsctl reset: %v", err)
+	}
+}
+
+/*
+A compromised api must not be able to delete a device and re-create it under
+the same id to get a fresh TOFU pin and the device's sealed read credential.
+*/
+func TestDeletedDeviceIDCannotBeReclaimed(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	hk := ssh.NewHostKeys(env.Pool("nms_poller"))
+	pg := env.Pool("postgres")
+	resp := sshemu.Config{Responses: map[string]string{"terminal datadump": ""}}
+
+	var gid int64
+	if err := pg.QueryRow(ctx, `INSERT INTO core.device_group (name) VALUES ('g-' || gen_random_uuid()) RETURNING id`).Scan(&gid); err != nil {
+		t.Fatal(err)
+	}
+	/* One api session throughout, so currval() holds the deleted id. */
+	api, err := env.Pool("nms_api").Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer api.Release()
+	insert := func(extra string, args ...any) (int64, error) {
+		var id int64
+		err := api.QueryRow(ctx, `INSERT INTO core.device `+extra, args...).Scan(&id)
+		return id, err
+	}
+	x, err := insert(`(name, address, group_id) VALUES ('x', '10.200.0.0'::inet + $1, $1) RETURNING id`, gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Exec(ctx, `INSERT INTO core.access_profile (owner_kind, owner_id, kind, ciphertext, key_version)
+		VALUES ('device', $1, 'ssh_read', '\x00', 1)`, x); err != nil {
+		t.Fatal(err)
+	}
+	realKey := sshemu.NewHostKey(t)
+	addr, _ := emu(t, realKey, resp)
+	r, err := ssh.Dial(ctx, addr, x, cred, hk, dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+
+	if _, err := api.Exec(ctx, `DELETE FROM core.device WHERE id = $1`, x); err != nil {
+		t.Fatal(err)
+	}
+	var profiles int
+	if err := pg.QueryRow(ctx, `SELECT count(*) FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, x).Scan(&profiles); err != nil || profiles != 0 {
+		t.Fatalf("access profiles after delete: %d %v", profiles, err)
+	}
+	if _, fp := pinned(t, env, x); fp != gossh.FingerprintSHA256(realKey.PublicKey()) {
+		t.Fatal("pin removed with the device")
+	}
+
+	denied := func(what string, err error) {
+		t.Helper()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Errorf("%s: want 42501, got %v", what, err)
+		}
+	}
+	_, err = insert(`(id, name, address, group_id) OVERRIDING SYSTEM VALUE VALUES ($1, 'x', '10.201.0.0'::inet + $2, $2) RETURNING id`, x, gid)
+	denied("re-create deleted id", err)
+	_, err = insert(`(id, name, address, group_id) OVERRIDING SYSTEM VALUE VALUES ($1, 'y', '10.202.0.0'::inet + $2, $2) RETURNING id`, x+1_000_000, gid)
+	denied("explicit unused id", err)
+
+	/* A legitimately re-added device gets a new id and its own pin. */
+	y, err := insert(`(name, address, group_id) VALUES ('x', '10.200.0.0'::inet + $1, $1) RETURNING id`, gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Exec(ctx, `UPDATE core.device SET id = $1 WHERE id = $2`, x, y); err == nil {
+		t.Error("id change accepted")
+	}
+	impostorKey := sshemu.NewHostKey(t)
+	impostor, log := emu(t, impostorKey, resp)
+	r, err = ssh.Dial(ctx, impostor, y, cred, hk, dialect())
+	if err != nil || y == x {
+		t.Fatalf("new device %d: %v", y, err)
+	}
+	_ = r.Close()
+	if _, fp := pinned(t, env, y); fp != gossh.FingerprintSHA256(impostorKey.PublicKey()) {
+		t.Fatal("new device not pinned to its own key")
+	}
+
+	/* The old id still refuses the impostor before any credential is sent. */
+	before := len(log.AuthAttempts())
+	if _, err := ssh.Dial(ctx, impostor, x, cred, hk, dialect()); !errors.Is(err, ssh.ErrHostKeyMismatch) {
+		t.Fatalf("old id: %v", err)
+	}
+	if got := log.AuthAttempts()[before:]; len(got) != 0 {
+		t.Fatalf("impostor saw auth attempts %q", got)
 	}
 }
