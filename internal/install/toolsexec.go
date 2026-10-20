@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -85,6 +86,9 @@ secret printed by the container is also written to totpOut (0600, never
 overwritten) and a warning is printed.
 */
 func AdminCreate(ctx context.Context, sys System, etc, user string, pw secret.Secret, totpOut string, out, errw io.Writer) error {
+	if err := checkTOTPOut(totpOut); err != nil {
+		return err
+	}
 	var captured bytes.Buffer
 	w := out
 	if totpOut != "" {
@@ -108,4 +112,23 @@ func AdminCreate(ctx context.Context, sys System, etc, user string, pw secret.Se
 		}
 	}
 	return errors.New("admin create: no TOTP secret in the output")
+}
+
+/*
+checkTOTPOut fails unless totpOut is empty or a not yet existing file in an
+existing directory, so a bad path is rejected before the admin is created.
+*/
+func checkTOTPOut(totpOut string) error {
+	if totpOut == "" {
+		return nil
+	}
+	if _, err := os.Lstat(totpOut); err == nil {
+		return fmt.Errorf("--totp-secret-out %s: must not exist", totpOut)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("--totp-secret-out: %w", err)
+	}
+	if st, err := os.Stat(filepath.Dir(totpOut)); err != nil || !st.IsDir() {
+		return fmt.Errorf("--totp-secret-out %s: parent directory does not exist", totpOut)
+	}
+	return nil
 }

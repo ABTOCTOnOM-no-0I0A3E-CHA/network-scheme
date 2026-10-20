@@ -21,6 +21,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/install"
 	"github.com/beekamai/network-scheme/internal/keys"
 	"github.com/beekamai/network-scheme/internal/pki"
+	"github.com/beekamai/network-scheme/internal/secret"
 )
 
 /* fakeSys records every OS interaction instead of performing it. */
@@ -482,6 +483,8 @@ func TestRunRejectsBadInputBeforeWriting(t *testing.T) {
 		"bad infra":         func(o *install.Options) { o.InfraNTP = []string{"ntp;rm -rf /"} },
 		"cert without key":  func(o *install.Options) { o.WebCertFile = o.AdminPasswordFile },
 		"missing image tag": func(o *install.Options) { o.ImageTag = "" },
+		"totp out exists":   func(o *install.Options) { writeFile(t, o.TOTPSecretOut, "old") },
+		"totp out no dir":   func(o *install.Options) { o.TOTPSecretOut = filepath.Join(t.TempDir(), "missing", "totp") },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -525,5 +528,18 @@ func TestRunInToolsArgv(t *testing.T) {
 	want := "docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl audit verify"
 	if len(sys.cmds) != 1 || cmdline(sys.cmds[0]) != want {
 		t.Fatalf("argv = %v, want %q", sys.cmds, want)
+	}
+}
+
+func TestAdminCreateRejectsBadTOTPOutBeforeRunning(t *testing.T) {
+	existing := filepath.Join(t.TempDir(), "totp")
+	writeFile(t, existing, "old")
+	for _, out := range []string{existing, filepath.Join(t.TempDir(), "missing", "totp")} {
+		sys := newFakeSys()
+		var buf bytes.Buffer
+		err := install.AdminCreate(context.Background(), sys, "/etc/nms", "admin", secret.New(adminPassword), out, &buf, &buf)
+		if err == nil || len(sys.cmds) != 0 {
+			t.Fatalf("%s: err=%v cmds=%v, want an error before any command", out, err, sys.cmds)
+		}
 	}
 }

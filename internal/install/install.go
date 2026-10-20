@@ -139,6 +139,9 @@ func prepareInstall(o Options) (prepared, error) {
 	if err := auth.ValidateNewPassword(p.password.Reveal()); err != nil {
 		return prepared{}, fmt.Errorf("install: admin password: %w", err)
 	}
+	if err := checkTOTPOut(o.TOTPSecretOut); err != nil {
+		return prepared{}, fmt.Errorf("install: %w", err)
+	}
 	if (o.WebCertFile == "") != (o.WebKeyFile == "") {
 		return prepared{}, errors.New("install: --web-cert and --web-key must be given together")
 	}
