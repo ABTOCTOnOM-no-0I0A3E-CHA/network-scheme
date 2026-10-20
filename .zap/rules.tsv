@@ -28,7 +28,7 @@
 10037	WARN	(Server Leaks Information via "X-Powered-By" HTTP Response Header Field(s))
 10038	FAIL	(Content Security Policy (CSP) Header Not Set)
 10039	WARN	(X-Backend-Server Header Information Leak)
-10040	WARN	(Secure Pages Include Mixed Content)
+10040	FAIL	(Secure Pages Include Mixed Content)
 10041	FAIL	(HTTP to HTTPS Insecure Transition in Form Post)
 10042	FAIL	(HTTPS to HTTP Insecure Transition in Form Post)
 10043	INFO	(User Controllable JavaScript Event (XSS))
