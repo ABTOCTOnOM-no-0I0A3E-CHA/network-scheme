@@ -484,4 +484,5 @@ components:
                 - locked
                 - rate_limited
                 - internal
+                - gateway_error # from the gateway itself (upstream down, proxy limits), never from api
             message: { type: string, description: "Human-readable, Russian" }

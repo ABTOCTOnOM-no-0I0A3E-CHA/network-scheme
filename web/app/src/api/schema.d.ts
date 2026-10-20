@@ -747,7 +747,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "locked" | "rate_limited" | "internal";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

@@ -138,6 +138,7 @@ describe("login flow", () => {
     [401, "invalid_credentials", ru.errors.invalid_credentials],
     [423, "locked", ru.errors.locked],
     [429, "rate_limited", ru.errors.rate_limited],
+    [502, "gateway_error", ru.errors.gateway_error],
   ])("error codes are localized (%i %s)", async (status, code, text) => {
     loginResponse = () => apiError(status, code);
     const user = userEvent.setup();

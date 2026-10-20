@@ -86,7 +86,7 @@
 		@api path /api/*
 		handle @api {
 			header Content-Type "application/json; charset=utf-8"
-			respond `{"error":{"code":"gateway_error"}}` {err.status_code}
+			respond `{"error":{"code":"gateway_error","message":"Ошибка шлюза панели"}}` {err.status_code}
 		}
 		handle {
 			respond "{err.status_code} {err.status_text}" {err.status_code}

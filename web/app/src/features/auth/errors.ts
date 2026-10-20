@@ -6,6 +6,7 @@ const KNOWN = new Set([
   "session_expired",
   "unauthenticated",
   "csrf",
+  "gateway_error",
 ]);
 
 /** Returns the raw `error.code` of an API error body, if any. */

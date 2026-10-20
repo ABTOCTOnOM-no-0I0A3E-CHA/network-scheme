@@ -360,7 +360,7 @@ func TestErrorResponsesKeepPanelHeaders(t *testing.T) {
 		}
 		panelHeadersOnce(t, resp.Header)
 		only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
-		if body != `{"error":{"code":"gateway_error"}}` {
+		if body != `{"error":{"code":"gateway_error","message":"Ошибка шлюза панели"}}` {
 			t.Errorf("body = %q", body)
 		}
 	})
