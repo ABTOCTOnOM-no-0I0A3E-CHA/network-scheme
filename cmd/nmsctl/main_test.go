@@ -35,6 +35,7 @@ func (*fakeSys) GOOS() string                         { return "linux" }
 func (f *fakeSys) InContainer() bool                  { return f.inContainer }
 func (*fakeSys) DockerServerVersion() (string, error) { return "28.0.0", nil }
 func (*fakeSys) Chown(string, int, int) error         { return nil }
+func (*fakeSys) Executable() (string, error)          { return os.Executable() }
 func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
 	f.cmds = append(f.cmds, c)
 	var b bytes.Buffer
@@ -376,6 +377,47 @@ func TestAuditVerifyRequiresAnchorsForOldEvents(t *testing.T) {
 	}
 	if code, out := cli(t, env, "", "audit", "verify", "--anchors", empty); code != 0 {
 		t.Fatalf("anchored: exit %d\n%s", code, out)
+	}
+}
+
+func TestAuditVerifyFailsOnStaleAnchors(t *testing.T) {
+	env := testdb.New(t)
+	resetAudit(t, env, truncateAudit, resetHead)
+	t.Cleanup(func() { resetAudit(t, env, truncateAudit, resetHead) })
+	anchors := filepath.Join(t.TempDir(), "anchors.log")
+
+	appendEvents(t, env, time.Now(), 2)
+	if code, out := cli(t, env, "", "audit", "anchor", "--anchors", anchors); code != 0 {
+		t.Fatalf("anchor: exit %d\n%s", code, out)
+	}
+	/* Backdate the anchor by 3 h: the timer has not run since. */
+	f, err := os.Open(anchors) // #nosec G304 -- test path
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := audit.ParseAnchors(f)
+	_ = f.Close()
+	if err != nil || len(got) != 1 {
+		t.Fatalf("anchors file: %+v %v", got, err)
+	}
+	got[0].At = time.Now().Add(-3 * time.Hour)
+	if err := os.WriteFile(anchors, []byte(got[0].String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := cli(t, env, "", "audit", "verify", "--anchors", anchors); code != 0 {
+		t.Fatalf("old anchor, no newer events: exit %d\n%s", code, out)
+	}
+
+	appendEvents(t, env, time.Now(), 1)
+	code, out := cli(t, env, "", "audit", "verify", "--anchors", anchors)
+	if code != 1 || !strings.Contains(out, "anchor timer is not running") {
+		t.Fatalf("stale anchor: exit %d\n%s", code, out)
+	}
+	if code, out := cli(t, env, "", "audit", "anchor", "--anchors", anchors); code != 0 {
+		t.Fatalf("anchor: exit %d\n%s", code, out)
+	}
+	if code, out := cli(t, env, "", "audit", "verify", "--anchors", anchors); code != 0 {
+		t.Fatalf("fresh anchor: exit %d\n%s", code, out)
 	}
 }
 

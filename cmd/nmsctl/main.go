@@ -322,9 +322,6 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 		}
 		o.AdminPassword = pw
 	}
-	if exe, err := os.Executable(); err == nil && exe != install.HostBinary {
-		printf(d.errw, "warning: the audit anchor timer runs %s; install this binary there\n", install.HostBinary)
-	}
 	return install.Run(ctx, o, d.sys)
 }
 

@@ -35,6 +35,12 @@ const (
 /* anchorGrace is how old the log may get before verify demands anchors. */
 const anchorGrace = time.Hour
 
+/*
+anchorStale is how old the newest anchor may get while newer events exist:
+the hourly timer anchors every run, so an older one means it has stopped.
+*/
+const anchorStale = 2 * time.Hour
+
 /* openDB connects as nms_cli with the settings of api.yaml and loads the data key. */
 func openDB(ctx context.Context) (*pgxpool.Pool, *[32]byte, func(), error) {
 	cfg, err := config.LoadAPI(configPath)
@@ -288,7 +294,9 @@ func checkChain(ctx context.Context, pool *pgxpool.Pool, path string, out io.Wri
 auditVerify checks the chain and the anchors. With no anchors at all it
 also fails when the log has events older than anchorGrace: the hourly
 anchor should have recorded them, so their absence may hide a truncation
-that a consistent rewrite of the head makes invisible to Verify.
+that a consistent rewrite of the head makes invisible to Verify. With
+anchors it fails when the newest is older than anchorStale while newer
+events exist: events after a stopped timer are not protected by anchors.
 */
 func auditVerify(ctx context.Context, pool *pgxpool.Pool, path string, d deps) error {
 	res, anchors, err := checkChain(ctx, pool, path, d.out)
@@ -304,6 +312,25 @@ func auditVerify(ctx context.Context, pool *pgxpool.Pool, path string, d deps) e
 		if old {
 			printf(d.out, "FAIL: no anchors in %s, but the log has events older than %s: truncation cannot be ruled out\n", path, anchorGrace)
 			return errFailed
+		}
+	} else {
+		newest := anchors[0]
+		for _, a := range anchors[1:] {
+			if a.At.After(newest.At) {
+				newest = a
+			}
+		}
+		if newest.At.Before(d.now().Add(-anchorStale)) {
+			var newer bool
+			if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit.event WHERE id > $1)`,
+				newest.ID).Scan(&newer); err != nil {
+				return err
+			}
+			if newer {
+				printf(d.out, "FAIL: newest anchor in %s is from %s (older than %s) and newer events exist: the anchor timer is not running\n",
+					path, newest.At.UTC().Format(time.RFC3339), anchorStale)
+				return errFailed
+			}
 		}
 	}
 	printf(d.out, "OK: %d events, last id %d, %d anchors match\n", res.Count, res.LastID, len(anchors))

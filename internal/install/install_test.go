@@ -33,11 +33,15 @@ type fakeSys struct {
 	chowns  map[string][2]int /* path -> uid, gid */
 	runErr  error
 	inCtner bool
+	exe     string /* the running nmsctl; default: the test binary */
 }
 
 func newFakeSys() *fakeSys {
-	return &fakeSys{goos: "linux", docker: "24.0.7", chowns: map[string][2]int{}}
+	exe, _ := os.Executable()
+	return &fakeSys{goos: "linux", docker: "24.0.7", chowns: map[string][2]int{}, exe: exe}
 }
+
+func (f *fakeSys) Executable() (string, error) { return f.exe, nil }
 
 func (f *fakeSys) GOOS() string                         { return f.goos }
 func (f *fakeSys) InContainer() bool                    { return f.inCtner }
@@ -448,6 +452,49 @@ func TestRunInstalls(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "WARNING") {
 		t.Errorf("no warning about --totp-secret-out:\n%s", out)
+	}
+
+	/* The running binary is copied to /usr/local/bin/nmsctl for the anchor timer, owned by root. */
+	dst := filepath.Join(root, "usr", "local", "bin", "nmsctl")
+	if !bytes.Equal(readFile(t, dst), readFile(t, sys.exe)) {
+		t.Fatal("nmsctl not copied to the host binary path")
+	}
+	if runtime.GOOS == "linux" {
+		if st, err := os.Stat(dst); err != nil || st.Mode().Perm() != 0o755 {
+			t.Errorf("nmsctl mode: %v %v", st, err)
+		}
+	}
+	var rootOwned bool
+	for p, owner := range sys.chowns {
+		rootOwned = rootOwned || (filepath.Dir(p) == filepath.Dir(dst) && owner == [2]int{0, 0})
+	}
+	if !rootOwned {
+		t.Errorf("nmsctl not chowned to root: %v", sys.chowns)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(dst)); len(entries) != 1 {
+		t.Errorf("leftover temp files: %v", entries)
+	}
+}
+
+func TestRunKeepsHostBinaryWhenRunFromIt(t *testing.T) {
+	o, root, out := installOptions(t)
+	dst := filepath.Join(root, "usr", "local", "bin", "nmsctl")
+	writeFile(t, dst, "the installed nmsctl")
+	sys := newFakeSys()
+	sys.exe = dst
+	if err := install.Run(context.Background(), o, sys); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	if got := string(readFile(t, dst)); got != "the installed nmsctl" {
+		t.Fatalf("host binary rewritten: %q", got)
+	}
+	for p := range sys.chowns {
+		if filepath.Dir(p) == filepath.Dir(dst) {
+			t.Fatalf("chowned %s", p)
+		}
+	}
+	if strings.Contains(out.String(), "Installed nmsctl") {
+		t.Fatalf("reported a copy:\n%s", out)
 	}
 }
 

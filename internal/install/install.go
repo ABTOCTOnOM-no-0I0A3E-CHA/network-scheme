@@ -177,6 +177,9 @@ func infraYAML(o Options) ([]byte, error) {
 }
 
 func install(ctx context.Context, o Options, sys System, p prepared) error {
+	if err := installHostBinary(o, sys); err != nil {
+		return err
+	}
 	ps := o.paths()
 	etc, vr := o.hostPath(ps.Etc), o.hostPath(ps.Var)
 	if err := os.MkdirAll(etc, 0o750); err != nil {
@@ -282,6 +285,53 @@ func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, error) {
 		return nil, fmt.Errorf("install: %w", err)
 	}
 	return fps, writeExcl(filepath.Join(gatewayDir, "keys.json"), doc, 0o644)
+}
+
+/*
+installHostBinary copies the running nmsctl to HostBinary (root:root, 0755),
+where the anchor timer runs it, unless it already runs from there. The copy
+is written next to the target and renamed into place.
+*/
+func installHostBinary(o Options, sys System) (err error) {
+	exe, err := sys.Executable()
+	if err != nil {
+		return fmt.Errorf("install: locate nmsctl: %w", err)
+	}
+	dst := o.hostPath(HostBinary)
+	if a, err := os.Stat(exe); err == nil {
+		if b, err := os.Stat(dst); err == nil && os.SameFile(a, b) {
+			return nil
+		}
+	}
+	src, err := os.Open(exe) // #nosec G304 -- our own executable
+	if err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil { // #nosec G301 -- the standard /usr/local/bin
+		return fmt.Errorf("install: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".nmsctl-*")
+	if err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	_, cerr := io.Copy(tmp, src)
+	if err := errors.Join(cerr, tmp.Chmod(0o755), tmp.Sync(), tmp.Close()); err != nil {
+		return fmt.Errorf("install: copy nmsctl: %w", err)
+	}
+	if err := sys.Chown(tmp.Name(), 0, 0); err != nil {
+		return fmt.Errorf("install: chown %s: %w", HostBinary, err)
+	}
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	_, err = fmt.Fprintf(o.Out, "Installed nmsctl to %s.\n", HostBinary)
+	return err
 }
 
 func installAnchorTimer(ctx context.Context, o Options, sys System) error {

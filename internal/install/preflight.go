@@ -46,6 +46,8 @@ type System interface {
 	DockerServerVersion() (string, error)
 	Chown(path string, uid, gid int) error
 	Run(ctx context.Context, c Cmd) error
+	/* Executable is the path of the running nmsctl binary. */
+	Executable() (string, error)
 }
 
 /* hostPath maps an absolute host path into o.Root (empty Root: the path itself). */

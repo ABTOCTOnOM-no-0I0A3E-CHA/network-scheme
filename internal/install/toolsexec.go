@@ -54,6 +54,9 @@ func (s OSSystem) DockerServerVersion() (string, error) {
 // Chown changes the numeric owner of path.
 func (OSSystem) Chown(path string, uid, gid int) error { return os.Lchown(path, uid, gid) }
 
+// Executable returns the path of the running binary.
+func (OSSystem) Executable() (string, error) { return os.Executable() }
+
 // Run starts docker or systemctl directly (no shell) and waits for it.
 func (OSSystem) Run(ctx context.Context, c Cmd) error {
 	if !allowedCommands[c.Name] {
