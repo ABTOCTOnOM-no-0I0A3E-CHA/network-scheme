@@ -172,14 +172,20 @@ func (s *server) withSession(next http.Handler) http.Handler {
 }
 
 /*
-checkCSRF requires X-CSRF-Token == Session.CSRF (constant time) on every
-state-changing request made with a live session.
+checkCSRF guards every state-changing request: an Origin header, when
+present, must equal the configured public origin (a request without one
+comes from a non-browser client and still needs the token), and with a live
+session X-CSRF-Token must equal Session.CSRF (constant time).
 */
-func checkCSRF(next http.Handler) http.Handler {
+func (s *server) checkCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
+			return
+		}
+		if o := r.Header.Values("Origin"); len(o) > 0 && (len(o) != 1 || o[0] != s.cfg.PublicOrigin) {
+			writeError(w, errCSRF)
 			return
 		}
 		if sc, ok := sessionFrom(r.Context()); ok && sc.valid {

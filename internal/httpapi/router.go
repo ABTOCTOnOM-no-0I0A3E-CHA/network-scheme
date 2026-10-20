@@ -100,7 +100,7 @@ func NewRouter(d Deps) http.Handler { return newServer(d).handler() }
 func (s *server) handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(withRequestID, s.recoverer, securityHeaders, limitBody, s.withClientIP,
-		s.rateLimit, s.withSession, checkCSRF)
+		s.rateLimit, s.withSession, s.checkCSRF)
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) { writeError(w, errNotFound) })
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) { writeError(w, errMethodNotAllowed) })
 

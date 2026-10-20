@@ -81,7 +81,7 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 		Users:         auth.NewUserStore(pool),
 		RBAC:          rbac.NewStore(pool),
 		Pool:          pool,
-		Cfg:           config.API{TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}},
+		Cfg:           config.API{PublicOrigin: publicOrigin, TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}},
 		Clock:         clk.Now,
 		Logger:        slog.New(slog.NewJSONHandler(&lockedWriter{w: logs}, nil)),
 		AuthRateLimit: 1000,
@@ -130,6 +130,7 @@ type req struct {
 	raw          []byte
 	cookie       string
 	csrf         string
+	origin       string
 	remote       string
 	xff          string
 }
@@ -163,6 +164,9 @@ func (f *fixture) do(r req) *http.Response {
 	}
 	if r.csrf != "" {
 		hr.Header.Set("X-CSRF-Token", r.csrf)
+	}
+	if r.origin != "" {
+		hr.Header.Set("Origin", r.origin)
 	}
 	rec := httptest.NewRecorder()
 	f.h.ServeHTTP(rec, hr)
@@ -381,6 +385,35 @@ func TestCSRFRequiredForMutations(t *testing.T) {
 	wantError(t, f.do(req{method: "POST", path: "/api/auth/logout", cookie: cookie}), http.StatusForbidden, "csrf")
 	wantError(t, f.do(req{method: "POST", path: "/api/auth/logout", cookie: cookie, csrf: "forged"}), http.StatusForbidden, "csrf")
 	f.me(cookie) /* the session survived the rejected logouts */
+}
+
+const publicOrigin = "https://nms.test"
+
+func TestForeignOriginRejectedOnMutations(t *testing.T) {
+	f := newFixture(t, nil)
+	name := uniqueName("origin")
+	f.createUser(name)
+	bad := map[string]string{"username": name, "password": "wrong-password-123"}
+
+	/* Without a session: a foreign Origin is refused before the credentials are checked. */
+	for _, o := range []string{"https://evil.test", "null", "https://nms.test:8443", "http://nms.test"} {
+		wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: o}), http.StatusForbidden, "csrf")
+	}
+	wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: publicOrigin}), http.StatusUnauthorized, "invalid_credentials")
+	wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad}), http.StatusUnauthorized, "invalid_credentials")
+
+	/* With a session and the right token, a foreign Origin is still refused. */
+	_, cookie := f.enroll(name)
+	csrf := f.me(cookie).CSRFToken
+	wantError(t, f.do(req{method: "POST", path: "/api/auth/logout", cookie: cookie, csrf: csrf, origin: "https://evil.test"}), http.StatusForbidden, "csrf")
+	f.me(cookie)
+	/* Safe methods do not check Origin. */
+	if resp := f.do(req{method: "GET", path: "/api/auth/me", cookie: cookie, origin: "https://evil.test"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET with a foreign Origin: %d", resp.StatusCode)
+	}
+	if resp := f.do(req{method: "POST", path: "/api/auth/logout", cookie: cookie, csrf: csrf, origin: publicOrigin}); resp.StatusCode/100 != 2 {
+		t.Fatalf("logout from the public origin: %d", resp.StatusCode)
+	}
 }
 
 func TestXFFIgnoredFromUntrustedPeer(t *testing.T) {

@@ -102,8 +102,8 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" {
-		return errors.New("config: listen_addr and data_key_file are required")
+	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" || cfg.PublicOrigin == "" {
+		return errors.New("config: listen_addr, public_origin and data_key_file are required")
 	}
 	key, err := config.ReadKeyFile(cfg.DataKeyFile)
 	if err != nil {
