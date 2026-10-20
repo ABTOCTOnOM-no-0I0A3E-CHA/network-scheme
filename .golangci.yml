@@ -23,3 +23,6 @@ linters:
         linters: [forbidigo]
       - path: _test\.go$
         linters: [gosec]
+    # npm packages may ship Go sources (e.g. flatted under web/app/node_modules)
+    paths:
+      - node_modules
