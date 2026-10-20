@@ -13,7 +13,7 @@ services:
     environment:
       POSTGRES_DB: "{{.DBName}}"
       POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
-    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password]
+    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - "{{.Paths.Etc}}/postgres/initdb:/docker-entrypoint-initdb.d:ro"
@@ -140,6 +140,8 @@ secrets:
     file: "{{.Paths.Etc}}/secrets/db_api_password"
   db_cli_password:
     file: "{{.Paths.Etc}}/secrets/db_cli_password"
+  db_poller_password:
+    file: "{{.Paths.Etc}}/secrets/db_poller_password"
   api_data_key:
     file: "{{.Paths.Etc}}/secrets/api_data_key"
   web_crt:
