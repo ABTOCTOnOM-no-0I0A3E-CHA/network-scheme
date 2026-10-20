@@ -30,6 +30,9 @@ SELECT format('GRANT CONNECT ON DATABASE %I TO nms_migrator, nms_api, nms_cli, n
 SELECT format('GRANT CREATE ON DATABASE %I TO nms_migrator', :'db') \gexec
 
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
+-- The TimescaleDB API (create_hypertable, policies) lives in public; only the
+-- migrator calls it. No role gets CREATE on public.
+GRANT USAGE ON SCHEMA public TO nms_migrator;
 
 CREATE SCHEMA core AUTHORIZATION nms_migrator;
 CREATE SCHEMA audit AUTHORIZATION nms_migrator;
