@@ -1,0 +1,13 @@
+{
+  "name": "nms-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@playwright/test": "1.63.0",
+    "otplib": "13.5.0"
+  }
+}
