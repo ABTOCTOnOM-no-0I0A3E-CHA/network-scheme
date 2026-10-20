@@ -35,6 +35,7 @@ const (
 	keyRequestID ctxKey = iota
 	keyClientIP
 	keySession
+	keySubject /* rbac.Subject loaded by the route policy */
 )
 
 /* sessionCtx is the outcome of the session cookie check. */

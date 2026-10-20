@@ -102,4 +102,7 @@ func TestDepthCapOnCorruptCycle(t *testing.T) {
 	if _, _, err := st.VisibleGroups(ctx, s, rbac.PermDevicesRead); err == nil {
 		t.Fatal("cycle must produce an error")
 	}
+	if anc, err := st.Ancestors(ctx, a); err == nil {
+		t.Fatalf("ancestors on a cycle must produce an error, got %d ids", len(anc))
+	}
 }

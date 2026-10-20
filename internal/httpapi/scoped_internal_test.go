@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/devices"
@@ -16,14 +19,15 @@ import (
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
-type fakeDevices map[int64]devices.Device
+/* queryCounter counts the queries sent through a pool. */
+type queryCounter struct{ n atomic.Int64 }
 
-func (f fakeDevices) Get(_ context.Context, id int64) (devices.Device, error) {
-	if d, ok := f[id]; ok {
-		return d, nil
-	}
-	return devices.Device{}, devices.ErrNotFound
+func (c *queryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
 }
+
+func (c *queryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func TestScopedPolicyAdmission(t *testing.T) {
 	env := testdb.New(t)
@@ -57,7 +61,27 @@ func TestScopedPolicyAdmission(t *testing.T) {
 	viewer := user("scoped_viewer", rbac.Binding{Role: rbac.RoleViewer, GroupID: &grp[0]})
 	none := user("scoped_none")
 
-	s := newServer(Deps{RBAC: st, Pool: pool, Devices: fakeDevices{1: {ID: 1, GroupID: grp[0]}, 2: {ID: 2, GroupID: grp[1]}}})
+	var dev [2]int64
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) (err error) {
+		for i := range dev {
+			addr := netip.AddrFrom4([4]byte{203, 0, 113, byte(i + 1)})
+			if dev[i], err = devices.NewStore(pool).Create(ctx, tx, devices.NewDevice{Name: "scoped", Address: addr, GroupID: grp[i]}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	counter := &queryCounter{}
+	cfg := pool.Config()
+	cfg.ConnConfig.Tracer = counter
+	counted, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(counted.Close)
+	s := newServer(Deps{RBAC: rbac.NewStore(counted), Pool: counted, Devices: devices.NewStore(counted)})
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
@@ -89,19 +113,28 @@ func TestScopedPolicyAdmission(t *testing.T) {
 		r.ServeHTTP(w, q)
 		return w.Code
 	}
+	own, foreign := fmt.Sprintf("/scoped/%d", dev[0]), fmt.Sprintf("/scoped/%d", dev[1])
+	queries := map[string]int64{} /* by user and path */
 	for _, c := range []struct {
 		user, path string
 		want       int
 	}{
-		{"viewer", "/scoped/1", 204},  /* own group */
-		{"viewer", "/scoped/2", 404},  /* foreign device */
-		{"viewer", "/scoped/99", 404}, /* missing device */
-		{"viewer", "/global", 403},    /* a group binding does not pass an unscoped policy */
-		{"none", "/scoped/1", 403},    /* no binding with the permission anywhere */
+		{"viewer", own, 204},                 /* own group */
+		{"viewer", foreign, 404},             /* foreign device */
+		{"viewer", "/scoped/999999999", 404}, /* missing device */
+		{"viewer", "/global", 403},           /* a group binding does not pass an unscoped policy */
+		{"none", own, 403},                   /* no binding with the permission anywhere */
 	} {
+		before := counter.n.Load()
 		if got := do(c.user, c.path); got != c.want {
 			t.Errorf("%s %s: got %d want %d", c.user, c.path, got, c.want)
 		}
+		queries[c.user+c.path] = counter.n.Load() - before
+	}
+	/* A foreign and a missing device cost the same work as an own one: no timing oracle. */
+	qOwn, qForeign, qMissing := queries["viewer"+own], queries["viewer"+foreign], queries["viewer/scoped/999999999"]
+	if qForeign != qMissing || qForeign != qOwn {
+		t.Errorf("query counts differ: own %d, foreign %d, missing %d", qOwn, qForeign, qMissing)
 	}
 }
 

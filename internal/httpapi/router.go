@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -24,7 +26,8 @@ type Deps struct {
 	Users         *auth.UserStore
 	RBAC          *rbac.Store
 	Pool          *pgxpool.Pool /* for handlers that open their own transactions */
-	Devices       DeviceLookup  /* object checks of group-scoped device routes */
+	Devices       *devices.Store
+	Jobs          Enqueuer /* background jobs, enqueued in the transaction of the request */
 	Cfg           config.API
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
@@ -69,7 +72,8 @@ type server struct {
 	users     *auth.UserStore
 	rbac      *rbac.Store
 	pool      *pgxpool.Pool
-	devices   DeviceLookup
+	devices   *devices.Store
+	jobs      Enqueuer
 	now       func() time.Time
 	cfg       config.API
 	log       *slog.Logger
@@ -81,7 +85,7 @@ type server struct {
 
 func newServer(d Deps) *server {
 	s := &server{
-		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, now: d.Clock, cfg: d.Cfg, log: d.Logger,
+		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
 	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
@@ -139,6 +143,29 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPatch, "/api/groups/{id}", groups, s.updateGroup)
 	s.route(r, http.MethodDelete, "/api/groups/{id}", groupsStepUp, s.deleteGroup)
 	s.route(r, http.MethodGet, "/api/audit", Policy{Perm: rbac.PermAuditRead}, s.listAudit)
+
+	/* Device permissions are group-scoped: lists filter by group, foreign objects answer 404. */
+	read := Policy{Perm: rbac.PermDevicesRead, Scoped: true}
+	poll := Policy{Perm: rbac.PermDevicesPoll, Scoped: true}
+	manage := Policy{Perm: rbac.PermDevicesManage, Scoped: true}
+	manageStepUp := Policy{Perm: rbac.PermDevicesManage, StepUp: true, Scoped: true}
+	creds := Policy{Perm: rbac.PermDeviceCredentials, StepUp: true, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices", read, s.listDevices)
+	s.route(r, http.MethodPost, "/api/devices", manage, s.createDevice)
+	s.route(r, http.MethodGet, "/api/devices/{id}", read, s.getDevice)
+	s.route(r, http.MethodPatch, "/api/devices/{id}", manage, s.updateDevice)
+	s.route(r, http.MethodDelete, "/api/devices/{id}", manageStepUp, s.deleteDevice)
+	s.route(r, http.MethodGet, "/api/devices/{id}/profiles", read, s.listProfiles)
+	s.route(r, http.MethodPut, "/api/devices/{id}/profiles/{kind}", creds, s.putProfile)
+	s.route(r, http.MethodDelete, "/api/devices/{id}/profiles/{kind}", creds, s.deleteProfile)
+	s.route(r, http.MethodPost, "/api/devices/{id}/poll", poll, s.pollNow)
+	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
+	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
+	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)
+	s.route(r, http.MethodPut, "/api/discovery/scans/{id}/profile", creds, s.putScanProfile)
+	s.route(r, http.MethodGet, "/api/discovery/inbox", manage, s.listInbox)
+	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/accept", manage, s.acceptDiscovered)
+	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/ignore", manage, s.ignoreDiscovered)
 	return r
 }
 
@@ -190,6 +217,8 @@ func (ph *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errForbidden)
 			return
 		}
+		/* Object checks of Scoped handlers reuse the subject instead of loading it again. */
+		r = r.WithContext(context.WithValue(r.Context(), keySubject, subj))
 	}
 	if ph.p.StepUp && !sc.sess.StepUpValid {
 		writeError(w, errStepUpRequired)

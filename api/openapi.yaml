@@ -371,6 +371,310 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /api/devices:
+    get:
+      summary: Devices in the groups where the caller holds devices.read
+      x-permission: devices.read
+      x-scoped: true
+      responses:
+        "200":
+          description: Devices ordered by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Add a device to a group the caller manages
+      description: A group outside the caller's scope answers 404; a used address and SNMP port 409 address_exists.
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, address, group_id]
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                address: { $ref: "#/components/schemas/DeviceAddress" }
+                snmp_port: { type: integer, minimum: 1, maximum: 65535, default: 161 }
+                group_id: { type: integer, format: int64 }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}:
+    get:
+      summary: One device; a device outside the caller's groups answers 404
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Device
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Change device fields; absent fields are unchanged
+      description: A null interval falls back to the group's. Moving needs devices.manage on the target group (else 404).
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                address: { $ref: "#/components/schemas/DeviceAddress" }
+                snmp_port: { type: integer, minimum: 1, maximum: 65535 }
+                group_id: { type: integer, format: int64 }
+                interval_avail_s: { $ref: "#/components/schemas/Interval" }
+                interval_metrics_s: { $ref: "#/components/schemas/Interval" }
+                interval_inventory_s: { $ref: "#/components/schemas/Interval" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a device and its credentials
+      x-permission: devices.manage
+      x-step-up: true
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/profiles:
+    get:
+      summary: Which read credentials are set; their content is never returned
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Profiles ordered by kind
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/profiles/{kind}:
+    put:
+      summary: Set a read credential sealed in the browser to the read-domain key
+      description: |
+        The API stores the ciphertext without opening it. A key_version other
+        than the current read-domain key answers 400 stale_key. snmp2c and
+        telnet_read mark the device insecure_protocols.
+      x-permission: device.credentials
+      x-step-up: true
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/ProfileKind" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SealedCredential" }
+      responses:
+        "204": { description: Stored }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Remove a read credential
+      x-permission: device.credentials
+      x-step-up: true
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/ProfileKind" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/poll:
+    post:
+      summary: Queue an immediate full poll of the device
+      x-permission: devices.poll
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "202": { description: Queued }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/discovery/scans:
+    get:
+      summary: Subnet scans of the groups the caller manages
+      x-permission: devices.manage
+      x-scoped: true
+      responses:
+        "200":
+          description: Scans ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Scan" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Schedule a subnet scan (ICMP + SNMP GET with the scan's own profile)
+      description: A prefix wider than /16 (more than 65 536 addresses) answers 400 cidr_too_wide.
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [cidr, group_id]
+              properties:
+                cidr: { type: string, examples: ["192.0.2.0/24"] }
+                group_id: { type: integer, format: int64 }
+                interval_s: { $ref: "#/components/schemas/ScanInterval" }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/discovery/scans/{id}:
+    patch:
+      summary: Change scan fields; absent fields are unchanged
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                cidr: { type: string }
+                group_id: { type: integer, format: int64 }
+                enabled: { type: boolean }
+                interval_s: { $ref: "#/components/schemas/ScanInterval" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/discovery/scans/{id}/profile:
+    put:
+      summary: Set the one SNMP credential the scan probes with
+      description: Setting one kind removes the other. key_version as for device profiles.
+      x-permission: device.credentials
+      x-step-up: true
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, ciphertext, key_version]
+              properties:
+                kind: { type: string, enum: [snmp2c, snmp3] }
+                ciphertext: { $ref: "#/components/schemas/Ciphertext" }
+                key_version: { $ref: "#/components/schemas/KeyVersion" }
+      responses:
+        "204": { description: Stored }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/discovery/inbox:
+    get:
+      summary: Finds of scans in the groups the caller manages, newest first
+      x-permission: devices.manage
+      x-scoped: true
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, accepted, ignored], default: pending }
+      responses:
+        "200":
+          description: Discovered devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Discovered" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/discovery/inbox/{id}/accept:
+    post:
+      summary: Turn a pending find into a device; answers the new device id
+      description: An item already handled answers 409 not_pending.
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, group_id]
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                group_id: { type: integer, format: int64 }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/discovery/inbox/{id}/ignore:
+    post:
+      summary: Hide a pending find
+      x-permission: devices.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Ignored }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -383,6 +687,11 @@ components:
       in: path
       required: true
       schema: { type: integer, format: int64, minimum: 1 }
+    ProfileKind:
+      name: kind
+      in: path
+      required: true
+      schema: { type: string, enum: [snmp2c, snmp3, ssh_read, telnet_read] }
     CSRF:
       name: X-CSRF-Token
       in: header
@@ -450,6 +759,90 @@ components:
       minLength: 1
       maxLength: 200
       description: No control characters, no leading or trailing spaces
+    Device:
+      type: object
+      required: [id, name, address, group_id, driver, model, firmware, insecure_protocols, state, state_since]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        address: { type: string }
+        group_id: { type: integer, format: int64 }
+        driver: { type: string }
+        model: { type: string, description: Reported by the device; render as text only }
+        firmware: { type: string, description: Reported by the device; render as text only }
+        insecure_protocols: { type: boolean, description: An SNMPv2c or telnet credential is set }
+        state: { type: string, enum: [up, partial, down, unknown] }
+        state_since: { type: [string, "null"], format: date-time }
+    DeviceDetail:
+      allOf:
+        - $ref: "#/components/schemas/Device"
+        - type: object
+          required: [snmp_port, interval_avail_s, interval_metrics_s, interval_inventory_s]
+          properties:
+            snmp_port: { type: integer }
+            interval_avail_s: { type: [integer, "null"], description: null inherits from the group }
+            interval_metrics_s: { type: [integer, "null"] }
+            interval_inventory_s: { type: [integer, "null"] }
+    DeviceAddress:
+      type: string
+      description: IPv4 or IPv6 unicast host address; loopback, multicast, broadcast and unspecified are refused
+      examples: ["192.0.2.10"]
+    Interval:
+      type: [integer, "null"]
+      minimum: 10
+      maximum: 86400
+      description: Seconds; null falls back to the group's interval
+    ScanInterval:
+      type: integer
+      minimum: 300
+      maximum: 2592000
+      default: 86400
+      description: Seconds between scans
+    Profile:
+      type: object
+      required: [kind, status, updated_at]
+      properties:
+        kind: { type: string, enum: [snmp2c, snmp3, ssh_read, telnet_read] }
+        status: { type: string, enum: [pending, ok, invalid, weak, mismatch] }
+        updated_at: { type: string, format: date-time }
+    Ciphertext:
+      type: string
+      contentEncoding: base64
+      description: Sealed box to the read-domain key, at most 4 KiB decoded; never opened by the API
+    KeyVersion:
+      type: integer
+      minimum: 1
+      description: key_version of the read domain in keys.json
+    SealedCredential:
+      type: object
+      additionalProperties: false
+      required: [ciphertext, key_version]
+      properties:
+        ciphertext: { $ref: "#/components/schemas/Ciphertext" }
+        key_version: { $ref: "#/components/schemas/KeyVersion" }
+    Scan:
+      type: object
+      required: [id, cidr, group_id, enabled, interval_s, last_run_at]
+      properties:
+        id: { type: integer, format: int64 }
+        cidr: { type: string }
+        group_id: { type: integer, format: int64 }
+        enabled: { type: boolean }
+        interval_s: { type: integer }
+        last_run_at: { type: [string, "null"], format: date-time }
+    Discovered:
+      type: object
+      required: [id, scan_id, group_id, address, sys_object_id, sys_descr, sys_name, found_at, status]
+      properties:
+        id: { type: integer, format: int64 }
+        scan_id: { type: integer, format: int64 }
+        group_id: { type: integer, format: int64, description: Group of the scan that found it }
+        address: { type: string }
+        sys_object_id: { type: string, description: Reported by the device; render as text only }
+        sys_descr: { type: string, description: Reported by the device; render as text only }
+        sys_name: { type: string, description: Reported by the device; render as text only }
+        found_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, accepted, ignored] }
     Error:
       type: object
       required: [error]
@@ -481,6 +874,10 @@ components:
                 - invalid_username
                 - weak_password
                 - invalid_role
+                - address_exists
+                - not_pending
+                - stale_key
+                - cidr_too_wide
                 - locked
                 - rate_limited
                 - internal

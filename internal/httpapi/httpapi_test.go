@@ -25,6 +25,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/testdb"
@@ -64,6 +65,7 @@ type fixture struct {
 	h    http.Handler
 	ip   string
 	logs *bytes.Buffer
+	jobs *fakeJobs
 }
 
 func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
@@ -76,12 +78,16 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 	clk := &fakeClock{t: time.Now().UTC().Truncate(time.Second)}
 	logs := &bytes.Buffer{}
 	pool := env.Pool("nms_api")
+	jobs := &fakeJobs{}
 	d := httpapi.Deps{
-		Auth:          auth.NewService(pool, key, clk.Now),
-		Users:         auth.NewUserStore(pool),
-		RBAC:          rbac.NewStore(pool),
-		Pool:          pool,
-		Cfg:           config.API{PublicOrigin: publicOrigin, TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}},
+		Auth:    auth.NewService(pool, key, clk.Now),
+		Users:   auth.NewUserStore(pool),
+		RBAC:    rbac.NewStore(pool),
+		Pool:    pool,
+		Devices: devices.NewStore(pool),
+		Jobs:    jobs,
+		Cfg: config.API{PublicOrigin: publicOrigin, TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+			ReadKeyVersion: 1},
 		Clock:         clk.Now,
 		Logger:        slog.New(slog.NewJSONHandler(&lockedWriter{w: logs}, nil)),
 		AuthRateLimit: 1000,
@@ -91,7 +97,7 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 	}
 	n := seq.Add(1)
 	return &fixture{
-		t: t, env: env, clk: clk, h: httpapi.NewRouter(d), logs: logs,
+		t: t, env: env, clk: clk, h: httpapi.NewRouter(d), logs: logs, jobs: jobs,
 		ip: fmt.Sprintf("192.0.%d.%d", 2+n/250, n%250+1),
 	}
 }

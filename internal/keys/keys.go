@@ -14,6 +14,9 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
+// InitialKeyVersion is the key_version of every domain key generated at install.
+const InitialKeyVersion = 1
+
 /* domains is the exact set of key domains keys.json must contain. */
 var domains = []string{"backup", "read", "write"}
 
@@ -80,7 +83,7 @@ func BuildKeysJSON(pubs map[string][32]byte) ([]byte, error) {
 			return nil, errors.New("zero public key for domain " + d)
 		}
 		doc.Domains[d] = PublicDomain{
-			KeyVersion:  1,
+			KeyVersion:  InitialKeyVersion,
 			PublicKey:   base64.StdEncoding.EncodeToString(pub[:]),
 			Fingerprint: Fingerprint(pub),
 		}

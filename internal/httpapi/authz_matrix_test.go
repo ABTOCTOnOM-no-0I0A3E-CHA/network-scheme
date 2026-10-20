@@ -2,44 +2,95 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
-/* subjects in the order the matrix exercises them; anon has no session. */
-var subjectNames = []string{"anon", "viewer", "operator", "auditor", "admin"}
+/*
+subjects in the order the matrix exercises them; anon has no session. The
+"A" subjects hold their role on group A only; requests target objects in
+group A (foreignMatrix repeats the group-scoped routes against group B).
+*/
+var subjectNames = []string{"anon", "viewer", "viewerA", "operator", "operatorA", "auditor", "admin", "adminA"}
+
+/* scopedSubjects are the group-bound subjects of foreignMatrix. */
+var scopedSubjects = []string{"viewerA", "operatorA", "adminA"}
 
 /* matrix: method+pattern -> expected status for each subject. */
 var matrix = map[string]map[string]int{
-	"GET /api/health":       {"anon": 200, "viewer": 200, "operator": 200, "auditor": 200, "admin": 200},
-	"POST /api/auth/login":  {"anon": 200, "viewer": 200, "operator": 200, "auditor": 200, "admin": 200},
-	"POST /api/auth/totp":   {"anon": 204, "viewer": 204, "operator": 204, "auditor": 204, "admin": 204},
-	"POST /api/auth/enroll": {"anon": 200, "viewer": 200, "operator": 200, "auditor": 200, "admin": 200},
-	"POST /api/auth/stepup": {"anon": 401, "viewer": 204, "operator": 204, "auditor": 204, "admin": 204},
-	"POST /api/auth/logout": {"anon": 401, "viewer": 204, "operator": 204, "auditor": 204, "admin": 204},
-	"GET /api/auth/me":      {"anon": 401, "viewer": 200, "operator": 200, "auditor": 200, "admin": 200},
+	"GET /api/health":              {"anon": 200, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"POST /api/auth/login":         {"anon": 200, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"POST /api/auth/totp":          {"anon": 204, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
+	"POST /api/auth/enroll":        {"anon": 200, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"POST /api/auth/stepup":        {"anon": 401, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
+	"POST /api/auth/logout":        {"anon": 401, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
+	"GET /api/auth/me":             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"GET /api/users":               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"POST /api/users":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"PATCH /api/users/{id}":        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/users/{id}/bindings": {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"PUT /api/users/{id}/bindings": {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/groups":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"POST /api/groups":             {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"PATCH /api/groups/{id}":       {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"DELETE /api/groups/{id}":      {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/audit":               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 200, "admin": 200, "adminA": 403},
 
-	"GET /api/users":               {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 200},
-	"POST /api/users":              {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 201},
-	"PATCH /api/users/{id}":        {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 204},
-	"GET /api/users/{id}/bindings": {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 200},
-	"PUT /api/users/{id}/bindings": {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 204},
-	"GET /api/groups":              {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 200},
-	"POST /api/groups":             {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 201},
-	"PATCH /api/groups/{id}":       {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 204},
-	"DELETE /api/groups/{id}":      {"anon": 401, "viewer": 403, "operator": 403, "auditor": 403, "admin": 204},
-	"GET /api/audit":               {"anon": 401, "viewer": 403, "operator": 403, "auditor": 200, "admin": 200},
+	"GET /api/devices":                         {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/devices":                        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
+	"GET /api/devices/{id}":                    {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"PATCH /api/devices/{id}":                  {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"DELETE /api/devices/{id}":                 {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"GET /api/devices/{id}/profiles":           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"PUT /api/devices/{id}/profiles/{kind}":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"DELETE /api/devices/{id}/profiles/{kind}": {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"POST /api/devices/{id}/poll":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 202, "operatorA": 202, "auditor": 403, "admin": 202, "adminA": 202},
+	"GET /api/discovery/scans":                 {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/discovery/scans":                {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
+	"PATCH /api/discovery/scans/{id}":          {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"PUT /api/discovery/scans/{id}/profile":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"GET /api/discovery/inbox":                 {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/discovery/inbox/{id}/accept":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
+	"POST /api/discovery/inbox/{id}/ignore":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+}
+
+/*
+foreignMatrix: every group-scoped route requested by the group-A subjects
+against objects (or a target group) in group B. A subject that holds the
+permission somewhere gets 404, never 403, for a foreign object; lists answer
+200 without the foreign rows.
+*/
+var foreignMatrix = map[string]map[string]int{
+	"GET /api/devices":                         {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"POST /api/devices":                        {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"GET /api/devices/{id}":                    {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"PATCH /api/devices/{id}":                  {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"DELETE /api/devices/{id}":                 {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"GET /api/devices/{id}/profiles":           {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"PUT /api/devices/{id}/profiles/{kind}":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"DELETE /api/devices/{id}/profiles/{kind}": {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"POST /api/devices/{id}/poll":              {"viewerA": 403, "operatorA": 404, "adminA": 404},
+	"GET /api/discovery/scans":                 {"viewerA": 403, "operatorA": 403, "adminA": 200},
+	"POST /api/discovery/scans":                {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"PATCH /api/discovery/scans/{id}":          {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"PUT /api/discovery/scans/{id}/profile":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"GET /api/discovery/inbox":                 {"viewerA": 403, "operatorA": 403, "adminA": 200},
+	"POST /api/discovery/inbox/{id}/accept":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"POST /api/discovery/inbox/{id}/ignore":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -63,6 +114,9 @@ type matrixEnv struct {
 	subjects    map[string]*subject
 	spare       string   /* enrolled user without bindings, logged in by the login routes */
 	spareBackup []string /* its unused backup codes */
+	groupA      int64    /* the group of the "A" subjects and of the matrix targets */
+	groupB      int64    /* a group no "A" subject is bound to */
+	target      int64    /* group the next validRequest targets */
 }
 
 func (f *fixture) bind(uid int64, bs ...rbac.Binding) {
@@ -104,8 +158,14 @@ func (f *fixture) stepUp(s *subject) {
 func newMatrixEnv(t *testing.T) *matrixEnv {
 	t.Helper()
 	m := &matrixEnv{fixture: newFixture(t, nil), subjects: map[string]*subject{"anon": nil}}
+	m.groupA, m.groupB = m.newGroup(), m.newGroup()
+	m.target = m.groupA
 	for _, n := range subjectNames[1:] {
-		m.subjects[n] = m.login(false, rbac.Binding{Role: rbac.Role(n)})
+		b := rbac.Binding{Role: rbac.Role(strings.TrimSuffix(n, "A"))}
+		if strings.HasSuffix(n, "A") {
+			b.GroupID = &m.groupA
+		}
+		m.subjects[n] = m.login(false, b)
 	}
 	/* One clock step for all: each user has its own TOTP replay counter. */
 	m.clk.Advance(30 * time.Second)
@@ -207,8 +267,57 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 	case "GET /api/audit":
 		return req{method: "GET", path: "/api/audit?limit=5"}
 	}
+	if r, ok := m.deviceRequest(key); ok {
+		return r
+	}
 	m.t.Fatalf("no valid request for %s", key)
 	return req{}
+}
+
+/* deviceRequest builds valid requests for the device and discovery routes with targets in m.target. */
+func (m *matrixEnv) deviceRequest(key string) (req, bool) {
+	g := m.target
+	ct := base64.StdEncoding.EncodeToString([]byte("sealed-credential"))
+	dev := func(format string) string { return fmt.Sprintf(format, m.newDevice(g)) }
+	switch key {
+	case "GET /api/devices":
+		return req{method: "GET", path: "/api/devices"}, true
+	case "POST /api/devices":
+		return req{method: "POST", path: "/api/devices", body: map[string]any{"name": uniqueName("d"), "address": nextAddr().String(), "group_id": g}}, true
+	case "GET /api/devices/{id}":
+		return req{method: "GET", path: dev("/api/devices/%d")}, true
+	case "PATCH /api/devices/{id}":
+		return req{method: "PATCH", path: dev("/api/devices/%d"), body: map[string]any{"name": uniqueName("r"), "interval_avail_s": 60}}, true
+	case "DELETE /api/devices/{id}":
+		return req{method: "DELETE", path: dev("/api/devices/%d")}, true
+	case "GET /api/devices/{id}/profiles":
+		return req{method: "GET", path: dev("/api/devices/%d/profiles")}, true
+	case "PUT /api/devices/{id}/profiles/{kind}":
+		return req{method: "PUT", path: dev("/api/devices/%d/profiles/snmp3"), body: map[string]any{"ciphertext": ct, "key_version": 1}}, true
+	case "DELETE /api/devices/{id}/profiles/{kind}":
+		id := m.newDevice(g)
+		m.newProfile(devices.Owner{Kind: devices.OwnerDevice, ID: id}, "ssh_read")
+		return req{method: "DELETE", path: fmt.Sprintf("/api/devices/%d/profiles/ssh_read", id)}, true
+	case "POST /api/devices/{id}/poll":
+		return req{method: "POST", path: dev("/api/devices/%d/poll")}, true
+	case "GET /api/discovery/scans":
+		return req{method: "GET", path: "/api/discovery/scans"}, true
+	case "POST /api/discovery/scans":
+		return req{method: "POST", path: "/api/discovery/scans", body: map[string]any{"cidr": "192.0.2.0/24", "group_id": g, "interval_s": 3600}}, true
+	case "PATCH /api/discovery/scans/{id}":
+		return req{method: "PATCH", path: fmt.Sprintf("/api/discovery/scans/%d", m.newScan(g)), body: map[string]any{"enabled": false}}, true
+	case "PUT /api/discovery/scans/{id}/profile":
+		return req{method: "PUT", path: fmt.Sprintf("/api/discovery/scans/%d/profile", m.newScan(g)),
+			body: map[string]any{"kind": "snmp3", "ciphertext": ct, "key_version": 1}}, true
+	case "GET /api/discovery/inbox":
+		return req{method: "GET", path: "/api/discovery/inbox"}, true
+	case "POST /api/discovery/inbox/{id}/accept":
+		return req{method: "POST", path: fmt.Sprintf("/api/discovery/inbox/%d/accept", m.newDiscovered(g)),
+			body: map[string]any{"name": uniqueName("acc"), "group_id": g}}, true
+	case "POST /api/discovery/inbox/{id}/ignore":
+		return req{method: "POST", path: fmt.Sprintf("/api/discovery/inbox/%d/ignore", m.newDiscovered(g))}, true
+	}
+	return req{}, false
 }
 
 func routeKeys() []string {
@@ -239,6 +348,44 @@ func TestEveryRouteInMatrix(t *testing.T) {
 	for k := range matrix {
 		if !slices.Contains(keys, k) {
 			t.Errorf("matrix row %s matches no registered route", k)
+		}
+	}
+	for _, r := range httpapi.Routes() {
+		k := r.Method + " " + r.Pattern
+		row, ok := foreignMatrix[k]
+		if r.Policy.Scoped != ok {
+			t.Errorf("route %s: scoped=%v but foreign matrix row present=%v", k, r.Policy.Scoped, ok)
+		}
+		if ok && len(row) != len(scopedSubjects) {
+			t.Errorf("foreign matrix row %s: %v", k, row)
+		}
+	}
+	for k := range foreignMatrix {
+		if !slices.Contains(keys, k) {
+			t.Errorf("foreign matrix row %s matches no registered route", k)
+		}
+	}
+}
+
+/* TestAuthzMatrixForeign runs every group-scoped route as the group-A subjects against group B. */
+func TestAuthzMatrixForeign(t *testing.T) {
+	m := newMatrixEnv(t)
+	m.target = m.groupB
+	for k, row := range foreignMatrix {
+		for _, n := range scopedSubjects {
+			s := m.subjects[n]
+			resp := m.do(s.authed(m.validRequest(k, s)))
+			want := row[n]
+			switch want {
+			case http.StatusNotFound:
+				wantError(t, resp, want, "not_found")
+			case http.StatusForbidden:
+				wantError(t, resp, want, "forbidden")
+			default:
+				if resp.StatusCode != want {
+					t.Errorf("%s as %s on group B: status %d, want %d", k, n, resp.StatusCode, want)
+				}
+			}
 		}
 	}
 }

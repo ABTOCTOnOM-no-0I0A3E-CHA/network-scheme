@@ -34,6 +34,8 @@ type API struct {
 	TrustedProxyCIDRs []netip.Prefix `yaml:"trusted_proxy_cidrs"`
 	DB                DB             `yaml:"db"`
 	DataKeyFile       string         `yaml:"data_key_file"`
+	/* ReadKeyVersion is the key_version of the read domain in keys.json; sealed credentials under any other version are refused. */
+	ReadKeyVersion int `yaml:"read_key_version"`
 }
 
 /*
@@ -58,6 +60,9 @@ func LoadAPI(path string) (API, error) {
 	}
 	if c.DB.Port == 0 {
 		c.DB.Port = defaultDBPort
+	}
+	if c.ReadKeyVersion < 0 {
+		return API{}, fmt.Errorf("config %s: read_key_version must be positive", path)
 	}
 	if err := c.DB.validate(); err != nil {
 		return API{}, fmt.Errorf("config %s: %w", path, err)

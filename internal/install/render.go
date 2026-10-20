@@ -13,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/beekamai/network-scheme/deploy"
+	"github.com/beekamai/network-scheme/internal/keys"
 )
 
 /*
@@ -54,10 +55,11 @@ type RenderInput struct {
 /* view is what the templates see: validated, defaulted, derived values. */
 type view struct {
 	RenderInput
-	Authority     string /* host[:port] of the public origin */
-	CoreIPRange   string /* upper half of CoreSubnet: dynamic addresses never collide with GatewayIP */
-	DBName        string
-	APIListenPort int
+	Authority      string /* host[:port] of the public origin */
+	CoreIPRange    string /* upper half of CoreSubnet: dynamic addresses never collide with GatewayIP */
+	DBName         string
+	APIListenPort  int
+	ReadKeyVersion int /* key_version of the read domain in keys.json written by the install */
 }
 
 var (
@@ -171,7 +173,8 @@ func prepare(in RenderInput) (view, error) {
 	if in.HTTPSPort != DefaultHTTPSPort {
 		authority += ":" + strconv.Itoa(in.HTTPSPort)
 	}
-	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080}, nil
+	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080,
+		ReadKeyVersion: keys.InitialKeyVersion}, nil
 }
 
 /* upperHalf returns the first address of the upper half of p: the first host bit set. */

@@ -82,17 +82,31 @@ func ancestors(ctx context.Context, q querier, groupID int64) ([]int64, error) {
 			SELECT id, parent_id, 0 FROM core.device_group WHERE id = $1
 			UNION ALL
 			SELECT g.id, g.parent_id, up.depth + 1 FROM core.device_group g JOIN up ON g.id = up.parent_id
+			WHERE up.depth <= $2
 		)
-		SELECT id FROM up WHERE depth > 0 ORDER BY depth`, groupID)
+		SELECT id, depth FROM up WHERE depth > 0 ORDER BY depth`, groupID, maxGroupDepth)
 	if err != nil {
 		return nil, fmt.Errorf("rbac: ancestors: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowTo[int64])
+	var out []int64
+	var id int64
+	var depth int
+	if _, err := pgx.ForEachRow(rows, []any{&id, &depth}, func() error {
+		if depth > maxGroupDepth {
+			return errors.New("rbac: ancestors: hierarchy deeper than 64 levels (cycle?)")
+		}
+		out = append(out, id)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("rbac: ancestors: %w", err)
+	}
+	return out, nil
 }
 
 /*
 Ancestors returns the parent chain of groupID, nearest first, excluding the
-group itself. The hierarchy is acyclic, so the recursion terminates.
+group itself. A chain longer than 64 levels, in practice a corrupted cycle,
+is an error rather than a truncated chain.
 */
 func (s *Store) Ancestors(ctx context.Context, groupID int64) ([]int64, error) {
 	return ancestors(ctx, s.pool, groupID)

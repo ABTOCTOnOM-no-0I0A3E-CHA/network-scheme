@@ -40,6 +40,10 @@ var (
 	errInvalidUsername  = apiError{http.StatusBadRequest, "invalid_username", "Недопустимое имя пользователя"}
 	errWeakPassword     = apiError{http.StatusBadRequest, "weak_password", "Пароль короче 12 символов или есть в списке скомпрометированных"}
 	errInvalidRole      = apiError{http.StatusBadRequest, "invalid_role", "Неизвестная роль"}
+	errAddressExists    = apiError{http.StatusConflict, "address_exists", "Устройство с таким адресом и портом SNMP уже есть"}
+	errNotPending       = apiError{http.StatusConflict, "not_pending", "Находка уже обработана"}
+	errStaleKey         = apiError{http.StatusBadRequest, "stale_key", "Учётные данные зашифрованы устаревшим ключом, обновите страницу"}
+	errCIDRTooWide      = apiError{http.StatusBadRequest, "cidr_too_wide", "Подсеть шире /16 (более 65 536 адресов)"}
 	errLocked           = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited      = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errInternal         = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
@@ -88,6 +92,11 @@ var knownErrors = []struct {
 	{rbac.ErrLastAdmin, errLastAdmin},
 	{rbac.ErrInvalidRole, errInvalidRole},
 	{devices.ErrNotFound, errNotFound},
+	{devices.ErrGroupNotFound, errNotFound},
+	{devices.ErrAddressExists, errAddressExists},
+	{devices.ErrNotPending, errNotPending},
+	{devices.ErrInvalid, errBadRequest},
+	{errKeyVersion, errStaleKey},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

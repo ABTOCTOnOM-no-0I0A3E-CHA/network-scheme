@@ -68,18 +68,17 @@ func (s *Store) CreateScan(ctx context.Context, tx pgx.Tx, n NewScan) (int64, er
 	return id, nil
 }
 
-// ListScans returns every scan ordered by id.
-func (s *Store) ListScans(ctx context.Context) ([]Scan, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, cidr, group_id, enabled, interval_s, last_run_at
-		FROM core.discovery_scan ORDER BY id`)
+// ListScans returns the scans whose group f selects, ordered by id.
+func (s *Store) ListScans(ctx context.Context, f Filter) ([]Scan, error) {
+	if !f.All && len(f.GroupIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+scanCols+` FROM core.discovery_scan
+		WHERE $1::bool OR group_id = ANY($2::bigint[]) ORDER BY id`, f.All, f.GroupIDs)
 	if err != nil {
 		return nil, fmt.Errorf("devices: list scans: %w", err)
 	}
-	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Scan, error) {
-		var sc Scan
-		err := r.Scan(&sc.ID, &sc.CIDR, &sc.GroupID, &sc.Enabled, &sc.IntervalS, &sc.LastRunAt)
-		return sc, err
-	})
+	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Scan, error) { return scanScan(r) })
 	if err != nil {
 		return nil, fmt.Errorf("devices: list scans: %w", err)
 	}
@@ -184,4 +183,72 @@ func (s *Store) Ignore(ctx context.Context, tx pgx.Tx, id int64) error {
 		return fmt.Errorf("devices: ignore: %w", err)
 	}
 	return nil
+}
+
+// ScanPatch holds the scan fields to change; nil leaves a field as is.
+type ScanPatch struct {
+	CIDR      *netip.Prefix
+	GroupID   *int64
+	Enabled   *bool
+	IntervalS *int
+}
+
+const scanCols = `id, cidr, group_id, enabled, interval_s, last_run_at`
+
+func scanScan(r pgx.Row) (Scan, error) {
+	var sc Scan
+	err := r.Scan(&sc.ID, &sc.CIDR, &sc.GroupID, &sc.Enabled, &sc.IntervalS, &sc.LastRunAt)
+	return sc, err
+}
+
+// GetScan returns a scan or ErrNotFound.
+func (s *Store) GetScan(ctx context.Context, id int64) (Scan, error) {
+	sc, err := scanScan(s.pool.QueryRow(ctx, `SELECT `+scanCols+` FROM core.discovery_scan WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Scan{}, ErrNotFound
+	}
+	if err != nil {
+		return Scan{}, fmt.Errorf("devices: get scan: %w", err)
+	}
+	return sc, nil
+}
+
+// UpdateScan applies p to scan id: ErrNotFound if absent, ErrGroupNotFound for an unknown group.
+func (s *Store) UpdateScan(ctx context.Context, tx pgx.Tx, id int64, p ScanPatch) error {
+	var cidr *netip.Prefix
+	if p.CIDR != nil {
+		if !p.CIDR.IsValid() {
+			return fmt.Errorf("%w: cidr", ErrInvalid)
+		}
+		m := p.CIDR.Masked()
+		cidr = &m
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE core.discovery_scan SET
+			cidr = coalesce($2::cidr, cidr),
+			group_id = coalesce($3, group_id),
+			enabled = coalesce($4, enabled),
+			interval_s = coalesce($5, interval_s)
+		WHERE id = $1`, id, cidr, p.GroupID, p.Enabled, p.IntervalS)
+	if err != nil {
+		return mapWrite("update scan", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetDiscovered returns one discovered item (with its scan's group) or ErrNotFound.
+func (s *Store) GetDiscovered(ctx context.Context, id int64) (Discovered, error) {
+	d, err := scanDiscovered(s.pool.QueryRow(ctx, `
+		SELECT `+discoveredCols+` FROM core.discovered d JOIN core.discovery_scan sc ON sc.id = d.scan_id
+		WHERE d.id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Discovered{}, ErrNotFound
+	}
+	if err != nil {
+		return Discovered{}, fmt.Errorf("devices: get discovered: %w", err)
+	}
+	return d, nil
 }

@@ -289,8 +289,12 @@ func (s *Store) PutProfile(ctx context.Context, tx pgx.Tx, owner Owner, kind str
 	if owner.Kind == OwnerScan {
 		table = "core.discovery_scan"
 	}
+	/*
+		An exclusive owner lock serializes puts for the same owner: with a shared
+		one, two first-time puts would both insert and one would hit the key.
+	*/
 	var one int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM `+table+` WHERE id = $1 FOR SHARE`, owner.ID).Scan(&one); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM `+table+` WHERE id = $1 FOR NO KEY UPDATE`, owner.ID).Scan(&one); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -350,4 +354,36 @@ func (s *Store) Profiles(ctx context.Context, owner Owner) ([]ProfileInfo, error
 		return nil, fmt.Errorf("devices: profiles: %w", err)
 	}
 	return out, nil
+}
+
+// Lock returns device id locked FOR UPDATE in tx (read-modify-write); ErrNotFound if absent.
+func (s *Store) Lock(ctx context.Context, tx pgx.Tx, id int64) (Device, error) {
+	d, err := scanDevice(tx.QueryRow(ctx, `SELECT `+deviceCols+` FROM core.device WHERE id = $1 FOR NO KEY UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Device{}, ErrNotFound
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("devices: lock: %w", err)
+	}
+	return d, nil
+}
+
+/*
+RefreshInsecure sets insecure_protocols of device id from its profiles: true
+while an snmp2c or telnet_read credential is set.
+*/
+func (s *Store) RefreshInsecure(ctx context.Context, tx pgx.Tx, id int64) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE core.device SET insecure_protocols = EXISTS (
+			SELECT 1 FROM core.access_profile
+			WHERE owner_kind = 'device' AND owner_id = $1 AND kind IN ('snmp2c', 'telnet_read')
+		), updated_at = now()
+		WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("devices: refresh insecure: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
