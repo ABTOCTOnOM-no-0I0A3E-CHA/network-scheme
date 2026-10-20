@@ -32,6 +32,10 @@ const (
 	payloadVersion = 1
 	maxPlaintext   = 4 << 10
 	nonceLen       = 16
+	maxSkew        = 5 * time.Minute
+	maxField       = 2048 /* bytes */
+	maxUsername    = 64
+	maxSNMPUser    = 32 /* USM limit */
 	minSNMPSecret  = 16 /* characters */
 	minPassword    = 12 /* characters */
 )

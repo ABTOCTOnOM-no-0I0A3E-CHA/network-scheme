@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/secret"
@@ -19,11 +20,12 @@ import (
 /*
 Open decrypts a sealed-box credential with the read-domain key pair and
 verifies it: strict payload format, binding to want and kind, and a
-created_at strictly newer than lastAccepted (zero when none was accepted).
+created_at strictly newer than lastAccepted (zero when none was accepted)
+and not later than now+5m.
 Checks run in the order malformed, owner, kind, stale, secret shape, weak.
 Returned errors never contain secret material.
 */
-func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind string, lastAccepted time.Time) (Credential, error) {
+func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind string, lastAccepted, now time.Time) (Credential, error) {
 	pt, ok := box.OpenAnonymous(nil, ciphertext, pub, priv)
 	if !ok {
 		return Credential{}, ErrUndecryptable
@@ -41,7 +43,7 @@ func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind strin
 		return Credential{}, ErrMalformed
 	}
 	createdAt, err := time.Parse(time.RFC3339, env.CreatedAt)
-	if err != nil {
+	if err != nil || createdAt.After(now.Add(maxSkew)) {
 		return Credential{}, ErrMalformed
 	}
 	if n, err := base64.StdEncoding.DecodeString(env.Nonce); err != nil || len(n) != nonceLen {
@@ -93,6 +95,25 @@ func parseOwner(s string) (devices.Owner, bool) {
 	return devices.Owner{Kind: k, ID: id}, true
 }
 
+/* clean reports whether s has no C0 control characters or DEL. */
+func clean(s string, allowNL bool) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if allowNL && (c == '\n' || c == '\r') {
+			continue
+		}
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+/* okStr reports whether *p is set, non-empty, control-free and at most limit bytes. */
+func okStr(p *string, limit int) bool {
+	return p != nil && *p != "" && len(*p) <= limit && clean(*p, false)
+}
+
 func short(s string, n int) bool { return utf8.RuneCountInString(s) < n }
 
 /* fill decodes and validates the kind-specific secret object into c. */
@@ -100,7 +121,7 @@ func (c *Credential) fill(raw json.RawMessage) error {
 	switch c.Kind {
 	case KindSNMP2c:
 		var s snmp2cSecret
-		if decodeStrict(raw, &s) != nil || s.Community == nil || *s.Community == "" {
+		if decodeStrict(raw, &s) != nil || !okStr(s.Community, maxField) {
 			return ErrMalformed
 		}
 		if short(*s.Community, minSNMPSecret) {
@@ -109,10 +130,10 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		c.Community = secret.New(*s.Community)
 	case KindSNMP3:
 		var s snmp3Secret
-		if decodeStrict(raw, &s) != nil || s.User == nil || *s.User == "" ||
+		if decodeStrict(raw, &s) != nil || !okStr(s.User, maxSNMPUser) ||
 			s.AuthProto == nil || !authProtos[*s.AuthProto] ||
 			s.PrivProto == nil || !privProtos[*s.PrivProto] ||
-			s.AuthKey == nil || s.PrivKey == nil {
+			!okStr(s.AuthKey, maxField) || !okStr(s.PrivKey, maxField) {
 			return ErrMalformed
 		}
 		if short(*s.AuthKey, minSNMPSecret) || short(*s.PrivKey, minSNMPSecret) {
@@ -122,7 +143,7 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		c.AuthKey, c.PrivKey = secret.New(*s.AuthKey), secret.New(*s.PrivKey)
 	default: /* ssh_read, telnet_read */
 		var s loginSecret
-		if decodeStrict(raw, &s) != nil || s.Username == nil || *s.Username == "" {
+		if decodeStrict(raw, &s) != nil || !okStr(s.Username, maxUsername) {
 			return ErrMalformed
 		}
 		hasPw := s.Password != nil && *s.Password != ""
@@ -130,6 +151,18 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		if s.Password != nil && !hasPw || s.PrivateKey != nil && !hasKey || hasPw == hasKey ||
 			(hasKey && c.Kind != KindSSHRead) {
 			return ErrMalformed
+		}
+		if hasPw && !okStr(s.Password, maxField) {
+			return ErrMalformed
+		}
+		if hasKey {
+			/* PEM needs line breaks; nothing else is allowed, and it must parse. */
+			if len(*s.PrivateKey) > maxField || !clean(*s.PrivateKey, true) {
+				return ErrMalformed
+			}
+			if _, err := ssh.ParseRawPrivateKey([]byte(*s.PrivateKey)); err != nil {
+				return ErrMalformed
+			}
 		}
 		if hasPw && short(*s.Password, minPassword) {
 			return ErrWeak

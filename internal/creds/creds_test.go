@@ -2,9 +2,11 @@ package creds_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/beekamai/network-scheme/internal/creds"
 	"github.com/beekamai/network-scheme/internal/creds/credstest"
@@ -26,6 +29,15 @@ var (
 )
 
 const k16 = "0123456789abcdef"
+
+var testPEM = func() string {
+	_, k, _ := ed25519.GenerateKey(rand.Reader)
+	b, err := ssh.MarshalPrivateKey(k, "")
+	if err != nil {
+		panic(err)
+	}
+	return string(pem.EncodeToMemory(b))
+}()
 
 func keys(t *testing.T) (pub, priv *[32]byte) {
 	t.Helper()
@@ -63,8 +75,8 @@ func TestOpenRoundTrip(t *testing.T) {
 				t.Fatalf("ssh pw: %+v", c)
 			}
 		}},
-		{"ssh_read", map[string]string{"username": "u", "private_key": "-----BEGIN-----"}, func(t *testing.T, c creds.Credential) {
-			if c.PrivateKey.Reveal() != "-----BEGIN-----" || !c.Password.IsZero() {
+		{"ssh_read", map[string]string{"username": "u", "private_key": testPEM}, func(t *testing.T, c creds.Credential) {
+			if c.PrivateKey.Reveal() != testPEM || !c.Password.IsZero() {
 				t.Fatalf("ssh key: %+v", c)
 			}
 		}},
@@ -76,7 +88,7 @@ func TestOpenRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		ct := credstest.Seal(pub, dev1, tc.kind, tc.secret, t0)
-		c, err := creds.Open(priv, pub, ct, dev1, tc.kind, time.Time{})
+		c, err := creds.Open(priv, pub, ct, dev1, tc.kind, time.Time{}, t0)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.kind, err)
 		}
@@ -90,11 +102,11 @@ func TestOpenRoundTrip(t *testing.T) {
 func TestOwnerSwapRejected(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
-	if _, err := creds.Open(priv, pub, ct, dev2, "snmp2c", time.Time{}); !errors.Is(err, creds.ErrOwnerMismatch) {
+	if _, err := creds.Open(priv, pub, ct, dev2, "snmp2c", time.Time{}, t0); !errors.Is(err, creds.ErrOwnerMismatch) {
 		t.Fatalf("device swap: %v", err)
 	}
 	scan1 := devices.Owner{Kind: devices.OwnerScan, ID: 1}
-	if _, err := creds.Open(priv, pub, ct, scan1, "snmp2c", time.Time{}); !errors.Is(err, creds.ErrOwnerMismatch) {
+	if _, err := creds.Open(priv, pub, ct, scan1, "snmp2c", time.Time{}, t0); !errors.Is(err, creds.ErrOwnerMismatch) {
 		t.Fatalf("owner-kind swap: %v", err)
 	}
 }
@@ -102,7 +114,7 @@ func TestOwnerSwapRejected(t *testing.T) {
 func TestKindSwapRejected(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
-	if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}); !errors.Is(err, creds.ErrKindMismatch) {
+	if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}, t0); !errors.Is(err, creds.ErrKindMismatch) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -111,11 +123,11 @@ func TestStaleRejected(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
 	for _, last := range []time.Time{t0, t0.Add(time.Second)} {
-		if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", last); !errors.Is(err, creds.ErrStale) {
+		if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", last, t0); !errors.Is(err, creds.ErrStale) {
 			t.Fatalf("last=%v: %v", last, err)
 		}
 	}
-	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", t0.Add(-time.Second)); err != nil {
+	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", t0.Add(-time.Second), t0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -123,7 +135,7 @@ func TestStaleRejected(t *testing.T) {
 func TestWeakSNMPv3KeyRejected(t *testing.T) {
 	pub, priv := keys(t)
 	open := func(kind string, s any) error {
-		_, err := creds.Open(priv, pub, credstest.Seal(pub, dev1, kind, s, t0), dev1, kind, time.Time{})
+		_, err := creds.Open(priv, pub, credstest.Seal(pub, dev1, kind, s, t0), dev1, kind, time.Time{}, t0)
 		return err
 	}
 	short := k16[:15]
@@ -151,7 +163,7 @@ func TestUnsupportedAuthProtoRejected(t *testing.T) {
 		s := snmp3(k16, k16)
 		s["auth_proto"] = p
 		ct := credstest.Seal(pub, dev1, "snmp3", s, t0)
-		if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}); !errors.Is(err, creds.ErrMalformed) {
+		if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}, t0); !errors.Is(err, creds.ErrMalformed) {
 			t.Fatalf("auth %q: %v", p, err)
 		}
 	}
@@ -159,7 +171,7 @@ func TestUnsupportedAuthProtoRejected(t *testing.T) {
 		s := snmp3(k16, k16)
 		s["priv_proto"] = p
 		ct := credstest.Seal(pub, dev1, "snmp3", s, t0)
-		if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}); !errors.Is(err, creds.ErrMalformed) {
+		if _, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}, t0); !errors.Is(err, creds.ErrMalformed) {
 			t.Fatalf("priv %q: %v", p, err)
 		}
 	}
@@ -168,7 +180,7 @@ func TestUnsupportedAuthProtoRejected(t *testing.T) {
 func TestSecretsMasked(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp3", snmp3("AUTHSECRET-0123456", "PRIVSECRET-0123456"), t0)
-	c, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{})
+	c, err := creds.Open(priv, pub, ct, dev1, "snmp3", time.Time{}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +197,7 @@ func TestSecretsMasked(t *testing.T) {
 func TestErrorsLeakNothing(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": "SECRETWEAK"}, t0)
-	_, err := creds.Open(priv, pub, ct, dev1, "snmp2c", time.Time{})
+	_, err := creds.Open(priv, pub, ct, dev1, "snmp2c", time.Time{}, t0)
 	if !errors.Is(err, creds.ErrWeak) || strings.Contains(err.Error(), "SECRETWEAK") {
 		t.Fatalf("got %v", err)
 	}
@@ -195,15 +207,15 @@ func TestUndecryptable(t *testing.T) {
 	pub, priv := keys(t)
 	otherPub, _ := keys(t)
 	ct := credstest.Seal(otherPub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
-	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", time.Time{}); !errors.Is(err, creds.ErrUndecryptable) {
+	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", time.Time{}, t0); !errors.Is(err, creds.ErrUndecryptable) {
 		t.Fatalf("wrong key: %v", err)
 	}
-	if _, err := creds.Open(priv, pub, nil, dev1, "snmp2c", time.Time{}); !errors.Is(err, creds.ErrUndecryptable) {
+	if _, err := creds.Open(priv, pub, nil, dev1, "snmp2c", time.Time{}, t0); !errors.Is(err, creds.ErrUndecryptable) {
 		t.Fatalf("empty: %v", err)
 	}
 	good := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
 	good[len(good)-1] ^= 1
-	if _, err := creds.Open(priv, pub, good, dev1, "snmp2c", time.Time{}); !errors.Is(err, creds.ErrUndecryptable) {
+	if _, err := creds.Open(priv, pub, good, dev1, "snmp2c", time.Time{}, t0); !errors.Is(err, creds.ErrUndecryptable) {
 		t.Fatalf("tampered: %v", err)
 	}
 }
@@ -248,7 +260,7 @@ func TestMalformedRejected(t *testing.T) {
 		"oversize":         {"snmp2c", `{"pad":"` + strings.Repeat("a", 5000) + `"}`},
 	}
 	for name, c := range cases {
-		_, err := creds.Open(priv, pub, rawSeal(t, pub, c.pt), dev1, c.kind, time.Time{})
+		_, err := creds.Open(priv, pub, rawSeal(t, pub, c.pt), dev1, c.kind, time.Time{}, t0)
 		if !errors.Is(err, creds.ErrMalformed) {
 			t.Errorf("%s: got %v", name, err)
 		}
@@ -268,12 +280,94 @@ func TestLibsodiumVector(t *testing.T) {
 	copy(priv[:], dec("9411f445e53fbcfc78dcd156eab19de0f4340eba44ae2f981bcf7f4a180cb575"))
 	copy(pub[:], dec("9f3eefcf3a0d6961ee4d0ced14bae85cdb7131f1b1ca3afb904564406594393d"))
 	ct := dec("2166774819a7f50186d6a430428156f3125745d6a443d3cafe4b0f7b3e3d0e1a5e2fd6f9e355e7a2742b651bd15520c784278f95e1f9eb4bfb8d277f16514401ea64f5134af0705def283744d34416fc6cfe7d7983774c407f8f33480836a3df9873b2e4415413c9063e7b651f9e08fdcf6e2190bf1ca6bb287b4e8fe921a44caab7f9a0e4d72b72f0eeb594b38fee58fbd9b8a859c3d6589d8caaaf94bfa5a32db44053f51fc283dc8beab8aa71db08fb06f13e45b6bab68e6ea7ddaaff7503b04570d600f91d00b486fa1af39d21aebfb52cd7aaae0a05bc6542036834a0e7b5ca1f64de3f57043197bc5186fb6d3c7459cacf8acf722960c2a568848e48514d7e14b8a9759f5ec4bb7bfb9a56e0429c991234d3b9d340faf7766490c626b248f39f276a6ebfd8")
-	c, err := creds.Open(&priv, &pub, ct, devices.Owner{Kind: devices.OwnerDevice, ID: 42}, "snmp3", time.Time{})
+	c, err := creds.Open(&priv, &pub, ct, devices.Owner{Kind: devices.OwnerDevice, ID: 42}, "snmp3", time.Time{}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.User != "monitor" || c.AuthKey.Reveal() != "auth-key-0123456789" || c.PrivKey.Reveal() != "priv-key-0123456789" ||
 		!c.CreatedAt.Equal(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("fields: %+v", c)
+	}
+}
+
+func TestControlCharsRejected(t *testing.T) {
+	pub, priv := keys(t)
+	open := func(kind string, s any) error {
+		_, err := creds.Open(priv, pub, credstest.Seal(pub, dev1, kind, s, t0), dev1, kind, time.Time{}, t0)
+		return err
+	}
+	pw := "twelve-chars"
+	for _, bad := range []string{"u\r\nconfigure", "u\x00", "u\x7f", "u\t", "u\x1b[A"} {
+		for _, kind := range []string{"ssh_read", "telnet_read"} {
+			if err := open(kind, map[string]string{"username": bad, "password": pw}); !errors.Is(err, creds.ErrMalformed) {
+				t.Errorf("%s username %q: %v", kind, bad, err)
+			}
+			if err := open(kind, map[string]string{"username": "u", "password": pw + bad}); !errors.Is(err, creds.ErrMalformed) {
+				t.Errorf("%s password %q: %v", kind, bad, err)
+			}
+		}
+		if err := open("snmp2c", map[string]string{"community": k16 + bad}); !errors.Is(err, creds.ErrMalformed) {
+			t.Errorf("community %q: %v", bad, err)
+		}
+		if err := open("snmp3", snmp3(k16+bad, k16)); !errors.Is(err, creds.ErrMalformed) {
+			t.Errorf("auth_key %q: %v", bad, err)
+		}
+		s := snmp3(k16, k16+bad)
+		if err := open("snmp3", s); !errors.Is(err, creds.ErrMalformed) {
+			t.Errorf("priv_key %q: %v", bad, err)
+		}
+		s = snmp3(k16, k16)
+		s["user"] = "m" + bad
+		if err := open("snmp3", s); !errors.Is(err, creds.ErrMalformed) {
+			t.Errorf("snmp3 user %q: %v", bad, err)
+		}
+	}
+	/* PEM may contain line breaks, but must parse; other controls are refused. */
+	if err := open("ssh_read", map[string]string{"username": "u", "private_key": testPEM}); err != nil {
+		t.Fatalf("valid pem: %v", err)
+	}
+	for name, k := range map[string]string{"garbage": "-----BEGIN-----", "nul": testPEM + "\x00", "tab": strings.Replace(testPEM, "\n", "\t", 1)} {
+		if err := open("ssh_read", map[string]string{"username": "u", "private_key": k}); !errors.Is(err, creds.ErrMalformed) {
+			t.Errorf("pem %s: %v", name, err)
+		}
+	}
+}
+
+func TestUsernameLengthCaps(t *testing.T) {
+	pub, priv := keys(t)
+	open := func(kind string, s any) error {
+		_, err := creds.Open(priv, pub, credstest.Seal(pub, dev1, kind, s, t0), dev1, kind, time.Time{}, t0)
+		return err
+	}
+	pw := "twelve-chars"
+	if err := open("ssh_read", map[string]string{"username": strings.Repeat("a", 64), "password": pw}); err != nil {
+		t.Fatalf("64: %v", err)
+	}
+	if err := open("ssh_read", map[string]string{"username": strings.Repeat("a", 65), "password": pw}); !errors.Is(err, creds.ErrMalformed) {
+		t.Fatalf("65: %v", err)
+	}
+	s := snmp3(k16, k16)
+	s["user"] = strings.Repeat("a", 32)
+	if err := open("snmp3", s); err != nil {
+		t.Fatalf("snmp3 32: %v", err)
+	}
+	s["user"] = strings.Repeat("a", 33)
+	if err := open("snmp3", s); !errors.Is(err, creds.ErrMalformed) {
+		t.Fatalf("snmp3 33: %v", err)
+	}
+}
+
+func TestFutureCreatedAtRejected(t *testing.T) {
+	pub, priv := keys(t)
+	open := func(created time.Time) error {
+		ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, created)
+		_, err := creds.Open(priv, pub, ct, dev1, "snmp2c", time.Time{}, t0)
+		return err
+	}
+	if err := open(t0.Add(4 * time.Minute)); err != nil {
+		t.Fatalf("now+4m: %v", err)
+	}
+	if err := open(t0.Add(6 * time.Minute)); !errors.Is(err, creds.ErrMalformed) {
+		t.Fatalf("now+6m: %v", err)
 	}
 }
