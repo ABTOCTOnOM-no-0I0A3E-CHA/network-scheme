@@ -70,12 +70,13 @@ type MetricStore interface {
 // Store is the TimescaleDB MetricStore.
 type Store struct {
 	pool *pgxpool.Pool
+	now  func() time.Time
 }
 
 var _ MetricStore = (*Store)(nil)
 
 // NewStore returns a Store over pool (nms_poller writes, nms_api reads).
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool, now: time.Now} }
 
 func (s *Store) copy(ctx context.Context, table string, cols []string, n int, row func(i int) []any) error {
 	if n == 0 {
@@ -119,34 +120,49 @@ func (s *Store) WriteAvailability(ctx context.Context, pts []AvailPoint) error {
 		})
 }
 
+/* Source tables of QueryIf, finest first, with their retention. */
+var ifSources = []struct {
+	table, inMax, outMax string
+	res, maxWidth        time.Duration
+	retention            time.Duration
+}{
+	{"metrics.if_metrics", "in_bps", "out_bps", 0, 48 * time.Hour, 14 * 24 * time.Hour},
+	{"metrics.if_metrics_5m", "in_bps_max", "out_bps_max", 5 * time.Minute, 60 * 24 * time.Hour, 90 * 24 * time.Hour},
+	{"metrics.if_metrics_1h", "in_bps_max", "out_bps_max", time.Hour, 0, 0},
+}
+
 /*
-ifSource picks the table for a range: raw points up to 2 days, 5-minute
-aggregates up to 60 days, hourly aggregates beyond. res is the source's own
-resolution (0 for raw).
+ifSource picks the finest source that both covers the range width (raw up to
+2 days, 5-minute aggregates up to 60 days, hourly beyond) and still keeps data
+as old as the range start (age = now - from).
 */
-func ifSource(width time.Duration) (table, inMax, outMax string, res time.Duration) {
-	switch {
-	case width <= 48*time.Hour:
-		return "metrics.if_metrics", "in_bps", "out_bps", 0
-	case width <= 60*24*time.Hour:
-		return "metrics.if_metrics_5m", "in_bps_max", "out_bps_max", 5 * time.Minute
-	default:
-		return "metrics.if_metrics_1h", "in_bps_max", "out_bps_max", time.Hour
+func ifSource(width, age time.Duration) int {
+	for i, src := range ifSources[:len(ifSources)-1] {
+		if width <= src.maxWidth && age <= src.retention {
+			return i
+		}
 	}
+	return len(ifSources) - 1
 }
 
 /*
 QueryIf returns the points of one interface in [from, to), oldest first. The
-source resolution follows the range width; a step coarser than the source
-regroups the points into step buckets (average, peak for the maxima).
+source follows the range width and age; a positive step regroups the points
+into buckets of max(step, 1s, source resolution) (average, peak for the maxima);
+step <= 0 keeps the source's own resolution.
 */
 func (s *Store) QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, to time.Time, step time.Duration) ([]IfPoint, error) {
 	if !to.After(from) {
 		return nil, errors.New("metrics: empty time range")
 	}
-	table, inMax, outMax, res := ifSource(to.Sub(from))
-	bucket := max(step, res)
-	/* Identifiers come from ifSource constants only; values are parameters. */
+	src := ifSources[ifSource(to.Sub(from), s.now().Sub(from))]
+	table, inMax, outMax := src.table, src.inMax, src.outMax
+	bucket := src.res
+	if step > 0 {
+		/* date_bin needs a non-zero interval; pgx sends microseconds. */
+		bucket = max(step, time.Second, src.res)
+	}
+	/* Identifiers come from the ifSources constants only; values are parameters. */
 	q := `SELECT ts, in_bps, ` + inMax + `, out_bps, ` + outMax + `,
 	             in_err_ps, out_err_ps, in_disc_ps, out_disc_ps, oper_up, speed_bps
 	      FROM ` + table + `

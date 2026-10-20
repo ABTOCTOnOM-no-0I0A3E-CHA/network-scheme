@@ -164,24 +164,35 @@ func TestQueryPicksResolution(t *testing.T) {
 	api := NewStore(env.Pool("nms_api"))
 	end := base.Add(2 * time.Hour)
 	cases := []struct {
-		name          string
-		from          time.Time
-		step          time.Duration
-		n             int
-		in, inMax     float64
-		out, outMax   float64
-		firstTS       time.Time
-		errNil, speed bool
+		name        string
+		from        time.Time
+		step        time.Duration
+		n           int
+		in, inMax   float64
+		out, outMax float64
+		firstTS     time.Time
+		later       time.Duration /* the clock reads end + later */
 	}{
-		{"raw", base, 0, 120, 0, 0, 0, 0, base, false, true},
-		{"raw-at-2-days", end.Add(-48 * time.Hour), 0, 120, 0, 0, 0, 0, base, false, true},
-		{"raw-rebucketed", base, 10 * time.Minute, 12, 4.5, 9, 9, 18, base, false, true},
-		{"5m", end.Add(-48*time.Hour - time.Second), 0, 24, 2, 4, 4, 8, base, false, true},
-		{"5m-at-60-days", end.Add(-60 * 24 * time.Hour), time.Minute, 24, 2, 4, 4, 8, base, false, true},
-		{"5m-rebucketed", base.Add(-10 * 24 * time.Hour), 30 * time.Minute, 4, 14.5, 29, 29, 58, base, false, true},
-		{"1h", end.Add(-60*24*time.Hour - time.Second), 0, 2, 29.5, 59, 59, 118, base, false, true},
+		{"raw", base, 0, 120, 0, 0, 0, 0, base, 0},
+		{"raw-at-2-days", end.Add(-48 * time.Hour), 0, 120, 0, 0, 0, 0, base, 0},
+		{"raw-rebucketed", base, 10 * time.Minute, 12, 4.5, 9, 9, 18, base, 0},
+		{"5m", end.Add(-48*time.Hour - time.Second), 0, 24, 2, 4, 4, 8, base, 0},
+		{"5m-at-60-days", end.Add(-60 * 24 * time.Hour), time.Minute, 24, 2, 4, 4, 8, base, 0},
+		{"5m-rebucketed", base.Add(-10 * 24 * time.Hour), 30 * time.Minute, 4, 14.5, 29, 29, 58, base, 0},
+		{"1h", end.Add(-60*24*time.Hour - time.Second), 0, 2, 29.5, 59, 59, 118, base, 0},
+		/* A narrow range older than a source's retention moves to the next source. */
+		{"raw-13-days-ago", base, 0, 120, 0, 0, 0, 0, base, 13 * 24 * time.Hour},
+		{"5m-20-days-ago", base, 0, 24, 2, 4, 4, 8, base, 20 * 24 * time.Hour},
+		{"1h-100-days-ago", base, 0, 2, 29.5, 59, 59, 118, base, 100 * 24 * time.Hour},
+		{"5m-wide-100-days-ago", end.Add(-10 * 24 * time.Hour), 0, 2, 29.5, 59, 59, 118, base, 100 * 24 * time.Hour},
+		/* Sub-second steps are clamped (1s on raw, the source resolution on aggregates). */
+		{"raw-step-1ns", base, time.Nanosecond, 120, 0, 0, 0, 0, base, 0},
+		{"raw-step-500ms", base, 500 * time.Millisecond, 120, 0, 0, 0, 0, base, 0},
+		{"5m-step-1ns", end.Add(-72 * time.Hour), time.Nanosecond, 24, 2, 4, 4, 8, base, 0},
+		{"1h-step-1m", base, time.Minute, 2, 29.5, 59, 59, 118, base, 100 * 24 * time.Hour},
 	}
 	for _, c := range cases {
+		api.now = func() time.Time { return end.Add(c.later) }
 		got, err := api.QueryIf(ctx, dev, ifIdx, c.from, end, c.step)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
