@@ -145,6 +145,27 @@ func ifSource(width, age time.Duration) int {
 	return len(ifSources) - 1
 }
 
+/* ifPlan returns the source QueryIf reads for the range and the bucket it regroups into (0: none). */
+func (s *Store) ifPlan(from, to time.Time, step time.Duration) (int, time.Duration) {
+	i := ifSource(to.Sub(from), s.now().Sub(from))
+	bucket := ifSources[i].res
+	if step > 0 {
+		/* date_bin needs a non-zero interval; pgx sends microseconds. */
+		bucket = max(step, time.Second, ifSources[i].res)
+	}
+	return i, bucket
+}
+
+/*
+IfStep returns the bucket width QueryIf would use for the same arguments
+now: max(step, 1s, source resolution) for a positive step, the source
+resolution otherwise. 0 means raw points at the poll interval.
+*/
+func (s *Store) IfStep(from, to time.Time, step time.Duration) time.Duration {
+	_, bucket := s.ifPlan(from, to, step)
+	return bucket
+}
+
 /*
 QueryIf returns the points of one interface in [from, to), oldest first. The
 source follows the range width and age; a positive step regroups the points
@@ -155,13 +176,8 @@ func (s *Store) QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, 
 	if !to.After(from) {
 		return nil, errors.New("metrics: empty time range")
 	}
-	src := ifSources[ifSource(to.Sub(from), s.now().Sub(from))]
-	table, inMax, outMax := src.table, src.inMax, src.outMax
-	bucket := src.res
-	if step > 0 {
-		/* date_bin needs a non-zero interval; pgx sends microseconds. */
-		bucket = max(step, time.Second, src.res)
-	}
+	i, bucket := s.ifPlan(from, to, step)
+	table, inMax, outMax := ifSources[i].table, ifSources[i].inMax, ifSources[i].outMax
 	/* Identifiers come from the ifSources constants only; values are parameters. */
 	q := `SELECT ts, in_bps, ` + inMax + `, out_bps, ` + outMax + `,
 	             in_err_ps, out_err_ps, in_disc_ps, out_disc_ps, oper_up, speed_bps

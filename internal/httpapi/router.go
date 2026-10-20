@@ -17,6 +17,8 @@ import (
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -27,7 +29,9 @@ type Deps struct {
 	RBAC          *rbac.Store
 	Pool          *pgxpool.Pool /* for handlers that open their own transactions */
 	Devices       *devices.Store
-	Jobs          Enqueuer /* background jobs, enqueued in the transaction of the request */
+	Inventory     *inventory.Store /* inventory rows and availability state (read only) */
+	Metrics       *metrics.Store   /* interface rate series (read only) */
+	Jobs          Enqueuer         /* background jobs, enqueued in the transaction of the request */
 	Cfg           config.API
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
@@ -73,6 +77,8 @@ type server struct {
 	rbac      *rbac.Store
 	pool      *pgxpool.Pool
 	devices   *devices.Store
+	inventory *inventory.Store
+	metrics   *metrics.Store
 	jobs      Enqueuer
 	now       func() time.Time
 	cfg       config.API
@@ -85,7 +91,7 @@ type server struct {
 
 func newServer(d Deps) *server {
 	s := &server{
-		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
+		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
 	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
@@ -159,6 +165,14 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPut, "/api/devices/{id}/profiles/{kind}", creds, s.putProfile)
 	s.route(r, http.MethodDelete, "/api/devices/{id}/profiles/{kind}", creds, s.deleteProfile)
 	s.route(r, http.MethodPost, "/api/devices/{id}/poll", poll, s.pollNow)
+	s.route(r, http.MethodGet, "/api/devices/{id}/interfaces", read, inventoryList(s, (*inventory.Store).Interfaces))
+	s.route(r, http.MethodGet, "/api/devices/{id}/arp", read, inventoryList(s, (*inventory.Store).ARP))
+	s.route(r, http.MethodGet, "/api/devices/{id}/mac", read, inventoryList(s, (*inventory.Store).MAC))
+	s.route(r, http.MethodGet, "/api/devices/{id}/vlans", read, inventoryList(s, (*inventory.Store).VLANs))
+	s.route(r, http.MethodGet, "/api/devices/{id}/lldp", read, inventoryList(s, (*inventory.Store).LLDP))
+	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
+	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
+	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
 	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
 	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
 	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)

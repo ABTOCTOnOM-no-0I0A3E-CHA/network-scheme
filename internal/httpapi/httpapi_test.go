@@ -27,6 +27,8 @@ import (
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
+	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
@@ -80,12 +82,14 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 	pool := env.Pool("nms_api")
 	jobs := &fakeJobs{}
 	d := httpapi.Deps{
-		Auth:    auth.NewService(pool, key, clk.Now),
-		Users:   auth.NewUserStore(pool),
-		RBAC:    rbac.NewStore(pool),
-		Pool:    pool,
-		Devices: devices.NewStore(pool),
-		Jobs:    jobs,
+		Auth:      auth.NewService(pool, key, clk.Now),
+		Users:     auth.NewUserStore(pool),
+		RBAC:      rbac.NewStore(pool),
+		Pool:      pool,
+		Devices:   devices.NewStore(pool),
+		Inventory: inventory.NewStore(pool),
+		Metrics:   metrics.NewStore(pool),
+		Jobs:      jobs,
 		Cfg: config.API{PublicOrigin: publicOrigin, TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 			ReadKeyVersion: 1},
 		Clock:         clk.Now,

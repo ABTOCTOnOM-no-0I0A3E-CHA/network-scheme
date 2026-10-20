@@ -300,3 +300,30 @@ func TestPollerCannotUpdateMetrics(t *testing.T) {
 		}
 	}
 }
+
+/* TestIfStep: the bucket QueryIf will use, after source selection and step clamping. */
+func TestIfStep(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	s := &Store{now: func() time.Time { return now }}
+	day := 24 * time.Hour
+	cases := []struct {
+		name     string
+		from, to time.Time
+		step     time.Duration
+		want     time.Duration
+	}{
+		{"raw", now.Add(-time.Hour), now, 0, 0},
+		{"raw-step-1ns", now.Add(-time.Hour), now, time.Nanosecond, time.Second},
+		{"raw-step-10m", now.Add(-time.Hour), now, 10 * time.Minute, 10 * time.Minute},
+		{"5m", now.Add(-3 * day), now, 0, 5 * time.Minute},
+		{"5m-step-1m", now.Add(-3 * day), now, time.Minute, 5 * time.Minute},
+		{"5m-old-narrow", now.Add(-20 * day), now.Add(-20*day + time.Hour), 0, 5 * time.Minute},
+		{"1h", now.Add(-100 * day), now, 0, time.Hour},
+		{"1h-step-2h", now.Add(-100 * day), now, 2 * time.Hour, 2 * time.Hour},
+	}
+	for _, c := range cases {
+		if got := s.IfStep(c.from, c.to, c.step); got != c.want {
+			t.Errorf("%s: IfStep = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

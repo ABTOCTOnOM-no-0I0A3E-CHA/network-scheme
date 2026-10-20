@@ -59,6 +59,14 @@ var matrix = map[string]map[string]int{
 	"PUT /api/devices/{id}/profiles/{kind}":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
 	"DELETE /api/devices/{id}/profiles/{kind}": {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
 	"POST /api/devices/{id}/poll":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 202, "operatorA": 202, "auditor": 403, "admin": 202, "adminA": 202},
+	"GET /api/devices/{id}/interfaces":         {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/arp":                {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/mac":                {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/vlans":              {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/lldp":               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/entities":           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/routes":             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/metrics/if":         {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/discovery/scans":                 {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 200},
 	"POST /api/discovery/scans":                {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
 	"PATCH /api/discovery/scans/{id}":          {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
@@ -84,6 +92,14 @@ var foreignMatrix = map[string]map[string]int{
 	"PUT /api/devices/{id}/profiles/{kind}":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"DELETE /api/devices/{id}/profiles/{kind}": {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"POST /api/devices/{id}/poll":              {"viewerA": 403, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/interfaces":         {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/arp":                {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/mac":                {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/vlans":              {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/lldp":               {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/entities":           {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/routes":             {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/metrics/if":         {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/discovery/scans":                 {"viewerA": 403, "operatorA": 403, "adminA": 200},
 	"POST /api/discovery/scans":                {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"PATCH /api/discovery/scans/{id}":          {"viewerA": 403, "operatorA": 403, "adminA": 404},
@@ -300,6 +316,13 @@ func (m *matrixEnv) deviceRequest(key string) (req, bool) {
 		return req{method: "DELETE", path: fmt.Sprintf("/api/devices/%d/profiles/ssh_read", id)}, true
 	case "POST /api/devices/{id}/poll":
 		return req{method: "POST", path: dev("/api/devices/%d/poll")}, true
+	case "GET /api/devices/{id}/interfaces", "GET /api/devices/{id}/arp", "GET /api/devices/{id}/mac", "GET /api/devices/{id}/vlans",
+		"GET /api/devices/{id}/lldp", "GET /api/devices/{id}/entities", "GET /api/devices/{id}/routes":
+		return req{method: "GET", path: dev("/api/devices/%d/" + strings.TrimPrefix(key, "GET /api/devices/{id}/") + "?limit=10")}, true
+	case "GET /api/devices/{id}/metrics/if":
+		to := time.Now().UTC()
+		q := url.Values{"if_index": {"1"}, "from": {to.Add(-time.Hour).Format(time.RFC3339)}, "to": {to.Format(time.RFC3339)}}
+		return req{method: "GET", path: dev("/api/devices/%d/metrics/if") + "?" + q.Encode()}, true
 	case "GET /api/discovery/scans":
 		return req{method: "GET", path: "/api/discovery/scans"}, true
 	case "POST /api/discovery/scans":

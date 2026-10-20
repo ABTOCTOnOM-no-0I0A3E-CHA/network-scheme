@@ -14,6 +14,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/audit"
 	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/inventory"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -61,11 +62,14 @@ type deviceDetailResponse struct {
 	IntervalInventoryS *int `json:"interval_inventory_s"`
 }
 
-/* toDeviceResponse: the availability state comes from the poller, which does not report yet, so it is "unknown". */
-func toDeviceResponse(d devices.Device) deviceResponse {
+/* toDeviceResponse adds the availability state; a device the state view does not list yet is "unknown". */
+func toDeviceResponse(d devices.Device, st inventory.DeviceState) deviceResponse {
+	if st.State == "" {
+		st = inventory.DeviceState{State: inventory.StateUnknown}
+	}
 	return deviceResponse{
 		ID: d.ID, Name: d.Name, Address: d.Address.String(), GroupID: d.GroupID, Driver: d.Driver,
-		Model: d.Model, Firmware: d.Firmware, InsecureProtocols: d.InsecureProtocols, State: "unknown",
+		Model: d.Model, Firmware: d.Firmware, InsecureProtocols: d.InsecureProtocols, State: st.State, StateSince: st.Since,
 	}
 }
 
@@ -124,9 +128,18 @@ func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	ids := make([]int64, len(ds))
+	for i, d := range ds {
+		ids[i] = d.ID
+	}
+	states, err := s.inventory.States(r.Context(), ids)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	out := make([]deviceResponse, 0, len(ds))
 	for _, d := range ds {
-		out = append(out, toDeviceResponse(d))
+		out = append(out, toDeviceResponse(d, states[d.ID]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -187,8 +200,13 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	states, err := s.inventory.States(r.Context(), []int64{d.ID})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, deviceDetailResponse{
-		deviceResponse: toDeviceResponse(d), SNMPPort: d.SNMPPort,
+		deviceResponse: toDeviceResponse(d, states[d.ID]), SNMPPort: d.SNMPPort,
 		IntervalAvailS: d.Intervals.AvailS, IntervalMetricsS: d.Intervals.MetricsS, IntervalInventoryS: d.Intervals.InventoryS,
 	})
 }

@@ -1055,6 +1055,429 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/interfaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Interfaces by if_index, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryInterface"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/arp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * ARP entries by address, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryARPEntry"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/mac": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Forwarding database by VLAN and MAC, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryMACEntry"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/vlans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * VLANs by id, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryVLAN"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/lldp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * LLDP neighbors by local port, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryLLDPNeighbor"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/entities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Physical components (ENTITY-MIB) by index, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryEntity"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Routing table by destination, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryRoute"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/metrics/if": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rate series of one interface, oldest first
+         * @description The source (raw, 5-minute or hourly aggregates) follows the range width
+         *     and age; step regroups the points and is raised to the source
+         *     resolution. More than 5000 points (raw points counted at the 10 s poll
+         *     floor) answers 400 too_many_points; a range longer than 730 days 400 bad_request.
+         */
+        get: {
+            parameters: {
+                query: {
+                    if_index: number;
+                    from: string;
+                    /** @description Exclusive; must be after from */
+                    to: string;
+                    /** @description Bucket width in seconds; absent keeps the source resolution */
+                    step?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Points */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Bucket width actually used in seconds; 0 for raw points */
+                            step_s: number;
+                            points: components["schemas"]["IfPoint"][];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/discovery/scans": {
         parameters: {
             query?: never;
@@ -1477,10 +1900,95 @@ export interface components {
             /** @enum {string} */
             status: "pending" | "accepted" | "ignored";
         };
+        InventoryInterface: {
+            if_index: number;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** @description Reported by the device; render as text only */
+            alias: string;
+            /** Format: int64 */
+            speed_bps: number;
+            oper_up: boolean;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryARPEntry: {
+            ip: string;
+            /** @example 00:11:22:33:44:55 */
+            mac: string;
+            if_index: number;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryMACEntry: {
+            mac: string;
+            /** @description 0 when unknown */
+            vlan: number;
+            if_index: number;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryVLAN: {
+            vlan_id: number;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryLLDPNeighbor: {
+            local_if_index: number;
+            /** @description Reported by the neighbor; render as text only */
+            chassis_id: string;
+            /** @description Reported by the neighbor; render as text only */
+            port_id: string;
+            /** @description Reported by the neighbor; render as text only */
+            sys_name: string;
+            mgmt_addr: string | null;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryEntity: {
+            ent_index: number;
+            class: string;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** @description Reported by the device; render as text only */
+            model: string;
+            /** @description Reported by the device; render as text only */
+            serial: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryRoute: {
+            /** @example 10.0.0.0/8 */
+            dest: string;
+            next_hop: string | null;
+            if_index: number;
+            proto: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        IfPoint: {
+            /** Format: date-time */
+            ts: string;
+            in_bps: number;
+            /** @description Peak inside the bucket */
+            in_bps_max: number;
+            out_bps: number;
+            out_bps_max: number;
+            /** @description null when the device did not report it */
+            in_err_ps: number | null;
+            out_err_ps: number | null;
+            in_disc_ps: number | null;
+            out_disc_ps: number | null;
+            oper_up: boolean;
+            /** Format: int64 */
+            speed_bps: number;
+        };
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -1512,6 +2020,8 @@ export interface components {
     parameters: {
         Id: number;
         ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
+        Limit: number;
+        Offset: number;
         CSRF: string;
     };
     requestBodies: {
