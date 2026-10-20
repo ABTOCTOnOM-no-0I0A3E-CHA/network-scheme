@@ -104,6 +104,14 @@ func (*UserStore) ResetTOTP(ctx context.Context, tx pgx.Tx, id int64) error {
 }
 
 /*
+Unlock clears the consecutive-failure counter and any account lock of the
+user (nmsctl user unlock and user reset). Per-IP limits are not affected.
+*/
+func (*UserStore) Unlock(ctx context.Context, tx pgx.Tx, id int64) error {
+	return resetAccount(ctx, tx, id)
+}
+
+/*
 EnrollTOTP gives the user a fresh TOTP secret and 10 backup codes, stored
 exactly as a completed web enrollment stores them (sealed with dataKey), and
 ends its sessions. nmsctl uses it to show the break-glass admin's QR code in

@@ -1,6 +1,6 @@
 /*
 Command nmsctl is the host-only administration CLI: installation, the
-break-glass admin, user resets and audit chain verification. Database
+break-glass admin, user resets and unlocks, and audit chain verification. Database
 commands run in the one-shot "nmsctl" tools container of the compose
 project; on the host nmsctl only prompts and forwards them.
 */
@@ -34,6 +34,7 @@ const usage = `usage:
                  [--non-interactive] [--totp-secret-out F]
   nmsctl admin create --user U [--password-file F] [--totp-secret-out F]
   nmsctl user reset U [--password [--password-file F]] [--totp]
+  nmsctl user unlock U
   nmsctl audit verify [--anchors F]
   nmsctl audit anchor [--anchors F]`
 
@@ -107,7 +108,7 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return err
 	}
 	switch cmd {
-	case "admin create", "user reset", "audit verify", "audit anchor":
+	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor":
 	default:
 		return errors.New(usage)
 	}
@@ -154,6 +155,12 @@ func hostCmd(ctx context.Context, cmd string, args []string, d deps) error {
 			fwd = append(fwd, "--totp")
 		}
 		return install.RunInTools(ctx, d.sys, install.DefaultEtc, fwd, stdin, d.out, d.errw)
+	case "user unlock":
+		user, err := parseUserUnlock(args)
+		if err != nil {
+			return err
+		}
+		return install.RunInTools(ctx, d.sys, install.DefaultEtc, []string{"user", "unlock", user}, strings.NewReader(""), d.out, d.errw)
 	case "audit verify", "audit anchor":
 		fwd := append(strings.Fields(cmd), args...)
 		return install.RunInTools(ctx, d.sys, install.DefaultEtc, fwd, strings.NewReader(""), d.out, d.errw)
@@ -214,6 +221,14 @@ func parseUserReset(args []string) (userResetArgs, error) {
 		return a, errors.New("nothing to reset: give --password and/or --totp")
 	}
 	return a, nil
+}
+
+/* parseUserUnlock accepts exactly one user name and no flags. */
+func parseUserUnlock(args []string) (string, error) {
+	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return "", errors.New("usage: nmsctl user unlock U")
+	}
+	return args[0], nil
 }
 
 /* maxPasswordInput bounds a password read from stdin. */

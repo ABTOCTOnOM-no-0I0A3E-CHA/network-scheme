@@ -408,6 +408,40 @@ func TestAccountLockoutEscalates(t *testing.T) {
 	}
 }
 
+func TestAccountFailuresExpire(t *testing.T) {
+	f := newFixture(t)
+	name := uniqueName("decay")
+	f.createUser(name)
+	bad := func() { wantErr(t, f.begin(name, "wrong-password-123"), auth.ErrInvalidCredentials) }
+
+	/* Failures more than 15 min after the previous one start the count again. */
+	for range 4 {
+		bad()
+	}
+	f.clk.Advance(15*time.Minute + time.Second)
+	for range 4 {
+		bad()
+	}
+	if err := f.begin(name, goodPW); err != nil {
+		t.Fatalf("expired failures still counted: %v", err)
+	}
+	bad()
+	wantErr(t, f.begin(name, goodPW), auth.ErrLocked)
+
+	/* The window runs from the end of the lock: a failure within it escalates... */
+	f.clk.Advance(10 * time.Minute)
+	bad()
+	f.clk.Advance(time.Minute)
+	wantErr(t, f.begin(name, goodPW), auth.ErrLocked)
+
+	/* ...one after it starts from 1 again. */
+	f.clk.Advance(time.Minute + 15*time.Minute + time.Second)
+	bad()
+	if err := f.begin(name, goodPW); err != nil {
+		t.Fatalf("failure after the window locked the account: %v", err)
+	}
+}
+
 func TestAccountLockoutConcurrent(t *testing.T) {
 	f := newFixture(t)
 	name := uniqueName("race")

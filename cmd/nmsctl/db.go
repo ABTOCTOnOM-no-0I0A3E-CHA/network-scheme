@@ -88,6 +88,12 @@ func dbCmd(ctx context.Context, cmd string, args []string, pool *pgxpool.Pool, k
 			pw = &p
 		}
 		return userReset(ctx, pool, a.user, pw, a.totp, d.out)
+	case "user unlock":
+		user, err := parseUserUnlock(args)
+		if err != nil {
+			return err
+		}
+		return userUnlock(ctx, pool, user, d.out)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -155,11 +161,21 @@ func adminCreate(ctx context.Context, pool *pgxpool.Pool, key *[32]byte, user st
 	return err
 }
 
+/* userID looks up a user by its normalized name. */
+func userID(ctx context.Context, tx pgx.Tx, name string) (int64, error) {
+	var id int64
+	err := tx.QueryRow(ctx, `SELECT id FROM core."user" WHERE username = $1`, name).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("%w: %s", auth.ErrUserNotFound, name)
+	}
+	return id, err
+}
+
 /*
 userReset sets a new password and/or removes TOTP (enrolled again at the next
-login); both end all sessions. It neither disables the user nor changes its
-bindings, so it cannot remove the last administrator and needs no
-rbac.GuardNotLastAdmin.
+login); both end all sessions and clear an account lock. It neither disables
+the user nor changes its bindings, so it cannot remove the last administrator
+and needs no rbac.GuardNotLastAdmin.
 */
 func userReset(ctx context.Context, pool *pgxpool.Pool, user string, pw *secret.Secret, totp bool, out io.Writer) error {
 	name, err := auth.NormalizeUsername(user)
@@ -168,12 +184,11 @@ func userReset(ctx context.Context, pool *pgxpool.Pool, user string, pw *secret.
 	}
 	users := auth.NewUserStore(pool)
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		var id int64
-		err := tx.QueryRow(ctx, `SELECT id FROM core."user" WHERE username = $1`, name).Scan(&id)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: %s", auth.ErrUserNotFound, name)
-		}
+		id, err := userID(ctx, tx, name)
 		if err != nil {
+			return err
+		}
+		if err := users.Unlock(ctx, tx, id); err != nil {
 			return err
 		}
 		if pw != nil {
@@ -199,7 +214,36 @@ func userReset(ctx context.Context, pool *pgxpool.Pool, user string, pw *secret.
 	if totp {
 		printf(out, "%s: TOTP removed; it is enrolled again at the next login.\n", name)
 	}
-	printf(out, "%s: all sessions ended.\n", name)
+	printf(out, "%s: all sessions ended; account lock cleared.\n", name)
+	return nil
+}
+
+/*
+userUnlock clears the failed-login counter and the account lock of a user
+(the way out of a lock kept up by repeated failures), audited in the same
+transaction. Sessions and per-IP limits are left alone.
+*/
+func userUnlock(ctx context.Context, pool *pgxpool.Pool, user string, out io.Writer) error {
+	name, err := auth.NormalizeUsername(user)
+	if err != nil {
+		return err
+	}
+	users := auth.NewUserStore(pool)
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		id, err := userID(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+		if err := users.Unlock(ctx, tx, id); err != nil {
+			return err
+		}
+		_, err = audit.Append(ctx, tx, cliEvent("cli.user_unlock", id, map[string]any{"username": name}))
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	printf(out, "%s: account lock cleared.\n", name)
 	return nil
 }
 

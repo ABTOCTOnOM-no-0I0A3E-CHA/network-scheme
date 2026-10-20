@@ -22,6 +22,12 @@ const (
 	ipLockFor        = 10 * time.Minute
 )
 
+/*
+accountFailureWindow: a failure more than this after both the previous
+failure and the end of the last lock starts the count again.
+*/
+const accountFailureWindow = 15 * time.Minute
+
 /* querier is satisfied by pgx.Tx and *pgxpool.Pool. */
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -106,14 +112,21 @@ func accountLocked(ctx context.Context, q querier, userID int64, now time.Time) 
 
 /*
 recordAccountFailure counts a failure against userID and returns an
-auth.lockout event when it locks the account. Call under lockUser.
+auth.lockout event when it locks the account. Call under lockUser. The
+count restarts at 1 when more than accountFailureWindow has passed since
+both the previous failure and the end of the last lock, so old failures
+stop escalating the lock.
 */
 func recordAccountFailure(ctx context.Context, tx pgx.Tx, userID int64, ip string, now time.Time) ([]audit.Event, error) {
 	var n int
 	err := tx.QueryRow(ctx,
-		`INSERT INTO core.account_lock (user_id, failures) VALUES ($1, 1)
-		 ON CONFLICT (user_id) DO UPDATE SET failures = core.account_lock.failures + 1
-		 RETURNING failures`, userID).Scan(&n)
+		`INSERT INTO core.account_lock (user_id, failures, last_failure_at) VALUES ($1, 1, $2)
+		 ON CONFLICT (user_id) DO UPDATE SET
+		   failures = CASE
+		     WHEN GREATEST(core.account_lock.last_failure_at, core.account_lock.locked_until) > $3
+		     THEN core.account_lock.failures + 1 ELSE 1 END,
+		   last_failure_at = EXCLUDED.last_failure_at
+		 RETURNING failures`, userID, now, now.Add(-accountFailureWindow)).Scan(&n)
 	if err != nil {
 		return nil, fmt.Errorf("auth: count account failure: %w", err)
 	}

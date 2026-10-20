@@ -218,6 +218,58 @@ func TestUserResetClearsTOTPAndSessions(t *testing.T) {
 	}
 }
 
+func TestUserUnlockAndResetClearAccountLock(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	code, out := cli(t, env, pw1+"\n", "admin", "create", "--user", "erin", "--password-file", "-")
+	if code != 0 {
+		t.Fatalf("admin create: %d\n%s", code, out)
+	}
+	svc := auth.NewService(env.Pool("nms_api"), testKey, nil)
+	lock := func() {
+		t.Helper()
+		for range 5 {
+			if _, err := svc.BeginLogin(ctx, "erin", "wrong-password-123", "192.0.2.20"); !errors.Is(err, auth.ErrInvalidCredentials) {
+				t.Fatalf("bad password: %v", err)
+			}
+		}
+		if _, err := svc.BeginLogin(ctx, "erin", pw1, "192.0.2.21"); !errors.Is(err, auth.ErrLocked) {
+			t.Fatalf("after 5 failures: %v, want ErrLocked", err)
+		}
+	}
+	before := auditCount(t, env, "cli.user_unlock")
+
+	lock()
+	if code, out := cli(t, env, "", "user", "unlock", "erin"); code != 0 {
+		t.Fatalf("user unlock: %d\n%s", code, out)
+	}
+	if _, err := svc.BeginLogin(ctx, "erin", pw1, "192.0.2.21"); err != nil {
+		t.Fatalf("after unlock: %v", err)
+	}
+	if got := auditCount(t, env, "cli.user_unlock"); got != before+1 {
+		t.Fatalf("cli.user_unlock events = %d, want %d", got, before+1)
+	}
+
+	lock()
+	if code, out := cli(t, env, "", "user", "reset", "erin", "--totp"); code != 0 {
+		t.Fatalf("user reset: %d\n%s", code, out)
+	}
+	if _, err := svc.BeginLogin(ctx, "erin", pw1, "192.0.2.21"); err != nil {
+		t.Fatalf("after reset: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"user", "unlock"},
+		{"user", "unlock", "nobody"},
+		{"user", "unlock", "erin", "extra"},
+		{"user", "unlock", "--totp"},
+	} {
+		if code, out := cli(t, env, "", args...); code != 1 {
+			t.Fatalf("%v: exit %d\n%s", args, code, out)
+		}
+	}
+}
+
 /* resetAudit empties the log as postgres with the guard triggers disabled. */
 func resetAudit(t *testing.T, env *testdb.Env, extra ...string) {
 	t.Helper()
@@ -348,6 +400,7 @@ func TestHostRunsDBCommandsInToolsContainer(t *testing.T) {
 		{[]string{"admin", "create", "--user", "dave", "--password-file", pwFile}, "admin create --user dave --password-file -", pw1 + "\n"},
 		{[]string{"user", "reset", "dave", "--password", "--password-file", pwFile}, "user reset dave --password --password-file -", pw1 + "\n"},
 		{[]string{"user", "reset", "dave", "--totp"}, "user reset dave --totp", ""},
+		{[]string{"user", "unlock", "dave"}, "user unlock dave", ""},
 		{[]string{"audit", "verify"}, "audit verify", ""},
 		{[]string{"audit", "anchor"}, "audit anchor", ""},
 	}
