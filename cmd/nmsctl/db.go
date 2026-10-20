@@ -119,7 +119,7 @@ func dbCmd(ctx context.Context, cmd string, args []string, pool *pgxpool.Pool, k
 func cliEvent(action string, userID int64, details map[string]any) audit.Event {
 	return audit.Event{
 		UserAgent: "nmsctl", Action: action, ObjectType: "user",
-		ObjectID: strconv.FormatInt(userID, 10), Result: "ok", Details: details,
+		ObjectID: strconv.FormatInt(userID, 10), Result: "success", Details: details,
 	}
 }
 

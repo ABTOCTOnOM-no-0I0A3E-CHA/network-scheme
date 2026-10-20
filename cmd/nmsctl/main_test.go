@@ -250,6 +250,12 @@ func TestUserUnlockAndResetClearAccountLock(t *testing.T) {
 	if got := auditCount(t, env, "cli.user_unlock"); got != before+1 {
 		t.Fatalf("cli.user_unlock events = %d, want %d", got, before+1)
 	}
+	var result string
+	if err := env.Pool("postgres").QueryRow(ctx,
+		`SELECT convert_from(payload, 'UTF8')::jsonb->>'result' FROM audit.event
+		 WHERE action = 'cli.user_unlock' ORDER BY id DESC LIMIT 1`).Scan(&result); err != nil || result != "success" {
+		t.Fatalf("cli.user_unlock result = %q, %v; want success", result, err)
+	}
 
 	lock()
 	if code, out := cli(t, env, "", "user", "reset", "erin", "--totp"); code != 0 {
