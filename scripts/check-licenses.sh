@@ -17,7 +17,7 @@ case "$mode" in
   js)
     # exclude only the scanned project itself (private, so "UNLICENSED"); every dependency stays checked
     root="$(bun -e 'const p=require(process.argv[1]);console.log(p.name+"@"+p.version)' "$(cd "$dir" && pwd)/package.json")"
-    bunx license-checker-rseidelsohn --start "$dir" --production --excludePackages "$root" --onlyAllow "${ALLOWED//,/;}"
+    bunx license-checker-rseidelsohn@5.0.1 --start "$dir" --production --excludePackages "$root" --onlyAllow "${ALLOWED//,/;}"
     ;;
   *)
     echo "unknown mode: $mode (expected go or js)" >&2
