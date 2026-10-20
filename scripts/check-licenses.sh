@@ -3,7 +3,7 @@
 # usage: check-licenses.sh go|js <dir>
 set -euo pipefail
 
-ALLOWED="MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,PostgreSQL,OFL-1.1,EPL-2.0"
+ALLOWED="MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,PostgreSQL,OFL-1.1,EPL-2.0,Unlicense,0BSD"
 
 mode="${1:?usage: check-licenses.sh go|js <dir>}"
 dir="${2:?usage: check-licenses.sh go|js <dir>}"
