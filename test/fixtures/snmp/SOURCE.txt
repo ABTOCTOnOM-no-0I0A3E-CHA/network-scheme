@@ -2,5 +2,20 @@ generic-switch.snmprec
   Synthetic data written by hand from the public MIB definitions (SNMPv2-MIB
   system group, IF-MIB ifTable/ifXTable incl. 64-bit HC counters, RFC 1213 /
   RFC 2863 / RFC 2233 object semantics). Models a 3-port switch.
+  Also contains HOST-RESOURCES-MIB (hrProcessorLoad, hrStorage RAM),
+  ENTITY-MIB entPhysicalTable, ENTITY-SENSOR-MIB entPhySensorTable,
+  BRIDGE-MIB dot1dBasePortIfIndex, Q-BRIDGE-MIB dot1qTpFdbTable and
+  dot1qVlanStaticTable, LLDP-MIB lldpRemTable/lldpRemManAddrTable,
+  IP-MIB ipNetToPhysicalTable and IP-FORWARD-MIB inetCidrRouteTable, with a
+  few deliberately malformed rows (short MAC, wrong address length prefix, empty
+  chassis id, unmapped bridge port, control characters in a name).
   NOT captured from hardware. sysObjectID uses the Eltex enterprise arc only
   as a plausible value; no real device identity is implied.
+
+generic-router.snmprec
+  Synthetic data written by hand from the public MIB definitions. Models a
+  2-port router exposing only the legacy tables: 32-bit IF-MIB ifTable (no
+  ifXTable), IP-MIB ipNetToMediaTable, BRIDGE-MIB dot1dTpFdbTable and
+  IP-FORWARD-MIB ipCidrRouteTable (one row with a non-contiguous mask).
+  NOT captured from hardware. sysObjectID uses the documentation enterprise
+  number 32473 (RFC 5612); addresses are documentation ranges (RFC 5737).
