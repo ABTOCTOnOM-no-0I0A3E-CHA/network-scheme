@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { api } from "@/lib/api";
-import { errorCode, errorKey } from "./errors";
+import { errorCode, errorKey, thrownKey } from "./errors";
 
 /**
  * First-time TOTP enrollment: QR drawn locally into a canvas, manual key, then
@@ -19,7 +19,7 @@ export function EnrollStep({
 }: {
   challenge: string;
   otpauthUri: string;
-  onDone: () => void;
+  onDone: () => Promise<void>;
   onExpired: () => void;
 }) {
   const { t } = useTranslation();
@@ -44,12 +44,17 @@ export function EnrollStep({
   const confirm = async (value: string) => {
     setBusy(true);
     setError(undefined);
-    const { data, error: err } = await api.POST("/api/auth/enroll", { body: { challenge, code: value } });
-    setBusy(false);
-    setCode("");
-    if (data) return setCodes(data.backup_codes);
-    if (errorCode(err) === "challenge_expired") return onExpired();
-    setError(t(errorKey(err)));
+    try {
+      const { data, error: err } = await api.POST("/api/auth/enroll", { body: { challenge, code: value } });
+      if (data) return setCodes(data.backup_codes);
+      if (errorCode(err) === "challenge_expired") return onExpired();
+      setError(t(errorKey(err)));
+    } catch (e) {
+      setError(t(thrownKey(e)));
+    } finally {
+      setBusy(false);
+      setCode("");
+    }
   };
 
   if (codes) {
@@ -64,9 +69,15 @@ export function EnrollStep({
           ))}
         </ul>
         <Button
-          onClick={() => {
-            setCodes(undefined);
-            onDone();
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onDone();
+            } finally {
+              setBusy(false);
+              setCodes(undefined);
+            }
           }}
         >
           {t("auth.codes.saved")}

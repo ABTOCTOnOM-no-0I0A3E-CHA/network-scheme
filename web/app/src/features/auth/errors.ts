@@ -14,6 +14,11 @@ export function errorCode(error: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
+/** Maps a thrown failure (fetch rejection = network error, anything else = unknown) to an `errors.*` key. */
+export function thrownKey(e: unknown): string {
+  return e instanceof TypeError ? "errors.network" : "errors.unknown";
+}
+
 /**
  * Maps an API error body to an i18n key under `errors.*`. Only `error.code` is
  * used; the server's `message` is never displayed.

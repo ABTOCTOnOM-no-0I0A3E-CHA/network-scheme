@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import { errorKey } from "./errors";
+import { errorKey, thrownKey } from "./errors";
 
 export type Challenge = { stage: "totp" | "enroll"; challenge: string; otpauthUri?: string };
 
@@ -22,11 +22,16 @@ export function LoginForm({ notice, onChallenge }: { notice?: string; onChalleng
     const password = String(fd.get("password") ?? "");
     setBusy(true);
     setError(undefined);
-    const { data, error: err } = await api.POST("/api/auth/login", { body: { username, password } });
-    setBusy(false);
-    form.reset();
-    if (data) onChallenge({ stage: data.stage, challenge: data.challenge, otpauthUri: data.otpauth_uri });
-    else setError(t(errorKey(err)));
+    try {
+      const { data, error: err } = await api.POST("/api/auth/login", { body: { username, password } });
+      if (data) onChallenge({ stage: data.stage, challenge: data.challenge, otpauthUri: data.otpauth_uri });
+      else setError(t(errorKey(err)));
+    } catch (e) {
+      setError(t(thrownKey(e)));
+    } finally {
+      setBusy(false);
+      form.reset();
+    }
   };
 
   return (

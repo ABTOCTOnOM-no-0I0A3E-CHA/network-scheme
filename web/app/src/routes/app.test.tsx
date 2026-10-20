@@ -154,6 +154,68 @@ describe("login flow", () => {
   });
 });
 
+describe("network failures", () => {
+  const unhandled: unknown[] = [];
+  const onRejection = (e: unknown) => unhandled.push(e);
+  beforeEach(() => {
+    unhandled.length = 0;
+    process.on("unhandledRejection", onRejection);
+  });
+  afterEach(() => {
+    process.off("unhandledRejection", onRejection);
+    expect(unhandled).toEqual([]);
+  });
+
+  it("login: re-enables the button, clears the password and shows a localized message", async () => {
+    loginResponse = () => HttpResponse.error();
+    const user = userEvent.setup();
+    renderApp("/login");
+    await submitCredentials(user);
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.errors.network);
+    expect(screen.getByRole("button", { name: ru.auth.submit })).toBeEnabled();
+    expect(screen.getByLabelText(ru.auth.password)).toHaveValue("");
+  });
+
+  it("totp: re-enables input, clears the code and shows a localized message", async () => {
+    server.use(http.post("*/api/auth/totp", () => HttpResponse.error()));
+    const user = userEvent.setup();
+    renderApp("/login");
+    await submitCredentials(user);
+    await user.type(await screen.findByLabelText(ru.auth.totp.label), "123456");
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.errors.network);
+    const input = screen.getByLabelText(ru.auth.totp.label);
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("");
+  });
+
+  it("enroll: re-enables input, clears the code and shows a localized message", async () => {
+    loginResponse = () =>
+      HttpResponse.json({ stage: "enroll", challenge: "ch2", otpauth_uri: "otpauth://totp/NMS:admin?secret=JBSWY3DPEHPK3PXP" });
+    server.use(http.post("*/api/auth/enroll", () => HttpResponse.error()));
+    const user = userEvent.setup();
+    renderApp("/login");
+    await submitCredentials(user);
+    await user.type(await screen.findByLabelText(ru.auth.totp.label), "123456");
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.errors.network);
+    const input = screen.getByLabelText(ru.auth.totp.label);
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("");
+  });
+
+  it("post-login /me failure returns to the credentials step with a message", async () => {
+    /* the login guard's own /me call answers 401; only the post-login refresh fails */
+    let calls = 0;
+    server.use(http.get("*/api/auth/me", () => (calls++ === 0 ? apiError(401, "unauthenticated") : HttpResponse.error())));
+    const user = userEvent.setup();
+    renderApp("/login");
+    await submitCredentials(user);
+    await user.type(await screen.findByLabelText(ru.auth.totp.label), "123456");
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.errors.network);
+    expect(screen.getByLabelText(ru.auth.username)).toBeEnabled();
+    expect(screen.getByRole("button", { name: ru.auth.submit })).toBeEnabled();
+  });
+});
+
 describe("shell", () => {
   beforeEach(() => {
     loggedIn = true;

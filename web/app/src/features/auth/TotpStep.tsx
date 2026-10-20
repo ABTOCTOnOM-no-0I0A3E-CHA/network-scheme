@@ -5,10 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { api } from "@/lib/api";
-import { errorCode, errorKey } from "./errors";
+import { errorCode, errorKey, thrownKey } from "./errors";
 
 /** Second factor: 6-digit TOTP, or a 16-character backup code behind a toggle. */
-export function TotpStep({ challenge, onDone, onExpired }: { challenge: string; onDone: () => void; onExpired: () => void }) {
+export function TotpStep({ challenge, onDone, onExpired }: { challenge: string; onDone: () => Promise<void>; onExpired: () => void }) {
   const { t } = useTranslation();
   const [backup, setBackup] = useState(false);
   const [code, setCode] = useState("");
@@ -18,12 +18,18 @@ export function TotpStep({ challenge, onDone, onExpired }: { challenge: string; 
   const verify = async (value: string) => {
     setBusy(true);
     setError(undefined);
-    const { error: err, response } = await api.POST("/api/auth/totp", { body: { challenge, code: value } });
-    setBusy(false);
-    setCode("");
-    if (response.ok) return onDone();
-    if (errorCode(err) === "challenge_expired") return onExpired();
-    setError(t(errorKey(err)));
+    try {
+      const { error: err, response } = await api.POST("/api/auth/totp", { body: { challenge, code: value } });
+      setCode("");
+      if (response.ok) return await onDone();
+      if (errorCode(err) === "challenge_expired") return onExpired();
+      setError(t(errorKey(err)));
+    } catch (e) {
+      setError(t(thrownKey(e)));
+    } finally {
+      setBusy(false);
+      setCode("");
+    }
   };
 
   const submitBackup = (e: FormEvent) => {
