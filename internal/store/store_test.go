@@ -55,6 +55,23 @@ func TestNoPublicSchemaAccess(t *testing.T) {
 	}
 }
 
+func TestAppRolesCannotConnectToOtherDatabases(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	for _, role := range []string{"nms_api", "nms_cli"} {
+		for _, db := range []string{"postgres", "template1"} {
+			err := env.Connect(ctx, role, db)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+				t.Errorf("%s connecting to %s: want SQLSTATE 42501, got %v", role, db, err)
+			}
+		}
+		if err := env.Connect(ctx, role, "nms"); err != nil {
+			t.Errorf("%s connecting to nms: %v", role, err)
+		}
+	}
+}
+
 func TestMigratorOwnsSchemas(t *testing.T) {
 	env := testdb.New(t)
 	var n int

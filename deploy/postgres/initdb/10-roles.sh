@@ -22,6 +22,8 @@ SELECT format('CREATE ROLE nms_api LOGIN PASSWORD %L', :'api_pw') \gexec
 SELECT format('CREATE ROLE nms_cli LOGIN PASSWORD %L', :'cli_pw') \gexec
 
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', :'db') \gexec
+-- The application roles reach no other database (template0 refuses connections already).
+REVOKE ALL ON DATABASE postgres, template1 FROM PUBLIC;
 SELECT format('GRANT CONNECT ON DATABASE %I TO nms_migrator, nms_api, nms_cli', :'db') \gexec
 SELECT format('GRANT CREATE ON DATABASE %I TO nms_migrator', :'db') \gexec
 

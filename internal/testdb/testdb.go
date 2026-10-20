@@ -36,7 +36,9 @@ var roles = []string{"nms_migrator", "nms_api", "nms_cli", "postgres"}
 
 // Env is a running, migrated test database.
 type Env struct {
-	pools map[string]*pgxpool.Pool
+	pools     map[string]*pgxpool.Pool
+	cfg       func(user string) config.DB
+	passwords map[string]string
 }
 
 // Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli or postgres.
@@ -46,6 +48,18 @@ func (e *Env) Pool(role string) *pgxpool.Pool {
 		panic("testdb: unknown role " + role)
 	}
 	return p
+}
+
+// Connect opens one connection as role to database db and closes it (to check CONNECT privileges).
+func (e *Env) Connect(ctx context.Context, role, db string) error {
+	c := e.cfg(role)
+	c.Name = db
+	p, err := store.Open(ctx, c, secret.New(e.passwords[role]))
+	if err != nil {
+		return err
+	}
+	p.Close()
+	return nil
 }
 
 var (
@@ -192,7 +206,7 @@ func start() (*Env, error) {
 	if err := store.Migrate(ctx, dbCfg("nms_migrator"), secret.New(passwords["nms_migrator"])); err != nil {
 		return nil, err
 	}
-	env := &Env{pools: map[string]*pgxpool.Pool{}}
+	env := &Env{pools: map[string]*pgxpool.Pool{}, cfg: dbCfg, passwords: passwords}
 	for _, role := range roles {
 		p, err := store.Open(ctx, dbCfg(role), secret.New(passwords[role]))
 		if err != nil {
