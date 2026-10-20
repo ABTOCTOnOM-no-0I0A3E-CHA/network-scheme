@@ -365,9 +365,15 @@ func TestErrorResponsesKeepPanelHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("body over 1MB", func(t *testing.T) {
-		big := strings.NewReader(strings.Repeat("a", 2<<20))
-		resp, _ := s.do(t, http.MethodPost, "/api/users", big, map[string]string{"Content-Type": "application/json"})
+	t.Run("body over 1MiB", func(t *testing.T) {
+		/* The gateway limit equals the api's 1 MiB: exactly 1 MiB passes, one byte more does not. */
+		limit := strings.NewReader(strings.Repeat("a", 1<<20))
+		resp, _ := s.do(t, http.MethodPost, "/api/users", limit, map[string]string{"Content-Type": "application/json"})
+		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+			t.Fatal("1 MiB body rejected by the gateway")
+		}
+		big := strings.NewReader(strings.Repeat("a", 1<<20+1))
+		resp, _ = s.do(t, http.MethodPost, "/api/users", big, map[string]string{"Content-Type": "application/json"})
 		if resp.StatusCode != http.StatusRequestEntityTooLarge {
 			t.Fatalf("status = %d, want 413", resp.StatusCode)
 		}
