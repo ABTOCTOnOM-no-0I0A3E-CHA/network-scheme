@@ -28,7 +28,7 @@ type Enqueuer interface {
 
 /* Limits of device input. */
 const (
-	maxCiphertext = 4 << 10 /* sealed credential, bytes */
+	maxCiphertext = 8<<10 + 48 /* sealed credential: 8 KiB plaintext + sealed-box overhead, bytes */
 	minIntervalS  = 10
 	maxIntervalS  = 86400
 )

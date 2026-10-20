@@ -346,7 +346,7 @@ func TestPutProfileStoresOpaqueCiphertext(t *testing.T) {
 		t.Fatalf("put %d", resp.StatusCode)
 	}
 	wantError(t, do(req{method: "PUT", path: path, body: map[string]any{"ciphertext": ct, "key_version": 2}}), http.StatusBadRequest, "stale_key")
-	wantError(t, do(req{method: "PUT", path: path, body: map[string]any{"ciphertext": base64.StdEncoding.EncodeToString(make([]byte, 4097)), "key_version": 1}}),
+	wantError(t, do(req{method: "PUT", path: path, body: map[string]any{"ciphertext": base64.StdEncoding.EncodeToString(make([]byte, 8<<10+48+1)), "key_version": 1}}),
 		http.StatusBadRequest, "bad_request")
 	wantError(t, do(req{method: "PUT", path: path, body: map[string]any{"ciphertext": "", "key_version": 1}}), http.StatusBadRequest, "bad_request")
 	wantError(t, do(req{method: "PUT", path: fmt.Sprintf("/api/devices/%d/profiles/ssh_write", id), body: map[string]any{"ciphertext": ct, "key_version": 1}}),

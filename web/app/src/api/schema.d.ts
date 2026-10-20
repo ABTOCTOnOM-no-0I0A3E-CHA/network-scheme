@@ -1436,7 +1436,7 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description Sealed box to the read-domain key, at most 4 KiB decoded; never opened by the API */
+        /** @description Sealed box to the read-domain key, at most 8240 bytes decoded; never opened by the API */
         Ciphertext: string;
         /** @description key_version of the read domain in keys.json */
         KeyVersion: number;

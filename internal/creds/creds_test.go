@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -257,7 +259,7 @@ func TestMalformedRejected(t *testing.T) {
 		"telnet key":       {"telnet_read", mk("1", "device:1", "telnet_read", ts, nonce, `{"username":"u","private_key":"k"}`)},
 		"trailing data":    {"snmp2c", mk("1", "device:1", "snmp2c", ts, nonce, good) + " {}"},
 		"extra top key":    {"snmp2c", strings.Replace(mk("1", "device:1", "snmp2c", ts, nonce, good), `"v":1`, `"v":1,"zz":1`, 1)},
-		"oversize":         {"snmp2c", `{"pad":"` + strings.Repeat("a", 5000) + `"}`},
+		"oversize":         {"snmp2c", `{"pad":"` + strings.Repeat("a", 9000) + `"}`},
 	}
 	for name, c := range cases {
 		_, err := creds.Open(priv, pub, rawSeal(t, pub, c.pt), dev1, c.kind, time.Time{}, t0)
@@ -369,5 +371,47 @@ func TestFutureCreatedAtRejected(t *testing.T) {
 	}
 	if err := open(t0.Add(6 * time.Minute)); !errors.Is(err, creds.ErrMalformed) {
 		t.Fatalf("now+6m: %v", err)
+	}
+}
+
+func TestRSA4096KeyAccepted(t *testing.T) {
+	pub, priv := keys(t)
+	rk, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, der := range map[string][]byte{"pkcs1": x509.MarshalPKCS1PrivateKey(rk), "pkcs8": mustPKCS8(t, rk)} {
+		typ := "RSA PRIVATE KEY"
+		if name == "pkcs8" {
+			typ = "PRIVATE KEY"
+		}
+		p := string(pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}))
+		ct := credstest.Seal(pub, dev1, "ssh_read", map[string]string{"username": "u", "private_key": p}, t0)
+		if _, err := creds.Open(priv, pub, ct, dev1, "ssh_read", time.Time{}, t0); err != nil {
+			t.Fatalf("%s (%d bytes): %v", name, len(p), err)
+		}
+	}
+}
+
+func mustPKCS8(t *testing.T, k *rsa.PrivateKey) []byte {
+	t.Helper()
+	b, err := x509.MarshalPKCS8PrivateKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestPrivateKeyCap(t *testing.T) {
+	pub, priv := keys(t)
+	over := testPEM + strings.Repeat(" ", 6<<10+1-len(testPEM))
+	ct := credstest.Seal(pub, dev1, "ssh_read", map[string]string{"username": "u", "private_key": over}, t0)
+	if _, err := creds.Open(priv, pub, ct, dev1, "ssh_read", time.Time{}, t0); !errors.Is(err, creds.ErrMalformed) {
+		t.Fatalf("6KiB+1: %v", err)
+	}
+	ok := testPEM + strings.Repeat(" ", 6<<10-len(testPEM))
+	ct = credstest.Seal(pub, dev1, "ssh_read", map[string]string{"username": "u", "private_key": ok}, t0)
+	if _, err := creds.Open(priv, pub, ct, dev1, "ssh_read", time.Time{}, t0); err != nil {
+		t.Fatalf("6KiB: %v", err)
 	}
 }

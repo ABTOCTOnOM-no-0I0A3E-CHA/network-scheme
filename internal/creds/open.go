@@ -157,7 +157,7 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		}
 		if hasKey {
 			/* PEM needs line breaks; nothing else is allowed, and it must parse. */
-			if len(*s.PrivateKey) > maxField || !clean(*s.PrivateKey, true) {
+			if len(*s.PrivateKey) > maxPrivateKey || !clean(*s.PrivateKey, true) {
 				return ErrMalformed
 			}
 			if _, err := ssh.ParseRawPrivateKey([]byte(*s.PrivateKey)); err != nil {

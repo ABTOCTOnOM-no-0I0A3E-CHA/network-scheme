@@ -808,7 +808,7 @@ components:
     Ciphertext:
       type: string
       contentEncoding: base64
-      description: Sealed box to the read-domain key, at most 4 KiB decoded; never opened by the API
+      description: Sealed box to the read-domain key, at most 8240 bytes decoded; never opened by the API
     KeyVersion:
       type: integer
       minimum: 1
