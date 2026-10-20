@@ -1,0 +1,6 @@
+generic-switch.snmprec
+  Synthetic data written by hand from the public MIB definitions (SNMPv2-MIB
+  system group, IF-MIB ifTable/ifXTable incl. 64-bit HC counters, RFC 1213 /
+  RFC 2863 / RFC 2233 object semantics). Models a 3-port switch.
+  NOT captured from hardware. sysObjectID uses the Eltex enterprise arc only
+  as a plausible value; no real device identity is implied.

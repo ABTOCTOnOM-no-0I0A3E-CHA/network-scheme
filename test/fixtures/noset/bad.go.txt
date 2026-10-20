@@ -1,0 +1,9 @@
+package bad
+
+import "github.com/gosnmp/gosnmp"
+
+/* Fixture for scripts/check-no-snmp-set.sh: a gosnmp SET must be detected. */
+func write(g *gosnmp.GoSNMP) {
+	_, _ = g.Set([]gosnmp.SnmpPDU{{Name: ".1.3.6.1.2.1.1.5.0", Type: gosnmp.OctetString, Value: "x"}})
+	_ = gosnmp.SetRequest
+}

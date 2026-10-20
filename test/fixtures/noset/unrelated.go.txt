@@ -1,0 +1,6 @@
+package unrelated
+
+import "flag"
+
+/* Fixture for scripts/check-no-snmp-set.sh: Set outside gosnmp users passes. */
+func set(fs *flag.FlagSet) { _ = fs.Set("x", "1") }
