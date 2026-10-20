@@ -32,6 +32,13 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       ref={ref}
       aria-label={t("palette.title")}
       className="m-auto mt-[15vh] w-full max-w-lg overflow-hidden rounded-lg border bg-popover p-0 text-popover-foreground shadow-lg backdrop:bg-black/50"
+      onCancel={(e) => {
+        /* Escape: update state synchronously and let the effect close the dialog.
+           The native close event arrives a task later, so relying on it lets a quick
+           Ctrl+K toggle the still-true state back to false. */
+        e.preventDefault();
+        onOpenChange(false);
+      }}
       onClose={() => onOpenChange(false)}
       onClick={(e) => {
         if (e.target === e.currentTarget) onOpenChange(false);
