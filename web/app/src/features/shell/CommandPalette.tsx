@@ -19,6 +19,8 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       /* jsdom lacks showModal(); the fallback keeps unit tests meaningful */
       if (typeof d.showModal === "function") d.showModal();
       else d.setAttribute("open", "");
+      /* React's autoFocus ran while the dialog was still closed; showModal() then focuses the dialog itself */
+      d.querySelector("input")?.focus();
     } else if (!open && d.open) {
       if (typeof d.close === "function") d.close();
       else d.removeAttribute("open");
