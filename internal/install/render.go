@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/beekamai/network-scheme/deploy"
@@ -121,6 +122,8 @@ func prepare(in RenderInput) (view, error) {
 		in.Paths.Var = DefaultVar
 	}
 
+	/* Browsers send the host lowercased in Origin; keep every rendered file identical to that. */
+	in.PublicHost = strings.ToLower(in.PublicHost)
 	switch {
 	case !hostRe.MatchString(in.PublicHost) || len(in.PublicHost) > 253:
 		return view{}, fmt.Errorf("public host %q is not a valid DNS name or IPv4 address", in.PublicHost)

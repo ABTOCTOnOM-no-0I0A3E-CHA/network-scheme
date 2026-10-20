@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/httprate"
 
 	"github.com/beekamai/network-scheme/internal/auth"
+	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/httpapi/clientip"
 )
 
@@ -184,7 +185,7 @@ func (s *server) checkCSRF(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if o := r.Header.Values("Origin"); len(o) > 0 && (len(o) != 1 || o[0] != s.cfg.PublicOrigin) {
+		if o := r.Header.Values("Origin"); len(o) > 0 && (len(o) != 1 || !s.originAllowed(o[0])) {
 			writeError(w, errCSRF)
 			return
 		}
@@ -197,6 +198,12 @@ func (s *server) checkCSRF(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+/* originAllowed reports whether an Origin header value names the public origin once normalised ("null" and malformed values fail). */
+func (s *server) originAllowed(o string) bool {
+	n, err := config.NormalizeOrigin(o)
+	return err == nil && n == s.cfg.PublicOrigin
 }
 
 /* setSessionCookie replaces any session cookie already queued (e.g. a clear) in this response. */

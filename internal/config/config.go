@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 
@@ -50,6 +51,11 @@ func LoadAPI(path string) (API, error) {
 	if err := dec.Decode(&c); err != nil {
 		return API{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	if c.PublicOrigin != "" {
+		if c.PublicOrigin, err = NormalizeOrigin(c.PublicOrigin); err != nil {
+			return API{}, fmt.Errorf("config %s: public_origin: %w", path, err)
+		}
+	}
 	if c.DB.Port == 0 {
 		c.DB.Port = defaultDBPort
 	}
@@ -57,6 +63,37 @@ func LoadAPI(path string) (API, error) {
 		return API{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	return c, nil
+}
+
+/*
+NormalizeOrigin returns the canonical form of an http(s) origin as browsers
+send it in the Origin header: lowercase scheme and host, default port
+dropped. A path, query, fragment or userinfo is an error.
+*/
+func NormalizeOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid origin %q", raw)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "https" && scheme != "http") || u.Hostname() == "" {
+		return "", fmt.Errorf("origin %q must be http(s)://host[:port]", raw)
+	}
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", fmt.Errorf("origin %q must not contain a path, query or credentials", raw)
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, nil
 }
 
 func (d DB) validate() error {

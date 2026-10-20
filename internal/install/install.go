@@ -110,6 +110,7 @@ func Run(ctx context.Context, o Options, sys System) error {
 
 func prepareInstall(o Options) (prepared, error) {
 	ps := o.paths()
+	o.PublicHost = strings.ToLower(o.PublicHost)
 	files, err := Render(RenderInput{
 		PublicHost: o.PublicHost, ImageTag: o.ImageTag,
 		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, Paths: ps,

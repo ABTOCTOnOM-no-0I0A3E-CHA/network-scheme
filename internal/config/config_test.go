@@ -3,6 +3,7 @@ package config_test
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -94,5 +95,42 @@ func TestReadKeyFile(t *testing.T) {
 		if ok && !bytes.Equal(key[:], want) {
 			t.Fatalf("%s: wrong key", name)
 		}
+	}
+}
+
+func TestNormalizeOrigin(t *testing.T) {
+	ok := map[string]string{
+		"https://NMS.Corp.example":      "https://nms.corp.example",
+		"HTTPS://nms.corp.example:443":  "https://nms.corp.example",
+		"https://nms.corp.example/":     "https://nms.corp.example",
+		"https://nms.corp.example:8443": "https://nms.corp.example:8443",
+		"http://nms.corp.example:80":    "http://nms.corp.example",
+		"https://10.0.0.5:8443":         "https://10.0.0.5:8443",
+	}
+	for in, want := range ok {
+		if got, err := config.NormalizeOrigin(in); err != nil || got != want {
+			t.Errorf("NormalizeOrigin(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "null", "nms.corp.example", "ftp://nms.corp.example", "https://nms.corp.example/path", "https://nms.corp.example?x=1", "https://u@nms.corp.example", "https://nms.corp.example#f"} {
+		if got, err := config.NormalizeOrigin(in); err == nil {
+			t.Errorf("NormalizeOrigin(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestLoadAPINormalizesPublicOrigin(t *testing.T) {
+	body := `
+listen_addr: 0.0.0.0:8080
+public_origin: %s
+db: {host: postgres, name: nms, user: nms_api, password_file: /run/secrets/db_api_password}
+data_key_file: /run/secrets/data_key
+`
+	c, err := config.LoadAPI(write(t, "ok.yaml", fmt.Sprintf(body, "https://NMS.Corp.example:443")))
+	if err != nil || c.PublicOrigin != "https://nms.corp.example" {
+		t.Fatalf("origin = %q, err = %v", c.PublicOrigin, err)
+	}
+	if _, err := config.LoadAPI(write(t, "bad.yaml", fmt.Sprintf(body, "https://nms.corp.example/panel"))); err == nil {
+		t.Error("a public_origin with a path must be rejected")
 	}
 }

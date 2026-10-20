@@ -416,6 +416,22 @@ func TestForeignOriginRejectedOnMutations(t *testing.T) {
 	}
 }
 
+func TestOriginComparedNormalised(t *testing.T) {
+	f := newFixture(t, func(d *httpapi.Deps) { d.Cfg.PublicOrigin = "https://NMS.Corp.example" })
+	name := uniqueName("originnorm")
+	f.createUser(name)
+	bad := map[string]string{"username": name, "password": "wrong-password-123"}
+	for _, o := range []string{"https://nms.corp.example", "https://nms.corp.example:443", "HTTPS://NMS.corp.example"} {
+		wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: o}), http.StatusUnauthorized, "invalid_credentials")
+	}
+	for _, o := range []string{"https://evil.example", "http://nms.corp.example", "null", "https://nms.corp.example:8443", "https://nms.corp.example/x"} {
+		wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: o}), http.StatusForbidden, "csrf")
+	}
+	g := newFixture(t, func(d *httpapi.Deps) { d.Cfg.PublicOrigin = "https://nms.corp.example:8443" })
+	wantError(t, g.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: "https://nms.corp.example"}), http.StatusForbidden, "csrf")
+	wantError(t, g.do(req{method: "POST", path: "/api/auth/login", body: bad, origin: "https://nms.corp.example:8443"}), http.StatusUnauthorized, "invalid_credentials")
+}
+
 func TestXFFIgnoredFromUntrustedPeer(t *testing.T) {
 	f := newFixture(t, nil)
 	bad := map[string]string{"username": uniqueName("ghost"), "password": "wrong-password-123"}

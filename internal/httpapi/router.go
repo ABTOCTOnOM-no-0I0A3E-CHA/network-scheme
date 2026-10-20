@@ -80,6 +80,10 @@ func newServer(d Deps) *server {
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
+	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
+	if o, err := config.NormalizeOrigin(s.cfg.PublicOrigin); err == nil {
+		s.cfg.PublicOrigin = o
+	}
 	if s.log == nil {
 		s.log = slog.Default()
 	}

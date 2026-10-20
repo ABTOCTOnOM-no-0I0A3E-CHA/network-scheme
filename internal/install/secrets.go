@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/beekamai/network-scheme/internal/keys"
@@ -183,6 +184,7 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	case webCrt == nil && webKey == nil:
 		var dns []string
 		var ips []net.IP
+		in.PublicHost = strings.ToLower(in.PublicHost)
 		if ip := net.ParseIP(in.PublicHost); ip != nil {
 			ips = append(ips, ip)
 		} else {

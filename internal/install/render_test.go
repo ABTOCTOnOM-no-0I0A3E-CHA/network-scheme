@@ -248,3 +248,27 @@ func TestComposeHardening(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderLowercasesPublicHost(t *testing.T) {
+	in := sampleInput()
+	in.PublicHost = "NMS.Corp.Example"
+	for key, got := range render(t, in) {
+		if bytes.Contains(got, []byte("Corp")) || bytes.Contains(got, []byte("NMS.")) {
+			t.Errorf("%s still contains the uppercase host", key)
+		}
+	}
+	p := filepath.Join(t.TempDir(), "api.yaml")
+	if err := os.WriteFile(p, render(t, in)["config/api.yaml"], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.LoadAPI(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PublicOrigin != "https://nms.corp.example" {
+		t.Errorf("public_origin = %q", c.PublicOrigin)
+	}
+	if !bytes.Contains(render(t, in)["Caddyfile"], []byte("https://nms.corp.example/assets/")) {
+		t.Error("Caddyfile CSP does not carry the lowercase host")
+	}
+}
