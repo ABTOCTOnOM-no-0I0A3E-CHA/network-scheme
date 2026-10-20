@@ -24,6 +24,7 @@ type Deps struct {
 	Users         *auth.UserStore
 	RBAC          *rbac.Store
 	Pool          *pgxpool.Pool /* for handlers that open their own transactions */
+	Devices       DeviceLookup  /* object checks of group-scoped device routes */
 	Cfg           config.API
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
@@ -33,12 +34,14 @@ type Deps struct {
 /*
 Policy is the access rule of a route. A non-public route needs a live
 session and Perm (rbac.PermSelf for the user's own account); StepUp
-additionally needs a step-up TOTP within the last 5 minutes.
+additionally needs a step-up TOTP within the last 5 minutes. Scoped admits
+on Perm held in any binding and leaves the object check to the handler.
 */
 type Policy struct {
 	Public bool
 	Perm   rbac.Perm
 	StepUp bool
+	Scoped bool
 }
 
 // RouteSpec is one registered route and its policy (the authorization matrix input).
@@ -66,6 +69,7 @@ type server struct {
 	users     *auth.UserStore
 	rbac      *rbac.Store
 	pool      *pgxpool.Pool
+	devices   DeviceLookup
 	now       func() time.Time
 	cfg       config.API
 	log       *slog.Logger
@@ -77,7 +81,7 @@ type server struct {
 
 func newServer(d Deps) *server {
 	s := &server{
-		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, now: d.Clock, cfg: d.Cfg, log: d.Logger,
+		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
 	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
@@ -141,10 +145,11 @@ func (s *server) handler() http.Handler {
 /*
 route is the only way to register an endpoint: it binds h to its policy so
 that Routes can enumerate every route. A policy that grants nothing explicit
-(non-public without Perm) or mixes public with a permission panics at start.
+(non-public without Perm), mixes public with a permission, or marks a
+route Scoped without a real permission panics at start.
 */
 func (s *server) route(r chi.Router, method, pattern string, p Policy, h http.HandlerFunc) {
-	if p.Public == (p.Perm != "") || (p.Public && p.StepUp) {
+	if p.Public == (p.Perm != "") || (p.Public && p.StepUp) || (p.Scoped && (p.Public || p.Perm == "" || p.Perm == rbac.PermSelf)) {
 		panic(fmt.Sprintf("httpapi: invalid policy %+v for %s %s", p, method, pattern))
 	}
 	r.Method(method, pattern, &policyHandler{s: s, p: p, h: h})
@@ -177,7 +182,11 @@ func (ph *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ph.s.fail(w, r, err)
 			return
 		}
-		if !subj.Can(ph.p.Perm, nil, nil) {
+		admitted := subj.Can(ph.p.Perm, nil, nil)
+		if ph.p.Scoped {
+			admitted = subj.HoldsAnywhere(ph.p.Perm)
+		}
+		if !admitted {
 			writeError(w, errForbidden)
 			return
 		}

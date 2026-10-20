@@ -13,7 +13,7 @@ import (
 TestOpenAPICoversRoutes checks that api/openapi.yaml is valid and documents
 exactly the registered routes, each with its policy: public routes have
 "security: []", the others name their permission in x-permission and mark
-step-up with "x-step-up: true".
+step-up with "x-step-up: true" and group-scoped routes with "x-scoped: true".
 */
 func TestOpenAPICoversRoutes(t *testing.T) {
 	doc, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
@@ -40,8 +40,9 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 		public := op.Security != nil && len(*op.Security) == 0
 		perm, _ := op.Extensions["x-permission"].(string)
 		stepUp, _ := op.Extensions["x-step-up"].(bool)
-		if public != r.Policy.Public || perm != string(r.Policy.Perm) || stepUp != r.Policy.StepUp {
-			t.Errorf("%s: documented public=%v x-permission=%q x-step-up=%v, registered %+v", k, public, perm, stepUp, r.Policy)
+		scoped, _ := op.Extensions["x-scoped"].(bool)
+		if public != r.Policy.Public || perm != string(r.Policy.Perm) || stepUp != r.Policy.StepUp || scoped != r.Policy.Scoped {
+			t.Errorf("%s: documented public=%v x-permission=%q x-step-up=%v x-scoped=%v, registered %+v", k, public, perm, stepUp, scoped, r.Policy)
 		}
 	}
 	for k := range spec {

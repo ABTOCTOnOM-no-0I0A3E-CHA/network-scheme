@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/beekamai/network-scheme/internal/auth"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -86,6 +87,7 @@ var knownErrors = []struct {
 	{rbac.ErrGroupCycle, errGroupCycle},
 	{rbac.ErrLastAdmin, errLastAdmin},
 	{rbac.ErrInvalidRole, errInvalidRole},
+	{devices.ErrNotFound, errNotFound},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */
