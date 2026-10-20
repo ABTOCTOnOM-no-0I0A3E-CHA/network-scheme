@@ -54,16 +54,23 @@ type Identity struct {
 	Serial      string
 }
 
-/* Sample is one metrics poll. */
+/*
+Sample is one metrics poll. Incomplete counts interfaces dropped because their
+in and out octet counters were not both read from the same counter family.
+*/
 type Sample struct {
 	SysUpTime  time.Duration
 	Interfaces []IfCounters
 	System     SysMetrics
+	Incomplete int
 }
 
 /*
-IfCounters holds raw interface counters. HC is true when the octet counters are
-the 64-bit ifHC* objects; otherwise they are 32-bit and may wrap.
+IfCounters holds raw interface counters. InOctets and OutOctets are always
+read in the same poll from one counter family: HC is true when both are the
+64-bit ifHC* objects, false when both are 32-bit (may wrap); a row that cannot
+meet this is not emitted. Error and discard counters are nil when the device
+did not return them in this poll; nil is never the same as zero.
 */
 type IfCounters struct {
 	Index                   int
@@ -71,8 +78,8 @@ type IfCounters struct {
 	OperUp                  bool
 	SpeedBps                uint64
 	InOctets, OutOctets     uint64
-	InErrors, OutErrors     uint64
-	InDiscards, OutDiscards uint64
+	InErrors, OutErrors     *uint64
+	InDiscards, OutDiscards *uint64
 	HC                      bool
 }
 

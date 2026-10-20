@@ -48,9 +48,30 @@ func TestDefaultOrder(t *testing.T) {
 	Register(fakeDriver{"eltex-mes"})
 }
 
-func TestSelectNoMatch(t *testing.T) {
-	if d := NewRegistry().Select("1.3", ""); d != nil {
-		t.Fatalf("empty registry selected %v", d)
+type noMatch struct{ fakeDriver }
+
+func (noMatch) Match(string, string) bool { return false }
+
+func mustPanic(t *testing.T, name string, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Errorf("%s did not panic", name)
+		}
+	}()
+	fn()
+}
+
+func TestRegistryAlwaysHasFallback(t *testing.T) {
+	/* nothing registered in this test binary: Default must fail fast, not return an empty registry */
+	mustPanic(t, "Default without generic", func() { Default() })
+	mustPanic(t, "NewRegistry()", func() { NewRegistry() })
+	mustPanic(t, "fallback not last", func() { NewRegistry(fakeDriver{GenericName}, fakeDriver{"eltex-mes"}) })
+
+	/* even if the fallback declines, Select never returns nil */
+	r := NewRegistry(noMatch{fakeDriver{"eltex-mes"}}, noMatch{fakeDriver{GenericName}})
+	if d := r.Select("1.3", ""); d == nil || d.Name() != GenericName {
+		t.Fatalf("Select = %v", d)
 	}
 }
 

@@ -29,6 +29,8 @@ func reader(t *testing.T, community string) snmp.Reader {
 	return r
 }
 
+func u(v uint64) *uint64 { return &v }
+
 func ctx(t *testing.T) context.Context {
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
@@ -46,10 +48,13 @@ func TestGenericCollectHCCounters(t *testing.T) {
 	}
 	want := []drivers.IfCounters{
 		{Index: 1, Name: "Gi1/0/1", Alias: "uplink", OperUp: true, SpeedBps: 1e9,
-			InOctets: 18446744073709551000, OutOctets: 5000000000000, HC: true},
+			InOctets: 18446744073709551000, OutOctets: 5000000000000, HC: true,
+			InErrors: u(0), OutErrors: u(0), InDiscards: u(0), OutDiscards: u(0)},
 		{Index: 2, Name: "Gi1/0/2", Alias: "server", SpeedBps: 1e9,
-			InOctets: 987654321012, OutOctets: 87654321098, InErrors: 2, InDiscards: 5, OutDiscards: 1, HC: true},
-		{Index: 3, Name: "Gi1/0/3", SpeedBps: 1e9, HC: true},
+			InOctets: 987654321012, OutOctets: 87654321098, HC: true,
+			InErrors: u(2), OutErrors: u(0), InDiscards: u(5), OutDiscards: u(1)},
+		{Index: 3, Name: "Gi1/0/3", SpeedBps: 1e9, HC: true,
+			InErrors: u(0), OutErrors: u(0), InDiscards: u(0), OutDiscards: u(0)},
 	}
 	if !reflect.DeepEqual(s.Interfaces, want) {
 		t.Fatalf("interfaces\n got %+v\nwant %+v", s.Interfaces, want)
@@ -78,8 +83,9 @@ func TestGenericFallback32bit(t *testing.T) {
 	}
 	want := []drivers.IfCounters{
 		{Index: 1, Name: "eth0", OperUp: true, SpeedBps: 1e8, InOctets: 4294967000, OutOctets: 3000000,
-			InErrors: 2, OutErrors: 4, InDiscards: 1, OutDiscards: 3},
-		{Index: 2, Name: "eth1", SpeedBps: 1e8, InOctets: 10, OutOctets: 20},
+			InErrors: u(2), OutErrors: u(4), InDiscards: u(1), OutDiscards: u(3)},
+		{Index: 2, Name: "eth1", SpeedBps: 1e8, InOctets: 10, OutOctets: 20,
+			InErrors: u(0), OutErrors: u(0), InDiscards: u(0), OutDiscards: u(0)},
 	}
 	if !reflect.DeepEqual(s.Interfaces, want) {
 		t.Fatalf("interfaces\n got %+v\nwant %+v", s.Interfaces, want)
@@ -325,5 +331,85 @@ func TestRegistryFallsBackToGeneric(t *testing.T) {
 	}
 	if !reflect.DeepEqual(d.Dialect(), New().Dialect()) || d.Dialect().ExecPrompt != nil || len(d.Dialect().Allowlist) != 0 {
 		t.Fatal("generic driver must not carry an SSH dialect")
+	}
+}
+
+/* staticReader serves Get and Walk from a fixed variable list, without a simulator. */
+type staticReader struct{ vars []snmp.Var }
+
+func (s staticReader) Get(_ context.Context, oids ...string) ([]snmp.Var, error) {
+	var out []snmp.Var
+	for _, o := range oids {
+		for _, v := range s.vars {
+			if v.OID == o {
+				out = append(out, v)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s staticReader) Walk(ctx context.Context, root string, fn func(snmp.Var) error) error {
+	for _, v := range s.vars {
+		if strings.HasPrefix(v.OID, root+".") {
+			if err := fn(v); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+func (s staticReader) BulkGet(context.Context, []string) ([]snmp.Var, error) { return nil, nil }
+
+func ctr(oid string, n uint64) snmp.Var {
+	return snmp.Var{OID: oid, Type: snmp.TypeCounter32, Value: n}
+}
+func c64(oid string, n uint64) snmp.Var {
+	return snmp.Var{OID: oid, Type: snmp.TypeCounter64, Value: n}
+}
+
+var upTime = snmp.Var{OID: oidSysUpTime, Type: snmp.TypeTimeTicks, Value: uint64(100)}
+
+func TestCollectDropsRowsMissingOctets(t *testing.T) {
+	t.Parallel()
+	/* if1 complete; if2 vanished before ifOutOctets was walked; if3 only in ifDescr */
+	r := staticReader{vars: []snmp.Var{
+		upTime,
+		{OID: ifEntry + ".2.1", Type: snmp.TypeOctetString, Value: []byte("a")},
+		{OID: ifEntry + ".2.2", Type: snmp.TypeOctetString, Value: []byte("b")},
+		{OID: ifEntry + ".2.3", Type: snmp.TypeOctetString, Value: []byte("c")},
+		ctr(ifEntry+".10.1", 100), ctr(ifEntry+".10.2", 200),
+		ctr(ifEntry+".14.1", 7),
+		ctr(ifEntry+".16.1", 300),
+	}}
+	s, err := New().Collect(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []drivers.IfCounters{{Index: 1, Name: "a", InOctets: 100, OutOctets: 300, InErrors: u(7)}}
+	eq(t, "interfaces", s.Interfaces, want)
+	if s.Incomplete != 2 {
+		t.Fatalf("Incomplete = %d, want 2", s.Incomplete)
+	}
+}
+
+func TestCollectNeverMixesCounterFamilies(t *testing.T) {
+	t.Parallel()
+	/* if1 has HC in+out; if2 only 32-bit; if3 HC in but no HC out */
+	r := staticReader{vars: []snmp.Var{
+		upTime,
+		ctr(ifEntry+".10.1", 1), ctr(ifEntry+".10.2", 2), ctr(ifEntry+".10.3", 3),
+		ctr(ifEntry+".16.1", 1), ctr(ifEntry+".16.2", 2), ctr(ifEntry+".16.3", 3),
+		c64(ifXEntry+".6.1", 1e12), c64(ifXEntry+".6.3", 3e12),
+		c64(ifXEntry+".10.1", 2e12),
+	}}
+	s, err := New().Collect(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "interfaces", s.Interfaces, []drivers.IfCounters{{Index: 1, InOctets: 1e12, OutOctets: 2e12, HC: true}})
+	if s.Incomplete != 2 {
+		t.Fatalf("Incomplete = %d, want 2", s.Incomplete)
 	}
 }

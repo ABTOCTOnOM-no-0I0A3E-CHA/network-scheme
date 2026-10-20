@@ -41,12 +41,22 @@ func Register(d Driver) {
 /* Registry selects a driver for a device. */
 type Registry struct{ drivers []Driver }
 
-/* NewRegistry returns a registry that tries ds in the given order. */
-func NewRegistry(ds ...Driver) *Registry { return &Registry{drivers: slices.Clone(ds)} }
+/*
+NewRegistry returns a registry that tries ds in the given order. The last
+driver must be the generic-snmp fallback; NewRegistry panics otherwise, so a
+registry can never fail to select a driver.
+*/
+func NewRegistry(ds ...Driver) *Registry {
+	if len(ds) == 0 || ds[len(ds)-1] == nil || ds[len(ds)-1].Name() != GenericName {
+		panic("drivers: the last driver must be " + GenericName + "; import internal/drivers/all")
+	}
+	return &Registry{drivers: slices.Clone(ds)}
+}
 
 /*
 Default returns a registry of every registered driver ordered eltex-esr,
-eltex-mes, other drivers by name, then generic-snmp.
+eltex-mes, other drivers by name, then generic-snmp. It panics when
+generic-snmp is not registered: binaries must import internal/drivers/all.
 */
 func Default() *Registry {
 	regMu.Lock()
@@ -67,12 +77,12 @@ func Default() *Registry {
 	return NewRegistry(ds...)
 }
 
-/* Select returns the first driver that matches, or nil when none does. */
+/* Select returns the first driver that matches; the generic fallback when none does. Never nil. */
 func (r *Registry) Select(sysObjectID, sysDescr string) Driver {
 	for _, d := range r.drivers {
 		if d.Match(sysObjectID, sysDescr) {
 			return d
 		}
 	}
-	return nil
+	return r.drivers[len(r.drivers)-1]
 }

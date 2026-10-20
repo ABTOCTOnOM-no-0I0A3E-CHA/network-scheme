@@ -34,6 +34,7 @@ type ifRow struct {
 	speed, high             uint64
 	operUp                  bool
 	c                       [6]uint64 /* in/out octets, in/out errors, in/out discards (32-bit) */
+	has                     [6]bool   /* which of c were read */
 	hcIn, hcOut             uint64
 	hasHCIn, hasHCOut       bool
 }
@@ -63,7 +64,7 @@ type ifColumn struct {
 func counter(i int) func(*ifRow, snmp.Var) {
 	return func(r *ifRow, v snmp.Var) {
 		if n, ok := snmp.AsUint64(v); ok {
-			r.c[i] = n
+			r.c[i], r.has[i] = n, true
 		}
 	}
 }
@@ -151,9 +152,11 @@ func (d Driver) walkInterfaces(ctx context.Context, r snmp.Reader, cols []ifColu
 }
 
 /*
-Collect reads sysUpTime, interface counters (64-bit ifHC* octets when the
-device has both for an interface, else 32-bit with HC=false) and system
-resources from HOST-RESOURCES-MIB and ENTITY-SENSOR-MIB when present.
+Collect reads sysUpTime, interface counters and system resources
+(HOST-RESOURCES-MIB, ENTITY-SENSOR-MIB) when present. If the device returns
+any ifHC octets, only interfaces with both ifHCInOctets and ifHCOutOctets are
+emitted (HC=true); otherwise only those with both 32-bit octet counters.
+Other interfaces are counted in Sample.Incomplete.
 */
 func (d Driver) Collect(ctx context.Context, r snmp.Reader) (drivers.Sample, error) {
 	var s drivers.Sample
@@ -170,15 +173,31 @@ func (d Driver) Collect(ctx context.Context, r snmp.Reader) (drivers.Sample, err
 	if err != nil {
 		return s, err
 	}
+	/* one counter family per poll: HC when the device returned any HC octets, else 32-bit */
+	anyHC := false
+	for _, row := range rows {
+		anyHC = anyHC || row.hasHCIn || row.hasHCOut
+	}
 	for _, i := range keys {
 		row := rows[i]
+		opt := func(k int) *uint64 {
+			if !row.has[k] {
+				return nil
+			}
+			return ptr(row.c[k])
+		}
 		c := drivers.IfCounters{
 			Index: i, Name: row.displayName(), Alias: row.alias, OperUp: row.operUp, SpeedBps: row.speedBps(),
-			InOctets: row.c[0], OutOctets: row.c[1], InErrors: row.c[2], OutErrors: row.c[3],
-			InDiscards: row.c[4], OutDiscards: row.c[5],
+			InErrors: opt(2), OutErrors: opt(3), InDiscards: opt(4), OutDiscards: opt(5),
 		}
-		if row.hasHCIn && row.hasHCOut {
+		switch {
+		case anyHC && row.hasHCIn && row.hasHCOut:
 			c.InOctets, c.OutOctets, c.HC = row.hcIn, row.hcOut, true
+		case !anyHC && row.has[0] && row.has[1]:
+			c.InOctets, c.OutOctets = row.c[0], row.c[1]
+		default: /* missing octets, or 32-bit only on an HC device: a value here would fake a wrap or reset */
+			s.Incomplete++
+			continue
 		}
 		s.Interfaces = append(s.Interfaces, c)
 	}
