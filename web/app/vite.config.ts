@@ -5,7 +5,13 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
+  resolve: {
+    alias: {
+      "@": path.resolve(import.meta.dirname, "src"),
+      /* CSP: the real package injects a runtime <style>; see the stub for details */
+      "react-remove-scroll": path.resolve(import.meta.dirname, "src/lib/remove-scroll-noop.tsx"),
+    },
+  },
   build: {
     /* CSP forbids inline scripts/styles and data: scripts; keep every asset a separate file */
     assetsInlineLimit: 0,

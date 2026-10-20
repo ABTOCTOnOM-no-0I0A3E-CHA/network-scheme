@@ -114,3 +114,22 @@
         @apply bg-background text-foreground font-sans;
     }
 }
+
+/* Static copy of the rules input-otp would inject at runtime (blocked by the panel CSP). */
+[data-input-otp]::selection {
+    background: transparent !important;
+    color: transparent !important;
+}
+[data-input-otp]:autofill,
+[data-input-otp]:-webkit-autofill {
+    background: transparent !important;
+    color: transparent !important;
+    border-color: transparent !important;
+    opacity: 0 !important;
+    box-shadow: none !important;
+    -webkit-box-shadow: none !important;
+    -webkit-text-fill-color: transparent !important;
+}
+[data-input-otp] + * {
+    pointer-events: all !important;
+}

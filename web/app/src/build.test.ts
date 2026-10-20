@@ -54,6 +54,24 @@ describe("production build", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("ships no runtime <style> injection paths that the CSP would block", () => {
+    /*
+     * A literal createElement("style")/insertRule scan cannot be zero: React DOM keeps a
+     * <style precedence> path we never use. What matters is that the libraries which inject
+     * styles on every use are absent or disarmed:
+     *  - react-remove-scroll / react-style-singleton (modal Radix Dialog/Menu/Popover/Select):
+     *    absent (vite aliases react-remove-scroll to a no-op), identified by the
+     *    __webpack_nonce__ lookup and scroll-lock markers;
+     *  - input-otp: skips its injection when an element with id input-otp-style exists.
+     */
+    const js = walk(out).filter((p) => p.endsWith(".js")).map((f) => readFileSync(f, "utf8"));
+    for (const text of js) {
+      expect(text).not.toContain("__webpack_nonce__");
+      expect(text).not.toContain("data-scroll-locked");
+    }
+    expect(html).toMatch(/<meta\s+id="input-otp-style"/);
+  });
+
   it("fonts are bundled locally", () => {
     expect(walk(out).some((f) => /inter.*\.woff2$/i.test(f))).toBe(true);
   });

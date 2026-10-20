@@ -1,11 +1,24 @@
-import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
-import { Home } from "@/pages/home";
+import { createRouter, type RouterHistory } from "@tanstack/react-router";
+import { setUnauthorizedHandler } from "@/lib/api";
+import { queryClient } from "@/lib/query";
+import { rootRoute } from "@/routes/__root";
+import { sectionRoutes, shellRoute } from "@/routes";
+import { loginRoute } from "@/routes/login";
 
-const rootRoute = createRootRoute({ component: Outlet });
-const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: Home });
+const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren(sectionRoutes)]);
 
-/** Application router; Task 14 adds the login flow and app shell routes. */
-export const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute]) });
+/** Builds the application router (history is injectable for tests) and wires the global 401 handler. */
+export function buildRouter(history?: RouterHistory) {
+  const r = createRouter({ routeTree, history });
+  setUnauthorizedHandler(() => {
+    queryClient.clear();
+    void r.navigate({ to: "/login" });
+  });
+  return r;
+}
+
+/** Application router. */
+export const router = buildRouter();
 
 declare module "@tanstack/react-router" {
   interface Register {

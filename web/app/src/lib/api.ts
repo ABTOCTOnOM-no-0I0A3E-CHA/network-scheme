@@ -5,6 +5,15 @@ let csrfToken: string | undefined;
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const ME_PATH = "/api/auth/me";
+/* 401 on these is an expected part of the login flow or is handled by the route guard. */
+const UNAUTH_EXEMPT = new Set([ME_PATH, "/api/auth/login", "/api/auth/totp", "/api/auth/enroll"]);
+
+let onUnauthorized: (() => void) | undefined;
+
+/** Registers the callback run when any non-login request returns 401 (session lost). */
+export function setUnauthorizedHandler(fn: (() => void) | undefined): void {
+  onUnauthorized = fn;
+}
 
 /*
  * Adds X-CSRF-Token to state-changing requests and refreshes the cached token
@@ -18,6 +27,9 @@ const csrf: Middleware = {
     return request;
   },
   async onResponse({ request, response }) {
+    if (response.status === 401 && !UNAUTH_EXEMPT.has(new URL(response.url || request.url).pathname)) {
+      onUnauthorized?.();
+    }
     if (request.method === "GET" && response.ok && new URL(response.url || request.url).pathname === ME_PATH) {
       const body = (await response.clone().json().catch(() => undefined)) as { csrf_token?: unknown } | undefined;
       csrfToken = typeof body?.csrf_token === "string" ? body.csrf_token : undefined;
@@ -36,5 +48,10 @@ export function clearCsrfToken(): void {
  * origin root (explicit, so Request can resolve it); a "/api" baseUrl would produce /api/api/....
  */
 /** Typed same-origin client for the panel API. */
-export const api = createClient<paths>({ baseUrl: window.location.origin, credentials: "same-origin" });
+export const api = createClient<paths>({
+  baseUrl: window.location.origin,
+  credentials: "same-origin",
+  /* resolved per call, so a fetch patched after module load (tests, msw) is honored */
+  fetch: (req) => globalThis.fetch(req),
+});
 api.use(csrf);
