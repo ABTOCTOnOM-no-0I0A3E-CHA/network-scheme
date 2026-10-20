@@ -1,0 +1,7 @@
+{
+  "name": "js-private-gpl",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "dependencies": { "sneaky-dep": "1.0.0" }
+}

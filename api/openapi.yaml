@@ -1,0 +1,488 @@
+openapi: 3.1.0
+info:
+  title: network-scheme panel API
+  version: 0.0.0
+  description: |
+    Panel API. Sessions use the `__Host-nms_session` cookie (Secure; HttpOnly;
+    SameSite=Strict; Path=/). Every state-changing request made with a session
+    must carry `X-CSRF-Token` equal to `csrf_token` from `GET /api/auth/me`.
+    Request bodies are JSON (`Content-Type: application/json`), at most 1 MiB,
+    unknown fields rejected. Rate limits per client IP: 10/min on login, totp,
+    enroll and stepup; 600/min overall.
+servers:
+  - url: /
+security:
+  - session: []
+paths:
+  /api/health:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+  /api/auth/login:
+    post:
+      summary: Check username and password, start the second factor
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Second step required
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stage, challenge]
+                properties:
+                  stage: { type: string, enum: [totp, enroll] }
+                  challenge: { type: string, description: "Valid for 5 minutes, single use" }
+                  otpauth_uri: { type: string, description: "enroll only: the new TOTP secret" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/auth/totp:
+    post:
+      summary: Complete a "totp" challenge with a TOTP or backup code
+      security: []
+      requestBody: { $ref: "#/components/requestBodies/ChallengeCode" }
+      responses:
+        "204":
+          description: Logged in
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookie" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/auth/enroll:
+    post:
+      summary: Complete an "enroll" challenge with a code from the new secret
+      security: []
+      requestBody: { $ref: "#/components/requestBodies/ChallengeCode" }
+      responses:
+        "200":
+          description: Enrolled and logged in; backup codes are shown once
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookie" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backup_codes]
+                properties:
+                  backup_codes:
+                    type: array
+                    items: { type: string }
+                    minItems: 10
+                    maxItems: 10
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/auth/stepup:
+    post:
+      summary: Re-confirm with a TOTP code; rotates the session token
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code: { type: string, pattern: "^[0-9]{6}$" }
+      responses:
+        "204":
+          description: Step-up valid for 5 minutes
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookie" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/auth/logout:
+    post:
+      summary: End the session
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204":
+          description: Logged out; the cookie is cleared (Max-Age=0)
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookie" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/auth/me:
+    get:
+      summary: Current user, role bindings and CSRF token
+      x-permission: self
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, username, roles, csrf_token]
+                properties:
+                  id: { type: integer, format: int64 }
+                  username: { type: string }
+                  roles:
+                    type: array
+                    items:
+                      type: object
+                      required: [role, group_id]
+                      properties:
+                        role: { type: string, enum: [viewer, operator, admin, auditor] }
+                        group_id:
+                          type: [integer, "null"]
+                          format: int64
+                          description: null for a global binding
+                  csrf_token: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+  /api/users:
+    get:
+      summary: List panel users
+      x-permission: users.manage
+      responses:
+        "200":
+          description: Users ordered by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a user without TOTP (it enrolls at the first login)
+      x-permission: users.manage
+      x-step-up: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password, minLength: 12 }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/users/{id}:
+    patch:
+      summary: Enable or disable a user; disabling ends its sessions
+      description: Disabling the last enabled global admin answers 409 last_admin.
+      x-permission: users.manage
+      x-step-up: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [disabled]
+              properties:
+                disabled: { type: boolean }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/users/{id}/bindings:
+    get:
+      summary: Role bindings of a user
+      x-permission: bindings.manage
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Bindings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Binding" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Replace all role bindings of a user
+      description: Dropping the last global admin binding answers 409 last_admin.
+      x-permission: bindings.manage
+      x-step-up: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: "#/components/schemas/Binding" }
+      responses:
+        "204": { description: Replaced }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/groups:
+    get:
+      summary: List device groups
+      x-permission: groups.manage
+      responses:
+        "200":
+          description: Groups ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a device group
+      x-permission: groups.manage
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                parent_id:
+                  type: [integer, "null"]
+                  format: int64
+                  description: null or absent for a root group
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/groups/{id}:
+    patch:
+      summary: Rename and/or move a group; absent fields are unchanged
+      x-permission: groups.manage
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                parent_id:
+                  type: [integer, "null"]
+                  format: int64
+                  description: null moves the group to the root
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a leaf group and the bindings scoped to it
+      x-permission: groups.manage
+      x-step-up: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/audit:
+    get:
+      summary: Audit events, newest first
+      x-permission: audit.read
+      parameters:
+        - name: before_id
+          in: query
+          description: Return only events with a smaller id
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, ts, action, user_id, result, object_type, object_id]
+                  properties:
+                    id: { type: integer, format: int64 }
+                    ts: { type: string, format: date-time }
+                    action: { type: string }
+                    user_id: { type: [integer, "null"], format: int64 }
+                    result: { type: string, enum: [success, failure] }
+                    object_type: { type: string }
+                    object_id: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: __Host-nms_session
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: { type: string }
+  headers:
+    SessionCookie:
+      description: "__Host-nms_session=<token>; Path=/; HttpOnly; Secure; SameSite=Strict"
+      schema: { type: string }
+  requestBodies:
+    ChallengeCode:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [challenge, code]
+            properties:
+              challenge: { type: string }
+              code: { type: string }
+  responses:
+    Created:
+      description: Created
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [id]
+            properties:
+              id: { type: integer, format: int64 }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    User:
+      type: object
+      required: [id, username, disabled, totp_enrolled]
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        disabled: { type: boolean }
+        totp_enrolled: { type: boolean }
+    Binding:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role: { type: string, enum: [viewer, operator, admin, auditor] }
+        group_id:
+          type: [integer, "null"]
+          format: int64
+          description: null or absent for a global binding
+    Group:
+      type: object
+      required: [id, parent_id, name]
+      properties:
+        id: { type: integer, format: int64 }
+        parent_id: { type: [integer, "null"], format: int64 }
+        name: { type: string }
+    GroupName:
+      type: string
+      minLength: 1
+      maxLength: 200
+      description: No control characters, no leading or trailing spaces
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthenticated
+                - invalid_credentials
+                - challenge_expired
+                - session_expired
+                - csrf
+                - forbidden
+                - stepup_required
+                - not_found
+                - method_not_allowed
+                - payload_too_large
+                - unsupported_media_type
+                - user_exists
+                - group_exists
+                - group_not_empty
+                - group_cycle
+                - last_admin
+                - invalid_username
+                - weak_password
+                - invalid_role
+                - locked
+                - rate_limited
+                - internal
+                - gateway_error # from the gateway itself (upstream down, proxy limits), never from api
+            message: { type: string, description: "Human-readable, Russian" }

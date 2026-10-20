@@ -1,0 +1,3 @@
+package gpldep
+
+func Dep() {}

@@ -1,0 +1,10 @@
+# Installed and enabled by nmsctl install.
+[Unit]
+Description=network-scheme: hourly audit chain anchor
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

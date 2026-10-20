@@ -19,3 +19,10 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+
+# license-check fixtures need their node_modules committed
+!test/fixtures/licenses/**/node_modules/
+
+# web app
+web/app/node_modules/
+web/app/dist/

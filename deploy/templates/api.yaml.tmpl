@@ -1,0 +1,12 @@
+# Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+listen_addr: ":{{.APIListenPort}}"
+public_origin: "https://{{.Authority}}"
+trusted_proxy_cidrs:
+  - "{{.GatewayIP}}/32"
+db:
+  host: "postgres"
+  port: 5432
+  name: "{{.DBName}}"
+  user: "nms_api"
+  password_file: "/run/secrets/db_api_password"
+data_key_file: "/run/secrets/api_data_key"

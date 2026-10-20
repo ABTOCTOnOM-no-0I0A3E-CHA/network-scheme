@@ -1,0 +1,12 @@
+# Installed by nmsctl install. Appends the current audit chain head to
+# /var/lib/nms/anchors/anchors.log (outside the reach of api) via the tools container.
+[Unit]
+Description=network-scheme: anchor the audit hash chain
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nmsctl audit anchor
+NoNewPrivileges=yes
+PrivateTmp=yes

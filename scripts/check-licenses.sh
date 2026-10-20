@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Fails if a dependency uses a license outside the allowlist.
+# usage: check-licenses.sh go|js <dir>
+set -euo pipefail
+
+ALLOWED="MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,PostgreSQL,OFL-1.1,EPL-2.0,Unlicense,0BSD"
+
+mode="${1:?usage: check-licenses.sh go|js <dir>}"
+dir="${2:?usage: check-licenses.sh go|js <dir>}"
+
+case "$mode" in
+  go)
+    cd "$dir"
+    # the project's own module is not a third-party dependency
+    go-licenses check ./... --allowed_licenses="$ALLOWED" --ignore "$(go list -m)"
+    ;;
+  js)
+    # exclude only the scanned project itself (private, so "UNLICENSED"); every dependency stays checked
+    root="$(bun -e 'const p=require(process.argv[1]);console.log(p.name+"@"+p.version)' "$(cd "$dir" && pwd)/package.json")"
+    bunx license-checker-rseidelsohn@5.0.1 --start "$dir" --production --excludePackages "$root" --onlyAllow "${ALLOWED//,/;}"
+    ;;
+  *)
+    echo "unknown mode: $mode (expected go or js)" >&2
+    exit 2
+    ;;
+esac
