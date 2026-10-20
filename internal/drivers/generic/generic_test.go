@@ -396,7 +396,7 @@ func TestCollectDropsRowsMissingOctets(t *testing.T) {
 
 func TestCollectNeverMixesCounterFamilies(t *testing.T) {
 	t.Parallel()
-	/* if1 has HC in+out; if2 only 32-bit; if3 HC in but no HC out */
+	/* HC-capable device: if1 has HC in+out; if2 only 32-bit (e.g. a slow serial port); if3 HC in but no HC out */
 	r := staticReader{vars: []snmp.Var{
 		upTime,
 		ctr(ifEntry+".10.1", 1), ctr(ifEntry+".10.2", 2), ctr(ifEntry+".10.3", 3),
@@ -408,8 +408,11 @@ func TestCollectNeverMixesCounterFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eq(t, "interfaces", s.Interfaces, []drivers.IfCounters{{Index: 1, InOctets: 1e12, OutOctets: 2e12, HC: true}})
-	if s.Incomplete != 2 {
-		t.Fatalf("Incomplete = %d, want 2", s.Incomplete)
+	eq(t, "interfaces", s.Interfaces, []drivers.IfCounters{
+		{Index: 1, InOctets: 1e12, OutOctets: 2e12, HC: true},
+		{Index: 2, InOctets: 2, OutOctets: 2},
+	})
+	if s.Incomplete != 1 {
+		t.Fatalf("Incomplete = %d, want 1 (if3 with a single HC octet)", s.Incomplete)
 	}
 }

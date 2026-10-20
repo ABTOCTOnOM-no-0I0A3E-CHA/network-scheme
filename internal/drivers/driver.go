@@ -69,7 +69,9 @@ type Sample struct {
 IfCounters holds raw interface counters. InOctets and OutOctets are always
 read in the same poll from one counter family: HC is true when both are the
 64-bit ifHC* objects, false when both are 32-bit (may wrap); a row that cannot
-meet this is not emitted. Error and discard counters are nil when the device
+meet this is not emitted. The family is chosen per interface and per poll, so
+HC can change between polls for the same interface (e.g. a failed ifXTable
+walk); a rate calculator must skip the point when it does. Error and discard counters are nil when the device
 did not return them in this poll; nil is never the same as zero.
 */
 type IfCounters struct {
