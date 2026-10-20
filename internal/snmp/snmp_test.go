@@ -48,7 +48,7 @@ func TestGetSysObjectIDv2c(t *testing.T) {
 	if len(vars) != 2 {
 		t.Fatalf("vars: %+v", vars)
 	}
-	if oid, ok := snmp.AsOID(vars[0]); !ok || oid != "1.3.6.1.4.1.35265.1.100" || vars[0].OID != sysObjectID {
+	if oid, ok := snmp.AsOID(vars[0]); !ok || oid != "1.3.6.1.4.1.32473.1.100" || vars[0].OID != sysObjectID {
 		t.Fatalf("sysObjectID: %+v", vars[0])
 	}
 	if s, ok := snmp.AsString(vars[1]); !ok || s != "sim-sw1" {

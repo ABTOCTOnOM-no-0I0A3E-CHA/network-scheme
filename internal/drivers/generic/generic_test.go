@@ -102,7 +102,7 @@ func TestGenericIdentify(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := drivers.Identity{
-		SysObjectID: "1.3.6.1.4.1.35265.1.100", SysDescr: "Synthetic Generic Switch 24-port, software 1.0.0",
+		SysObjectID: "1.3.6.1.4.1.32473.1.100", SysDescr: "Synthetic Generic Switch 24-port, software 1.0.0",
 		SysName: "sim-sw1", Model: "SIM-SW-24", Firmware: "1.0.0", Serial: "SIM0001",
 	}
 	if id != want {

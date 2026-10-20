@@ -7,5 +7,7 @@ can select them. Import it for side effects in each binary that polls devices:
 package all
 
 import (
-	_ "github.com/beekamai/network-scheme/internal/drivers/generic" /* fallback, registers generic-snmp */
+	_ "github.com/beekamai/network-scheme/internal/drivers/eltexesr" /* registers eltex-esr */
+	_ "github.com/beekamai/network-scheme/internal/drivers/eltexmes" /* registers eltex-mes */
+	_ "github.com/beekamai/network-scheme/internal/drivers/generic"  /* fallback, registers generic-snmp */
 )

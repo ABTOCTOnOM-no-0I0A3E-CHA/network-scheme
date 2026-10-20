@@ -48,6 +48,25 @@ func TestDefaultOrder(t *testing.T) {
 	Register(fakeDriver{"eltex-mes"})
 }
 
+type unverifiedDriver struct{ fakeDriver }
+
+func (unverifiedDriver) Verified() bool { return false }
+
+type verifiedDriver struct{ fakeDriver }
+
+func (verifiedDriver) Verified() bool { return true }
+
+func TestUnverified(t *testing.T) {
+	Register(fakeDriver{GenericName})
+	Register(unverifiedDriver{fakeDriver{"eltex-mes"}})
+	Register(verifiedDriver{fakeDriver{"zz-verified"}})
+	Register(unverifiedDriver{fakeDriver{"eltex-esr"}})
+	defer func() { registered = nil }()
+	if got := strings.Join(Unverified(), ","); got != "eltex-esr,eltex-mes" {
+		t.Fatalf("Unverified() = %s", got)
+	}
+}
+
 type noMatch struct{ fakeDriver }
 
 func (noMatch) Match(string, string) bool { return false }

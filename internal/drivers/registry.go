@@ -86,3 +86,22 @@ func (r *Registry) Select(sysObjectID, sysDescr string) Driver {
 	}
 	return r.drivers[len(r.drivers)-1]
 }
+
+/*
+Unverified returns, sorted, the names of registered drivers that report
+Verified() == false: drivers written from vendor documentation whose OIDs,
+prompts and commands have not yet been checked on real devices. Drivers
+without a Verified method (generic-snmp, standard MIBs only) are not listed.
+*/
+func Unverified() []string {
+	regMu.Lock()
+	defer regMu.Unlock()
+	var out []string
+	for _, d := range registered {
+		if v, ok := d.(interface{ Verified() bool }); ok && !v.Verified() {
+			out = append(out, d.Name())
+		}
+	}
+	slices.Sort(out)
+	return out
+}

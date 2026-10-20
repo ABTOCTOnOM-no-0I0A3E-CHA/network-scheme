@@ -7,8 +7,10 @@ SHA-256 authentication and AES privacy.
 package simtest
 
 import (
+	"bufio"
 	"context"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -33,6 +35,36 @@ const (
 func Fixture(name string) string {
 	_, file, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(file), "..", "..", "..", "fixtures", "snmp", name)
+}
+
+/*
+FixtureSys returns the sysObjectID and sysDescr values of a fixture file in
+test/fixtures/snmp without starting the simulator (for driver Match tests).
+*/
+func FixtureSys(t testing.TB, name string) (sysObjectID, sysDescr string) {
+	t.Helper()
+	f, err := os.Open(Fixture(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f) /* ScanLines also drops a trailing CR */
+	for sc.Scan() {
+		p := strings.SplitN(sc.Text(), "|", 3)
+		switch {
+		case len(p) == 3 && p[0] == "1.3.6.1.2.1.1.2.0":
+			sysObjectID = p[2]
+		case len(p) == 3 && p[0] == "1.3.6.1.2.1.1.1.0":
+			sysDescr = p[2]
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if sysObjectID == "" {
+		t.Fatalf("%s has no sysObjectID", name)
+	}
+	return sysObjectID, sysDescr
 }
 
 /* V2Cred is an snmp2c credential for the given community (a fixture name). */
