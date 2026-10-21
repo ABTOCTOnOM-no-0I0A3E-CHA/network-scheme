@@ -72,6 +72,12 @@ describe("production build", () => {
     expect(html).toMatch(/<meta\s+id="input-otp-style"/);
   });
 
+  it("sealing is pure JS: no WebAssembly and no wasm CSP relaxation", () => {
+    for (const f of walk(out).filter((p) => /\.(js|html)$/.test(p))) {
+      expect(readFileSync(f, "utf8")).not.toMatch(/WebAssembly|wasm-unsafe-eval/);
+    }
+  });
+
   it("fonts are bundled locally", () => {
     expect(walk(out).some((f) => /inter.*\.woff2$/i.test(f))).toBe(true);
   });

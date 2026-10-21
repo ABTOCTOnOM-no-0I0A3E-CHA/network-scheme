@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -271,20 +273,11 @@ func TestMalformedRejected(t *testing.T) {
 	}
 }
 
-/* The vector was produced by libsodium (libsodium-wrappers 0.7.15, crypto_box_seal). */
+/* testdata/libsodium_vector.json was produced by libsodium-wrappers (crypto_box_seal); the web tests read it too. */
 func TestLibsodiumVector(t *testing.T) {
-	dec := func(s string) []byte {
-		b, err := hex.DecodeString(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
 	var priv, pub [32]byte
-	copy(priv[:], dec("9411f445e53fbcfc78dcd156eab19de0f4340eba44ae2f981bcf7f4a180cb575"))
-	copy(pub[:], dec("9f3eefcf3a0d6961ee4d0ced14bae85cdb7131f1b1ca3afb904564406594393d"))
-	ct := dec("2166774819a7f50186d6a430428156f3125745d6a443d3cafe4b0f7b3e3d0e1a5e2fd6f9e355e7a2742b651bd15520c784278f95e1f9eb4bfb8d277f16514401ea64f5134af0705def283744d34416fc6cfe7d7983774c407f8f33480836a3df9873b2e4415413c9063e7b651f9e08fdcf6e2190bf1ca6bb287b4e8fe921a44caab7f9a0e4d72b72f0eeb594b38fee58fbd9b8a859c3d6589d8caaaf94bfa5a32db44053f51fc283dc8beab8aa71db08fb06f13e45b6bab68e6ea7ddaaff7503b04570d600f91d00b486fa1af39d21aebfb52cd7aaae0a05bc6542036834a0e7b5ca1f64de3f57043197bc5186fb6d3c7459cacf8acf722960c2a568848e48514d7e14b8a9759f5ec4bb7bfb9a56e0429c991234d3b9d340faf7766490c626b248f39f276a6ebfd8")
-	c, err := creds.Open(&priv, &pub, ct, devices.Owner{Kind: devices.OwnerDevice, ID: 42}, "snmp3", time.Time{}, t0)
+	v := loadVector(t, "libsodium_vector.json", &priv, &pub)
+	c, err := creds.Open(&priv, &pub, v.ct, devices.Owner{Kind: devices.OwnerDevice, ID: 42}, "snmp3", time.Time{}, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +285,89 @@ func TestLibsodiumVector(t *testing.T) {
 		!c.CreatedAt.Equal(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("fields: %+v", c)
 	}
+}
+
+/* testdata/browser_sealed_vector.json was sealed by the web app's sealCredential (web/app/scripts/gen-seal-vector.ts). */
+func TestBrowserSealedVector(t *testing.T) {
+	var priv, pub [32]byte
+	v := loadVector(t, "browser_sealed_vector.json", &priv, &pub)
+	for _, w := range v.Cases {
+		ct, err := hex.DecodeString(w.Ciphertext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := devices.Owner{Kind: devices.OwnerDevice, ID: 7}
+		c, err := creds.Open(&priv, &pub, ct, owner, w.Kind, time.Time{}, t0)
+		if err != nil {
+			t.Fatalf("%s: %v", w.Kind, err)
+		}
+		if c.Owner != owner || c.Kind != w.Kind || !c.CreatedAt.Equal(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)) {
+			t.Fatalf("%s: %+v", w.Kind, c)
+		}
+		switch w.Kind {
+		case "snmp2c":
+			if c.Community.Reveal() != "community-0123456789" {
+				t.Fatalf("snmp2c: %+v", c)
+			}
+		case "snmp3":
+			if c.User != "monitor" || c.AuthProto != "SHA256" || c.PrivProto != "AES" ||
+				c.AuthKey.Reveal() != "auth-key-0123456789" || c.PrivKey.Reveal() != "priv-key-0123456789" {
+				t.Fatalf("snmp3: %+v", c)
+			}
+		case "ssh_read":
+			if c.Username != "admin-é" || c.Password.Reveal() != "pa55 w0rd \"q\" 12☃" {
+				t.Fatalf("ssh_read: %+v", c)
+			}
+		default:
+			t.Fatalf("unexpected kind %s", w.Kind)
+		}
+	}
+	if len(v.Cases) != 3 {
+		t.Fatalf("cases: %d", len(v.Cases))
+	}
+}
+
+type vector struct {
+	ct    []byte
+	Cases []struct {
+		Kind       string `json:"kind"`
+		Ciphertext string `json:"ciphertext"`
+	} `json:"cases"`
+}
+
+/* loadVector reads a fixture from testdata, filling the key pair and (for single-vector files) the ciphertext. */
+func loadVector(t *testing.T, name string, priv, pub *[32]byte) vector {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+		Ciphertext string `json:"ciphertext"`
+		Cases      []struct {
+			Kind       string `json:"kind"`
+			Ciphertext string `json:"ciphertext"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	dec := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	copy(priv[:], dec(f.PrivateKey))
+	copy(pub[:], dec(f.PublicKey))
+	v := vector{Cases: f.Cases}
+	if f.Ciphertext != "" {
+		v.ct = dec(f.Ciphertext)
+	}
+	return v
 }
 
 func TestControlCharsRejected(t *testing.T) {
