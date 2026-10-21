@@ -208,8 +208,9 @@ type compose struct {
 		Networks    map[string]any    `yaml:"networks"`
 	} `yaml:"services"`
 	Networks map[string]struct {
-		Internal bool `yaml:"internal"`
-		IPAM     struct {
+		Internal   bool  `yaml:"internal"`
+		EnableIPv6 *bool `yaml:"enable_ipv6"`
+		IPAM       struct {
 			Config []struct {
 				Subnet string `yaml:"subnet"`
 			} `yaml:"config"`
@@ -315,6 +316,10 @@ func TestComposeHardening(t *testing.T) {
 	dev := c.Networks["devices"]
 	if dev.Internal || len(dev.IPAM.Config) != 1 || dev.IPAM.Config[0].Subnet != install.DefaultDevicesSubnet {
 		t.Errorf("devices network = %+v, want routed with subnet %s", dev, install.DefaultDevicesSubnet)
+	}
+	/* The egress rules are IPv4 only: IPv6 must be off explicitly, not by daemon default. */
+	if dev.EnableIPv6 == nil || *dev.EnableIPv6 {
+		t.Errorf("devices network enable_ipv6 = %v, want explicit false", dev.EnableIPv6)
 	}
 	if !slices.Equal(c.Services["postgres"].Command, []string{"postgres", "-c", "timescaledb.telemetry_level=off"}) {
 		t.Errorf("postgres command = %v, want telemetry off", c.Services["postgres"].Command)

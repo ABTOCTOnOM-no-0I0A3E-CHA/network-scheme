@@ -19,8 +19,8 @@ const egressChain = "DOCKER-USER"
 /* EgressFile is the egress configuration written by install, relative to Paths.Etc. */
 const EgressFile = "config/egress.yaml"
 
-/* egressUnit re-applies the egress rules at boot, before Docker starts any container. */
-const egressUnit = "nms-egress.service"
+/* egressDropIn makes Docker apply the egress rules before it starts; a failure keeps Docker down. */
+const egressDropIn = "docker.service.d/nms-egress.conf"
 
 /*
 Egress limits where the devices network may send packets: only to the
@@ -76,7 +76,7 @@ func egressYAML(e Egress) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte("# Written by nmsctl install. nms-egress.service applies it at boot (nmsctl egress apply).\n"), body...), nil
+	return append([]byte("# Written by nmsctl install. Docker applies it before it starts (nmsctl egress apply).\n"), body...), nil
 }
 
 // LoadEgress reads and validates the egress configuration of an installation.
@@ -92,6 +92,20 @@ func LoadEgress(path string) (Egress, error) {
 		return Egress{}, fmt.Errorf("egress: parse %s: %w", path, err)
 	}
 	return e, e.validate()
+}
+
+// ErrEgressBypassed means Docker does not send forwarded traffic through DOCKER-USER.
+var ErrEgressBypassed = errors.New("install: Docker does not pass forwarded traffic through DOCKER-USER (egress rules would not apply)")
+
+/*
+CheckDockerUsesEgress verifies that the running Docker daemon jumps from
+FORWARD to DOCKER-USER, so the egress rules are on the containers' path.
+*/
+func CheckDockerUsesEgress(ctx context.Context, sys System) error {
+	if err := sys.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "-C", "FORWARD", "-j", egressChain}}); err != nil {
+		return fmt.Errorf("%w: %v", ErrEgressBypassed, err)
+	}
+	return nil
 }
 
 /* rules returns the allow rules (in their final order) and the closing DROP rule. */

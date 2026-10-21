@@ -339,7 +339,7 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 	return install.Run(ctx, o, d.sys)
 }
 
-/* egressApply re-applies the recorded egress rules (nms-egress.service at boot). */
+/* egressApply re-applies the recorded egress rules (the Docker drop-in runs it before Docker starts). */
 func egressApply(ctx context.Context, d deps) error {
 	e, err := install.LoadEgress(install.DefaultEtc + "/" + install.EgressFile)
 	if err != nil {

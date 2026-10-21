@@ -36,8 +36,8 @@ const (
 /* systemdDir receives the systemd units. */
 const systemdDir = "/etc/systemd/system"
 
-/* units are copied from deploy/systemd; the egress unit and the anchor timer are enabled. */
-var units = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer", egressUnit}
+/* units are copied from deploy/systemd (paths relative to systemdDir); the anchor timer is enabled. */
+var units = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer", egressDropIn}
 
 /* readPubFile is the public read-domain key for the poller, relative to Paths.Etc. */
 const readPubFile = "config/domain_read.pub"
@@ -87,9 +87,9 @@ type prepared struct {
 /*
 Run installs on this host: preflight → validation of every input → secrets →
 keys.json for the gateway → rendered compose project → egress rules of the
-devices network → docker compose up and wait for healthy → first admin with
-TOTP (in the tools container) → systemd units (egress rules at boot, hourly
-audit anchor timer) → marker Etc/installed → key and certificate fingerprints.
+devices network, checked to be on Docker's forwarding path → docker compose up and wait for healthy → first admin with
+TOTP (in the tools container) → systemd units (Docker drop-in that applies
+the egress rules before Docker starts, hourly audit anchor timer) → marker Etc/installed → key and certificate fingerprints.
 Invalid input fails before anything is written; an existing installation
 fails with ErrAlreadyInstalled and nothing is touched.
 */
@@ -228,6 +228,9 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	/* Before any container exists, so the poller never runs unfiltered. */
 	if err := ApplyEgress(ctx, sys, p.egress); err != nil {
 		return fmt.Errorf("install: %w", err)
+	}
+	if err := CheckDockerUsesEgress(ctx, sys); err != nil {
+		return err
 	}
 
 	compose := path.Join(ps.Etc, "compose.yaml")
@@ -369,11 +372,15 @@ func installUnits(ctx context.Context, o Options, sys System) error {
 		if err != nil {
 			return err
 		}
-		if err := writeExcl(filepath.Join(dir, u), body, 0o644); err != nil {
+		p := filepath.Join(dir, filepath.FromSlash(u))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { // #nosec G301 -- a standard systemd drop-in directory
+			return fmt.Errorf("install: %w", err)
+		}
+		if err := writeExcl(p, body, 0o644); err != nil {
 			return err
 		}
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", egressUnit}, {"enable", "--now", "nms-audit-anchor.timer"}} {
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", "--now", "nms-audit-anchor.timer"}} {
 		if err := sys.Run(ctx, Cmd{Name: "systemctl", Args: args, Stdout: o.Out, Stderr: o.Out}); err != nil {
 			return fmt.Errorf("install: systemctl %s: %w", strings.Join(args, " "), err)
 		}

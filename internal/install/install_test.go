@@ -101,6 +101,10 @@ func TestPreflightErrors(t *testing.T) {
 		{"userland-proxy true", "linux", "24.0.7", `{"userland-proxy": true}`, false, install.ErrUserlandProxy},
 		{"daemon.json invalid", "linux", "24.0.7", `{`, false, install.ErrUserlandProxy},
 		{"already installed", "linux", "24.0.7", goodDaemonJSON, true, install.ErrAlreadyInstalled},
+		{"iptables explicitly on", "linux", "29.1.3", `{"userland-proxy": false, "iptables": true, "firewall-backend": "iptables"}`, false, nil},
+		{"iptables off", "linux", "29.1.3", `{"userland-proxy": false, "iptables": false}`, false, install.ErrDockerFirewall},
+		{"iptables not a bool", "linux", "29.1.3", `{"userland-proxy": false, "iptables": "false"}`, false, install.ErrDockerFirewall},
+		{"nftables backend", "linux", "29.1.3", `{"userland-proxy": false, "firewall-backend": "nftables"}`, false, install.ErrDockerFirewall},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -119,6 +123,9 @@ func TestPreflightErrors(t *testing.T) {
 			}
 			if errors.Is(err, install.ErrUserlandProxy) && !strings.Contains(err.Error(), `"userland-proxy": false`) {
 				t.Fatalf("error lacks the JSON fragment to paste: %v", err)
+			}
+			if errors.Is(err, install.ErrDockerFirewall) && !strings.Contains(err.Error(), `"iptables"`) {
+				t.Fatalf("error lacks the JSON fragment to set: %v", err)
 			}
 		})
 	}
@@ -450,22 +457,27 @@ func TestRunInstalls(t *testing.T) {
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
+		"iptables -w -C FORWARD -j DOCKER-USER",
 		"docker compose -f /etc/nms/compose.yaml up -d --wait --wait-timeout 600",
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
-		"systemctl enable nms-egress.service",
 		"systemctl enable --now nms-audit-anchor.timer",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[5] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[5])
+	if sys.stdins[6] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins[6])
 	}
-	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer", "nms-egress.service"} {
+	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
+	}
+	/* Docker starts only after the egress rules are applied; a failing apply keeps it down. */
+	dropIn := string(readFile(t, filepath.Join(root, "etc", "systemd", "system", "docker.service.d", "nms-egress.conf")))
+	if !strings.Contains(dropIn, "[Service]\nExecStartPre=/usr/local/bin/nmsctl egress apply\n") || strings.Contains(dropIn, "ExecStartPre=-") {
+		t.Errorf("docker drop-in:\n%s", dropIn)
 	}
 	if got := strings.TrimSpace(string(readFile(t, o.TOTPSecretOut))); got != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("totp secret out = %q", got)
@@ -493,6 +505,26 @@ func TestRunInstalls(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(dst)); len(entries) != 1 {
 		t.Errorf("leftover temp files: %v", entries)
+	}
+}
+
+func TestRunFailsWhenDockerBypassesDockerUser(t *testing.T) {
+	o, _, out := installOptions(t)
+	sys := newFakeSys()
+	sys.run = func(c install.Cmd) error {
+		if cmdline(c) == "iptables -w -C FORWARD -j DOCKER-USER" {
+			return errors.New("iptables: Bad rule")
+		}
+		return nil
+	}
+	err := install.Run(context.Background(), o, sys)
+	if !errors.Is(err, install.ErrEgressBypassed) {
+		t.Fatalf("Run = %v, want ErrEgressBypassed\n%s", err, out)
+	}
+	for _, c := range sys.cmds {
+		if c.Name == "docker" {
+			t.Fatalf("containers started without effective egress rules: %s", cmdline(c))
+		}
 	}
 }
 

@@ -163,6 +163,8 @@ networks:
           ip_range: "{{.CoreIPRange}}"
   # Towards the devices: routed, but DOCKER-USER lets it reach only the management subnets.
   devices:
+    # IPv4 only: the egress rules are iptables (IPv4) rules.
+    enable_ipv6: false
     ipam:
       config:
         - subnet: "{{.DevicesSubnet}}"

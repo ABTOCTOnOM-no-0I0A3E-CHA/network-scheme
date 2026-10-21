@@ -145,7 +145,8 @@ jobs:
             exit 1
           fi
           sed -n '/^Installation complete/,$p' "$E2E_DIR/install.log"
-          systemctl is-enabled nms-audit-anchor.timer nms-egress.service
+          systemctl is-enabled nms-audit-anchor.timer
+          systemctl show docker -p ExecStartPre | grep -q "/usr/local/bin/nmsctl egress apply"
       - name: Start the device simulator on the devices network
         run: |
           # Synthetic SNMPv3 user of test/sim/snmpsim/simtest. self.snmprec answers SNMPv3 with an
@@ -201,10 +202,6 @@ jobs:
           if docker run --rm --network nms_devices "$NETSHOOT" nc -z -w 5 1.1.1.1 443; then
             echo "devices network reached 1.1.1.1"; exit 1
           fi
-          # nms-egress.service restores a deleted rule (as at boot)
-          sudo iptables -w -D DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
-          sudo systemctl restart nms-egress.service
-          sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
           sudo iptables -w -S DOCKER-USER
       - name: ZAP baseline
         uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
@@ -217,6 +214,14 @@ jobs:
           cmd_options: -I
           fail_action: true
           allow_issue_writing: false
+      # Last: it restarts Docker and with it the stack.
+      - name: Docker applies the egress rules before it starts
+        run: |
+          sudo iptables -w -D DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          sudo systemctl restart docker
+          sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          sudo iptables -w -C FORWARD -j DOCKER-USER
+          sudo iptables -w -S DOCKER-USER
       - name: Service logs
         if: failure()
         run: |
