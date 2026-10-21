@@ -92,3 +92,29 @@ func TestTimescaleTelemetryOff(t *testing.T) {
 		t.Fatalf("timescaledb.telemetry_level = %q, want off", level)
 	}
 }
+
+func TestUntrustedBoundsRejectOversizedWrites(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	api := env.Pool("nms_api")
+	insert := func(n int) error {
+		_, err := api.Exec(ctx, `INSERT INTO core.access_profile (owner_kind, owner_id, kind, ciphertext, key_version)
+			VALUES ('device', $1, 'snmp2c', repeat('x', $2)::bytea, 1)`, int64(n), n)
+		return err
+	}
+	if err := insert(8240); err != nil {
+		t.Fatalf("ciphertext at the cap: %v", err)
+	}
+	var pgErr *pgconn.PgError
+	if err := insert(8241); !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("oversized ciphertext: want check violation, got %v", err)
+	}
+	var group int64
+	if err := api.QueryRow(ctx, `INSERT INTO core.device_group (name) VALUES ('g') RETURNING id`).Scan(&group); err != nil {
+		t.Fatal(err)
+	}
+	_, err := api.Exec(ctx, `INSERT INTO core.device (name, address, group_id, driver) VALUES ('d', '192.0.2.1', $1, repeat('d', 201))`, group)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("oversized driver: want check violation, got %v", err)
+	}
+}

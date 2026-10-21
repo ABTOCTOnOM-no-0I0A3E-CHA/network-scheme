@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -454,5 +455,42 @@ func TestHeartbeatAndHealthcheck(t *testing.T) {
 	}
 	if err := Healthy(ctx, pool, stale); err == nil {
 		t.Fatal("healthy with a 46 s old heartbeat")
+	}
+}
+
+func TestOversizedCiphertextIsInvalidAndUnread(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	ctx := context.Background()
+	addr := netip.MustParseAddrPort("198.51.100.130:161")
+	id := h.device(addr)
+	/* The CHECK keeps the api from writing such a row; lift it to plant one as a superuser. */
+	su := h.env.Pool("postgres")
+	if _, err := su.Exec(ctx, `ALTER TABLE core.access_profile DROP CONSTRAINT access_profile_ciphertext_len`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := su.Exec(ctx, `INSERT INTO core.access_profile (owner_kind, owner_id, kind, ciphertext, key_version)
+		VALUES ('device', $1, 'snmp3', repeat('x', $2)::bytea, 1)`, id, maxCiphertext+1); err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	rows, err := p.pool.Query(ctx, `SELECT CASE WHEN octet_length(ciphertext) <= $1 THEN ciphertext END
+		FROM core.access_profile WHERE owner_id = $2`, maxCiphertext, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pgx.ForEachRow(rows, []any{&got}, func() error { return nil }); err != nil || got != nil {
+		t.Fatalf("oversized ciphertext was read: %d bytes, err %v", len(got), err)
+	}
+	cache := newDevCache()
+	_, err = p.credential(ctx, devices.Owner{Kind: devices.OwnerDevice, ID: id}, cache, snmpKinds...)
+	if !errors.Is(err, errNoProfile) {
+		t.Fatalf("credential err = %v, want errNoProfile", err)
+	}
+	if s := h.str(`SELECT status FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, id); s != "invalid" {
+		t.Fatalf("oversized profile status = %q", s)
+	}
+	if len(cache.creds) != 0 || h.dialer.count(addr) != 0 {
+		t.Fatal("oversized profile was opened or dialed")
 	}
 }

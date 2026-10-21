@@ -21,6 +21,9 @@ const (
 	profileMismatch = "mismatch"
 )
 
+/* maxCiphertext is the database cap on a sealed credential; a longer one is never read. */
+const maxCiphertext = 8240
+
 /* snmpKinds are tried in this order; the first usable credential is used. */
 var snmpKinds = []string{creds.KindSNMP3, creds.KindSNMP2c}
 
@@ -60,8 +63,10 @@ func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *dev
 		ct           []byte
 	}
 	got := map[string]row{}
-	rows, err := p.pool.Query(ctx, `SELECT kind, ciphertext, status FROM core.access_profile
-		WHERE owner_kind = $1 AND owner_id = $2 AND kind = ANY($3)`, owner.Kind, owner.ID, kinds)
+	/* An oversized ciphertext (nil here) is not read at all: the api is not trusted to bound it. */
+	rows, err := p.pool.Query(ctx, `SELECT kind,
+			CASE WHEN octet_length(ciphertext) <= $4 THEN ciphertext END, status FROM core.access_profile
+		WHERE owner_kind = $1 AND owner_id = $2 AND kind = ANY($3)`, owner.Kind, owner.ID, kinds, maxCiphertext)
 	if err != nil {
 		return creds.Credential{}, fmt.Errorf("%w: read profiles: %w", errDB, err)
 	}
@@ -77,6 +82,12 @@ func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *dev
 		if !ok {
 			continue
 		}
+		if r.ct == nil {
+			if err := p.markOversized(ctx, owner, k, r.status); err != nil {
+				return creds.Credential{}, fmt.Errorf("%w: %w", errDB, err)
+			}
+			continue
+		}
 		c, err := p.open(ctx, owner, k, r.ct, r.status, cache)
 		if err == nil {
 			return c, nil
@@ -86,6 +97,21 @@ func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *dev
 		}
 	}
 	return creds.Credential{}, errNoProfile
+}
+
+/* markOversized rejects a profile whose ciphertext exceeds the cap; it is never opened or dialed with. */
+func (p *Poller) markOversized(ctx context.Context, owner devices.Owner, kind, status string) error {
+	if status == profileInvalid {
+		return nil
+	}
+	if _, err := p.pool.Exec(ctx, `UPDATE core.access_profile SET status = $4
+		WHERE owner_kind = $1 AND owner_id = $2 AND kind = $3 AND octet_length(ciphertext) > $5`,
+		owner.Kind, owner.ID, kind, profileInvalid, maxCiphertext); err != nil {
+		return fmt.Errorf("poller: set profile status: %w", err)
+	}
+	p.log.Warn("credential rejected", slog.String("owner_kind", owner.Kind), slog.Int64("owner_id", owner.ID),
+		slog.String("kind", kind), slog.String("status", profileInvalid))
+	return nil
 }
 
 func isVerifyErr(err error) bool {
