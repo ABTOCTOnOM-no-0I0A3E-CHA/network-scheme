@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { logout, useSession } from "@/features/auth/useSession";
+import { StepUpDialog } from "@/features/common/StepUpDialog";
 import { getTheme, setTheme } from "@/lib/theme";
 import { CommandPalette } from "./CommandPalette";
 import { Sidebar } from "./Sidebar";
@@ -70,6 +71,7 @@ export function AppShell() {
         </main>
       </SidebarInset>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <StepUpDialog />
     </SidebarProvider>
   );
 }
