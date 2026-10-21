@@ -256,11 +256,11 @@ func TestBadProfileMarkedNotPolled(t *testing.T) {
 			}
 		}
 		cache := newDevCache()
-		_ = p.run(ctx, d, cache, classAvail)
-		if err := p.run(ctx, d, cache, classMetrics); err == nil {
+		_ = p.run(ctx, d, cache, classAvail, nil)
+		if err := p.run(ctx, d, cache, classMetrics, nil); err == nil {
 			t.Fatalf("%s: metrics without a usable profile succeeded", want)
 		}
-		_ = p.run(ctx, d, cache, classInventory)
+		_ = p.run(ctx, d, cache, classInventory, nil)
 		if got := h.str(`SELECT status FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, id); got != want {
 			t.Fatalf("profile status = %q, want %q", got, want)
 		}
@@ -288,7 +288,7 @@ func TestStaleCiphertextRejected(t *testing.T) {
 	h.profile(id, "snmp3", older)
 	devs, _ := p.loadDevices(ctx)
 	for _, d := range devs {
-		_ = p.run(ctx, d, newDevCache(), classAvail)
+		_ = p.run(ctx, d, newDevCache(), classAvail, nil)
 	}
 	if s := h.str(`SELECT status FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, id); s != "mismatch" {
 		t.Fatalf("rolled-back credential status = %q", s)
@@ -328,7 +328,7 @@ func TestStatusPartialWhenSNMPFails(t *testing.T) {
 		t.Fatalf("devices = %v, %v", devs, err)
 	}
 	began := time.Now()
-	if err := p.run(ctx, devs[0], newDevCache(), classAvail); err != nil {
+	if err := p.run(ctx, devs[0], newDevCache(), classAvail, nil); err != nil {
 		t.Fatal(err)
 	}
 	if took := time.Since(began); took > 3*time.Second {
@@ -349,7 +349,7 @@ func TestStatusPartialWhenSNMPFails(t *testing.T) {
 	}
 	/* Neither ICMP nor SNMP: down. */
 	p.pinger = fakePinger{ok: false}
-	if err := p.run(ctx, devs[0], newDevCache(), classAvail); err != nil {
+	if err := p.run(ctx, devs[0], newDevCache(), classAvail, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s := h.str(`SELECT state FROM inventory.device_status WHERE device_id = $1`, id); s != "down" {

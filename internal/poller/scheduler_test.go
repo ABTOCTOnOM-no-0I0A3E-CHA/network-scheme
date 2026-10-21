@@ -16,7 +16,7 @@ func testDevice(id int64, every time.Duration) device {
 }
 
 func TestJitterSpreadsStartup(t *testing.T) {
-	s := newScheduler(4, func(context.Context, device, *devCache, class) error { return nil }, nil)
+	s := newScheduler(4, func(context.Context, device, *devCache, class, *deviceLock) error { return nil }, nil)
 	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	devs := make([]device, 100)
@@ -41,7 +41,7 @@ func TestSlowDeviceDoesNotBlockOthers(t *testing.T) {
 	const every = 100 * time.Millisecond
 	var mu sync.Mutex
 	runs := map[int64][]time.Time{}
-	s := newScheduler(8, func(ctx context.Context, d device, _ *devCache, _ class) error {
+	s := newScheduler(8, func(ctx context.Context, d device, _ *devCache, _ class, _ *deviceLock) error {
 		if d.ID == 1 { /* an unreachable device: every request runs into its timeout */
 			select {
 			case <-ctx.Done():
@@ -92,7 +92,10 @@ func TestNoOverlappingPollsPerDevice(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		inflight[id].Add(-1)
 	}
-	s := newScheduler(64, func(_ context.Context, d device, _ *devCache, _ class) error {
+	s := newScheduler(64, func(_ context.Context, d device, _ *devCache, _ class, lk *deviceLock) error {
+		if lk != nil { /* availability without the lock never opens a session: not a poll of the device */
+			return nil
+		}
 		enter(d.ID)
 		return nil
 	}, nil)
@@ -126,7 +129,7 @@ func TestNoOverlappingPollsPerDevice(t *testing.T) {
 
 func TestApplyReschedulesAndForgets(t *testing.T) {
 	var forgotten []int64
-	s := newScheduler(1, func(context.Context, device, *devCache, class) error { return nil }, func(id int64) { forgotten = append(forgotten, id) })
+	s := newScheduler(1, func(context.Context, device, *devCache, class, *deviceLock) error { return nil }, func(id int64) { forgotten = append(forgotten, id) })
 	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	s.apply([]device{testDevice(1, time.Hour), testDevice(2, time.Hour)})
@@ -180,7 +183,7 @@ func TestBackoff(t *testing.T) {
 
 func TestAvailabilityNeverBacksOff(t *testing.T) {
 	var avail, metrics atomic.Int32
-	s := newScheduler(4, func(_ context.Context, _ device, _ *devCache, c class) error {
+	s := newScheduler(4, func(_ context.Context, _ device, _ *devCache, c class, _ *deviceLock) error {
 		if c == classAvail {
 			avail.Add(1)
 		} else {
@@ -197,5 +200,95 @@ func TestAvailabilityNeverBacksOff(t *testing.T) {
 	/* ~20 availability runs at a fixed interval; metrics backs off 50, 100, 200, 400 ms: ~5 runs. */
 	if avail.Load() < 14 || metrics.Load() > 7 {
 		t.Fatalf("availability ran %d times, metrics %d times", avail.Load(), metrics.Load())
+	}
+}
+
+/* busyRun blocks metrics and inventory of the slow devices for 3 s and records availability runs. */
+type busyRun struct {
+	mu     sync.Mutex
+	slow   map[int64]bool
+	avail  map[int64][]time.Time
+	locked map[int64]int /* availability runs that found the device lock free */
+}
+
+func newBusyRun() *busyRun {
+	return &busyRun{slow: map[int64]bool{}, avail: map[int64][]time.Time{}, locked: map[int64]int{}}
+}
+
+func (b *busyRun) run(ctx context.Context, d device, _ *devCache, c class, lk *deviceLock) error {
+	if c == classAvail {
+		got := lk == nil || lk.TryLock()
+		if got && lk != nil {
+			lk.Unlock()
+		}
+		b.mu.Lock()
+		b.avail[d.ID] = append(b.avail[d.ID], time.Now())
+		if got {
+			b.locked[d.ID]++
+		}
+		b.mu.Unlock()
+		return nil
+	}
+	if b.slow[d.ID] {
+		select {
+		case <-ctx.Done():
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return nil
+}
+
+func TestAvailabilityRunsWhileDeviceBusy(t *testing.T) {
+	b := newBusyRun()
+	b.slow[1] = true
+	s := newScheduler(8, b.run, nil)
+	d := testDevice(1, 100*time.Millisecond)
+	d.Intervals[classInventory] = 10 * time.Millisecond /* a long inventory takes the device lock almost at once */
+	s.apply([]device{d})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s.loop(ctx)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := len(b.avail[1]); n < 12 {
+		t.Fatalf("availability ran %d times in 2 s while the inventory held the device", n)
+	}
+	if b.locked[1] > 2 {
+		t.Fatalf("availability got the device lock %d times while the inventory held it", b.locked[1])
+	}
+}
+
+func TestSlowDevicesDoNotPinWorkers(t *testing.T) {
+	const workers, every = 6, 100 * time.Millisecond
+	b := newBusyRun()
+	var devs []device
+	for id := int64(1); id <= 13; id++ {
+		d := testDevice(id, every)
+		if id <= 3 { /* more slow devices than workers/3 */
+			b.slow[id] = true
+			d.Intervals[classMetrics], d.Intervals[classInventory] = 10*time.Millisecond, 10*time.Millisecond
+		}
+		devs = append(devs, d)
+	}
+	s := newScheduler(workers, b.run, nil)
+	s.apply(devs)
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	s.loop(ctx)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id := int64(4); id <= 13; id++ {
+		ts := b.avail[id]
+		if len(ts) < 10 {
+			t.Fatalf("device %d ran %d times in 2.5 s", id, len(ts))
+		}
+		prev := start
+		for _, at := range ts {
+			if gap := at.Sub(prev); gap > every+time.Second {
+				t.Fatalf("device %d waited %v between runs", id, gap)
+			}
+			prev = at
+		}
 	}
 }

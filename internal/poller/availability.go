@@ -20,6 +20,8 @@ const (
 	oidSysObjID   = "1.3.6.1.2.1.1.2.0"
 	oidSysDescr   = "1.3.6.1.2.1.1.1.0"
 	noProfileText = "no usable SNMP credential"
+	/* busyNoAnswerText: the session of the poll in progress has not answered within the interval. */
+	busyNoAnswerText = "no SNMP answer during the poll in progress"
 )
 
 // Pinger sends one ICMP echo request and reports the round trip.
@@ -68,16 +70,37 @@ func (p *Poller) snmpBudget() time.Duration {
 }
 
 /*
-availability probes ICMP and SNMP sysUpTime and records the point and the
-device state. It fails only when the result cannot be stored: an unreachable
-device is a result, not an error.
+availability probes ICMP and SNMP and records the point and the device state.
+ICMP runs without the device lock. For SNMP it takes the lock only if it is
+free (lk nil: the caller holds it) and reads sysUpTime over its own session;
+while another poll holds the device it opens no second session and counts
+SNMP as answering when that poll's session answered within one availability
+interval. Without the lock it reads only the atomic stamp of the cache. It
+fails only when the result cannot be stored: an unreachable device is a
+result, not an error.
 */
-func (p *Poller) availability(ctx context.Context, d device, cache *devCache) error {
+func (p *Poller) availability(ctx context.Context, d device, cache *devCache, lk *deviceLock) error {
 	at := p.now()
 	rtt, icmpOK := p.pinger.Ping(ctx, d.Addr.Addr())
-	snmpOK, reason, err := p.snmpAlive(ctx, d, cache)
-	if err != nil {
-		return err
+	var (
+		snmpOK bool
+		reason string
+	)
+	if lk == nil || lk.TryLock() {
+		if lk != nil {
+			defer lk.Unlock()
+		}
+		p.refresh(d, cache)
+		var err error
+		if snmpOK, reason, err = p.snmpAlive(ctx, d, cache); err != nil {
+			return err
+		}
+	} else {
+		last := cache.lastSNMP.Load()
+		snmpOK = last != 0 && p.now().Sub(time.Unix(0, last)) <= d.Intervals[classAvail]
+		if !snmpOK {
+			reason = busyNoAnswerText
+		}
 	}
 	state := availState(icmpOK, snmpOK)
 	pt := metrics.AvailPoint{DeviceID: d.ID, TS: at, ICMPOk: icmpOK, SNMPOk: snmpOK, State: state}

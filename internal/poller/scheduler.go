@@ -34,13 +34,44 @@ type device struct {
 	Intervals [numClasses]time.Duration
 }
 
-/* runFunc polls one class of a device; it is called with the device lock held. */
-type runFunc func(ctx context.Context, d device, cache *devCache, c class) error
+/*
+runFunc polls one class of a device. lk is nil when the caller holds the
+device lock. Availability is called with the device's lock not held (lk set):
+it may only TryLock it and must not touch the device cache without it.
+*/
+type runFunc func(ctx context.Context, d device, cache *devCache, c class, lk *deviceLock) error
+
+/* deviceLock serialises the polls of one device: one SNMP and one SSH session at most. */
+type deviceLock struct{ ch chan struct{} }
+
+func newDeviceLock() *deviceLock { return &deviceLock{ch: make(chan struct{}, 1)} }
+
+/* Lock takes the lock unless ctx ends first. */
+func (l *deviceLock) Lock(ctx context.Context) error {
+	select {
+	case l.ch <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+/* TryLock takes the lock if it is free, without waiting. */
+func (l *deviceLock) TryLock() bool {
+	select {
+	case l.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *deviceLock) Unlock() { <-l.ch }
 
 type devState struct {
 	dev   device
-	lock  chan struct{} /* per-device mutex: one poll of the device at a time, whatever the class or source */
-	cache *devCache     /* touched only with lock held */
+	lock  *deviceLock /* one poll of the device at a time, whatever the class or source */
+	cache *devCache   /* touched only with lock held, apart from its atomics */
 	next  [numClasses]time.Time
 	gen   [numClasses]uint64 /* invalidates queued items when the class is rescheduled */
 	busy  [numClasses]bool
@@ -71,8 +102,9 @@ func (h *itemHeap) Pop() any {
 scheduler runs every class of every device at its interval on a bounded
 worker pool. A device's first run is at a random point within its interval,
 so a restart does not poll every device at once. A class is queued again only
-when its run has finished, and every run holds the device lock, so polls of
-one device never overlap. Failing metrics and inventory runs back off
+when its run has finished, and every session-opening run holds the device
+lock, so polls of one device never overlap; availability never waits for the
+lock, so a long inventory cannot delay it. Failing metrics and inventory runs back off
 exponentially; availability always keeps its interval.
 */
 type scheduler struct {
@@ -145,7 +177,7 @@ func (s *scheduler) apply(devs []device) {
 		seen[d.ID] = true
 		ds, ok := s.devs[d.ID]
 		if !ok {
-			ds = &devState{dev: d, lock: make(chan struct{}, 1), cache: newDevCache()}
+			ds = &devState{dev: d, lock: newDeviceLock(), cache: newDevCache()}
 			s.devs[d.ID] = ds
 			for c := range numClasses {
 				s.schedule(ds, c, now.Add(jitter(d.Intervals[c])))
@@ -215,34 +247,33 @@ func (s *scheduler) loop(ctx context.Context) {
 	}
 }
 
-/* lockDevice takes the device lock unless ctx ends first. */
-func lockDevice(ctx context.Context, ds *devState) error {
-	select {
-	case ds.lock <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-/* exec runs one due class on a worker slot under the device lock and queues the next run. */
+/* exec runs one due class on a worker slot (under the device lock unless availability) and queues the next run. */
 func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 	defer s.wg.Done()
 	err := func() error {
+		/*
+			Device lock first, worker slot second: a run waiting for its busy device
+			must not hold a slot. Availability does not wait for the lock at all; it
+			gets the lock to TryLock.
+		*/
+		lk := ds.lock
+		if it.c != classAvail {
+			if err := ds.lock.Lock(ctx); err != nil {
+				return err
+			}
+			defer ds.lock.Unlock()
+			lk = nil
+		}
 		select {
 		case s.sem <- struct{}{}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		defer func() { <-s.sem }()
-		if err := lockDevice(ctx, ds); err != nil {
-			return err
-		}
-		defer func() { <-ds.lock }()
 		s.mu.Lock()
 		d := ds.dev
 		s.mu.Unlock()
-		return s.run(ctx, d, ds.cache, it.c)
+		return s.run(ctx, d, ds.cache, it.c, lk)
 	}()
 
 	s.mu.Lock()
@@ -281,10 +312,10 @@ func (s *scheduler) runNow(ctx context.Context, id int64, fn func(d device, cach
 	if ds == nil {
 		return errNotMine
 	}
-	if err := lockDevice(ctx, ds); err != nil {
+	if err := ds.lock.Lock(ctx); err != nil {
 		return err
 	}
-	defer func() { <-ds.lock }()
+	defer ds.lock.Unlock()
 	s.mu.Lock()
 	if s.devs[id] != ds {
 		s.mu.Unlock()

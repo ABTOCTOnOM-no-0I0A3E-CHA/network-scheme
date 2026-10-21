@@ -87,10 +87,10 @@ func TestHeavyTablesSkippedWhenCPUHigh(t *testing.T) {
 		skip bool
 	}{{95, true}, {80, false}, {81, true}, {10, false}} {
 		cpu = c.cpu
-		if err := p.run(ctx, devs[0], cache, classMetrics); err != nil {
+		if err := p.run(ctx, devs[0], cache, classMetrics, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := p.run(ctx, devs[0], cache, classInventory); err != nil {
+		if err := p.run(ctx, devs[0], cache, classInventory, nil); err != nil {
 			t.Fatal(err)
 		}
 		if skip != c.skip {

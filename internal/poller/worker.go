@@ -32,13 +32,14 @@ var errDB = errors.New("poller: database")
 func isDBErr(err error) bool { return errors.Is(err, errDB) }
 
 /*
-devCache is what the poller learned about one device. It is used only with
-the device lock held; the flags are set by the scheduler when the device
-record changes.
+devCache is what the poller learned about one device. Its plain fields are
+used only with the device lock held; the atomics may be read without it. The
+flags are set by the scheduler when the device record changes.
 */
 type devCache struct {
-	readdressed atomic.Bool /* address or port changed: forget everything */
-	redriven    atomic.Bool /* driver setting changed: identify again */
+	readdressed atomic.Bool  /* address or port changed: forget everything */
+	redriven    atomic.Bool  /* driver setting changed: identify again */
+	lastSNMP    atomic.Int64 /* unix ns of the last answer on any session to the device; 0: none */
 	drv         drivers.Driver
 	creds       map[string]opened
 	lastCPU     *float64
@@ -46,18 +47,16 @@ type devCache struct {
 
 func newDevCache() *devCache { return &devCache{creds: map[string]opened{}} }
 
-/* run polls class c of d; the scheduler holds the device lock. */
-func (p *Poller) run(ctx context.Context, d device, cache *devCache, c class) error {
-	if cache.readdressed.Swap(false) {
-		cache.drv, cache.lastCPU = nil, nil
-		p.rates.Forget(d.ID)
+/*
+run polls class c of d. lk is nil when the caller holds the device lock;
+availability gets the unheld lock (see availability).
+*/
+func (p *Poller) run(ctx context.Context, d device, cache *devCache, c class, lk *deviceLock) error {
+	if c == classAvail {
+		return p.availability(ctx, d, cache, lk)
 	}
-	if cache.redriven.Swap(false) {
-		cache.drv = nil
-	}
+	p.refresh(d, cache)
 	switch c {
-	case classAvail:
-		return p.availability(ctx, d, cache)
 	case classMetrics:
 		return p.collect(ctx, d, cache)
 	default:
@@ -65,22 +64,78 @@ func (p *Poller) run(ctx context.Context, d device, cache *devCache, c class) er
 	}
 }
 
+/* refresh applies the scheduler's change flags; the device lock must be held. */
+func (p *Poller) refresh(d device, cache *devCache) {
+	if cache.readdressed.Swap(false) {
+		cache.drv, cache.lastCPU = nil, nil
+		cache.lastSNMP.Store(0)
+		p.rates.Forget(d.ID)
+	}
+	if cache.redriven.Swap(false) {
+		cache.drv = nil
+	}
+}
+
 /* pollAll runs a full poll (poll_now): availability, metrics, inventory. */
 func (p *Poller) pollAll(ctx context.Context, d device, cache *devCache) error {
 	var errs []error
 	for c := range numClasses {
-		errs = append(errs, p.run(ctx, d, cache, c))
+		errs = append(errs, p.run(ctx, d, cache, c, nil))
 	}
 	return errors.Join(errs...)
 }
 
-/* session opens an SNMP session with the device's first usable SNMP credential. */
+/*
+session opens an SNMP session with the device's first usable SNMP credential.
+Every answer on it stamps cache.lastSNMP, which availability reads while the
+session's poll holds the device.
+*/
 func (p *Poller) session(ctx context.Context, d device, cache *devCache) (snmp.Reader, io.Closer, error) {
 	c, err := p.credential(ctx, d, cache, snmpKinds...)
 	if err != nil {
 		return nil, nil, err
 	}
-	return p.dial(ctx, d.Addr, c, p.cfg.snmpOptions())
+	r, closer, err := p.dial(ctx, d.Addr, c, p.cfg.snmpOptions())
+	if err != nil {
+		return nil, nil, err
+	}
+	return stampReader{r: r, at: &cache.lastSNMP, now: p.now}, closer, nil
+}
+
+/* stampReader records the time of every successful request (and every walked variable). */
+type stampReader struct {
+	r   snmp.Reader
+	at  *atomic.Int64
+	now func() time.Time
+}
+
+func (s stampReader) stamp() { s.at.Store(s.now().UnixNano()) }
+
+func (s stampReader) Get(ctx context.Context, oids ...string) ([]snmp.Var, error) {
+	v, err := s.r.Get(ctx, oids...)
+	if err == nil {
+		s.stamp()
+	}
+	return v, err
+}
+
+func (s stampReader) BulkGet(ctx context.Context, oids []string) ([]snmp.Var, error) {
+	v, err := s.r.BulkGet(ctx, oids)
+	if err == nil {
+		s.stamp()
+	}
+	return v, err
+}
+
+func (s stampReader) Walk(ctx context.Context, root string, fn func(snmp.Var) error) error {
+	err := s.r.Walk(ctx, root, func(v snmp.Var) error {
+		s.stamp()
+		return fn(v)
+	})
+	if err == nil {
+		s.stamp() /* an empty subtree is an answer too */
+	}
+	return err
 }
 
 /*
