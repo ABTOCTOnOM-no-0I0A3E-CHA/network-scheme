@@ -309,7 +309,7 @@ func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 	if s.devs[it.id] != ds {
 		s.mu.Unlock()
 		s.onRemove(it.id) /* removed while running: drop what this run may have recorded */
-		go ds.wipeWhenIdle()
+		go ds.wipeWhenIdle() // #nosec G118 -- the wipe must not be cancelled with the run
 		return
 	}
 	now := s.now()
