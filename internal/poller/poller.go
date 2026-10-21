@@ -78,6 +78,8 @@ type Poller struct {
 	disc        *discovery
 	discEvery   time.Duration
 	scanRecheck time.Duration
+	scanFloor   time.Duration                                          /* least interval between scheduled runs of a scan, whatever interval_s says */
+	scanGap     time.Duration                                          /* least time between two runs of a scan, however requested */
 	scanPanics  atomic.Int64                                           /* recovered panics of discovery runs */
 	recheck     func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
 }
@@ -89,6 +91,7 @@ func New(cfg Config, d Deps) *Poller {
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
 		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
+		scanFloor: minScanInterval, scanGap: minScanGap,
 	}
 	p.recheck = p.scanState
 	if p.pinger == nil {

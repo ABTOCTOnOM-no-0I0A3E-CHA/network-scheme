@@ -35,6 +35,9 @@ const (
 /* errScanRefused: the scan does not exist, is disabled, is not this poller's or has no usable credential. */
 var errScanRefused = errors.New("poller: scan refused")
 
+/* errScanTooSoon: the scan ran less than scanGap ago; the request is dropped. */
+var errScanTooSoon = errors.New("poller: scan ran recently")
+
 /*
 scanState is what a run depends on: a run continues only while the scan's
 row and its SNMP profiles are unchanged (profiles as kind, updated_at and a
@@ -188,14 +191,24 @@ func (d *discovery) release(id int64) {
 	delete(d.running, id)
 }
 
-/* begin validates scan id and records the start of its run. */
+/*
+begin validates scan id and records the start of its run. A scan whose last
+run began less than scanGap ago is not run again (errScanTooSoon), however
+the run was requested: the api can enqueue jobs at will.
+*/
 func (p *Poller) begin(ctx context.Context, id int64) (scanRun, error) {
 	run, err := p.prepareScan(ctx, id)
 	if err != nil {
 		return scanRun{}, err
 	}
-	if _, err := p.pool.Exec(ctx, `UPDATE core.discovery_scan SET last_run_at = now() WHERE id = $1`, id); err != nil {
+	tag, err := p.pool.Exec(ctx, `UPDATE core.discovery_scan SET last_run_at = now() WHERE id = $1
+		AND (last_run_at IS NULL OR last_run_at <= now() - make_interval(secs => $2::float8))`, id, p.scanGap.Seconds())
+	if err != nil {
 		return scanRun{}, fmt.Errorf("poller: mark scan run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		run.cred.Wipe()
+		return scanRun{}, errScanTooSoon
 	}
 	return run, nil
 }
@@ -209,6 +222,11 @@ func (p *Poller) startScan(ctx, life context.Context, id int64) error {
 		return nil
 	}
 	run, err := p.begin(ctx, id)
+	if errors.Is(err, errScanTooSoon) {
+		p.disc.release(id)
+		p.log.Info("scan run skipped", slog.Int64("scan_id", id), slog.String("reason", err.Error()))
+		return nil
+	}
 	if err != nil {
 		p.disc.release(id)
 		return err
@@ -381,7 +399,7 @@ feed:
 /*
 discoverLoop starts the due scans of this poller now and every discEvery: an
 enabled scan with a credential not yet rejected, whose last run began at
-least interval_s ago. A scan still running is skipped.
+least interval_s (but never less than scanFloor) ago. A scan still running is skipped.
 */
 func (p *Poller) discoverLoop(ctx context.Context) {
 	t := time.NewTicker(p.discEvery)
@@ -402,10 +420,10 @@ func (p *Poller) startDueScans(ctx context.Context) error {
 	rows, err := p.pool.Query(ctx, `
 		SELECT s.id FROM core.discovery_scan s
 		WHERE s.poller_id = $1 AND s.enabled
-			AND (s.last_run_at IS NULL OR s.last_run_at <= now() - make_interval(secs => s.interval_s))
+			AND (s.last_run_at IS NULL OR s.last_run_at <= now() - make_interval(secs => greatest(s.interval_s, $3::float8)))
 			AND EXISTS (SELECT 1 FROM core.access_profile a WHERE a.owner_kind = 'scan' AND a.owner_id = s.id
 				AND a.kind = ANY($2) AND a.status IN ('pending', 'ok'))
-		ORDER BY s.last_run_at NULLS FIRST, s.id`, p.cfg.PollerID, snmpKinds)
+		ORDER BY s.last_run_at NULLS FIRST, s.id`, p.cfg.PollerID, snmpKinds, p.scanFloor.Seconds())
 	if err != nil {
 		return fmt.Errorf("poller: due scans: %w", err)
 	}

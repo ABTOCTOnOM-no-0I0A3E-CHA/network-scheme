@@ -462,7 +462,7 @@ func TestOversizedCiphertextIsInvalidAndUnread(t *testing.T) {
 	h := newHarness(t, "")
 	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
 	ctx := context.Background()
-	addr := netip.MustParseAddrPort("198.51.100.130:161")
+	addr := netip.MustParseAddrPort("198.51.100.170:161")
 	id := h.device(addr)
 	/* The CHECK keeps the api from writing such a row; lift it to plant one as a superuser. */
 	su := h.env.Pool("postgres")
@@ -492,5 +492,44 @@ func TestOversizedCiphertextIsInvalidAndUnread(t *testing.T) {
 	}
 	if len(cache.creds) != 0 || h.dialer.count(addr) != 0 {
 		t.Fatal("oversized profile was opened or dialed")
+	}
+}
+
+func TestLoadDevicesClampsIntervals(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	ctx := context.Background()
+	own := h.device(netip.MustParseAddrPort("198.51.100.180:161"))
+	viaGroup := h.device(netip.MustParseAddrPort("198.51.100.181:161"))
+	api := h.env.Pool("nms_api")
+	/* The api can write any positive interval. */
+	if _, err := api.Exec(ctx, `UPDATE core.device SET interval_avail_s = 1, interval_metrics_s = 1, interval_inventory_s = 1 WHERE id = $1`, own); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Exec(ctx, `INSERT INTO core.device_group (name, interval_avail_s, interval_metrics_s, interval_inventory_s)
+		VALUES ('fast-'||gen_random_uuid(), 1, 1, 2000000000) RETURNING id`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Exec(ctx, `UPDATE core.device SET group_id = (SELECT max(id) FROM core.device_group) WHERE id = $1`, viaGroup); err != nil {
+		t.Fatal(err)
+	}
+	devs, err := p.loadDevices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64][numClasses]time.Duration{
+		own:      {minAvailInterval, minMetricsInterval, minInventoryInterval},
+		viaGroup: {minAvailInterval, minMetricsInterval, maxIntervalDuration},
+	}
+	for _, d := range devs {
+		if w, ok := want[d.ID]; ok {
+			if d.Intervals != w {
+				t.Errorf("device %d intervals = %v, want %v", d.ID, d.Intervals, w)
+			}
+			delete(want, d.ID)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("devices not loaded: %v", want)
 	}
 }

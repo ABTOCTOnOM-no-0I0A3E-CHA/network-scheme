@@ -47,7 +47,7 @@ func (p *Poller) loadDevices(ctx context.Context) ([]device, error) {
 		for c := range numClasses {
 			d.Intervals[c] = def[c]
 			if iv[c] != nil {
-				d.Intervals[c] = time.Duration(*iv[c]) * time.Second
+				d.Intervals[c] = clampInterval(c, *iv[c])
 			}
 		}
 		return d, nil
@@ -56,6 +56,11 @@ func (p *Poller) loadDevices(ctx context.Context) ([]device, error) {
 		return nil, fmt.Errorf("poller: load devices: %w", err)
 	}
 	return devs, nil
+}
+
+/* clampInterval turns a database interval (seconds) into a duration within the floor of class c and 24 h. */
+func clampInterval(c class, secs int) time.Duration {
+	return min(max(time.Duration(secs)*time.Second, minIntervals[c]), maxIntervalDuration)
 }
 
 /*

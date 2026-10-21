@@ -31,7 +31,16 @@ const (
 	maxSNMPRetries      = 5
 	minIntervalDuration = time.Second
 	maxIntervalDuration = 24 * time.Hour
+	/* Floors for intervals read from the database (the api is not trusted to keep them sane). */
+	minAvailInterval     = 5 * time.Second
+	minMetricsInterval   = 10 * time.Second
+	minInventoryInterval = time.Minute
+	minScanInterval      = time.Hour
+	minScanGap           = 10 * time.Minute /* between two runs of one scan, whatever starts them */
 )
+
+/* minIntervals are the floors per class for device and group intervals. */
+var minIntervals = [numClasses]time.Duration{classAvail: minAvailInterval, classMetrics: minMetricsInterval, classInventory: minInventoryInterval}
 
 // Intervals are the polling intervals per class.
 type Intervals struct {

@@ -178,10 +178,12 @@ func runScan(p *Poller, id int64) error {
 }
 
 func (h *harness) scanPoller(pg Pinger, d *scanDialer) *Poller {
-	return New(h.config(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour}), Deps{
+	p := New(h.config(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour}), Deps{
 		Pool: h.env.Pool("nms_poller"), Priv: h.priv, Pub: h.pub, Pinger: pg, DialSNMP: d.dial,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	p.scanFloor, p.scanGap = 0, 0 /* tests rerun scans at once; the floors have their own test */
+	return p
 }
 
 type found struct {
@@ -403,10 +405,11 @@ func TestDiscoveryJobValidatesArgs(t *testing.T) {
 	d := newScanDialer(map[netip.Addr]netip.AddrPort{host(good, 2): sim})
 	p := h.scanPoller(pg, d)
 	p.discEvery = time.Hour
+	p.scanGap = minScanGap
 	scan := h.scan(good, true)
 	h.sealV3(devices.Owner{Kind: devices.OwnerScan, ID: scan}, simtest.V3AuthKey)
-	/* Not due: only the job can start this run. */
-	if _, err := h.env.Pool("nms_api").Exec(context.Background(), `UPDATE core.discovery_scan SET last_run_at = now() WHERE id = $1`, scan); err != nil {
+	/* Not due (interval 24 h): only the job can start this run. */
+	if _, err := h.env.Pool("nms_api").Exec(context.Background(), `UPDATE core.discovery_scan SET last_run_at = now() - interval '1 hour' WHERE id = $1`, scan); err != nil {
 		t.Fatal(err)
 	}
 	start(t, p)
@@ -703,5 +706,49 @@ func TestRecheckFailsClosed(t *testing.T) {
 				t.Fatalf("recovered panics = %d", p.scanPanics.Load())
 			}
 		})
+	}
+}
+
+/*
+TestScanFloorAndGap: the api can set interval_s to 1 and enqueue jobs at
+will. The schedule never starts a scan before scanFloor, and no request
+starts a scan that began less than scanGap ago.
+*/
+func TestScanFloorAndGap(t *testing.T) {
+	h := newHarness(t, "")
+	pfx := nextScanPrefix()
+	pg := newScanPinger()
+	p := h.scanPoller(pg, newScanDialer(nil))
+	p.scanFloor, p.scanGap = minScanInterval, minScanGap
+	scan := h.scan(pfx, true)
+	h.sealV3(devices.Owner{Kind: devices.OwnerScan, ID: scan}, simtest.V3AuthKey)
+	setRun := func(ago string) {
+		t.Helper()
+		if _, err := h.env.Pool("nms_api").Exec(context.Background(),
+			`UPDATE core.discovery_scan SET interval_s = 1, last_run_at = now() - $2::interval WHERE id = $1`, scan, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setRun("30 minutes") /* interval_s = 1 says due; the floor says not for another 30 minutes */
+	if err := p.startDueScans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.disc.wg.Wait()
+	if pg.total() != 0 {
+		t.Fatal("schedule started a scan before the floor")
+	}
+	setRun("2 minutes") /* a job right after a run: dropped */
+	if err := runScan(p, scan); err != nil {
+		t.Fatal(err)
+	}
+	if pg.total() != 0 {
+		t.Fatal("a job started a scan within the gap")
+	}
+	setRun("11 minutes")
+	if err := runScan(p, scan); err != nil {
+		t.Fatal(err)
+	}
+	if pg.total() == 0 {
+		t.Fatal("a job after the gap did not run the scan")
 	}
 }
