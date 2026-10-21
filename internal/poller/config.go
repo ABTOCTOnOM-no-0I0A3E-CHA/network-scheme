@@ -25,6 +25,7 @@ const (
 	defaultHeavyCPU     = 80
 	defaultDBPort       = 5432
 	maxWorkers          = 10_000
+	maxDefaultDBConns   = 64
 	minSNMPTimeout      = 100 * time.Millisecond
 	maxSNMPTimeout      = 30 * time.Second
 	maxSNMPRetries      = 5
@@ -87,6 +88,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Workers == 0 {
 		c.Workers = defaultWorkers
+	}
+	if c.DB.MaxConns == 0 && c.Workers > 0 {
+		/* Every run writes to the database; River and the heartbeat share the pool. */
+		c.DB.MaxConns = min(c.Workers/4+8, maxDefaultDBConns)
 	}
 	if c.SNMPTimeout == 0 {
 		c.SNMPTimeout = defaultSNMPTimeout

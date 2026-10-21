@@ -30,8 +30,36 @@ func TestConfigDefaults(t *testing.T) {
 	}
 	want := Intervals{Availability: 30 * time.Second, Metrics: time.Minute, Inventory: 5 * time.Minute}
 	if c.PollerID != "local" || c.Workers != 256 || c.SNMPTimeout != 2*time.Second || c.SNMPRetries == nil || *c.SNMPRetries != 1 ||
-		c.DefaultIntervals != want || c.HeavyCPUThreshold != 80 || c.DB.Port != 5432 {
+		c.DefaultIntervals != want || c.HeavyCPUThreshold != 80 || c.DB.Port != 5432 || c.DB.MaxConns != 64 {
 		t.Fatalf("defaults = %+v", c)
+	}
+}
+
+/* db.max_conns defaults to workers/4 + 8, at most 64, so the workers, River and the heartbeat share a pool sized to them. */
+func TestConfigDBMaxConns(t *testing.T) {
+	for _, tc := range []struct {
+		extra string
+		want  int
+	}{
+		{"workers: 16\n", 12},
+		{"workers: 1\n", 8},
+		{"workers: 10000\n", 64},
+	} {
+		c, err := LoadConfig(writeConfig(t, minimalConfig+tc.extra))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.DB.MaxConns != tc.want {
+			t.Errorf("%q: db.max_conns = %d, want %d", tc.extra, c.DB.MaxConns, tc.want)
+		}
+	}
+	dbLine := "password_file: /run/secrets/db_poller_password}"
+	c, err := LoadConfig(writeConfig(t, strings.ReplaceAll(minimalConfig, dbLine, dbLine[:len(dbLine)-1]+", max_conns: 20}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DB.MaxConns != 20 {
+		t.Errorf("explicit db.max_conns = %d, want 20", c.DB.MaxConns)
 	}
 }
 
@@ -79,6 +107,8 @@ func TestConfigRejects(t *testing.T) {
 	for name, db := range map[string]string{
 		"secret inline":   "db: {host: db, name: nms, user: u, password: x}",
 		"missing db host": "db: {name: nms, user: u, password_file: /x}",
+		"negative conns":  "db: {host: db, name: nms, user: u, password_file: /x, max_conns: -1}",
+		"too many conns":  "db: {host: db, name: nms, user: u, password_file: /x, max_conns: 1001}",
 	} {
 		if _, err := LoadConfig(writeConfig(t, strings.ReplaceAll(minimalConfig, dbLine, db))); err == nil {
 			t.Errorf("%s: accepted", name)

@@ -25,7 +25,12 @@ type DB struct {
 	Name         string `yaml:"name"`
 	User         string `yaml:"user"`
 	PasswordFile string `yaml:"password_file"`
+	/* MaxConns caps the connection pool; 0 selects the service's default. */
+	MaxConns int `yaml:"max_conns"`
 }
+
+/* maxDBConns bounds db.max_conns. */
+const maxDBConns = 1000
 
 // API is the configuration of the api service (api.yaml).
 type API struct {
@@ -116,6 +121,8 @@ func (d DB) validate() error {
 		return errors.New("db.password_file is required")
 	case d.Port < 1 || d.Port > 65535:
 		return fmt.Errorf("db.port %d out of range", d.Port)
+	case d.MaxConns < 0 || d.MaxConns > maxDBConns:
+		return fmt.Errorf("db.max_conns must be 0..%d", maxDBConns)
 	}
 	return nil
 }

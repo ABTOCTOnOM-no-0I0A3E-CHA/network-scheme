@@ -36,6 +36,9 @@ func poolConfig(c config.DB, pw secret.Secret) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database config: %w", err)
 	}
+	if c.MaxConns > 0 {
+		cfg.MaxConns = int32(c.MaxConns) // #nosec G115 -- range checked by config validation
+	}
 	cc := cfg.ConnConfig
 	cc.Host, cc.Port = c.Host, uint16(c.Port) // #nosec G115 -- range checked by config validation
 	cc.Database, cc.User, cc.Password = c.Name, c.User, pw.Reveal()
