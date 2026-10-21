@@ -22,6 +22,8 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Check
         run: scripts/check.sh
+      - name: Race detector
+        run: go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
       - name: Isolation check detects violations
         run: "! scripts/check-isolation.sh test/fixtures/isolation"
 
