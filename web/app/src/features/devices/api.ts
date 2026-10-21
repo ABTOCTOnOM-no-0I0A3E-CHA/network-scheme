@@ -1,6 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "@/api/schema";
-import { unwrap, withStepUp } from "@/features/common/stepup";
+import { pickStep, coarserStep } from "@/features/charts/series";
+import { ApiError, unwrap, withStepUp } from "@/features/common/stepup";
 import { api } from "@/lib/api";
 
 type S = components["schemas"];
@@ -93,14 +94,28 @@ export function useDeviceTable<T extends DeviceTable>(id: number, table: T, page
 
 export type MetricsRange = { from: Date; to: Date; step?: number };
 
-/** Rate series of one interface over `range`. */
+/**
+ * Rate series of one interface over `range`. Without `range.step` the step is
+ * picked to stay under the point limit; on `too_many_points` the step is
+ * doubled and the request repeated once.
+ */
 export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange) {
   const from = range.from.toISOString();
   const to = range.to.toISOString();
   return useQuery({
     queryKey: deviceKeys.metrics(id, ifIndex, from, to, range.step),
-    queryFn: async () =>
-      unwrap(await api.GET("/api/devices/{id}/metrics/if", { params: { path: { id }, query: { if_index: ifIndex, from, to, step: range.step } } })),
+    retry: false,
+    queryFn: async () => {
+      const fetchOnce = async (step: number) =>
+        unwrap(await api.GET("/api/devices/{id}/metrics/if", { params: { path: { id }, query: { if_index: ifIndex, from, to, step } } }));
+      const step = range.step ?? pickStep(range.from, range.to);
+      try {
+        return await fetchOnce(step);
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "too_many_points") return fetchOnce(coarserStep(step));
+        throw e;
+      }
+    },
   });
 }
 

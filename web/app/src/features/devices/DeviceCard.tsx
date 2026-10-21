@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { LineChart } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey, thrownKey } from "@/features/auth/errors";
@@ -8,6 +9,7 @@ import { safeText } from "@/lib/text";
 import type { CredKind } from "@/lib/seal";
 import { cn } from "@/lib/utils";
 import { useDevice, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
+import { ChartsTab } from "@/features/charts/ChartsTab";
 import { DeviceEditForm } from "./DeviceEditForm";
 import { InventoryTable, Text, type Column } from "./InventoryTable";
 import { ProfileForm } from "./ProfileForm";
@@ -29,6 +31,7 @@ export function DeviceCard({ id, canPoll, canManage }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>("interfaces");
+  const [chartIf, setChartIf] = useState<number | undefined>();
 
   if (device.isPending) return <p className="text-sm text-muted-foreground">{t("card.loading")}</p>;
   if (device.error) {
@@ -68,7 +71,18 @@ export function DeviceCard({ id, canPoll, canManage }: Props) {
       </div>
       <div role="tabpanel" id="tab-panel" aria-labelledby={`tab-${tab}`}>
         {/* keyed by tab so paging state never carries over between tables */}
-        <TabBody key={tab} tab={tab} deviceId={device.data.id} canManage={canManage} />
+        <TabBody
+          key={tab}
+          tab={tab}
+          deviceId={device.data.id}
+          canManage={canManage}
+          chartIf={chartIf}
+          onChartIf={setChartIf}
+          onShowChart={(i) => {
+            setChartIf(i);
+            setTab("graphs");
+          }}
+        />
       </div>
     </section>
   );
@@ -155,7 +169,16 @@ function Header({ device, canPoll, canManage }: { device: DeviceDetail; canPoll:
   );
 }
 
-function TabBody({ tab, deviceId, canManage }: { tab: TabId; deviceId: number; canManage: boolean }) {
+type TabBodyProps = {
+  tab: TabId;
+  deviceId: number;
+  canManage: boolean;
+  chartIf: number | undefined;
+  onChartIf: (i: number) => void;
+  onShowChart: (i: number) => void;
+};
+
+function TabBody({ tab, deviceId, canManage, chartIf, onChartIf, onShowChart }: TabBodyProps) {
   const { t, i18n } = useTranslation();
   const num = (n: number) => <span className="tabular-nums">{n}</span>;
   const col = <R,>(cid: string, cell: (r: R) => ReactNode): Column<R> => ({ id: cid, header: t(`card.col.${cid}`), cell });
@@ -163,12 +186,7 @@ function TabBody({ tab, deviceId, canManage }: { tab: TabId; deviceId: number; c
 
   switch (tab) {
     case "graphs":
-      /* Task 5 mounts the interface charts here */
-      return (
-        <div data-slot="device-charts" className="text-sm text-muted-foreground">
-          {t("card.chartsSoon")}
-        </div>
-      );
+      return <ChartsTab deviceId={deviceId} ifIndex={chartIf} onIfIndex={onChartIf} />;
     case "profiles":
       return <ProfilesTab deviceId={deviceId} canManage={canManage} />;
     case "interfaces":
@@ -183,6 +201,11 @@ function TabBody({ tab, deviceId, canManage }: { tab: TabId; deviceId: number; c
             col("alias", (r: { alias: string }) => <Text value={r.alias} />),
             col("speed", (r: { speed_bps: number }) => t("card.bps", { n: r.speed_bps.toLocaleString(i18n.language) })),
             col("oper", (r: { oper_up: boolean }) => (r.oper_up ? t("card.up") : t("card.down"))),
+            col("chart", (r: { if_index: number; name: string }) => (
+              <Button type="button" variant="outline" size="sm" aria-label={t("card.chartBtn", { name: safeText(r.name) })} onClick={() => onShowChart(r.if_index)}>
+                <LineChart aria-hidden />
+              </Button>
+            )),
           ]}
         />
       );

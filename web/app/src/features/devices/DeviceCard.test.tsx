@@ -37,6 +37,7 @@ const kp = x25519.keygen();
 let deviceFn: () => Response;
 let polled = 0;
 let patched: unknown;
+let metricsQuery: Record<string, string | null> | undefined;
 const seen = "2026-10-02T10:00:00Z";
 const server = setupServer(
   http.get("*/api/devices/7", () => deviceFn()),
@@ -56,6 +57,11 @@ const server = setupServer(
   http.get("*/api/devices/7/lldp", () =>
     HttpResponse.json({ items: [{ local_if_index: 1, chassis_id: "aa:bb", port_id: "\u0001p", sys_name: "<img src=x onerror=alert(1)>", mgmt_addr: null, seen_at: seen }], next_offset: null }),
   ),
+  http.get("*/api/devices/7/metrics/if", ({ request }) => {
+    const q = new URL(request.url).searchParams;
+    metricsQuery = { if_index: q.get("if_index"), step: q.get("step") };
+    return HttpResponse.json({ step_s: 10, points: [] });
+  }),
   http.get("*/api/devices/7/profiles", () => HttpResponse.json([{ kind: "snmp3", status: "weak", updated_at: seen }])),
   http.get("*/api/groups", () => err(403, "forbidden")),
   http.post("*/api/devices/7/poll", () => {
@@ -75,6 +81,7 @@ afterEach(() => {
   server.resetHandlers();
   polled = 0;
   patched = undefined;
+  metricsQuery = undefined;
 });
 afterAll(() => server.close());
 
@@ -132,6 +139,16 @@ describe("DeviceCard", () => {
     expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
     expect(screen.getByText("�p")).toBeInTheDocument();
+  });
+
+  it("the chart button of an interface opens the graphs tab for it", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(false);
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.chartBtn.replace("{{name}}", "ge0/2") }));
+    expect(screen.getByRole("tab", { name: ru.card.tab.graphs })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText(ru.chart.empty)).toBeInTheDocument();
+    expect(metricsQuery).toMatchObject({ if_index: "2" });
+    expect(Number(metricsQuery?.step)).toBeGreaterThanOrEqual(10);
   });
 
   it("operator sees poll-now and queues a poll, viewer does not", async () => {
