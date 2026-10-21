@@ -28,7 +28,7 @@ const daemonJSON = "/etc/docker/daemon.json"
 
 // Cmd is an external command with a fixed argv; it is never run through a shell.
 type Cmd struct {
-	Name   string /* "docker" or "systemctl" */
+	Name   string /* "docker", "systemctl" or "iptables" */
 	Args   []string
 	Stdin  io.Reader
 	Stdout io.Writer

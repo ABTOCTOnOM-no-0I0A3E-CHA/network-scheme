@@ -20,7 +20,7 @@ Container users that read secrets. Compose file secrets are bind mounts that
 keep the host owner and mode, so every secret is owned by its consumer.
 */
 const (
-	/* ContainerUID is the distroless "nonroot" user of api, migrate, nmsctl and gateway. */
+	/* ContainerUID is the distroless "nonroot" user of api, migrate, nmsctl, poller and gateway. */
 	ContainerUID = 65532
 	/*
 		PostgresUID is uid and gid of "postgres" in DefaultDBImage, found with
@@ -170,7 +170,11 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 		if err != nil {
 			return nil, err
 		}
-		add(DomainKeyFiles[d], []byte(base64.StdEncoding.EncodeToString(k.Private[:])), 0, 0, 0o400)
+		uid := 0
+		if d == "read" { /* opened by the poller to verify read credentials */
+			uid = ContainerUID
+		}
+		add(DomainKeyFiles[d], []byte(base64.StdEncoding.EncodeToString(k.Private[:])), uid, uid, 0o400)
 	}
 
 	caCrt, caKey, err := pki.NewCA("network-scheme internal CA", caValidity)

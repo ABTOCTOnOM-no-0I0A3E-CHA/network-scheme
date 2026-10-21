@@ -1,0 +1,16 @@
+# Installed by nmsctl install. Puts the egress rules of the devices network
+# (/etc/nms/config/egress.yaml) into the DOCKER-USER chain before Docker starts
+# any container: the devices network may reach only the management subnets.
+[Unit]
+Description=network-scheme: egress rules of the devices network
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/nmsctl egress apply
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=docker.service

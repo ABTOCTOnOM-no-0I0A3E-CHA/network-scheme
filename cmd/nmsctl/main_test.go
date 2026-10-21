@@ -465,3 +465,19 @@ func TestHostRunsDBCommandsInToolsContainer(t *testing.T) {
 		t.Fatal("install ran inside the container")
 	}
 }
+
+func TestEgressApplyOnlyOnHost(t *testing.T) {
+	for _, c := range []struct {
+		inContainer bool
+		args        []string
+	}{
+		{true, []string{"egress", "apply"}},
+		{false, []string{"egress", "apply", "--extra"}},
+	} {
+		sys := &fakeSys{inContainer: c.inContainer}
+		var out bytes.Buffer
+		if code := run(context.Background(), c.args, deps{out: &out, errw: &out, sys: sys}); code != 1 || len(sys.cmds) != 0 {
+			t.Fatalf("%v in container=%v: exit %d, commands %v", c.args, c.inContainer, code, sys.cmds)
+		}
+	}
+}

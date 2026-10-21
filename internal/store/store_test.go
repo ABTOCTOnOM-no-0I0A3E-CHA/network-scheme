@@ -82,3 +82,13 @@ func TestMigratorOwnsSchemas(t *testing.T) {
 		t.Fatalf("schemas owned by nms_migrator = %d, err %v", n, err)
 	}
 }
+
+func TestTimescaleTelemetryOff(t *testing.T) {
+	var level string
+	if err := testdb.New(t).Pool("postgres").QueryRow(context.Background(), `SHOW timescaledb.telemetry_level`).Scan(&level); err != nil {
+		t.Fatal(err)
+	}
+	if level != "off" {
+		t.Fatalf("timescaledb.telemetry_level = %q, want off", level)
+	}
+}

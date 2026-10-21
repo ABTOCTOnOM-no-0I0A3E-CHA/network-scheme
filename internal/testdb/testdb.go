@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	dockercontainer "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -144,11 +146,7 @@ func start() (*Env, error) {
 		return nil, err
 	}
 	passwords := map[string]string{}
-	files := []testcontainers.ContainerFile{{
-		HostFilePath:      filepath.Join(root, "deploy", "postgres", "initdb", "10-roles.sh"),
-		ContainerFilePath: "/docker-entrypoint-initdb.d/10-roles.sh",
-		FileMode:          0o755,
-	}}
+	var files []testcontainers.ContainerFile
 	/* Mirror production: every password is a file under /run/secrets. */
 	for role, secretName := range map[string]string{
 		"postgres":     "postgres_password",
@@ -173,11 +171,23 @@ func start() (*Env, error) {
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        Image,
 			ExposedPorts: []string{"5432/tcp"},
+			/* As in the deployment: no TimescaleDB telemetry. */
+			Cmd: []string{"postgres", "-c", "timescaledb.telemetry_level=off"},
 			Env: map[string]string{ // #nosec G101 -- path of a secret file, not a secret
 				"POSTGRES_DB":            dbName,
 				"POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_password",
 			},
 			Files: files,
+			/*
+				Mirror production: compose bind-mounts deploy/postgres/initdb over the
+				directory, so the image's own init scripts never run.
+			*/
+			HostConfigModifier: func(hc *dockercontainer.HostConfig) {
+				hc.Mounts = append(hc.Mounts, mount.Mount{
+					Type: mount.TypeBind, Source: filepath.Join(root, "deploy", "postgres", "initdb"),
+					Target: "/docker-entrypoint-initdb.d", ReadOnly: true,
+				})
+			},
 			/* The entrypoint restarts the server after init scripts: wait for the second start. */
 			WaitingFor: wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).WithStartupTimeout(2 * time.Minute),

@@ -3,6 +3,7 @@ package install_test
 import (
 	"bytes"
 	"flag"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/beekamai/network-scheme/deploy"
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/install"
+	"github.com/beekamai/network-scheme/internal/poller"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
@@ -41,9 +43,10 @@ func render(t *testing.T, in install.RenderInput) map[string][]byte {
 
 /* goldenFiles maps rendered keys to their golden files. */
 var goldenFiles = map[string]string{
-	"compose.yaml":    "compose.yaml.golden",
-	"Caddyfile":       "Caddyfile.golden",
-	"config/api.yaml": "api.yaml.golden",
+	"compose.yaml":       "compose.yaml.golden",
+	"Caddyfile":          "Caddyfile.golden",
+	"config/api.yaml":    "api.yaml.golden",
+	"config/poller.yaml": "poller.yaml.golden",
 }
 
 func TestRenderGolden(t *testing.T) {
@@ -111,11 +114,31 @@ func TestRenderedAPIConfigLoads(t *testing.T) {
 	}
 }
 
+func TestRenderedPollerConfigLoads(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "poller.yaml")
+	if err := os.WriteFile(p, render(t, sampleInput())["config/poller.yaml"], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := poller.LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PollerID != "local" || c.DB.User != "nms_poller" || c.DB.Name != "nms" || c.DB.Host != "postgres" ||
+		c.DB.PasswordFile != "/run/secrets/db_poller_password" || c.ReadKeyFile != "/run/secrets/domain_read_key" ||
+		c.ReadPubKeyFile != "/etc/nms/domain_read.pub" {
+		t.Errorf("unexpected config: %+v", c)
+	}
+}
+
 func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	in := sampleInput()
 	in.HTTPSPort = 8443
 	in.CoreSubnet = "10.99.0.0/24"
+	in.DevicesSubnet = "10.99.8.0/22"
 	out := render(t, in)
+	if !bytes.Contains(out["compose.yaml"], []byte(`- subnet: "10.99.8.0/22"`)) {
+		t.Error("devices network must use DevicesSubnet")
+	}
 	if !bytes.Contains(out["config/api.yaml"], []byte(`"https://nms.example.org:8443"`)) {
 		t.Errorf("public_origin must carry the port:\n%s", out["config/api.yaml"])
 	}
@@ -144,6 +167,12 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		"gateway in ip_range":  func(in *install.RenderInput) { in.GatewayIP = "172.30.0.200" },
 		"relative etc path":    func(in *install.RenderInput) { in.Paths.Etc = "etc/nms" },
 		"path with quote":      func(in *install.RenderInput) { in.Paths.Var = "/var/lib/n\"ms" },
+		"devices overlap core": func(in *install.RenderInput) { in.DevicesSubnet = "172.30.0.0/16" },
+		"devices same as core": func(in *install.RenderInput) { in.DevicesSubnet = "172.30.0.0/24" },
+		"devices ipv6":         func(in *install.RenderInput) { in.DevicesSubnet = "fd00::/64" },
+		"devices host bits":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.1/24" },
+		"devices too small":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/30" },
+		"devices injection":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/24\"\n  x: y" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -160,6 +189,13 @@ func TestRenderRejectsBadInput(t *testing.T) {
 type compose struct {
 	Services map[string]struct {
 		Image       string            `yaml:"image"`
+		Entrypoint  []string          `yaml:"entrypoint"`
+		Command     []string          `yaml:"command"`
+		Sysctls     map[string]string `yaml:"sysctls"`
+		Secrets     []any             `yaml:"secrets"`
+		Healthcheck struct {
+			Test []string `yaml:"test"`
+		} `yaml:"healthcheck"`
 		User        string            `yaml:"user"`
 		CapDrop     []string          `yaml:"cap_drop"`
 		SecurityOpt []string          `yaml:"security_opt"`
@@ -173,6 +209,11 @@ type compose struct {
 	} `yaml:"services"`
 	Networks map[string]struct {
 		Internal bool `yaml:"internal"`
+		IPAM     struct {
+			Config []struct {
+				Subnet string `yaml:"subnet"`
+			} `yaml:"config"`
+		} `yaml:"ipam"`
 	} `yaml:"networks"`
 	Secrets map[string]struct {
 		File string `yaml:"file"`
@@ -186,7 +227,7 @@ func TestComposeHardening(t *testing.T) {
 	if err := yaml.Unmarshal(render(t, sampleInput())["compose.yaml"], &c); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"postgres", "migrate", "api", "gateway", "nmsctl"} {
+	for _, want := range []string{"postgres", "migrate", "api", "poller", "gateway", "nmsctl"} {
 		if _, ok := c.Services[want]; !ok {
 			t.Errorf("service %s missing", want)
 		}
@@ -241,6 +282,42 @@ func TestComposeHardening(t *testing.T) {
 	}
 	if len(c.Secrets) == 0 {
 		t.Error("no secrets declared")
+	}
+
+	/* poller: api image as /poller, unprivileged ICMP via sysctl, only core + devices, only its secrets. */
+	p := c.Services["poller"]
+	if p.Image != "nms/api:1.0.0" || !slices.Equal(p.Entrypoint, []string{"/poller"}) || !slices.Equal(p.Command, []string{"run"}) {
+		t.Errorf("poller image/entrypoint/command = %q %v %v", p.Image, p.Entrypoint, p.Command)
+	}
+	if p.User != "65532:65532" {
+		t.Errorf("poller user = %q", p.User)
+	}
+	if p.Sysctls["net.ipv4.ping_group_range"] != "0 2147483647" {
+		t.Errorf("poller sysctls = %v", p.Sysctls)
+	}
+	if !slices.Equal(p.Healthcheck.Test, []string{"CMD", "/poller", "healthcheck"}) {
+		t.Errorf("poller healthcheck = %v", p.Healthcheck.Test)
+	}
+	if !slices.Equal(p.Secrets, []any{"db_poller_password", "domain_read_key"}) {
+		t.Errorf("poller secrets = %v", p.Secrets)
+	}
+	if got := slices.Sorted(maps.Keys(p.Networks)); !slices.Equal(got, []string{"core", "devices"}) {
+		t.Errorf("poller networks = %v", got)
+	}
+	for name, s := range c.Services {
+		if _, ok := s.Networks["devices"]; ok && name != "poller" {
+			t.Errorf("%s must not join devices", name)
+		}
+		if name != "poller" && slices.Contains(s.Secrets, any("domain_read_key")) {
+			t.Errorf("%s must not get the read domain key", name)
+		}
+	}
+	dev := c.Networks["devices"]
+	if dev.Internal || len(dev.IPAM.Config) != 1 || dev.IPAM.Config[0].Subnet != install.DefaultDevicesSubnet {
+		t.Errorf("devices network = %+v, want routed with subnet %s", dev, install.DefaultDevicesSubnet)
+	}
+	if !slices.Equal(c.Services["postgres"].Command, []string{"postgres", "-c", "timescaledb.telemetry_level=off"}) {
+		t.Errorf("postgres command = %v, want telemetry off", c.Services["postgres"].Command)
 	}
 	for name, s := range c.Secrets {
 		if !strings.HasPrefix(s.File, "/etc/nms/secrets/") || strings.Contains(s.File, "..") {

@@ -33,6 +33,8 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 -- The TimescaleDB API (create_hypertable, policies) lives in public; only the
 -- migrator calls it. No role gets CREATE on public.
 GRANT USAGE ON SCHEMA public TO nms_migrator;
+-- This directory is mounted over the image's own init scripts, which would create it.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 CREATE SCHEMA core AUTHORIZATION nms_migrator;
 CREATE SCHEMA audit AUTHORIZATION nms_migrator;

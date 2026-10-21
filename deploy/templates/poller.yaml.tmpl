@@ -1,0 +1,10 @@
+# Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+poller_id: "local"
+db:
+  host: "postgres"
+  port: 5432
+  name: "{{.DBName}}"
+  user: "nms_poller"
+  password_file: "/run/secrets/db_poller_password"
+read_key_file: "/run/secrets/domain_read_key"
+read_pub_key_file: "/etc/nms/domain_read.pub"

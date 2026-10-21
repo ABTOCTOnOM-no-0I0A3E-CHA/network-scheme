@@ -96,16 +96,21 @@ jobs:
       - name: Vulnerability scan
         run: osv-scanner --recursive .
 
-  # Real install on a fresh runner, login through the browser, zero egress, ZAP baseline.
+  # Real install on a fresh runner, login through the browser, a simulated device polled
+  # end to end, zero egress, egress rules of the devices network, ZAP baseline.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       E2E_DIR: /tmp/nms-e2e
       COMPOSE: /etc/nms/compose.yaml
+      # The default devices subnet; the simulator lives there, so it is the management subnet too.
+      DEVICES_SUBNET: 172.30.1.0/24
+      SNMPSIM: nms-e2e-snmpsim
       INSTALL_ARGS: >-
         --non-interactive --public-host localhost --admin-user admin
         --admin-password-file /tmp/nms-e2e/admin-password --image-tag ci
+        --mgmt-subnet 172.30.1.0/24
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
@@ -125,6 +130,7 @@ jobs:
         run: |
           docker build -t nms/api:ci -f deploy/docker/api.Dockerfile .
           docker build -t nms/gateway:ci -f deploy/docker/gateway.Dockerfile .
+          docker build -t nms-snmpsim:ci test/sim/snmpsim
       - name: Build nmsctl
         run: |
           CGO_ENABLED=0 go build -trimpath -o nmsctl ./cmd/nmsctl
@@ -139,19 +145,33 @@ jobs:
             exit 1
           fi
           sed -n '/^Installation complete/,$p' "$E2E_DIR/install.log"
-          systemctl is-enabled nms-audit-anchor.timer
+          systemctl is-enabled nms-audit-anchor.timer nms-egress.service
+      - name: Start the device simulator on the devices network
+        run: |
+          # Synthetic SNMPv3 user of test/sim/snmpsim/simtest. self.snmprec answers SNMPv3 with an
+          # empty context name, as the poller sends it to real devices.
+          docker run -d --name "$SNMPSIM" --network nms_devices \
+            -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/self.snmprec:ro" nms-snmpsim:ci \
+            sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
+              --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
+              --agent-udpv4-endpoint=0.0.0.0:161 --v3-user=simuser --v3-auth-proto=SHA256 \
+              --v3-auth-key=sim-auth-key-0123456789 --v3-priv-proto=AES --v3-priv-key=sim-priv-key-0123456789'
+          for _ in $(seq 1 60); do docker logs "$SNMPSIM" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' && break; sleep 1; done
+          docker logs "$SNMPSIM" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' || { docker logs "$SNMPSIM"; exit 1; }
+          addr="$(docker inspect -f '{{(index .NetworkSettings.Networks "nms_devices").IPAddress}}' "$SNMPSIM")"
+          echo "NMS_E2E_SNMPSIM=$addr" >> "$GITHUB_ENV"
       - name: Start egress capture
         run: |
           test/egress/capture.sh start
-          # recreate the gateway (the only service with a route out) so its startup is captured too
-          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway
+          # recreate the services with a route out (gateway: edge, poller: devices) so their startup is captured too
+          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
       - name: Playwright
         run: >-
           docker run --rm --init --ipc=host --network host
-          -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -w /e2e
+          -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
       - name: Audit anchor timer unit and audit verify
@@ -167,6 +187,25 @@ jobs:
           grep -q "already installed" <<<"$out"
       - name: Zero egress
         run: test/egress/capture.sh check
+      - name: Devices network reaches only the management subnets
+        run: |
+          # NETSHOOT: nicolaka/netshoot v0.16 (as in test/egress/capture.sh)
+          NETSHOOT=nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70
+          rules() { sudo iptables -w -S DOCKER-USER | grep -c -- "-s $DEVICES_SUBNET" || true; }
+          sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          before="$(rules)"
+          sudo /usr/local/bin/nmsctl egress apply
+          [ "$(rules)" = "$before" ] || { echo "egress apply is not idempotent"; sudo iptables -w -S DOCKER-USER; exit 1; }
+          # control: outside the devices network the host routes out, so a failure below is the DROP rule
+          docker run --rm --network bridge "$NETSHOOT" nc -z -w 5 1.1.1.1 443
+          if docker run --rm --network nms_devices "$NETSHOOT" nc -z -w 5 1.1.1.1 443; then
+            echo "devices network reached 1.1.1.1"; exit 1
+          fi
+          # nms-egress.service restores a deleted rule (as at boot)
+          sudo iptables -w -D DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          sudo systemctl restart nms-egress.service
+          sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          sudo iptables -w -S DOCKER-USER
       - name: ZAP baseline
         uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
         with:
@@ -180,4 +219,6 @@ jobs:
           allow_issue_writing: false
       - name: Service logs
         if: failure()
-        run: sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
+        run: |
+          sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
+          docker logs --tail 100 "$SNMPSIM" || true

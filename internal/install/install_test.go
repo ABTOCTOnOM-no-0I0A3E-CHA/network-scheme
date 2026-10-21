@@ -33,7 +33,8 @@ type fakeSys struct {
 	chowns  map[string][2]int /* path -> uid, gid */
 	runErr  error
 	inCtner bool
-	exe     string /* the running nmsctl; default: the test binary */
+	exe     string                    /* the running nmsctl; default: the test binary */
+	run     func(c install.Cmd) error /* optional: result of iptables commands (default runErr) */
 }
 
 func newFakeSys() *fakeSys {
@@ -60,6 +61,9 @@ func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
 		in = string(b)
 	}
 	f.stdins = append(f.stdins, in)
+	if f.run != nil && c.Name == "iptables" {
+		return f.run(c)
+	}
 	if slices.Contains(c.Args, "admin") && c.Stdout != nil {
 		_, _ = io.WriteString(c.Stdout, "QR...\n"+install.TOTPSecretLinePrefix+"JBSWY3DPEHPK3PXP\n")
 	}
@@ -143,7 +147,7 @@ var wantOwner = map[string]struct {
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"ca.crt":               {0, 0, 0o400},
 	"ca.key":               {0, 0, 0o400},
-	"domain_read.key":      {0, 0, 0o400},
+	"domain_read.key":      {install.ContainerUID, install.ContainerUID, 0o400},
 	"domain_write.key":     {0, 0, 0o400},
 	"domain_backup.key":    {0, 0, 0o400},
 	"executor_sealing_key": {0, 0, 0o400},
@@ -373,6 +377,7 @@ func installOptions(t *testing.T) (install.Options, string, *bytes.Buffer) {
 		PublicHost:        "nms.example.org",
 		InfraNTP:          []string{"10.0.0.1"},
 		InfraDNS:          []string{"10.0.0.2", "dns.corp.example"},
+		MgmtSubnets:       []string{"10.0.0.0/8"},
 		AdminUser:         "admin",
 		AdminPasswordFile: pwFile,
 		TOTPSecretOut:     filepath.Join(t.TempDir(), "totp"),
@@ -394,7 +399,8 @@ func TestRunInstalls(t *testing.T) {
 	}
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
-		"compose.yaml", "Caddyfile", "config/api.yaml", "config/infra.yaml", "postgres/initdb/10-roles.sh", "installed",
+		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/infra.yaml", "config/egress.yaml",
+		"config/domain_read.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
@@ -422,28 +428,41 @@ func TestRunInstalls(t *testing.T) {
 	if len(kj.Domains) != 3 || !strings.Contains(out.String(), kj.Domains["read"].Fingerprint) {
 		t.Fatalf("keys.json %+v / fingerprint not printed:\n%s", kj, out)
 	}
+	/* The poller's public read key is the one keys.json publishes. */
+	if got := strings.TrimSpace(string(readFile(t, filepath.Join(etc, "config", "domain_read.pub")))); got != kj.Domains["read"].PublicKey {
+		t.Errorf("domain_read.pub = %q, keys.json read key = %q", got, kj.Domains["read"].PublicKey)
+	}
+	eg, err := install.LoadEgress(filepath.Join(etc, "config", "egress.yaml"))
+	if err != nil || eg.DevicesSubnet.String() != install.DefaultDevicesSubnet || len(eg.MgmtSubnets) != 1 || eg.MgmtSubnets[0].String() != "10.0.0.0/8" {
+		t.Errorf("egress.yaml = %+v, %v", eg, err)
+	}
 	if !strings.Contains(out.String(), "SHA-256") {
 		t.Errorf("web certificate fingerprint not printed:\n%s", out)
 	}
 
-	/* Commands: compose up, admin create through the tools container, timer. */
+	/* Commands: egress rules before any container, compose up, admin create in the tools container, units. */
 	var lines []string
 	for _, c := range sys.cmds {
 		lines = append(lines, cmdline(c))
 	}
 	want := []string{
+		"iptables -w -n -L DOCKER-USER",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 		"docker compose -f /etc/nms/compose.yaml up -d --wait --wait-timeout 600",
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
+		"systemctl enable nms-egress.service",
 		"systemctl enable --now nms-audit-anchor.timer",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[1] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[1])
+	if sys.stdins[5] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins[5])
 	}
-	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
+	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer", "nms-egress.service"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
@@ -533,6 +552,9 @@ func TestRunRejectsBadInputBeforeWriting(t *testing.T) {
 		"missing image tag": func(o *install.Options) { o.ImageTag = "" },
 		"totp out exists":   func(o *install.Options) { writeFile(t, o.TOTPSecretOut, "old") },
 		"totp out no dir":   func(o *install.Options) { o.TOTPSecretOut = filepath.Join(t.TempDir(), "missing", "totp") },
+		"no mgmt subnet":    func(o *install.Options) { o.MgmtSubnets = nil },
+		"reserved mgmt":     func(o *install.Options) { o.MgmtSubnets = []string{"10.0.0.0/8", "127.0.0.0/8"} },
+		"bad devices":       func(o *install.Options) { o.DevicesSubnet = "172.30.0.0/24" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

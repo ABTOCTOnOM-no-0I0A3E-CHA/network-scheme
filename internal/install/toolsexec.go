@@ -28,9 +28,9 @@ const TOTPSecretLinePrefix = "TOTP secret (manual entry): "
 const HostBinary = "/usr/local/bin/nmsctl"
 
 /* allowedCommands are the only programs OSSystem.Run starts. */
-var allowedCommands = map[string]bool{"docker": true, "systemctl": true}
+var allowedCommands = map[string]bool{"docker": true, "systemctl": true, "iptables": true}
 
-// OSSystem is the real System: it shells out to docker and systemctl with fixed argv.
+// OSSystem is the real System: it shells out to docker, systemctl and iptables with fixed argv.
 type OSSystem struct{}
 
 // GOOS returns runtime.GOOS.
@@ -57,7 +57,7 @@ func (OSSystem) Chown(path string, uid, gid int) error { return os.Lchown(path, 
 // Executable returns the path of the running binary.
 func (OSSystem) Executable() (string, error) { return os.Executable() }
 
-// Run starts docker or systemctl directly (no shell) and waits for it.
+// Run starts docker, systemctl or iptables directly (no shell) and waits for it.
 func (OSSystem) Run(ctx context.Context, c Cmd) error {
 	if !allowedCommands[c.Name] {
 		return fmt.Errorf("install: command %q is not allowed", c.Name)
