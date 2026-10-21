@@ -1,10 +1,10 @@
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Dialog } from "radix-ui";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
-import { errorKey, thrownKey } from "@/features/auth/errors";
-import { api } from "@/lib/api";
+import { errorCode, errorKey, thrownKey } from "@/features/auth/errors";
+import { api, notifyUnauthorized } from "@/lib/api";
 import { stepUpStore } from "./stepup";
 
 /** Host of the step-up prompt; mount once inside the authenticated shell. */
@@ -28,6 +28,12 @@ function StepUpForm() {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const otp = useRef<HTMLInputElement>(null);
+
+  /* the input is disabled while verifying and loses focus; give it back after a failed attempt */
+  useEffect(() => {
+    if (!busy && error) otp.current?.focus();
+  }, [busy, error]);
 
   const verify = async (value: string) => {
     setBusy(true);
@@ -38,6 +44,12 @@ function StepUpForm() {
         body: { code: value },
       });
       if (response.ok) return stepUpStore.settle(true);
+      /* a wrong code answers 401 too; only these codes mean the session itself is gone */
+      const code = errorCode(err);
+      if (code === "session_expired" || code === "unauthenticated") {
+        stepUpStore.settle(false);
+        return notifyUnauthorized();
+      }
       setError(t(errorKey(err)));
     } catch (e) {
       setError(t(thrownKey(e)));
@@ -56,6 +68,7 @@ function StepUpForm() {
           maxLength={6}
           inputMode="numeric"
           pattern="[0-9]*"
+          ref={otp}
           autoFocus
           autoComplete="one-time-code"
           aria-label={t("stepup.label")}

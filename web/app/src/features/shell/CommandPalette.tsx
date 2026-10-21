@@ -6,7 +6,7 @@ import { useDevices } from "@/features/devices/api";
 
 const MAX_RESULTS = 20;
 
-/* Devices matching the query by name or address; nothing is requested or listed until something is typed. */
+/* Devices matching the query by name or address; the list is fetched when the palette opens, but nothing is rendered until something is typed. */
 function DeviceResults({ query, onDone }: { query: string; onDone: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();

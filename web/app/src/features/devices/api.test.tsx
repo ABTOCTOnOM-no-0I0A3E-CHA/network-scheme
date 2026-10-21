@@ -1,4 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,6 +9,7 @@ import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import "@/i18n";
 import ru from "@/i18n/ru.json";
+import { setUnauthorizedHandler } from "@/lib/api";
 import { errorKey } from "@/features/auth/errors";
 import { StateBadge } from "@/features/common/StateBadge";
 import { StepUpDialog } from "@/features/common/StepUpDialog";
@@ -130,6 +133,31 @@ describe("step-up", () => {
     expect(screen.queryByText("RAW SERVER MESSAGE")).toBeNull();
   });
 
+  it("a wrong code (401) does not trigger the global unauthorized handler; a lost session does", async () => {
+    const spy = vi.fn();
+    setUnauthorizedHandler(spy);
+    try {
+      stepupFn = () => err(401, "invalid_credentials");
+      open();
+      withStepUp(async () => {
+        throw new ApiError("stepup_required", 403);
+      }).catch(() => undefined);
+      const input = await screen.findByLabelText(ru.stepup.label);
+      await userEvent.type(input, "000000");
+      expect(await screen.findByRole("alert")).toHaveTextContent(ru.errors.invalid_credentials);
+      expect(spy).not.toHaveBeenCalled();
+      expect(screen.getByText(ru.stepup.title)).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByLabelText(ru.stepup.label)).toHaveFocus());
+
+      stepupFn = () => err(401, "session_expired");
+      await userEvent.type(screen.getByLabelText(ru.stepup.label), "111111");
+      await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.queryByText(ru.stepup.title)).toBeNull());
+    } finally {
+      setUnauthorizedHandler(undefined);
+    }
+  });
+
   it("does not retry a second stepup_required", async () => {
     deleteFn = () => err(403, "stepup_required");
     stepupFn = () => new HttpResponse(null, { status: 204 });
@@ -145,7 +173,11 @@ describe("step-up", () => {
 
 describe("error codes", () => {
   it("every API error code has a translation", () => {
-    for (const code of ["not_found", "forbidden", "stepup_required", "address_exists", "too_many_points", "group_not_empty", "internal"]) {
+    const yaml = readFileSync(path.resolve(__dirname, "../../../../../api/openapi.yaml"), "utf8");
+    const block = yaml.slice(yaml.indexOf("- bad_request"), yaml.indexOf("message: { type: string, description: \"Human-readable"));
+    const codes = [...block.matchAll(/^\s+- (\w+)/gm)].map((m) => m[1]);
+    expect(codes.length).toBeGreaterThan(25);
+    for (const code of codes) {
       const key = errorKey({ error: { code } });
       expect(key).toBe(`errors.${code}`);
       expect(ru.errors[code as keyof typeof ru.errors]).toBeTruthy();

@@ -10,10 +10,11 @@ import { StateBadge } from "@/features/common/StateBadge";
 import { ApiError } from "@/features/common/stepup";
 import { cn } from "@/lib/utils";
 import { AddDeviceDialog } from "./AddDeviceDialog";
-import { useDevices, useGroups, type Device } from "./api";
+import { filterDevices, useDevices, useGroups, type Device } from "./api";
 
 const ROW_HEIGHT = 44;
 const NO_DEVICES: Device[] = [];
+const MIN_WIDTH = "min-w-[70rem]";
 const GRID =
   "grid grid-cols-[7rem_minmax(8rem,1.2fr)_minmax(8rem,1fr)_minmax(7rem,1fr)_minmax(7rem,1fr)_minmax(6rem,0.8fr)_minmax(10rem,1.2fr)_minmax(9rem,1fr)] items-center gap-3 px-3";
 const SELECT_CLASS = "h-9 rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
@@ -33,7 +34,8 @@ export function DeviceList({ canAdd, search, onSearchChange }: Props) {
   const [state, setState] = useState<Device["state"] | undefined>();
   const [adding, setAdding] = useState(false);
   const all = useDevices();
-  const devices = useDevices({ groupId, state, search });
+  const filtered = useMemo(() => filterDevices(all.data ?? NO_DEVICES, { groupId, state, search }), [all.data, groupId, state, search]);
+  const devices = { isPending: all.isPending, error: all.error, data: all.data && filtered };
   const groups = useGroups();
   const groupNames = useMemo(() => new Map(groups.data?.map((g) => [g.id, g.name])), [groups.data]);
 
@@ -134,7 +136,7 @@ export function DeviceList({ canAdd, search, onSearchChange }: Props) {
         </p>
       )}
       <div role="table" aria-label={t("devices.table")} aria-rowcount={tableRows.length + 1} className="overflow-x-auto rounded-md border">
-        <div className="min-w-[64rem]">
+        <div className={MIN_WIDTH}>
           {table.getHeaderGroups().map((hg) => (
             <div key={hg.id} role="row" className={cn(GRID, "h-10 border-b bg-muted/50 text-xs font-medium text-muted-foreground")}>
               {hg.headers.map((hd) => (

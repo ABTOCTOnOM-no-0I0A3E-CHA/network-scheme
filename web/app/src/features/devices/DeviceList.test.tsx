@@ -149,6 +149,25 @@ describe("DeviceList", () => {
     expect(screen.getByLabelText(ru.devices.addDialog.name)).toHaveValue("core-1");
   });
 
+  it("rejects an invalid SNMP port before sending", async () => {
+    devices = [];
+    let posted = 0;
+    createFn = () => {
+      posted++;
+      return HttpResponse.json({ id: 1 }, { status: 201 });
+    };
+    setup(true);
+    await userEvent.click(await screen.findByRole("button", { name: ru.devices.add }));
+    await userEvent.type(await screen.findByLabelText(ru.devices.addDialog.name), "core-1");
+    await userEvent.type(screen.getByLabelText(ru.devices.addDialog.address), "192.0.2.10");
+    const port = screen.getByLabelText(ru.devices.addDialog.port);
+    await userEvent.clear(port);
+    await userEvent.type(port, "70000");
+    await userEvent.click(screen.getByRole("button", { name: ru.devices.addDialog.create }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.devices.addDialog.badPort);
+    expect(posted).toBe(0);
+  });
+
   it("after creation moves straight to the credential step", async () => {
     devices = [];
     createFn = () => HttpResponse.json({ id: 42 }, { status: 201 });

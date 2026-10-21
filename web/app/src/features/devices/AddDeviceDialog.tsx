@@ -50,6 +50,7 @@ function Steps({ groups, onClose }: { groups?: Group[]; onClose: () => void }) {
     const address = String(fd.get("address") ?? "").trim();
     const groupId = Number(fd.get("group_id"));
     const port = Number(fd.get("port") || 161);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return setError(t("devices.addDialog.badPort"));
     if (!name || !address || !Number.isInteger(groupId) || groupId <= 0) return setError(t("devices.addDialog.required"));
     try {
       setDeviceId(await create.mutateAsync({ name, address, group_id: groupId, snmp_port: port }));
