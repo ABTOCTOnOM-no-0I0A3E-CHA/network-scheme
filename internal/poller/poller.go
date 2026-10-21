@@ -82,6 +82,10 @@ type Poller struct {
 	scanGap     time.Duration                                          /* least time between two runs of a scan, however requested */
 	scanPanics  atomic.Int64                                           /* recovered panics of discovery runs */
 	recheck     func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
+
+	jobReload     sync.Mutex   /* single-flight reloadForJob */
+	lastJobReload time.Time    /* guarded by jobReload */
+	jobReloads    atomic.Int64 /* rereads done for jobs; tests read it */
 }
 
 // New returns a poller for a validated cfg.

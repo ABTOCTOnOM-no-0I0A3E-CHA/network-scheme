@@ -533,3 +533,32 @@ func TestLoadDevicesClampsIntervals(t *testing.T) {
 		t.Fatalf("devices not loaded: %v", want)
 	}
 }
+
+func TestUnknownPollNowJobsReloadOncePerGap(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	var mu sync.Mutex
+	clock := time.Now()
+	p.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	w := &pollNowWorker{p: p}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			err := w.Work(context.Background(), &river.Job[jobs.PollNowArgs]{Args: jobs.PollNowArgs{DeviceID: 1<<40 + int64(i)}})
+			if err == nil || !errors.Is(err, errNotMine) {
+				t.Errorf("job %d: err = %v, want a cancel for an unknown device", i, err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := p.jobReloads.Load(); n != 1 {
+		t.Fatalf("%d rereads for 8 unknown-device jobs, want 1", n)
+	}
+	mu.Lock()
+	clock = clock.Add(jobReloadGap + time.Second)
+	mu.Unlock()
+	_ = w.Work(context.Background(), &river.Job[jobs.PollNowArgs]{Args: jobs.PollNowArgs{DeviceID: 1 << 41}})
+	if n := p.jobReloads.Load(); n != 2 {
+		t.Fatalf("%d rereads after the gap, want 2", n)
+	}
+}
