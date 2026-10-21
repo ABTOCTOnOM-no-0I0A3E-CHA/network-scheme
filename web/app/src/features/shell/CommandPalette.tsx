@@ -1,12 +1,56 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import { Command, CommandEmpty, CommandInput, CommandList } from "@/components/ui/command";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { useDevices } from "@/features/devices/api";
+
+const MAX_RESULTS = 20;
+
+/* Devices matching the query by name or address; nothing is requested or listed until something is typed. */
+function DeviceResults({ query, onDone }: { query: string; onDone: () => void }) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { data } = useDevices({ search: query });
+  if (!query.trim() || !data?.length) return null;
+  return (
+    <CommandGroup heading={t("palette.devices")}>
+      {data.slice(0, MAX_RESULTS).map((d) => (
+        <CommandItem
+          key={d.id}
+          value={String(d.id)}
+          onSelect={() => {
+            onDone();
+            void navigate({ to: "/devices", search: { q: d.name } });
+          }}
+        >
+          <span className="truncate">{d.name}</span>
+          <span className="ml-auto font-mono text-xs text-muted-foreground">{d.address}</span>
+        </CommandItem>
+      ))}
+    </CommandGroup>
+  );
+}
+
+function PaletteBody({ onDone }: { onDone: () => void }) {
+  const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  return (
+    /* results are filtered by the device query itself, not by cmdk, so thousands of devices are never rendered */
+    <Command shouldFilter={false}>
+      <CommandInput autoFocus placeholder={t("palette.placeholder")} value={query} onValueChange={setQuery} />
+      <CommandList>
+        <CommandEmpty>{t("palette.empty")}</CommandEmpty>
+        <DeviceResults query={query} onDone={onDone} />
+      </CommandList>
+    </Command>
+  );
+}
 
 /**
  * Command palette in a native modal <dialog>. A Radix Dialog would pull in
  * react-remove-scroll, whose runtime <style> injection the panel CSP blocks;
  * the native element needs no scroll-lock library and traps focus itself.
- * Phase 0 has no commands, so it always shows the empty state.
+ * It searches devices by name or address.
  */
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const { t } = useTranslation();
@@ -47,14 +91,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         if (e.target === e.currentTarget) onOpenChange(false);
       }}
     >
-      {open && (
-        <Command>
-          <CommandInput autoFocus placeholder={t("palette.placeholder")} />
-          <CommandList>
-            <CommandEmpty>{t("palette.empty")}</CommandEmpty>
-          </CommandList>
-        </Command>
-      )}
+      {open && <PaletteBody onDone={() => onOpenChange(false)} />}
     </dialog>
   );
 }
