@@ -39,6 +39,8 @@ const server = setupServer(
     return new HttpResponse(null, { status: 204 });
   }),
   http.get("*/api/devices", () => HttpResponse.json(inventory)),
+  http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
+  http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
   http.get("*/api/groups", () => apiError(403, "forbidden")),
   http.get("*/api/auth/me", () =>
     loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles, csrf_token: "tok" }) : apiError(401, "unauthenticated"),
@@ -248,9 +250,8 @@ describe("shell", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "198.51");
     await user.click(await screen.findByRole("option", { name: /edge-rtr/ }));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/devices"));
-    expect(router.state.location.search).toEqual({ q: "edge-rtr" });
-    expect(await screen.findByLabelText(ru.devices.search)).toHaveValue("edge-rtr");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/devices/2"));
+    expect(await screen.findByRole("heading", { name: "edge-rtr" })).toBeInTheDocument();
 
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "core");

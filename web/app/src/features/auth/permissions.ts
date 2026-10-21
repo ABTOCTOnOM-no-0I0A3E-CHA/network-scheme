@@ -7,3 +7,8 @@ import type { Session } from "./useSession";
 export function canManageDevices(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "admin");
 }
+
+/** UI hint only: devices.poll belongs to the operator and admin roles. */
+export function canPollDevices(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
+}

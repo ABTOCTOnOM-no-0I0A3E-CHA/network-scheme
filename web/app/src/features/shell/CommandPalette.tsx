@@ -20,7 +20,7 @@ function DeviceResults({ query, onDone }: { query: string; onDone: () => void })
           value={String(d.id)}
           onSelect={() => {
             onDone();
-            void navigate({ to: "/devices", search: { q: d.name } });
+            void navigate({ to: "/devices/$id", params: { id: String(d.id) } });
           }}
         >
           <span className="truncate">{d.name}</span>

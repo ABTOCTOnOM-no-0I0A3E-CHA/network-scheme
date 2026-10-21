@@ -12,6 +12,7 @@ function DevicesPage() {
     <DeviceList
       canAdd={canManageDevices(session)}
       search={q ?? ""}
+      onOpen={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}
       onSearchChange={(next) => void navigate({ to: "/devices", search: { q: next || undefined }, replace: true })}
     />
   );

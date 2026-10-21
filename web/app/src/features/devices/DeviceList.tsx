@@ -25,10 +25,12 @@ type Props = {
   canAdd: boolean;
   search: string;
   onSearchChange: (search: string) => void;
+  /** Opens the device card; names are plain text when absent. */
+  onOpen?: (id: number) => void;
 };
 
 /** Device inventory: filters, virtualized table and the add-device dialog. All device fields are rendered as text. */
-export function DeviceList({ canAdd, search, onSearchChange }: Props) {
+export function DeviceList({ canAdd, search, onSearchChange, onOpen }: Props) {
   const { t } = useTranslation();
   const [groupId, setGroupId] = useState<number | undefined>();
   const [state, setState] = useState<Device["state"] | undefined>();
@@ -43,7 +45,15 @@ export function DeviceList({ canAdd, search, onSearchChange }: Props) {
     const h = createColumnHelper<Device>();
     return [
       h.accessor("state", { id: "state", header: () => t("devices.col.state"), cell: (c) => <StateBadge state={c.getValue()} since={c.row.original.state_since} /> }),
-      h.accessor("name", { id: "name", header: () => t("devices.col.name"), cell: (c) => <span className="truncate font-medium">{c.getValue()}</span> }),
+      h.accessor("name", { id: "name", header: () => t("devices.col.name"), cell: (c) =>
+          onOpen ? (
+            <button type="button" title={c.getValue()} className="truncate text-left font-medium underline-offset-2 hover:underline" onClick={() => onOpen(c.row.original.id)}>
+              {c.getValue()}
+            </button>
+          ) : (
+            <span className="truncate font-medium">{c.getValue()}</span>
+          ),
+      }),
       h.accessor("address", { id: "address", header: () => t("devices.col.address"), cell: (c) => <span className="truncate font-mono text-xs">{c.getValue()}</span> }),
       h.accessor("group_id", {
         id: "group",
@@ -75,7 +85,7 @@ export function DeviceList({ canAdd, search, onSearchChange }: Props) {
           ) : null,
       }),
     ];
-  }, [t, groupNames]);
+  }, [t, groupNames, onOpen]);
 
   /* the compiler skips memoizing this component, which is what TanStack Table needs */
   // eslint-disable-next-line react-hooks/incompatible-library
