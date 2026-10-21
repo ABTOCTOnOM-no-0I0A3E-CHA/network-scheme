@@ -92,8 +92,8 @@ func newHarness(t *testing.T, simContext string) *harness {
 }
 
 func (h *harness) config(iv Intervals) Config {
-	zero := 0
-	return Config{PollerID: h.pollerID, Workers: 16, SNMPTimeout: 400 * time.Millisecond, SNMPRetries: &zero,
+	one := 1 /* production defaults: the simulator can be slow while other test containers run */
+	return Config{PollerID: h.pollerID, Workers: 16, SNMPTimeout: 2 * time.Second, SNMPRetries: &one,
 		DefaultIntervals: iv, HeavyCPUThreshold: 80}
 }
 
@@ -317,6 +317,8 @@ func silentUDP(t *testing.T) netip.AddrPort {
 func TestStatusPartialWhenSNMPFails(t *testing.T) {
 	h := newHarness(t, "")
 	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	zero := 0
+	p.cfg.SNMPTimeout, p.cfg.SNMPRetries = 400*time.Millisecond, &zero
 	ctx := context.Background()
 	addr := silentUDP(t)
 	id := h.device(addr)
@@ -408,10 +410,14 @@ func TestPollNowJob(t *testing.T) {
 	eventually(t, 30*time.Second, "poll_now job completed", func() bool {
 		return h.count(`SELECT count(*) FROM jobs.river_job WHERE kind = 'poll_now' AND (args->>'device_id')::bigint = $1 AND state = 'completed'`, id) == 1
 	})
-	if h.count(`SELECT count(*) FROM metrics.availability WHERE device_id = $1 AND state = 'up'`, id) == 0 ||
-		h.count(`SELECT count(*) FROM inventory.interface WHERE device_id = $1`, id) == 0 ||
-		h.count(`SELECT count(*) FROM metrics.sys_metrics WHERE device_id = $1`, id) == 0 {
-		t.Fatal("poll_now did not run a full poll")
+	for what, sql := range map[string]string{
+		"availability": `SELECT count(*) FROM metrics.availability WHERE device_id = $1 AND state = 'up'`,
+		"inventory":    `SELECT count(*) FROM inventory.interface WHERE device_id = $1`,
+		"metrics":      `SELECT count(*) FROM metrics.sys_metrics WHERE device_id = $1`,
+	} {
+		if h.count(sql, id) == 0 {
+			t.Errorf("poll_now stored no %s", what)
+		}
 	}
 	/* A job for a device this poller does not own is cancelled, not run. */
 	foreign := newHarness(t, "")
