@@ -11,7 +11,7 @@ const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent p
 /* client-side bounds; the API enforces its own as well */
 const MAX_INTERVAL = 86400;
 const INTERVALS = [
-  { field: "interval_avail_s", min: 5, label: "card.edit.intervalAvail" },
+  { field: "interval_avail_s", min: 10, label: "card.edit.intervalAvail" },
   { field: "interval_metrics_s", min: 10, label: "card.edit.intervalMetrics" },
   { field: "interval_inventory_s", min: 60, label: "card.edit.intervalInventory" },
 ] as const;

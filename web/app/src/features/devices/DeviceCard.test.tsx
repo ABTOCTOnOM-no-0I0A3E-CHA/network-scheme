@@ -183,9 +183,9 @@ describe("DeviceCard", () => {
     await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
     const form = screen.getByRole("form", { name: ru.card.edit.title });
     const avail = within(form).getByLabelText(ru.card.edit.intervalAvail);
-    await userEvent.type(avail, "4");
+    await userEvent.type(avail, "9");
     await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
-    expect(await within(form).findByRole("alert")).toHaveTextContent("от 5 до 86400");
+    expect(await within(form).findByRole("alert")).toHaveTextContent("от 10 до 86400");
     expect(patched).toBeUndefined();
 
     await userEvent.clear(avail);
