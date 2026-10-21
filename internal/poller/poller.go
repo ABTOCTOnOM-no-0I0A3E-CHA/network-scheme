@@ -51,6 +51,12 @@ type Deps struct {
 	Registry *drivers.Registry /* nil: drivers.Default() */
 	Clock    func() time.Time  /* nil: time.Now */
 	Logger   *slog.Logger      /* nil: slog.Default() */
+	/*
+		AvailabilityStarted, when set, is called as each scheduled availability
+		run starts, with the time the run was due; load tests measure the
+		scheduling delay with it. It must return quickly.
+	*/
+	AvailabilityStarted func(deviceID int64, due, started time.Time)
 }
 
 // Poller polls the devices of one poller id.
@@ -101,6 +107,13 @@ func New(cfg Config, d Deps) *Poller {
 		p.log = slog.Default()
 	}
 	p.sched = newScheduler(cfg.Workers, p.run, p.forget)
+	if hook := d.AvailabilityStarted; hook != nil {
+		p.sched.started = func(id int64, c class, due, at time.Time) {
+			if c == classAvail {
+				hook(id, due, at)
+			}
+		}
+	}
 	p.rates = metrics.NewRateCalc(func(id int64) time.Duration { return p.sched.interval(id, classMetrics) })
 	return p
 }

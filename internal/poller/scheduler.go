@@ -104,7 +104,8 @@ worker pool. A device's first run is at a random point within its interval,
 so a restart does not poll every device at once. A class is queued again only
 when its run has finished, and every session-opening run holds the device
 lock, so polls of one device never overlap; availability never waits for the
-lock, so a long inventory cannot delay it. Failing metrics and inventory runs back off
+lock, so a long inventory cannot delay it, and metrics and inventory never
+take the quarter of the worker slots kept for it. Failing metrics and inventory runs back off
 exponentially; availability always keeps its interval.
 */
 type scheduler struct {
@@ -113,8 +114,10 @@ type scheduler struct {
 	q        itemHeap
 	wake     chan struct{}
 	sem      chan struct{}
+	heavy    chan struct{} /* metrics and inventory: all but a quarter of the slots, kept for availability */
 	run      runFunc
-	onRemove func(id int64) /* called without mu held */
+	onRemove func(id int64)                             /* called without mu held */
+	started  func(id int64, c class, due, at time.Time) /* nil, or told when a scheduled run starts */
 	now      func() time.Time
 	wg       sync.WaitGroup
 }
@@ -125,7 +128,8 @@ func newScheduler(workers int, run runFunc, onRemove func(int64)) *scheduler {
 	}
 	return &scheduler{
 		devs: map[int64]*devState{}, wake: make(chan struct{}, 1), sem: make(chan struct{}, workers),
-		run: run, onRemove: onRemove, now: time.Now,
+		heavy: make(chan struct{}, max(workers-workers/4, 1)),
+		run:   run, onRemove: onRemove, now: time.Now,
 	}
 }
 
@@ -253,8 +257,9 @@ func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 	err := func() error {
 		/*
 			Device lock first, worker slot second: a run waiting for its busy device
-			must not hold a slot. Availability does not wait for the lock at all; it
-			gets the lock to TryLock.
+			must not hold a slot. Metrics and inventory take a heavy slot before the
+			worker slot, so availability always finds a free one. Availability does
+			not wait for the lock at all; it gets the lock to TryLock.
 		*/
 		lk := ds.lock
 		if it.c != classAvail {
@@ -263,6 +268,12 @@ func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 			}
 			defer ds.lock.Unlock()
 			lk = nil
+			select {
+			case s.heavy <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			defer func() { <-s.heavy }()
 		}
 		select {
 		case s.sem <- struct{}{}:
@@ -273,6 +284,9 @@ func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 		s.mu.Lock()
 		d := ds.dev
 		s.mu.Unlock()
+		if s.started != nil {
+			s.started(d.ID, it.c, it.at, s.now())
+		}
 		return s.run(ctx, d, ds.cache, it.c, lk)
 	}()
 

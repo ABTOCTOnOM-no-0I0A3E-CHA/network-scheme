@@ -292,3 +292,110 @@ func TestSlowDevicesDoNotPinWorkers(t *testing.T) {
 		}
 	}
 }
+
+func TestStartedReportsDueTime(t *testing.T) {
+	const every = 100 * time.Millisecond
+	type start struct {
+		c       class
+		due, at time.Time
+	}
+	var mu sync.Mutex
+	starts := map[int64][]start{}
+	s := newScheduler(4, func(context.Context, device, *devCache, class, *deviceLock) error { return nil }, nil)
+	s.started = func(id int64, c class, due, at time.Time) {
+		mu.Lock()
+		starts[id] = append(starts[id], start{c, due, at})
+		mu.Unlock()
+	}
+	s.apply([]device{testDevice(1, every), testDevice(2, every)})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.loop(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	for id := int64(1); id <= 2; id++ {
+		var prev time.Time
+		n := 0
+		for _, st := range starts[id] {
+			if st.c != classAvail {
+				continue
+			}
+			if st.at.Before(st.due) {
+				t.Fatalf("device %d started at %v, before it was due (%v)", id, st.at, st.due)
+			}
+			if !prev.IsZero() && st.due.Sub(prev) != every {
+				t.Fatalf("device %d: due times %v apart, want %v", id, st.due.Sub(prev), every)
+			}
+			prev = st.due
+			n++
+		}
+		if n < 5 {
+			t.Fatalf("device %d: %d availability starts reported in 1 s", id, n)
+		}
+	}
+}
+
+func TestAvailabilityStartedHook(t *testing.T) {
+	var got []int64
+	p := New(Config{Workers: 1}, Deps{AvailabilityStarted: func(id int64, _, _ time.Time) { got = append(got, id) }})
+	now := time.Now()
+	p.sched.started(1, classMetrics, now, now)
+	p.sched.started(2, classAvail, now, now)
+	p.sched.started(3, classInventory, now, now)
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("hook saw devices %v, want only the availability start of device 2", got)
+	}
+	if New(Config{Workers: 1}, Deps{}).sched.started != nil {
+		t.Fatal("scheduler reports starts without a hook")
+	}
+}
+
+/*
+Slow metrics and inventory runs of every device (a slow network) must not
+take every worker slot: availability keeps a quarter of them and stays on
+schedule.
+*/
+func TestSlowPollsLeaveSlotsForAvailability(t *testing.T) {
+	const every = 100 * time.Millisecond
+	var mu sync.Mutex
+	runs := map[int64][]time.Time{}
+	s := newScheduler(8, func(ctx context.Context, d device, _ *devCache, c class, _ *deviceLock) error {
+		if c != classAvail {
+			select {
+			case <-ctx.Done():
+			case <-time.After(3 * time.Second):
+			}
+			return nil
+		}
+		mu.Lock()
+		runs[d.ID] = append(runs[d.ID], time.Now())
+		mu.Unlock()
+		return nil
+	}, nil)
+	var devs []device
+	for id := int64(1); id <= 20; id++ {
+		d := testDevice(id, every)
+		d.Intervals = [numClasses]time.Duration{every, every, every}
+		devs = append(devs, d)
+	}
+	s.apply(devs)
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	s.loop(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, d := range devs {
+		ts := runs[d.ID]
+		if len(ts) < 10 {
+			t.Fatalf("device %d: availability ran %d times in 2.5 s while slow polls ran", d.ID, len(ts))
+		}
+		prev := start
+		for _, at := range ts {
+			if gap := at.Sub(prev); gap > every+time.Second {
+				t.Fatalf("device %d: availability waited %v", d.ID, gap)
+			}
+			prev = at
+		}
+	}
+}
