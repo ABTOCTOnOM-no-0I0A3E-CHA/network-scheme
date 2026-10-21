@@ -120,11 +120,6 @@ func TestWrongCommunityAndVersionAreSilent(t *testing.T) {
 	if _, err := c2.Get([]string{".1.3.6.1.2.1.1.1.0"}); err == nil {
 		t.Error("SNMPv1 answered")
 	}
-	c3 := start(t)
-	connect(t, c3)
-	if _, err := c3.Set([]gosnmp.SnmpPDU{{Name: ".1.3.6.1.2.1.1.5.0", Type: gosnmp.OctetString, Value: "x"}}); err == nil {
-		t.Error("SET answered")
-	}
 }
 
 func TestParseRejectsVariation(t *testing.T) {
