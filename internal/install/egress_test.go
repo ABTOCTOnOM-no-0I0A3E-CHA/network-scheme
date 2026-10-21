@@ -3,6 +3,7 @@ package install_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -177,6 +178,29 @@ func TestEgressRejectsBadConfigBeforeRunning(t *testing.T) {
 				t.Fatalf("commands ran: %v", sys.cmds)
 			}
 		})
+	}
+}
+
+func TestEgressErrorsCarryIPTablesStderr(t *testing.T) {
+	const reason = "iptables v1.8.10 (nf_tables): Could not fetch rule set generation id: Permission denied (you must be root)"
+	sys := newFakeSys()
+	sys.run = func(c install.Cmd) error {
+		if c.Stderr == nil {
+			t.Fatalf("no stderr for %s", cmdline(c))
+		}
+		_, _ = io.WriteString(c.Stderr, reason+"\n"+strings.Repeat("x", 2000))
+		return errors.New("exit status 4")
+	}
+	err := install.ApplyEgress(context.Background(), sys, testEgress())
+	if err == nil || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), "exit status 4") {
+		t.Fatalf("ApplyEgress error = %v, want the iptables reason", err)
+	}
+	if len(err.Error()) > 1024 {
+		t.Fatalf("error not bounded: %d bytes", len(err.Error()))
+	}
+	err = install.CheckDockerUsesEgress(context.Background(), sys)
+	if !errors.Is(err, install.ErrEgressBypassed) || !strings.Contains(err.Error(), reason) {
+		t.Fatalf("CheckDockerUsesEgress error = %v", err)
 	}
 }
 

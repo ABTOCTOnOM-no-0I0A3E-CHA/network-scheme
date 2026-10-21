@@ -36,8 +36,8 @@ const (
 /* systemdDir receives the systemd units. */
 const systemdDir = "/etc/systemd/system"
 
-/* units are copied from deploy/systemd (paths relative to systemdDir); the anchor timer is enabled. */
-var units = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer", egressDropIn}
+/* anchorUnits are copied from deploy/systemd; the timer is enabled. */
+var anchorUnits = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"}
 
 /* readPubFile is the public read-domain key for the poller, relative to Paths.Etc. */
 const readPubFile = "config/domain_read.pub"
@@ -232,6 +232,10 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	if err := CheckDockerUsesEgress(ctx, sys); err != nil {
 		return err
 	}
+	/* Also before compose up: from now on Docker starts only with the rules (and restarts the stack at boot). */
+	if err := installEgressDropIn(ctx, o, sys); err != nil {
+		return err
+	}
 
 	compose := path.Join(ps.Etc, "compose.yaml")
 	if _, err := fmt.Fprintln(o.Out, "Starting services…"); err != nil {
@@ -362,28 +366,40 @@ func installHostBinary(o Options, sys System) (err error) {
 	return err
 }
 
-func installUnits(ctx context.Context, o Options, sys System) error {
+/* writeUnits copies files from deploy/systemd to systemdDir (names relative to both) and reloads systemd. */
+func writeUnits(ctx context.Context, o Options, sys System, names ...string) error {
 	dir := o.hostPath(systemdDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- the standard /etc/systemd/system
-		return fmt.Errorf("install: %w", err)
-	}
-	for _, u := range units {
+	for _, u := range names {
 		body, err := deploy.FS.ReadFile("systemd/" + u)
 		if err != nil {
 			return err
 		}
 		p := filepath.Join(dir, filepath.FromSlash(u))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { // #nosec G301 -- a standard systemd drop-in directory
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { // #nosec G301 -- standard systemd directories
 			return fmt.Errorf("install: %w", err)
 		}
 		if err := writeExcl(p, body, 0o644); err != nil {
 			return err
 		}
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "--now", "nms-audit-anchor.timer"}} {
-		if err := sys.Run(ctx, Cmd{Name: "systemctl", Args: args, Stdout: o.Out, Stderr: o.Out}); err != nil {
-			return fmt.Errorf("install: systemctl %s: %w", strings.Join(args, " "), err)
-		}
+	if err := sys.Run(ctx, Cmd{Name: "systemctl", Args: []string{"daemon-reload"}, Stdout: o.Out, Stderr: o.Out}); err != nil {
+		return fmt.Errorf("install: systemctl daemon-reload: %w", err)
+	}
+	return nil
+}
+
+/* installEgressDropIn makes every later Docker start apply and check the egress rules first. */
+func installEgressDropIn(ctx context.Context, o Options, sys System) error {
+	return writeUnits(ctx, o, sys, egressDropIn)
+}
+
+func installUnits(ctx context.Context, o Options, sys System) error {
+	if err := writeUnits(ctx, o, sys, anchorUnits...); err != nil {
+		return err
+	}
+	enable := Cmd{Name: "systemctl", Args: []string{"enable", "--now", "nms-audit-anchor.timer"}, Stdout: o.Out, Stderr: o.Out}
+	if err := sys.Run(ctx, enable); err != nil {
+		return fmt.Errorf("install: systemctl enable nms-audit-anchor.timer: %w", err)
 	}
 	return nil
 }

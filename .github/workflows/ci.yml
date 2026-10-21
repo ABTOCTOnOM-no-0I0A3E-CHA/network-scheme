@@ -147,6 +147,7 @@ jobs:
           sed -n '/^Installation complete/,$p' "$E2E_DIR/install.log"
           systemctl is-enabled nms-audit-anchor.timer
           systemctl show docker -p ExecStartPre | grep -q "/usr/local/bin/nmsctl egress apply"
+          systemctl show docker -p ExecStartPost | grep -q "/usr/local/bin/nmsctl egress check"
       - name: Start the device simulator on the devices network
         run: |
           # Synthetic SNMPv3 user of test/sim/snmpsim/simtest. self.snmprec answers SNMPv3 with an

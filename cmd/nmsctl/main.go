@@ -34,7 +34,7 @@ const usage = `usage:
                  [--devices-subnet CIDR] [--admin-user U] [--admin-password-file F]
                  [--web-cert F --web-key F] [--infra-ntp H,..] [--infra-dns H,..] [--infra-mirror H,..]
                  [--non-interactive] [--totp-secret-out F]
-  nmsctl egress apply
+  nmsctl egress apply|check
   nmsctl admin create --user U [--password-file F] [--totp-secret-out F]
   nmsctl user reset U [--password [--password-file F]] [--totp]
   nmsctl user unlock U
@@ -103,9 +103,12 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return errors.New(usage)
 	}
 	cmd, rest := args[0]+" "+args[1], args[2:]
-	if cmd == "egress apply" {
+	if cmd == "egress apply" || cmd == "egress check" {
 		if d.sys.InContainer() || len(rest) > 0 {
-			return errors.New("usage: nmsctl egress apply (on the host, as root)")
+			return errors.New("usage: nmsctl egress apply|check (on the host, as root)")
+		}
+		if cmd == "egress check" { /* ExecStartPost of docker.service: fails Docker if the rules are bypassed */
+			return install.CheckDockerUsesEgress(ctx, d.sys)
 		}
 		return egressApply(ctx, d)
 	}

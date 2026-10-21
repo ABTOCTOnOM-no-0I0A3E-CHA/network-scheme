@@ -35,6 +35,7 @@ type fakeSys struct {
 	inCtner bool
 	exe     string                    /* the running nmsctl; default: the test binary */
 	run     func(c install.Cmd) error /* optional: result of iptables commands (default runErr) */
+	onRun   func(c install.Cmd)       /* optional: observes every command before it is recorded */
 }
 
 func newFakeSys() *fakeSys {
@@ -54,6 +55,9 @@ func (f *fakeSys) Chown(path string, uid, gid int) error {
 }
 
 func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
+	if f.onRun != nil {
+		f.onRun(c)
+	}
 	f.cmds = append(f.cmds, c)
 	in := ""
 	if c.Stdin != nil {
@@ -458,6 +462,7 @@ func TestRunInstalls(t *testing.T) {
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 		"iptables -w -C FORWARD -j DOCKER-USER",
+		"systemctl daemon-reload",
 		"docker compose -f /etc/nms/compose.yaml up -d --wait --wait-timeout 600",
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
@@ -466,8 +471,8 @@ func TestRunInstalls(t *testing.T) {
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[6] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[6])
+	if sys.stdins[7] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins[7])
 	}
 	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
@@ -476,7 +481,8 @@ func TestRunInstalls(t *testing.T) {
 	}
 	/* Docker starts only after the egress rules are applied; a failing apply keeps it down. */
 	dropIn := string(readFile(t, filepath.Join(root, "etc", "systemd", "system", "docker.service.d", "nms-egress.conf")))
-	if !strings.Contains(dropIn, "[Service]\nExecStartPre=/usr/local/bin/nmsctl egress apply\n") || strings.Contains(dropIn, "ExecStartPre=-") {
+	if !strings.Contains(dropIn, "[Service]\nExecStartPre=/usr/local/bin/nmsctl egress apply\nExecStartPost=/usr/local/bin/nmsctl egress check\n") ||
+		strings.Contains(dropIn, "=-") {
 		t.Errorf("docker drop-in:\n%s", dropIn)
 	}
 	if got := strings.TrimSpace(string(readFile(t, o.TOTPSecretOut))); got != "JBSWY3DPEHPK3PXP" {
@@ -505,6 +511,31 @@ func TestRunInstalls(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(dst)); len(entries) != 1 {
 		t.Errorf("leftover temp files: %v", entries)
+	}
+}
+
+func TestEgressDropInBeforeContainers(t *testing.T) {
+	o, root, out := installOptions(t)
+	dropIn := filepath.Join(root, "etc", "systemd", "system", "docker.service.d", "nms-egress.conf")
+	sys := newFakeSys()
+	reloaded, checked := false, false
+	sys.onRun = func(c install.Cmd) {
+		if c.Name == "systemctl" && cmdline(c) == "systemctl daemon-reload" {
+			_, err := os.Stat(dropIn)
+			reloaded = reloaded || err == nil
+		}
+		if c.Name == "docker" && !checked {
+			checked = true
+			if !reloaded {
+				t.Errorf("first docker command %q ran before the drop-in was written and systemd reloaded", cmdline(c))
+			}
+		}
+	}
+	if err := install.Run(context.Background(), o, sys); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	if !checked {
+		t.Fatal("no docker command ran")
 	}
 }
 

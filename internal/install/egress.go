@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -102,10 +103,33 @@ CheckDockerUsesEgress verifies that the running Docker daemon jumps from
 FORWARD to DOCKER-USER, so the egress rules are on the containers' path.
 */
 func CheckDockerUsesEgress(ctx context.Context, sys System) error {
-	if err := sys.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "-C", "FORWARD", "-j", egressChain}}); err != nil {
+	if err := iptables(ctx, sys, "-w", "-C", "FORWARD", "-j", egressChain); err != nil {
 		return fmt.Errorf("%w: %v", ErrEgressBypassed, err)
 	}
 	return nil
+}
+
+/* maxIPTablesStderr bounds the iptables message kept in an error. */
+const maxIPTablesStderr = 512
+
+/*
+iptables runs iptables with args. On failure the error carries the start of
+its stderr, so the reason reaches the caller (and the journal at boot).
+*/
+func iptables(ctx context.Context, sys System, args ...string) error {
+	var stderr bytes.Buffer
+	err := sys.Run(ctx, Cmd{Name: "iptables", Args: args, Stderr: &stderr})
+	if err == nil {
+		return nil
+	}
+	msg := stderr.Bytes()
+	if len(msg) > maxIPTablesStderr {
+		msg = msg[:maxIPTablesStderr]
+	}
+	if s := strings.TrimSpace(string(msg)); s != "" {
+		return fmt.Errorf("%w: %s", err, s)
+	}
+	return err
 }
 
 /* rules returns the allow rules (in their final order) and the closing DROP rule. */
@@ -131,9 +155,7 @@ func ApplyEgress(ctx context.Context, sys System, e Egress) error {
 	if err := e.validate(); err != nil {
 		return err
 	}
-	ipt := func(args ...string) error {
-		return sys.Run(ctx, Cmd{Name: "iptables", Args: append([]string{"-w"}, args...)})
-	}
+	ipt := func(args ...string) error { return iptables(ctx, sys, append([]string{"-w"}, args...)...) }
 	has := func(rule []string) bool { return ipt(append([]string{"-C", egressChain}, rule...)...) == nil }
 	insert := func(rule []string) error {
 		if err := ipt(append([]string{"-I", egressChain, "1"}, rule...)...); err != nil {
