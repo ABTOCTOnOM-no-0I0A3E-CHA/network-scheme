@@ -124,13 +124,14 @@ func TestKindSwapRejected(t *testing.T) {
 func TestStaleRejected(t *testing.T) {
 	pub, priv := keys(t)
 	ct := credstest.Seal(pub, dev1, "snmp2c", map[string]string{"community": k16}, t0)
-	for _, last := range []time.Time{t0, t0.Add(time.Second)} {
-		if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", last, t0); !errors.Is(err, creds.ErrStale) {
+	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", t0.Add(time.Second), t0); !errors.Is(err, creds.ErrStale) {
+		t.Fatalf("older than accepted: %v", err)
+	}
+	/* Equal is the same credential opened again on the next poll, not a rollback. */
+	for _, last := range []time.Time{t0, t0.Add(-time.Second)} {
+		if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", last, t0); err != nil {
 			t.Fatalf("last=%v: %v", last, err)
 		}
-	}
-	if _, err := creds.Open(priv, pub, ct, dev1, "snmp2c", t0.Add(-time.Second), t0); err != nil {
-		t.Fatal(err)
 	}
 }
 

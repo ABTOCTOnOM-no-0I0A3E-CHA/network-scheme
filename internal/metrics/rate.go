@@ -15,6 +15,7 @@ for concurrent use.
 
 A point is skipped (no rate, the new sample becomes the baseline) when:
   - the device's SysUpTime went back (reboot): every interface of the device;
+    a zero SysUpTime is unknown and never counts as a reboot;
   - more than three poll intervals passed since the baseline, or no time passed;
   - the interface switched between 32-bit and 64-bit counters;
   - a 64-bit octet counter decreased;
@@ -55,8 +56,13 @@ func (r *RateCalc) Rates(deviceID int64, s drivers.Sample, at time.Time) []IfPoi
 
 	maxGap := 3 * r.interval(deviceID)
 	prev := r.devs[deviceID]
-	reboot := prev != nil && s.SysUpTime < prev.uptime
-	next := &devState{uptime: s.SysUpTime, ifs: make(map[int]ifPrev, len(s.Interfaces))}
+	/* A zero sysUpTime means "not read": no reboot check, the last known uptime is kept. */
+	uptime := s.SysUpTime
+	if uptime == 0 && prev != nil {
+		uptime = prev.uptime
+	}
+	reboot := prev != nil && s.SysUpTime != 0 && s.SysUpTime < prev.uptime
+	next := &devState{uptime: uptime, ifs: make(map[int]ifPrev, len(s.Interfaces))}
 
 	var out []IfPoint
 	for _, c := range s.Interfaces {

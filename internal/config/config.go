@@ -101,6 +101,9 @@ func NormalizeOrigin(raw string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
+// Validate checks that every connection field is set and the port is in range.
+func (d DB) Validate() error { return d.validate() }
+
 func (d DB) validate() error {
 	switch {
 	case d.Host == "":

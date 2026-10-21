@@ -15,7 +15,7 @@ var (
 	ErrUndecryptable = errors.New("creds: cannot decrypt credential")
 	ErrOwnerMismatch = errors.New("creds: credential is bound to another owner")
 	ErrKindMismatch  = errors.New("creds: credential is of another kind")
-	ErrStale         = errors.New("creds: credential is not newer than the last accepted one")
+	ErrStale         = errors.New("creds: credential is older than the last accepted one")
 	ErrWeak          = errors.New("creds: credential secret is too weak")
 	ErrMalformed     = errors.New("creds: malformed credential payload")
 )

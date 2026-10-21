@@ -19,7 +19,10 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/httpapi"
+	"github.com/beekamai/network-scheme/internal/jobs"
 	"github.com/beekamai/network-scheme/internal/rbac"
+	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
 /* fakeJobs records enqueued jobs; with fail set every enqueue errors. */
@@ -504,6 +507,26 @@ func TestPollEnqueuesInTransaction(t *testing.T) {
 	if count() != before {
 		t.Fatal("audit record committed without its job")
 	}
+}
+
+func TestPollNowQueuesRiverJob(t *testing.T) {
+	enq, err := jobs.NewEnqueuer(testdb.New(t).Pool("nms_api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, func(d *httpapi.Deps) { d.Jobs = enq })
+	g := f.newGroup()
+	id := f.newDevice(g)
+	op := f.login(false, rbac.Binding{Role: rbac.RoleOperator, GroupID: &g})
+	if resp := f.do(op.authed(req{method: "POST", path: fmt.Sprintf("/api/devices/%d/poll", id)})); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("poll %d", resp.StatusCode)
+	}
+	var n int
+	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT count(*) FROM jobs.river_job
+		WHERE kind = 'poll_now' AND queue = 'poller_local' AND (args->>'device_id')::bigint = $1`, id).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("queued poll_now jobs = %d, %v", n, err)
+	}
+	wantAudit(t, f, "devices.poll_now")
 }
 
 func TestDiscoveryFlow(t *testing.T) {

@@ -14,13 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
 	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/jobs"
 	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/store"
@@ -123,12 +122,16 @@ func serve(ctx context.Context, args []string) error {
 		return err
 	}
 	defer pool.Close()
+	enq, err := jobs.NewEnqueuer(pool)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
-			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: metrics.NewStore(pool), Jobs: noJobs{}, Cfg: cfg, Clock: time.Now, Logger: log,
+			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: metrics.NewStore(pool), Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -153,20 +156,6 @@ func serve(ctx context.Context, args []string) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
-}
-
-/*
-noJobs stands in for the job queue until the poller's queue exists: every
-enqueue fails, so "poll now" answers 500 and commits nothing.
-*/
-type noJobs struct{}
-
-func (noJobs) EnqueuePollNow(context.Context, pgx.Tx, int64) error {
-	return errors.New("jobs not configured")
-}
-
-func (noJobs) EnqueueDiscovery(context.Context, pgx.Tx, int64) error {
-	return errors.New("jobs not configured")
 }
 
 /* healthcheck probes the local API for the container health check: exit 0 or 1. */

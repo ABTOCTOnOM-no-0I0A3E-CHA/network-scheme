@@ -20,8 +20,8 @@ import (
 /*
 Open decrypts a sealed-box credential with the read-domain key pair and
 verifies it: strict payload format, binding to want and kind, and a
-created_at strictly newer than lastAccepted (zero when none was accepted)
-and not later than now+5m.
+created_at not older than lastAccepted (zero when none was accepted; equal is
+the same credential opened again) and not later than now+5m.
 Checks run in the order malformed, owner, kind, stale, secret shape, weak.
 Returned errors never contain secret material.
 */
@@ -55,7 +55,7 @@ func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind strin
 	if env.Kind != kind {
 		return Credential{}, ErrKindMismatch
 	}
-	if !createdAt.After(lastAccepted) {
+	if createdAt.Before(lastAccepted) {
 		return Credential{}, ErrStale
 	}
 	c := Credential{Kind: env.Kind, Owner: owner, CreatedAt: createdAt}

@@ -82,8 +82,9 @@ func provider(db *sql.DB) (*goose.Provider, error) {
 }
 
 /*
-Migrate applies all pending embedded migrations. The connecting role must be
-the schema owner (nms_migrator); concurrent runs are serialised by an advisory lock.
+Migrate applies all pending embedded migrations, then River's job queue
+migrations in the jobs schema. The connecting role must be the schema owner
+(nms_migrator); concurrent runs are serialised by advisory locks.
 */
 func Migrate(ctx context.Context, c config.DB, pw secret.Secret) error {
 	cfg, err := poolConfig(c, pw)
@@ -98,6 +99,9 @@ func Migrate(ctx context.Context, c config.DB, pw secret.Secret) error {
 	}
 	if _, err := p.Up(ctx); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
+	}
+	if err := migrateJobs(ctx, cfg); err != nil {
+		return fmt.Errorf("apply job queue migrations: %w", err)
 	}
 	return nil
 }

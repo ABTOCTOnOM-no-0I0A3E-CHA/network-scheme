@@ -87,6 +87,16 @@ func (r *Registry) Select(sysObjectID, sysDescr string) Driver {
 	return r.drivers[len(r.drivers)-1]
 }
 
+/* ByName returns the driver called name, or nil when the registry has none. */
+func (r *Registry) ByName(name string) Driver {
+	for _, d := range r.drivers {
+		if d.Name() == name {
+			return d
+		}
+	}
+	return nil
+}
+
 /*
 Unverified returns, sorted, the names of registered drivers that report
 Verified() == false: drivers written from vendor documentation whose OIDs,

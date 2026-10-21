@@ -94,6 +94,16 @@ func TestRegistryAlwaysHasFallback(t *testing.T) {
 	}
 }
 
+func TestRegistryByName(t *testing.T) {
+	r := NewRegistry(fakeDriver{"eltex-mes"}, fakeDriver{GenericName})
+	if d := r.ByName("eltex-mes"); d == nil || d.Name() != "eltex-mes" {
+		t.Fatalf("ByName(eltex-mes) = %v", d)
+	}
+	if d := r.ByName("auto"); d != nil {
+		t.Fatalf("ByName(auto) = %v", d)
+	}
+}
+
 func TestCleanText(t *testing.T) {
 	long := strings.Repeat("я", 600) /* 1200 bytes */
 	for in, want := range map[string]string{

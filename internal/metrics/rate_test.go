@@ -126,6 +126,29 @@ func TestRateRebootSkipped(t *testing.T) {
 	}
 }
 
+func TestRateUnknownUptimeKeepsPrevious(t *testing.T) {
+	rc := newCalc()
+	rc.Rates(5, sample(10*time.Hour, ifc(1, 1000, 1000, true)), t0)
+	/* sysUpTime missing (0): not a reboot, the rate is computed and the stored uptime is kept. */
+	pts := rc.Rates(5, sample(0, ifc(1, 1600, 1000, true)), t0.Add(pollEvery))
+	if len(pts) != 1 || pts[0].InBps != 80 {
+		t.Fatalf("unknown uptime = %+v", pts)
+	}
+	/* The next real uptime is compared with the last known one (10h), so 10h+2m is no reboot... */
+	if pts := rc.Rates(5, sample(10*time.Hour+2*pollEvery, ifc(1, 2200, 1000, true)), t0.Add(2*pollEvery)); len(pts) != 1 {
+		t.Fatalf("after unknown uptime = %+v", pts)
+	}
+	/* ...while a smaller one still is. */
+	if pts := rc.Rates(5, sample(time.Minute, ifc(1, 2800, 1000, true)), t0.Add(3*pollEvery)); len(pts) != 0 {
+		t.Fatalf("reboot after unknown uptime = %+v", pts)
+	}
+	/* A first sample without uptime is a baseline like any other. */
+	rc.Rates(6, sample(0, ifc(1, 0, 0, true)), t0)
+	if pts := rc.Rates(6, sample(time.Hour, ifc(1, 600, 0, true)), t0.Add(pollEvery)); len(pts) != 1 {
+		t.Fatalf("baseline without uptime = %+v", pts)
+	}
+}
+
 func TestRateHCDecreaseSkipped(t *testing.T) {
 	rc := newCalc()
 	rc.Rates(1, sample(time.Hour, ifc(1, 1<<40, 1<<40, true)), t0)
