@@ -52,8 +52,33 @@ function setup(ui: (qc: QueryClient) => React.ReactNode) {
 const COMMUNITY = ru.profile.community;
 
 describe("ProfileForm", () => {
+  it("has no password inputs (password managers), is masked text with ignore hints, and posts", async () => {
+    const { container } = render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProfileForm owner="device:7" kind="snmp3" />
+      </QueryClientProvider>,
+    );
+    expect(container.querySelector("input[type=password]")).toBeNull();
+    for (const n of ["auth_key", "priv_key"]) {
+      const el = container.querySelector(`input[name=${n}]`)!;
+      expect(el).toHaveAttribute("autocomplete", "off");
+      for (const a of ["data-1p-ignore", "data-lpignore", "data-bwignore", "data-form-type", "autocapitalize"]) expect(el).toHaveAttribute(a);
+      expect(el.className).toContain("text-security");
+    }
+    expect(container.querySelector("form")).toHaveAttribute("method", "post");
+  });
+
+  it("reports a key-load failure as keyError", async () => {
+    server.use(http.get("*/keys.json", () => new HttpResponse(null, { status: 500 })));
+    setup(() => <ProfileForm owner="device:7" kind="snmp2c" />);
+    await userEvent.type(screen.getByLabelText(COMMUNITY), SECRET);
+    await userEvent.click(screen.getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(ru.profile.keyError));
+    expect(bodies).toHaveLength(0);
+  });
+
   it("seals in the browser: the request carries only ciphertext, the fields are cleared, nothing leaks into caches or storage", async () => {
-    const log = vi.spyOn(console, "log");
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m));
     const onSaved = vi.fn();
     const qc = setup(() => <ProfileForm owner="device:7" kind="snmp2c" onSaved={onSaved} />);
     await screen.findByText(ru.profile.key.replace("{{fingerprint}}", fingerprint(kp.publicKey)));
@@ -78,8 +103,8 @@ describe("ProfileForm", () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain(SECRET);
     expect(JSON.stringify({ ...sessionStorage })).not.toContain(SECRET);
     expect(location.href).not.toContain(SECRET);
-    expect(log).not.toHaveBeenCalled();
-    log.mockRestore();
+    spies.forEach((s) => expect(s).not.toHaveBeenCalled());
+    spies.forEach((s) => s.mockRestore());
   });
 
   it("rejects a short key and control characters before sending anything", async () => {

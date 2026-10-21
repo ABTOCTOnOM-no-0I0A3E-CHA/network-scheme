@@ -22,6 +22,8 @@ import {
 } from "@/lib/seal";
 import { useSaveProfile, type Profile } from "./profiles";
 
+/* masked text input: a type=password field would be offered to the browser password manager */
+const MASK = "[-webkit-text-security:disc]";
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 
 type Props = {
@@ -40,7 +42,7 @@ type Props = {
  * cleared after a successful save.
  */
 export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const qc = useQueryClient();
   const formRef = useRef<HTMLFormElement>(null);
   const key = useReadKey();
@@ -88,8 +90,13 @@ export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
     if (problem) return setError(t(`profile.err.${problem.problem}`, { field: fieldLabel(problem.field) }));
     try {
       /* always the current key: a rotated key must not be sealed to from a stale cache */
-      const readKey = await qc.fetchQuery({ queryKey: readKeyQueryKey, queryFn: loadReadKey, staleTime: 0 });
-      const ct = sealCredential(readKey.publicKey, buildPayload(owner, kind, secret as never));
+      let readKey, ct;
+      try {
+        readKey = await qc.fetchQuery({ queryKey: readKeyQueryKey, queryFn: loadReadKey, staleTime: 0 });
+        ct = sealCredential(readKey.publicKey, buildPayload(owner, kind, secret as never));
+      } catch {
+        return setError(t("profile.keyError"));
+      }
       await save.mutateAsync({ kind, ciphertext: toBase64(ct), keyVersion: readKey.keyVersion });
       form.reset();
       setReveal(false);
@@ -105,11 +112,20 @@ export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
     }
   };
 
-  const secretInput = (name: string, label: string, gen = false, autoComplete = "new-password") => (
+  const secretInput = (name: string, label: string, gen = false) => (
     <div className="grid gap-2">
       <Label htmlFor={`${owner}-${kind}-${name}`}>{label}</Label>
       <div className="flex gap-2">
-        <Input id={`${owner}-${kind}-${name}`} name={name} type={reveal ? "text" : "password"} autoComplete={autoComplete} spellCheck={false} />
+        <Input id={`${owner}-${kind}-${name}`} name={name} type="text"
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-1p-ignore
+          data-lpignore="true"
+          data-bwignore
+          data-form-type="other"
+          className={reveal ? "" : MASK}
+        />
         {gen && (
           <Button type="button" variant="outline" onClick={() => generate(name)}>
             {t("profile.generate")}
@@ -138,11 +154,11 @@ export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
   );
 
   return (
-    <form ref={formRef} onSubmit={submit} className="grid gap-4" noValidate autoComplete="off">
+    <form ref={formRef} onSubmit={submit} className="grid gap-4" noValidate autoComplete="off" method="post" action="">
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-medium">{t(`profile.title.${kind}`)}</h3>
         <p className="text-xs text-muted-foreground">
-          {profile ? `${t(`profile.status.${profile.status}`)}, ${t("profile.updated", { date: new Date(profile.updated_at).toLocaleString("ru-RU") })}` : t("profile.status.none")}
+          {profile ? `${t(`profile.status.${profile.status}`)}, ${t("profile.updated", { date: new Date(profile.updated_at).toLocaleString(i18n.language) })}` : t("profile.status.none")}
         </p>
       </div>
       {kind === "snmp2c" && secretInput("community", t("profile.community"))}
@@ -167,7 +183,12 @@ export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
               rows={5}
               spellCheck={false}
               autoComplete="off"
-              className={`${SELECT_CLASS} h-auto py-2 font-mono ${reveal ? "" : "[-webkit-text-security:disc]"}`}
+              autoCapitalize="off"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore
+              data-form-type="other"
+              className={`${SELECT_CLASS} h-auto py-2 font-mono ${reveal ? "" : MASK}`}
             />
             <p className="text-xs text-muted-foreground">{t("profile.orKey")}</p>
           </div>
