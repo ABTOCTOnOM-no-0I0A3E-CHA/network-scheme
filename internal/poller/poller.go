@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,22 +55,24 @@ type Deps struct {
 
 // Poller polls the devices of one poller id.
 type Poller struct {
-	cfg       Config
-	pool      *pgxpool.Pool
-	priv      *[32]byte
-	pub       *[32]byte
-	pinger    Pinger
-	dial      DialFunc
-	reg       *drivers.Registry
-	now       func() time.Time
-	log       *slog.Logger
-	sched     *scheduler
-	rates     *metrics.RateCalc
-	metrics   *metrics.Store
-	inv       *inventory.Store
-	hostKeys  *ssh.HostKeys
-	disc      *discovery
-	discEvery time.Duration
+	cfg         Config
+	pool        *pgxpool.Pool
+	priv        *[32]byte
+	pub         *[32]byte
+	pinger      Pinger
+	dial        DialFunc
+	reg         *drivers.Registry
+	now         func() time.Time
+	log         *slog.Logger
+	sched       *scheduler
+	rates       *metrics.RateCalc
+	metrics     *metrics.Store
+	inv         *inventory.Store
+	hostKeys    *ssh.HostKeys
+	disc        *discovery
+	discEvery   time.Duration
+	scanRecheck time.Duration
+	scanPanics  atomic.Int64 /* recovered panics of discovery runs */
 }
 
 // New returns a poller for a validated cfg.
@@ -78,7 +81,7 @@ func New(cfg Config, d Deps) *Poller {
 		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, pinger: d.Pinger, dial: d.DialSNMP,
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
-		disc: newDiscovery(), discEvery: discoveryEvery,
+		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
 	}
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}

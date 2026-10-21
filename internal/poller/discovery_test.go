@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -29,6 +30,8 @@ type scanPinger struct {
 	ok      map[netip.Addr]bool
 	hold    netip.Addr
 	release chan struct{}
+	delay   time.Duration /* every probe takes this long (or until ctx ends) */
+	panicAt netip.Addr
 	mu      sync.Mutex
 	pings   map[netip.Addr]int
 	active  int
@@ -54,6 +57,16 @@ func (pg *scanPinger) Ping(ctx context.Context, a netip.Addr) (time.Duration, bo
 		pg.active--
 		pg.mu.Unlock()
 	}()
+	if a == pg.panicAt {
+		panic("hostile ping " + a.String())
+	}
+	if pg.delay > 0 {
+		select {
+		case <-time.After(pg.delay):
+		case <-ctx.Done():
+			return 0, false
+		}
+	}
 	if a == pg.hold {
 		select {
 		case <-pg.release:
@@ -77,6 +90,7 @@ type scanDialer struct {
 	dials map[netip.Addr]int
 	used  map[string]int
 	ports map[uint16]bool
+	fail  bool /* record, then fail without sending anything */
 }
 
 func newScanDialer(sim map[netip.Addr]netip.AddrPort) *scanDialer {
@@ -89,6 +103,9 @@ func (d *scanDialer) dial(ctx context.Context, a netip.AddrPort, c creds.Credent
 	d.ports[a.Port()] = true
 	d.used[c.Kind+":"+c.User+":"+c.AuthKey.Reveal()+":"+c.Community.Reveal()]++
 	d.mu.Unlock()
+	if d.fail {
+		return nil, nil, errors.New("test: no SNMP agent")
+	}
 	o.ContextName = "eltex-mes" /* simulator only: snmpsim picks the .snmprec by v3 context name */
 	to, ok := d.sim[a.Addr()]
 	if !ok {
@@ -481,5 +498,150 @@ func TestDiscoveryScheduledSkipsRunning(t *testing.T) {
 		if pg.count(a) != 0 {
 			t.Fatalf("disabled scan probed %s", a)
 		}
+	}
+}
+
+func (d *scanDialer) total() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, v := range d.dials {
+		n += v
+	}
+	return n
+}
+
+func (pg *scanPinger) total() int {
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	n := 0
+	for _, v := range pg.pings {
+		n += v
+	}
+	return n
+}
+
+func (p *Poller) scanRunning(id int64) bool {
+	p.disc.mu.Lock()
+	defer p.disc.mu.Unlock()
+	return p.disc.running[id]
+}
+
+/*
+TestRunStopsWhenScanChanges: a run re-checks its scan and stops within one
+re-check period when the scan is disabled, deleted, re-addressed, moved to
+another poller or gets another credential; no session is opened afterwards.
+A changed credential is used by the next run.
+*/
+func TestRunStopsWhenScanChanges(t *testing.T) {
+	const newKey = "next-auth-key-0123456789" // #nosec G101 -- test value
+	for name, change := range map[string]string{
+		"disable": `UPDATE core.discovery_scan SET enabled = false WHERE id = $1`,
+		"delete":  `DELETE FROM core.discovery_scan WHERE id = $1`,
+		"cidr":    `UPDATE core.discovery_scan SET cidr = '10.252.255.0/24' WHERE id = $1`,
+		"poller":  `UPDATE core.discovery_scan SET poller_id = poller_id || '-x' WHERE id = $1`,
+		"profile": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "")
+			n := byte(scanNet.Add(1))
+			pfx := netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 252, n, 0}), 24)
+			pg := newScanPinger()
+			pg.delay = 100 * time.Millisecond
+			for a := range scanHosts(pfx) {
+				pg.ok[a] = true
+			}
+			d := newScanDialer(nil)
+			d.fail = true
+			p := h.scanPoller(pg, d)
+			p.scanRecheck = 100 * time.Millisecond
+			scan := h.scan(pfx, true)
+			owner := devices.Owner{Kind: devices.OwnerScan, ID: scan}
+			h.sealV3(owner, simtest.V3AuthKey)
+			ctx := context.Background()
+			if err := p.startScan(ctx, ctx, scan); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, 5*time.Second, "run probing", func() bool { return d.total() >= scanConcurrency })
+			if change == "" {
+				time.Sleep(10 * time.Millisecond) /* a distinct updated_at */
+				h.sealV3(owner, newKey)
+			} else if _, err := h.env.Pool("nms_api").Exec(ctx, change, scan); err != nil {
+				t.Fatal(err)
+			}
+			changed := time.Now()
+			eventually(t, 2*time.Second, "run cancelled", func() bool { return !p.scanRunning(scan) })
+			p.disc.wg.Wait()
+			if took := time.Since(changed); took > time.Second {
+				t.Errorf("run stopped %v after the change", took)
+			}
+			dials := d.total()
+			time.Sleep(300 * time.Millisecond)
+			if d.total() != dials || dials >= 254 || pg.total() >= 254 {
+				t.Fatalf("after the change: %d -> %d sessions, %d pings of 254 hosts", dials, d.total(), pg.total())
+			}
+			if used := d.credentials(); len(used) != 1 || used["snmp3:"+simtest.V3User+":"+simtest.V3AuthKey+":"] != dials {
+				t.Fatalf("credentials: %v", used)
+			}
+			if change != "" {
+				return
+			}
+			pg.delay = 0
+			if err := runScan(p, scan); err != nil {
+				t.Fatal(err)
+			}
+			if used := d.credentials(); used["snmp3:"+simtest.V3User+":"+newKey+":"] != 254 {
+				t.Fatalf("next run credentials: %v", used)
+			}
+		})
+	}
+}
+
+/* hostileReader answers the system group, or panics like a broken parser on hostile input. */
+type hostileReader struct{ panics bool }
+
+func (f hostileReader) Get(_ context.Context, _ ...string) ([]snmp.Var, error) {
+	if f.panics {
+		panic("hostile answer")
+	}
+	return []snmp.Var{
+		{OID: oidSysObjID, Type: snmp.TypeOID, Value: "1.3.6.1.4.1.32473.9"},
+		{OID: oidSysDescr, Type: snmp.TypeOctetString, Value: []byte("fake\x00 device")},
+		{OID: oidSysName, Type: snmp.TypeOctetString, Value: []byte("fake1")},
+	}, nil
+}
+
+func (hostileReader) Walk(context.Context, string, func(snmp.Var) error) error { return nil }
+
+func (hostileReader) BulkGet(context.Context, []string) ([]snmp.Var, error) { return nil, nil }
+
+/* TestScanRecoversPanics: a panic while probing one host is logged and counted; the run and the poller go on. */
+func TestScanRecoversPanics(t *testing.T) {
+	h := newHarness(t, "")
+	pfx := nextScanPrefix()
+	a2, a3, a4 := host(pfx, 2), host(pfx, 3), host(pfx, 4)
+	pg := newScanPinger(a2, a3)
+	pg.panicAt = a4
+	dial := func(_ context.Context, a netip.AddrPort, _ creds.Credential, _ snmp.Options) (snmp.Reader, io.Closer, error) {
+		return hostileReader{panics: a.Addr() == a3}, io.NopCloser(nil), nil
+	}
+	p := New(h.config(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour}), Deps{
+		Pool: h.env.Pool("nms_poller"), Priv: h.priv, Pub: h.pub, Pinger: pg, DialSNMP: dial,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	scan := h.scan(pfx, true)
+	h.sealV3(devices.Owner{Kind: devices.OwnerScan, ID: scan}, simtest.V3AuthKey)
+	if err := runScan(p, scan); err != nil {
+		t.Fatal(err)
+	}
+	got := h.inbox(scan)
+	if len(got) != 1 || got[0].Address != a2 || got[0].Descr != "fake device" {
+		t.Fatalf("inbox = %+v", got)
+	}
+	if n := p.scanPanics.Load(); n != 2 {
+		t.Fatalf("recovered panics = %d, want 2", n)
+	}
+	if p.scanRunning(scan) {
+		t.Fatal("run still claimed")
 	}
 }

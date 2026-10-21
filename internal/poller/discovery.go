@@ -23,22 +23,35 @@ import (
 
 /* Discovery limits. */
 const (
-	scanConcurrency = 32            /* addresses probed at once per scan */
-	maxScanRuns     = 2             /* scans of this poller running at once */
-	scanTimeout     = 6 * time.Hour /* bound of one run; a /16 needs about 35 min of ICMP timeouts */
-	discoveryEvery  = time.Minute   /* how often due scans are looked for */
-	scanSNMPPort    = 161
-	oidSysName      = "1.3.6.1.2.1.1.5.0"
+	scanConcurrency  = 32               /* addresses probed at once per scan */
+	maxScanRuns      = 2                /* scans of this poller running at once */
+	scanTimeout      = 6 * time.Hour    /* bound of one run; a /16 needs about 35 min of ICMP timeouts */
+	discoveryEvery   = time.Minute      /* how often due scans are looked for */
+	scanRecheckEvery = 15 * time.Second /* how often a run checks that its scan is unchanged */
+	scanSNMPPort     = 161
+	oidSysName       = "1.3.6.1.2.1.1.5.0"
 )
 
 /* errScanRefused: the scan does not exist, is disabled, is not this poller's or has no usable credential. */
 var errScanRefused = errors.New("poller: scan refused")
 
+/*
+scanState is what a run depends on: a run continues only while the scan's
+row and its SNMP profiles are unchanged (profiles as kind, updated_at and a
+digest of the ciphertext).
+*/
+type scanState struct {
+	enabled  bool
+	pollerID string
+	prefix   netip.Prefix
+	profiles string
+}
+
 /* scanRun is a validated scan with its opened credential. */
 type scanRun struct {
-	id     int64
-	prefix netip.Prefix
-	cred   creds.Credential
+	id    int64
+	state scanState
+	cred  creds.Credential
 }
 
 /* discovery tracks the scan runs of this poller. */
@@ -60,25 +73,20 @@ poller, has an unscannable prefix or no usable credential is refused
 (errScanRefused); other errors are database failures.
 */
 func (p *Poller) prepareScan(ctx context.Context, id int64) (scanRun, error) {
-	var (
-		prefix   netip.Prefix
-		enabled  bool
-		pollerID string
-	)
-	err := p.pool.QueryRow(ctx, `SELECT cidr, enabled, poller_id FROM core.discovery_scan WHERE id = $1`, id).
-		Scan(&prefix, &enabled, &pollerID)
+	/* Read before the credential: a profile replaced after this read cancels the run at the first re-check. */
+	st, err := p.scanState(ctx, id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return scanRun{}, fmt.Errorf("%w: scan %d does not exist", errScanRefused, id)
 	case err != nil:
-		return scanRun{}, fmt.Errorf("poller: load scan: %w", err)
-	case pollerID != p.cfg.PollerID:
+		return scanRun{}, err
+	case st.pollerID != p.cfg.PollerID:
 		return scanRun{}, fmt.Errorf("%w: scan %d belongs to another poller", errScanRefused, id)
-	case !enabled:
+	case !st.enabled:
 		return scanRun{}, fmt.Errorf("%w: scan %d is disabled", errScanRefused, id)
 	}
 	/* The api is not trusted to have validated the prefix. */
-	if err := devices.CheckScanPrefix(prefix); err != nil {
+	if err := devices.CheckScanPrefix(st.prefix); err != nil {
 		return scanRun{}, fmt.Errorf("%w: scan %d: %w", errScanRefused, id, err)
 	}
 	c, err := p.credential(ctx, devices.Owner{Kind: devices.OwnerScan, ID: id}, newDevCache(), snmpKinds...)
@@ -88,7 +96,70 @@ func (p *Poller) prepareScan(ctx context.Context, id int64) (scanRun, error) {
 	if err != nil {
 		return scanRun{}, err
 	}
-	return scanRun{id: id, prefix: prefix.Masked(), cred: c}, nil
+	return scanRun{id: id, state: st, cred: c}, nil
+}
+
+/* scanState reads the state of scan id (prefix masked); pgx.ErrNoRows if it does not exist. */
+func (p *Poller) scanState(ctx context.Context, id int64) (scanState, error) {
+	var st scanState
+	err := p.pool.QueryRow(ctx, `
+		SELECT s.enabled, s.poller_id, s.cidr, coalesce((
+			SELECT string_agg(a.kind || ':' || a.updated_at::text || ':' || encode(sha256(a.ciphertext), 'hex'), ',' ORDER BY a.kind)
+			FROM core.access_profile a WHERE a.owner_kind = 'scan' AND a.owner_id = s.id AND a.kind = ANY($2)), '')
+		FROM core.discovery_scan s WHERE s.id = $1`, id, snmpKinds).Scan(&st.enabled, &st.pollerID, &st.prefix, &st.profiles)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return scanState{}, err
+	}
+	if err != nil {
+		return scanState{}, fmt.Errorf("poller: load scan: %w", err)
+	}
+	st.prefix = st.prefix.Masked()
+	return st, nil
+}
+
+/*
+watchScan cancels a run when its scan is deleted, disabled, moved to another
+poller or prefix, or its profile changes; it checks every scanRecheck until
+ctx ends. A failed read is retried at the next check.
+*/
+func (p *Poller) watchScan(ctx context.Context, cancel context.CancelFunc, run *scanRun, log *slog.Logger) {
+	t := time.NewTicker(p.scanRecheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		st, err := p.scanState(ctx, run.id)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows), err == nil && st != run.state:
+			log.Info("scan changed, run cancelled")
+			cancel()
+			return
+		case err != nil && ctx.Err() == nil:
+			log.Warn("scan re-check failed", slog.String("err", err.Error()))
+		}
+	}
+}
+
+/*
+recoverScan, deferred directly in discovery goroutines, turns a panic (for
+example on a hostile device's answer) into a log line and counts it in
+p.scanPanics and, if not nil, in count. The panic value is logged as cleaned
+text under a fixed key.
+*/
+func (p *Poller) recoverScan(id int64, where string, count *atomic.Int64) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	p.scanPanics.Add(1)
+	if count != nil {
+		count.Add(1)
+	}
+	p.log.Error("discovery panic recovered", slog.Int64("scan_id", id), slog.String("where", where),
+		slog.String("panic", drivers.CleanText([]byte(fmt.Sprint(r)))))
 }
 
 /* claim marks scan id running; false if a run of it is in progress. */
@@ -141,27 +212,40 @@ func (p *Poller) startScan(ctx, life context.Context, id int64) error {
 			return
 		}
 		defer func() { <-p.disc.slots }()
-		p.sweepScan(life, run)
+		defer p.recoverScan(id, "run", nil)
+		p.sweepScan(life, &run)
 	})
 	return nil
 }
 
-/* sweepScan probes every host of the scan and records what answers SNMP. */
-func (p *Poller) sweepScan(ctx context.Context, run scanRun) {
+/*
+sweepScan probes every host of the scan and records what answers SNMP. The
+run stops as soon as watchScan sees its scan change; the credential is
+dropped when the run ends.
+*/
+func (p *Poller) sweepScan(ctx context.Context, run *scanRun) {
+	defer func() { run.cred = creds.Credential{} }()
 	ctx, cancel := context.WithTimeout(ctx, scanTimeout)
-	defer cancel()
+	var watch sync.WaitGroup
+	defer watch.Wait()
+	defer cancel() /* before Wait: stops the watcher */
 	log := p.log.With(slog.Int64("scan_id", run.id))
-	known, err := p.knownAddrs(ctx, run.prefix)
+	watch.Go(func() {
+		defer p.recoverScan(run.id, "watch", nil)
+		p.watchScan(ctx, cancel, run, log)
+	})
+	known, err := p.knownAddrs(ctx, run.state.prefix)
 	if err != nil {
 		log.Warn("scan aborted", slog.String("err", err.Error()))
 		return
 	}
 	st := devices.NewStore(p.pool)
-	var found, failed atomic.Int64
-	sweep(ctx, scanHosts(run.prefix), scanConcurrency, func(ctx context.Context, a netip.Addr) {
+	var found, failed, panics atomic.Int64
+	sweep(ctx, scanHosts(run.state.prefix), scanConcurrency, func(ctx context.Context, a netip.Addr) {
 		if known[a] {
 			return /* never a second session to a polled device, never into the inbox */
 		}
+		defer p.recoverScan(run.id, "probe", &panics)
 		sys, ok := p.probe(ctx, run.cred, a)
 		if !ok {
 			return
@@ -177,7 +261,7 @@ func (p *Poller) sweepScan(ctx context.Context, run scanRun) {
 		found.Add(1)
 	})
 	log.Info("scan finished", slog.Int64("answered", found.Load()), slog.Int64("not_stored", failed.Load()),
-		slog.Bool("complete", ctx.Err() == nil))
+		slog.Int64("panics", panics.Load()), slog.Bool("complete", ctx.Err() == nil))
 }
 
 /* knownAddrs returns the device addresses within prefix. */
