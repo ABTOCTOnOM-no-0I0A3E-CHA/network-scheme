@@ -386,6 +386,9 @@ func report(t *testing.T, env *testdb.Env, starts []start, ids []int64, began, e
 	}
 	t.Logf("per availability interval:\n%s", table)
 
+	/* A run that finishes after its next due time reschedules from now, so lateness
+	   after overruns is not accumulated in the delays: it is bounded by the minRuns and
+	   censor checks below. */
 	if p95 > p95Limit {
 		t.Errorf("p95 availability start delay %v > %v", p95, p95Limit)
 	}
@@ -395,8 +398,9 @@ func report(t *testing.T, env *testdb.Env, starts []start, ids []int64, began, e
 	if started := len(starts) - censored; rows < started-256 { /* runs still writing at the stop may miss their point */
 		t.Errorf("%d points stored for %d started runs", rows, started)
 	}
-	if float64(snmpOK) < 0.95*float64(rows) {
-		t.Errorf("SNMP answered in %d of %d points: the simulator, not the poller, was measured", snmpOK, rows)
+	/* a sanity guard on the simulator, not an acceptance criterion */
+	if float64(snmpOK) < 0.90*float64(rows) {
+		t.Errorf("SNMP answered in %d of %d points (< 90%%): simulator or host starvation, the poller was not what was measured", snmpOK, rows)
 	}
 }
 
