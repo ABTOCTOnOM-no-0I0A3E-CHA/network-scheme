@@ -1609,7 +1609,7 @@ export interface paths {
         get?: never;
         /**
          * Set the one SNMP credential the scan probes with
-         * @description Setting one kind removes the other. key_version as for device profiles.
+         * @description Setting one kind removes the other. key_version as for device profiles. An enabled scan is queued for a run.
          */
         put: {
             parameters: {

@@ -26,9 +26,6 @@ const (
 	KindDiscoveryScan = "discovery_scan"
 )
 
-// DiscoveryQueue is the queue of discovery scans (scans are not assigned to a poller).
-const DiscoveryQueue = "discovery"
-
 /* pollerIDRe keeps "poller_" + id a valid River queue name of at most 64 characters. */
 var pollerIDRe = regexp.MustCompile(`^[a-z0-9]+(?:[_-][a-z0-9]+)*$`)
 
@@ -62,7 +59,10 @@ func (PollNowArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: liveStates}}
 }
 
-// DiscoveryScanArgs asks for a run of discovery scan ScanID.
+/*
+DiscoveryScanArgs asks the scan's poller for a run of discovery scan ScanID.
+Duplicates are coalesced while one is queued; it is never retried.
+*/
 type DiscoveryScanArgs struct {
 	ScanID int64 `json:"scan_id"`
 }
@@ -72,7 +72,7 @@ func (DiscoveryScanArgs) Kind() string { return KindDiscoveryScan }
 
 // InsertOpts implements river.JobArgsWithInsertOpts.
 func (DiscoveryScanArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{Queue: DiscoveryQueue, MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: liveStates}}
+	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: liveStates}}
 }
 
 /* liveStates: a job is a duplicate only of one not yet finished (River's required minimum). */
@@ -99,15 +99,7 @@ func NewEnqueuer(pool *pgxpool.Pool) (*Enqueuer, error) {
 
 // EnqueuePollNow queues an immediate poll of deviceID on the device's poller.
 func (e *Enqueuer) EnqueuePollNow(ctx context.Context, tx pgx.Tx, deviceID int64) error {
-	var pollerID string
-	err := tx.QueryRow(ctx, `SELECT poller_id FROM core.device WHERE id = $1`, deviceID).Scan(&pollerID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("jobs: device %d does not exist", deviceID)
-	}
-	if err != nil {
-		return fmt.Errorf("jobs: %w", err)
-	}
-	q, err := Queue(pollerID)
+	q, err := ownerQueue(ctx, tx, `SELECT poller_id FROM core.device WHERE id = $1`, "device", deviceID)
 	if err != nil {
 		return err
 	}
@@ -117,10 +109,27 @@ func (e *Enqueuer) EnqueuePollNow(ctx context.Context, tx pgx.Tx, deviceID int64
 	return nil
 }
 
-// EnqueueDiscovery queues a run of discovery scan scanID.
+// EnqueueDiscovery queues a run of discovery scan scanID on the scan's poller.
 func (e *Enqueuer) EnqueueDiscovery(ctx context.Context, tx pgx.Tx, scanID int64) error {
-	if _, err := e.client.InsertTx(ctx, tx, DiscoveryScanArgs{ScanID: scanID}, nil); err != nil {
+	q, err := ownerQueue(ctx, tx, `SELECT poller_id FROM core.discovery_scan WHERE id = $1`, "discovery scan", scanID)
+	if err != nil {
+		return err
+	}
+	if _, err := e.client.InsertTx(ctx, tx, DiscoveryScanArgs{ScanID: scanID}, &river.InsertOpts{Queue: q}); err != nil {
 		return fmt.Errorf("jobs: enqueue discovery: %w", err)
 	}
 	return nil
+}
+
+/* ownerQueue returns the queue of the poller of object id, read by query in tx. */
+func ownerQueue(ctx context.Context, tx pgx.Tx, query, what string, id int64) (string, error) {
+	var pollerID string
+	err := tx.QueryRow(ctx, query, id).Scan(&pollerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("jobs: %s %d does not exist", what, id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("jobs: %w", err)
+	}
+	return Queue(pollerID)
 }

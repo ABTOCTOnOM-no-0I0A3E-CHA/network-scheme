@@ -21,14 +21,15 @@ const (
 	pollNowTimeout = 10 * time.Minute
 )
 
-/* newRiver returns the job client working this poller's queue. */
-func (p *Poller) newRiver() (*river.Client[pgx.Tx], error) {
+/* newRiver returns the job client working this poller's queue; scan runs it starts last until life ends. */
+func (p *Poller) newRiver(life context.Context) (*river.Client[pgx.Tx], error) {
 	q, err := jobs.Queue(p.cfg.PollerID)
 	if err != nil {
 		return nil, err
 	}
 	w := river.NewWorkers()
 	river.AddWorker(w, &pollNowWorker{p: p})
+	river.AddWorker(w, &discoveryWorker{p: p, life: life})
 	c, err := river.NewClient(riverpgxv5.New(p.pool), &river.Config{
 		Schema:  store.JobsSchema,
 		Queues:  map[string]river.QueueConfig{q: {MaxWorkers: pollNowWorkers}},

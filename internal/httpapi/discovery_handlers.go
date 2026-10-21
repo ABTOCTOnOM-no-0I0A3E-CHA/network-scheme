@@ -16,7 +16,6 @@ import (
 
 /* Limits of discovery scans. */
 const (
-	maxScanHostBits  = 16 /* at most 65 536 addresses: /16 for IPv4, /112 for IPv6 */
 	minScanIntervalS = 300
 	maxScanIntervalS = 30 * 86400
 	defScanIntervalS = 86400
@@ -51,17 +50,16 @@ type discoveredResponse struct {
 /* parseScanCIDR returns the masked prefix, or the client error for an invalid or too wide one. */
 func parseScanCIDR(s string) (netip.Prefix, apiError, bool) {
 	p, err := netip.ParsePrefix(s)
-	if err != nil || p.Addr().Zone() != "" {
+	if err != nil {
 		return netip.Prefix{}, errBadRequest, false
 	}
-	p = p.Masked()
-	if a := p.Addr(); a.IsLoopback() || a.IsMulticast() || a.Is4In6() {
-		return netip.Prefix{}, errBadRequest, false
-	}
-	if p.Addr().BitLen()-p.Bits() > maxScanHostBits {
+	switch err := devices.CheckScanPrefix(p); {
+	case errors.Is(err, devices.ErrScanTooWide):
 		return netip.Prefix{}, errCIDRTooWide, false
+	case err != nil:
+		return netip.Prefix{}, errBadRequest, false
 	}
-	return p, apiError{}, true
+	return p.Masked(), apiError{}, true
 }
 
 func validScanInterval(v int) bool { return v >= minScanIntervalS && v <= maxScanIntervalS }
@@ -224,7 +222,8 @@ func (s *server) updateScan(w http.ResponseWriter, r *http.Request) {
 
 /*
 putScanProfile sets the one credential a scan probes with (sealed, opaque
-to the API); setting one kind removes the other.
+to the API); setting one kind removes the other. An enabled scan is queued
+for a run with the new credential in the same transaction.
 */
 func (s *server) putScanProfile(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -236,7 +235,8 @@ func (s *server) putScanProfile(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if _, err := s.scanIn(r, sc, id); err != nil {
+	scan, err := s.scanIn(r, sc, id)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -269,7 +269,10 @@ func (s *server) putScanProfile(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		return nil
+		if !scan.Enabled {
+			return nil
+		}
+		return s.jobs.EnqueueDiscovery(r.Context(), tx, id)
 	}) {
 		return
 	}

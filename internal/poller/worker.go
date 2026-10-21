@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/inventory"
 	"github.com/beekamai/network-scheme/internal/metrics"
@@ -91,7 +92,7 @@ Every answer on it stamps cache.lastSNMP, which availability reads while the
 session's poll holds the device.
 */
 func (p *Poller) session(ctx context.Context, d device, cache *devCache) (snmp.Reader, io.Closer, error) {
-	c, err := p.credential(ctx, d, cache, snmpKinds...)
+	c, err := p.credential(ctx, devices.Owner{Kind: devices.OwnerDevice, ID: d.ID}, cache, snmpKinds...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -255,7 +256,7 @@ func (p *Poller) sshRunner(ctx context.Context, d device, cache *devCache, drv d
 	if dl.ExecPrompt == nil {
 		return nil
 	}
-	c, err := p.credential(ctx, d, cache, creds.KindSSHRead)
+	c, err := p.credential(ctx, devices.Owner{Kind: devices.OwnerDevice, ID: d.ID}, cache, creds.KindSSHRead)
 	if err != nil {
 		if !errors.Is(err, errNoProfile) {
 			p.log.Warn("ssh credential unavailable", slog.Int64("device_id", d.ID), slog.String("err", err.Error()))

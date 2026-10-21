@@ -10,6 +10,40 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// MaxScanHostBits bounds a scan to 65 536 addresses: /16 for IPv4, /112 for IPv6.
+const MaxScanHostBits = 16
+
+// ErrScanTooWide is returned for a prefix with more than MaxScanHostBits host bits.
+var ErrScanTooWide = errors.New("devices: scan prefix too wide")
+
+/* specialPrefixes are never scanned: unspecified, loopback, link-local, multicast and IPv4-mapped space. */
+var specialPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"), netip.MustParsePrefix("::/127"), netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"), netip.MustParsePrefix("::ffff:0:0/96"),
+}
+
+/*
+CheckScanPrefix reports whether p may be scanned: ErrInvalid for an invalid
+or zoned prefix or one touching unspecified, loopback, link-local, multicast
+or IPv4-mapped space, ErrScanTooWide above MaxScanHostBits host bits.
+*/
+func CheckScanPrefix(p netip.Prefix) error {
+	if !p.IsValid() || p.Addr().Zone() != "" {
+		return fmt.Errorf("%w: cidr", ErrInvalid)
+	}
+	p = p.Masked()
+	for _, sp := range specialPrefixes {
+		if p.Overlaps(sp) {
+			return fmt.Errorf("%w: cidr %s is reserved", ErrInvalid, p)
+		}
+	}
+	if p.Addr().BitLen()-p.Bits() > MaxScanHostBits {
+		return ErrScanTooWide
+	}
+	return nil
+}
+
 // NewScan describes a discovery scan to create.
 type NewScan struct {
 	CIDR      netip.Prefix
@@ -87,7 +121,8 @@ func (s *Store) ListScans(ctx context.Context, f Filter) ([]Scan, error) {
 
 /*
 UpsertDiscovered records a find. A repeated address (even from another scan)
-updates the existing row's scan, data and found_at; its status is kept.
+updates the existing row's scan, data and found_at; its status is kept. An
+address already used by a device is not recorded.
 */
 func (s *Store) UpsertDiscovered(ctx context.Context, tx pgx.Tx, scanID int64, address netip.Addr, sysObjectID, sysDescr, sysName string) error {
 	if !address.IsValid() {
@@ -95,7 +130,8 @@ func (s *Store) UpsertDiscovered(ctx context.Context, tx pgx.Tx, scanID int64, a
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO core.discovered (scan_id, address, sys_object_id, sys_descr, sys_name)
-		VALUES ($1, $2, $3, $4, $5)
+		SELECT $1, $2, $3, $4, $5
+		WHERE NOT EXISTS (SELECT 1 FROM core.device WHERE address = $2)
 		ON CONFLICT (address) DO UPDATE
 		SET scan_id = EXCLUDED.scan_id, sys_object_id = EXCLUDED.sys_object_id,
 		    sys_descr = EXCLUDED.sys_descr, sys_name = EXCLUDED.sys_name, found_at = now()`,

@@ -2,7 +2,8 @@
 Package poller is the read-only collection service: it schedules
 availability, metric and inventory polls of the devices assigned to it, runs
 them through the device drivers with the read credentials it alone can open,
-and works the poll_now jobs of its queue.
+runs its discovery scans and works the poll_now and discovery_scan jobs of its
+queue.
 */
 package poller
 
@@ -53,20 +54,22 @@ type Deps struct {
 
 // Poller polls the devices of one poller id.
 type Poller struct {
-	cfg      Config
-	pool     *pgxpool.Pool
-	priv     *[32]byte
-	pub      *[32]byte
-	pinger   Pinger
-	dial     DialFunc
-	reg      *drivers.Registry
-	now      func() time.Time
-	log      *slog.Logger
-	sched    *scheduler
-	rates    *metrics.RateCalc
-	metrics  *metrics.Store
-	inv      *inventory.Store
-	hostKeys *ssh.HostKeys
+	cfg       Config
+	pool      *pgxpool.Pool
+	priv      *[32]byte
+	pub       *[32]byte
+	pinger    Pinger
+	dial      DialFunc
+	reg       *drivers.Registry
+	now       func() time.Time
+	log       *slog.Logger
+	sched     *scheduler
+	rates     *metrics.RateCalc
+	metrics   *metrics.Store
+	inv       *inventory.Store
+	hostKeys  *ssh.HostKeys
+	disc      *discovery
+	discEvery time.Duration
 }
 
 // New returns a poller for a validated cfg.
@@ -75,6 +78,7 @@ func New(cfg Config, d Deps) *Poller {
 		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, pinger: d.Pinger, dial: d.DialSNMP,
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
+		disc: newDiscovery(), discEvery: discoveryEvery,
 	}
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
@@ -108,7 +112,7 @@ func (p *Poller) Run(ctx context.Context) error {
 	if err := p.reload(ctx); err != nil {
 		return err
 	}
-	rc, err := p.newRiver()
+	rc, err := p.newRiver(ctx)
 	if err != nil {
 		return err
 	}
@@ -119,11 +123,14 @@ func (p *Poller) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { p.heartbeat(ctx) })
 	wg.Go(func() { p.listen(ctx) })
+	wg.Go(func() { p.discoverLoop(ctx) })
 	p.sched.loop(ctx)
 	wg.Wait()
 	sctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
-	if err := rc.StopAndCancel(sctx); err != nil && !errors.Is(err, context.Canceled) {
+	err = rc.StopAndCancel(sctx)
+	p.disc.wg.Wait() /* scan runs end with ctx */
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("poller: stop job client: %w", err)
 	}
 	return nil

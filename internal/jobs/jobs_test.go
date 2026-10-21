@@ -65,3 +65,38 @@ func TestEnqueuePollNowCoalesces(t *testing.T) {
 		t.Fatalf("job for a missing device: %d, %v", n, err)
 	}
 }
+
+/* TestEnqueueDiscoveryUsesPollerQueue: a scan run goes to the queue of the scan's poller, coalesced while queued. */
+func TestEnqueueDiscoveryUsesPollerQueue(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	api := env.Pool("nms_api")
+	var g, scan int64
+	if err := api.QueryRow(ctx, `INSERT INTO core.device_group (name) VALUES ('jobs-'||gen_random_uuid()) RETURNING id`).Scan(&g); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.QueryRow(ctx, `INSERT INTO core.discovery_scan (cidr, group_id, poller_id) VALUES ('198.51.100.0/24', $1, 'site-2') RETURNING id`, g).Scan(&scan); err != nil {
+		t.Fatal(err)
+	}
+	enq, err := jobs.NewEnqueuer(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := pgx.BeginFunc(ctx, api, func(tx pgx.Tx) error { return enq.EnqueueDiscovery(ctx, tx, scan) }); err != nil {
+			t.Fatalf("enqueue as nms_api: %v", err)
+		}
+	}
+	var n int
+	var queue string
+	if err := env.Pool("nms_poller").QueryRow(ctx, `SELECT count(*), min(queue) FROM jobs.river_job
+		WHERE kind = 'discovery_scan' AND (args->>'scan_id')::bigint = $1`, scan).Scan(&n, &queue); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || queue != "poller_site-2" {
+		t.Fatalf("jobs = %d in %q, want 1 in poller_site-2", n, queue)
+	}
+	if err := pgx.BeginFunc(ctx, api, func(tx pgx.Tx) error { return enq.EnqueueDiscovery(ctx, tx, -1) }); err == nil {
+		t.Fatal("job for a missing scan enqueued")
+	}
+}

@@ -615,3 +615,71 @@ func TestDiscoveryFlow(t *testing.T) {
 	wantError(t, f.do(admin.authed(req{method: "GET", path: "/api/discovery/inbox?status=bogus"})), http.StatusBadRequest, "bad_request")
 	wantAudit(t, f, "discovery.scan_create", "discovery.scan_update", "discovery.accept", "discovery.ignore")
 }
+
+/* TestScanCIDRRejectsSpecialPrefixes: prefixes that touch unspecified, loopback, link-local or multicast space are refused. */
+func TestScanCIDRRejectsSpecialPrefixes(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(true, rbac.Binding{Role: rbac.RoleAdmin})
+	for _, c := range []string{
+		"0.0.0.0/24", "0.0.0.0/32", "::/112", "::/128", "::1/128",
+		"169.254.0.0/16", "169.254.10.0/24", "fe80::/112", "fe80::1:0/112",
+		"127.0.0.0/24", "224.0.0.0/24", "239.255.255.0/24", "ff02::/112",
+	} {
+		wantError(t, f.do(admin.authed(req{method: "POST", path: "/api/discovery/scans", body: map[string]any{"cidr": c, "group_id": g}})),
+			http.StatusBadRequest, "bad_request")
+	}
+	for _, c := range []string{"169.253.0.0/16", "10.0.0.0/24", "2001:db8::/112"} {
+		if resp := f.do(admin.authed(req{method: "POST", path: "/api/discovery/scans", body: map[string]any{"cidr": c, "group_id": g}})); resp.StatusCode != http.StatusCreated {
+			t.Errorf("%s: status %d", c, resp.StatusCode)
+		}
+	}
+	scan := f.newScan(g)
+	wantError(t, f.do(admin.authed(req{method: "PATCH", path: fmt.Sprintf("/api/discovery/scans/%d", scan), body: map[string]any{"cidr": "169.254.0.0/24"}})),
+		http.StatusBadRequest, "bad_request")
+}
+
+/* TestScopedAdminCannotMoveScanToForeignGroup: an admin of group A cannot move a scan of A into group B. */
+func TestScopedAdminCannotMoveScanToForeignGroup(t *testing.T) {
+	f := newFixture(t, nil)
+	a, b := f.newGroup(), f.newGroup()
+	adminA := f.login(true, rbac.Binding{Role: rbac.RoleAdmin, GroupID: &a})
+	scan := f.newScan(a)
+	wantError(t, f.do(adminA.authed(req{method: "PATCH", path: fmt.Sprintf("/api/discovery/scans/%d", scan), body: map[string]any{"group_id": b}})),
+		http.StatusNotFound, "not_found")
+	got, err := devices.NewStore(f.env.Pool("nms_api")).GetScan(context.Background(), scan)
+	if err != nil || got.GroupID != a {
+		t.Fatalf("scan after a refused move: %+v, %v", got, err)
+	}
+}
+
+/* TestScanProfileTriggersRun: setting the profile of an enabled scan queues a run in the same transaction. */
+func TestScanProfileTriggersRun(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(true, rbac.Binding{Role: rbac.RoleAdmin})
+	enabled, disabled := f.newScan(g), f.newScan(g)
+	if resp := f.do(admin.authed(req{method: "PATCH", path: fmt.Sprintf("/api/discovery/scans/%d", disabled), body: map[string]any{"enabled": false}})); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("disable scan %d", resp.StatusCode)
+	}
+	ct := base64.StdEncoding.EncodeToString([]byte("sealed-scan-credential"))
+	for _, id := range []int64{enabled, disabled} {
+		if resp := f.do(admin.authed(req{method: "PUT", path: fmt.Sprintf("/api/discovery/scans/%d/profile", id),
+			body: map[string]any{"kind": "snmp2c", "ciphertext": ct, "key_version": 1}})); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("put scan profile: %d", resp.StatusCode)
+		}
+	}
+	if len(f.jobs.scans) != 1 || f.jobs.scans[0] != enabled {
+		t.Fatalf("scan runs = %v, want [%d]", f.jobs.scans, enabled)
+	}
+	/* An enqueue failure rolls the profile change back. */
+	f.jobs.fail = true
+	if resp := f.do(admin.authed(req{method: "PUT", path: fmt.Sprintf("/api/discovery/scans/%d/profile", enabled),
+		body: map[string]any{"kind": "snmp3", "ciphertext": ct, "key_version": 1}})); resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("put with a failing enqueue: %d", resp.StatusCode)
+	}
+	ps, err := devices.NewStore(f.env.Pool("nms_api")).Profiles(context.Background(), devices.Owner{Kind: devices.OwnerScan, ID: enabled})
+	if err != nil || len(ps) != 1 || ps[0].Kind != "snmp2c" {
+		t.Fatalf("profiles after a failed enqueue = %+v, %v", ps, err)
+	}
+}

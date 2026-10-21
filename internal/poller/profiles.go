@@ -49,19 +49,19 @@ func profileStatus(err error) string {
 }
 
 /*
-credential returns the first usable credential of kinds for device d, or
-errNoProfile. A rejected profile gets its status and is skipped: the device
-is never contacted with it. Other errors are database failures.
+credential returns the first usable credential of kinds for owner (a device
+or a scan), or errNoProfile. A rejected profile gets its status and is
+skipped: nothing is ever contacted with it. Other errors are database
+failures.
 */
-func (p *Poller) credential(ctx context.Context, d device, cache *devCache, kinds ...string) (creds.Credential, error) {
-	owner := devices.Owner{Kind: devices.OwnerDevice, ID: d.ID}
+func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *devCache, kinds ...string) (creds.Credential, error) {
 	type row struct {
 		kind, status string
 		ct           []byte
 	}
 	got := map[string]row{}
 	rows, err := p.pool.Query(ctx, `SELECT kind, ciphertext, status FROM core.access_profile
-		WHERE owner_kind = 'device' AND owner_id = $1 AND kind = ANY($2)`, d.ID, kinds)
+		WHERE owner_kind = $1 AND owner_id = $2 AND kind = ANY($3)`, owner.Kind, owner.ID, kinds)
 	if err != nil {
 		return creds.Credential{}, fmt.Errorf("%w: read profiles: %w", errDB, err)
 	}
@@ -127,7 +127,8 @@ func (p *Poller) open(ctx context.Context, owner devices.Owner, kind string, ct 
 			return creds.Credential{}, fmt.Errorf("poller: set profile status: %w", err)
 		}
 		if verr != nil {
-			p.log.Warn("credential rejected", slog.Int64("device_id", owner.ID), slog.String("kind", kind), slog.String("status", st))
+			p.log.Warn("credential rejected", slog.String("owner_kind", owner.Kind), slog.Int64("owner_id", owner.ID),
+				slog.String("kind", kind), slog.String("status", st))
 		}
 	}
 	cache.creds[kind] = opened{sum: sum, cred: c, err: verr}
