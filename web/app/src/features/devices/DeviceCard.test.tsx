@@ -95,6 +95,43 @@ function setup(canPoll: boolean, canManage = false) {
 }
 
 describe("DeviceCard", () => {
+  it("starts fresh when the device id changes: closed edit form, no values of the previous device", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    let patched8 = 0;
+    server.use(
+      http.get("*/api/devices/8", () => HttpResponse.json(detail({ id: 8, name: "edge-sw", address: "192.0.2.20" }))),
+      http.get("*/api/devices/8/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
+      http.get("*/api/groups", () => HttpResponse.json([{ id: 1, parent_id: null, name: "Core" }])),
+      http.patch("*/api/devices/8", () => {
+        patched8++;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (id: number) => (
+      <QueryClientProvider client={qc}>
+        <DeviceCard id={id} canPoll canManage />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(7));
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    expect(within(screen.getByRole("form", { name: ru.card.edit.title })).getByLabelText(ru.devices.addDialog.address)).toHaveValue("192.0.2.10");
+    await userEvent.click(screen.getByRole("tab", { name: ru.card.tab.lldp }));
+
+    rerender(ui(8));
+    expect(await screen.findByRole("heading", { name: "edge-sw" })).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: ru.card.edit.title })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: ru.card.tab.interfaces })).toHaveAttribute("aria-selected", "true");
+    /* opening the form again shows the new device's values; saving unchanged values sends nothing */
+    await userEvent.click(screen.getByRole("button", { name: ru.card.edit.open }));
+    const form = screen.getByRole("form", { name: ru.card.edit.title });
+    expect(within(form).getByLabelText(ru.devices.addDialog.address)).toHaveValue("192.0.2.20");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: ru.card.edit.title })).not.toBeInTheDocument());
+    expect(patched8).toBe(0);
+    expect(patched).toBeUndefined();
+  });
+
   it("shows the header facts", async () => {
     deviceFn = () => HttpResponse.json(detail());
     setup(false);

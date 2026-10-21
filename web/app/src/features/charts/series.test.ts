@@ -62,6 +62,22 @@ describe("shapeData", () => {
     expect(cols[0][2]).toBe((cols[0][1] as number) + 60);
   });
 
+  it("does not break a line whose points are one poll interval apart under a finer step", () => {
+    const pts = Array.from({ length: 10 }, (_, i) => pt(new Date(Date.parse("2026-10-21T10:00:00Z") + i * 60_000).toISOString()));
+    const cols = shapeData(pts, TRAFFIC_KEYS, 10);
+    expect(cols[0]).toHaveLength(10);
+    expect(cols[1].every((v) => v !== null)).toBe(true);
+  });
+
+  it("still breaks the line over a 10 minute hole with 60 s spacing under step 10", () => {
+    const base = Date.parse("2026-10-21T10:00:00Z");
+    const at = (min: number) => pt(new Date(base + min * 60_000).toISOString());
+    const cols = shapeData([at(0), at(1), at(2), at(3), at(13), at(14)], TRAFFIC_KEYS, 10);
+    expect(cols[0]).toHaveLength(7);
+    expect(cols[1].filter((v) => v === null)).toHaveLength(1);
+    expect(cols[1][4]).toBeNull();
+  });
+
   it("infers the spacing of raw points (step 0) from the median", () => {
     const cols = shapeData([pt("2026-10-21T10:00:00Z"), pt("2026-10-21T10:00:10Z"), pt("2026-10-21T10:00:20Z"), pt("2026-10-21T10:05:00Z")], TRAFFIC_KEYS, 0);
     expect(cols[1].filter((v) => v === null)).toHaveLength(1);

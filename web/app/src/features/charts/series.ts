@@ -52,9 +52,10 @@ export const TRAFFIC_KEYS = ["in_bps", "out_bps"] as const;
 /** Series order of the errors chart. */
 export const ERROR_KEYS = ["in_err_ps", "out_err_ps", "in_disc_ps", "out_disc_ps"] as const;
 
-function medianDelta(ts: number[]): number {
+/* lower quartile of the spacing: holes (few, long deltas) do not raise it the way they would a median of a short series */
+function typicalDelta(ts: number[]): number {
   const d = ts.slice(1).map((v, i) => v - ts[i]).sort((a, b) => a - b);
-  return d.length ? d[Math.floor(d.length / 2)] : 0;
+  return d.length ? d[Math.floor((d.length - 1) / 4)] : 0;
 }
 
 /**
@@ -64,7 +65,8 @@ function medianDelta(ts: number[]): number {
  */
 export function shapeData(points: IfPoint[], keys: readonly (keyof IfPoint)[], stepS: number): Columns {
   const ts = points.map((p) => Math.floor(Date.parse(p.ts) / 1000));
-  const unit = stepS > 0 ? stepS : medianDelta(ts);
+  /* the server only returns buckets with data: with a poll interval above the step the normal spacing is the typical delta */
+  const unit = Math.max(stepS, typicalDelta(ts));
   const cols: Columns = [[], ...keys.map(() => [])];
   points.forEach((p, i) => {
     if (i > 0 && unit > 0 && ts[i] - ts[i - 1] > 2 * unit) {

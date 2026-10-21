@@ -73,11 +73,11 @@ afterEach(() => {
 });
 afterAll(() => server.close());
 
-function setup(onOpenDevice = vi.fn()) {
+function setup(onOpenDevice = vi.fn(), canManage = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <DiscoveryPage onOpenDevice={onOpenDevice} />
+      <DiscoveryPage canManage={canManage} onOpenDevice={onOpenDevice} />
     </QueryClientProvider>,
   );
   return onOpenDevice;
@@ -110,7 +110,7 @@ describe("scan form", () => {
     scanPost = () => err(400, "bad_request");
     setup();
     await submitScan("127.0.0.0/24");
-    expect(await screen.findByRole("alert")).toHaveTextContent(ru.scan.err.badCidr);
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.scan.err.badRequest);
     expect(screen.queryByText(/RAW SERVER MESSAGE/)).not.toBeInTheDocument();
   });
 
@@ -142,6 +142,20 @@ describe("scan form", () => {
     expect(profileBody).toMatchObject({ kind: "snmp2c", key_version: 1 });
     expect(JSON.stringify(profileBody)).not.toContain("scan-community");
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
+
+describe("permissions", () => {
+  it("offers nothing and requests nothing without device management rights", async () => {
+    let requests = 0;
+    server.events.on("request:start", () => requests++);
+    setup(vi.fn(), false);
+    expect(await screen.findByText(ru.discovery.noAccess)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(ru.scan.cidr)).not.toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(requests).toBe(0);
+    server.events.removeAllListeners();
   });
 });
 

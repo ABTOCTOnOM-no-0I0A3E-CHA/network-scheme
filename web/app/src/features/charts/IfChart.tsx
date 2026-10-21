@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
@@ -8,17 +8,36 @@ import { useIfMetrics, type MetricsRange } from "@/features/devices/api";
 import { ERROR_KEYS, TRAFFIC_KEYS, formatBps, formatPs, isEmpty, shapeData, type Columns } from "./series";
 
 const COLORS = ["#2563eb", "#16a34a", "#dc2626", "#d97706"];
-const AXIS = "#888";
-const GRID = "rgba(136,136,136,0.2)";
+const FALLBACK_AXIS = "#888";
+const FALLBACK_GRID = "rgba(136,136,136,0.2)";
 const HEIGHT = 220;
 
 type Spec = { label: string; fmt: (v: number) => string };
+
+type Theme = { axis: string; grid: string };
+
+/* Axis and grid colors follow the active theme through the app's CSS custom properties. */
+function readTheme(): Theme {
+  const css = getComputedStyle(document.documentElement);
+  return { axis: css.getPropertyValue("--muted-foreground").trim() || FALLBACK_AXIS, grid: css.getPropertyValue("--border").trim() || FALLBACK_GRID };
+}
+
+/* Bumps when the theme class of <html> changes, so plots are rebuilt with the new colors. */
+function useThemeVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    const mo = new MutationObserver(() => setVersion((v) => v + 1));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => mo.disconnect();
+  }, []);
+  return version;
+}
 
 /**
  * uPlot options: local-time x axis, formatted y axis, gaps for null values
  * (spanGaps off). Exported for tests.
  */
-export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number) => string): uPlot.Options {
+export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number) => string, theme: Theme = { axis: FALLBACK_AXIS, grid: FALLBACK_GRID }): uPlot.Options {
   return {
     width,
     height: HEIGHT,
@@ -26,8 +45,8 @@ export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number)
     cursor: { drag: { x: true, y: false } },
     scales: { x: { time: true }, y: { range: (_u, _min, max) => [0, max > 0 ? max * 1.1 : 1] } },
     axes: [
-      { stroke: AXIS, grid: { stroke: GRID } },
-      { stroke: AXIS, grid: { stroke: GRID }, size: 80, values: (_u, splits) => splits.map((v) => fmtAxis(v)) },
+      { stroke: theme.axis, grid: { stroke: theme.grid } },
+      { stroke: theme.axis, grid: { stroke: theme.grid }, size: 80, values: (_u, splits) => splits.map((v) => fmtAxis(v)) },
     ],
     series: [
       {},
@@ -45,18 +64,19 @@ export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number)
 /* Canvas plot of the columns; rebuilt when the data or formatting changes. */
 function Plot({ data, series, fmtAxis, label }: { data: Columns; series: Spec[]; fmtAxis: (v: number) => string; label: string }) {
   const host = useRef<HTMLDivElement>(null);
+  const themeVersion = useThemeVersion();
 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const u = new uPlot(buildOptions(el.clientWidth || 640, series, fmtAxis), data as uPlot.AlignedData, el);
+    const u = new uPlot(buildOptions(el.clientWidth || 640, series, fmtAxis, readTheme()), data as uPlot.AlignedData, el);
     const ro = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => u.setSize({ width: el.clientWidth || 640, height: HEIGHT }));
     ro?.observe(el);
     return () => {
       ro?.disconnect();
       u.destroy();
     };
-  }, [data, series, fmtAxis]);
+  }, [data, series, fmtAxis, themeVersion]);
 
   return <div ref={host} role="img" aria-label={label} className="w-full overflow-hidden" />;
 }

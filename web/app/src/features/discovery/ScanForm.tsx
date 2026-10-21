@@ -11,14 +11,15 @@ import { DEFAULT_SCAN_INTERVAL, MAX_SCAN_INTERVAL, MIN_SCAN_INTERVAL, useCreateS
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 
 /**
- * Message key of a failed scan request. The API answers 400 for a malformed or
- * reserved prefix (loopback, link-local, multicast, unspecified, IPv4-mapped) and
- * cidr_too_wide above /16; both get a scan-specific explanation.
+ * Message key of a failed scan request. cidr_too_wide (above /16) is unambiguous.
+ * A malformed or reserved prefix (loopback, link-local, multicast, unspecified,
+ * IPv4-mapped) shares the plain bad_request code with a bad interval or group, so
+ * its message names all of them.
  */
 export function scanErrorKey(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === "cidr_too_wide") return "scan.err.tooWide";
-    if (err.code === "bad_request") return "scan.err.badCidr";
+    if (err.code === "bad_request") return "scan.err.badRequest";
     return errorKey({ error: { code: err.code } });
   }
   return err instanceof TypeError ? thrownKey(err) : "errors.unknown";

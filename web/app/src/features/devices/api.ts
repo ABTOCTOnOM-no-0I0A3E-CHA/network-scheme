@@ -119,10 +119,11 @@ export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange) {
   });
 }
 
-/** Device groups (needs groups.manage; others get a 403 error). */
-export function useGroups() {
+/** Device groups (needs groups.manage; others get a 403 error). Pass `false` to skip the request for those who may not list them. */
+export function useGroups(enabled = true) {
   return useQuery({
     queryKey: deviceKeys.groups,
+    enabled,
     queryFn: async () => unwrap(await api.GET("/api/groups")),
   });
 }

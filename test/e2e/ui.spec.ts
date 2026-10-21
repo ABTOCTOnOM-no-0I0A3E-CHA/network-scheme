@@ -64,6 +64,8 @@ test("device added through the UI is polled, charted and a scan is scheduled", a
   await page.getByRole("link", { name: "Обнаружение" }).click();
   await expect(page.getByRole("heading", { name: "Обнаружение" })).toBeVisible();
   const scan = async (cidr: string) => {
+    /* the group list loads asynchronously: submit only once it is offered */
+    await expect(page.getByLabel("Группа", { exact: true }).locator("option", { hasText: GROUP })).toHaveCount(1);
     await page.getByLabel("Подсеть (CIDR)").fill(cidr);
     await page.getByLabel("Интервал, с").fill("3600");
     await page.getByRole("button", { name: "Запланировать" }).click();
@@ -71,7 +73,7 @@ test("device added through the UI is polled, charted and a scan is scheduled", a
   await scan("10.0.0.0/8");
   await expect(page.getByRole("alert").filter({ hasText: "шире /16" })).toBeVisible();
   await scan("127.0.0.0/24");
-  await expect(page.getByRole("alert").filter({ hasText: "Недопустимая подсеть" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "Запрос отклонён" })).toBeVisible();
   await scan(SCAN_CIDR);
   const credDialog = page.getByRole("dialog");
   await expect(credDialog.getByText("Учётка сканирования")).toBeVisible();

@@ -27,7 +27,12 @@ type Props = {
 };
 
 /** Device card: summary header with poll-now, edit form and inventory tabs. Every device-reported string is rendered as text. */
-export function DeviceCard({ id, canPoll, canManage }: Props) {
+export function DeviceCard(props: Props) {
+  /* keyed by device so tab, chart selection, paging and an open edit form never carry over to another device */
+  return <DeviceCardBody key={props.id} {...props} />;
+}
+
+function DeviceCardBody({ id, canPoll, canManage }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>("interfaces");
@@ -91,7 +96,7 @@ export function DeviceCard({ id, canPoll, canManage }: Props) {
 function Header({ device, canPoll, canManage }: { device: DeviceDetail; canPoll: boolean; canManage: boolean }) {
   const { t } = useTranslation();
   const poll = usePollDevice();
-  const groups = useGroups();
+  const groups = useGroups(canManage);
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | undefined>();
   const groupName = groups.data?.find((g) => g.id === device.group_id)?.name ?? `#${device.group_id}`;
@@ -164,7 +169,7 @@ function Header({ device, canPoll, canManage }: { device: DeviceDetail; canPoll:
           </div>
         ))}
       </dl>
-      {editing && <DeviceEditForm device={device} groups={groups.data} onDone={() => setEditing(false)} />}
+      {editing && <DeviceEditForm key={device.id} device={device} groups={groups.data} onDone={() => setEditing(false)} />}
     </div>
   );
 }
