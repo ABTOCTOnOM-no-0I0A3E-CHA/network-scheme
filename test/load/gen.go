@@ -1,8 +1,8 @@
 //go:build load
 
 /*
-Package load is the load test of the poller: 1 000 simulated devices on one
-snmpsim (build tag load, so go test ./... skips it).
+Package load is the load test of the poller: 1 000 simulated devices, each an
+in-process SNMPv2c agent of test/sim/snmpgo (build tag load, so go test ./... skips it).
 */
 package load
 

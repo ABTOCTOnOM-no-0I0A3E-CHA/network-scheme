@@ -98,7 +98,7 @@ jobs:
       - name: Vulnerability scan
         run: osv-scanner --recursive .
 
-  # 1 000 devices on one snmpsim (one UDP port each, reached on the container's address), the poller
+  # 1 000 devices as in-process SNMPv2c agents (one loopback UDP port each), the poller
   # with production defaults for 10 minutes: p95 of the availability start delay must stay within 30 s.
   load:
     if: github.event_name == 'pull_request'

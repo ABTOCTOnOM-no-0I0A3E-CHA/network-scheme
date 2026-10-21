@@ -32,7 +32,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/poller"
 	"github.com/beekamai/network-scheme/internal/store"
 	"github.com/beekamai/network-scheme/internal/testdb"
-	"github.com/beekamai/network-scheme/test/sim/snmpsim/simtest"
+	"github.com/beekamai/network-scheme/test/sim/snmpgo"
 )
 
 /* runFor is how long the poller runs; CI uses the default, a local smoke may pass -args -load.duration=2m. */
@@ -136,8 +136,8 @@ func TestAvailabilityCycle1000Devices(t *testing.T) {
 		t.Fatal(err)
 	}
 	setupStart := time.Now()
-	addrs := simtest.StartMany(t, dir, firstPort, numDevices)
-	t.Logf("simulator with %d UDP ports ready in %v (first %v)", numDevices, time.Since(setupStart).Round(time.Second), addrs[0])
+	addrs := startAgents(t, dir)
+	t.Logf("simulator with %d UDP ports ready in %v (first %v)", numDevices, time.Since(setupStart).Round(time.Millisecond), addrs[0])
 
 	cfg, pub, priv := pollerConfig(t, env)
 	ids := addDevices(t, env, addrs, pub)
@@ -200,6 +200,29 @@ func TestAvailabilityCycle1000Devices(t *testing.T) {
 	rec.mu.Unlock()
 	starts = censor(starts, ids, end)
 	report(t, env, starts, ids, began, end, &u, logFile.Name())
+}
+
+/*
+startAgents serves every generated .snmprec file by an in-process SNMPv2c agent on its own loopback
+port (the Python snmpsim starves on the 4 vCPUs of a CI runner, the poller then times out and piles up requests).
+*/
+func startAgents(t *testing.T, dir string) []netip.AddrPort {
+	t.Helper()
+	addrs := make([]netip.AddrPort, numDevices)
+	for i := range addrs {
+		mib, err := snmpgo.LoadSnmprec(filepath.Join(dir, community(i)+".snmprec"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(firstPort+i)) //nolint:gosec // numDevices ports from firstPort
+		a, err := snmpgo.Listen(addr, community(i), mib)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = a.Close() })
+		addrs[i] = addr
+	}
+	return addrs
 }
 
 /* pollerConfig writes poller.yaml with production defaults (workers, intervals, db.max_conns) and loads it. */
@@ -352,7 +375,7 @@ func report(t *testing.T, env *testdb.Env, starts []start, ids []int64, began, e
 	}
 
 	const mib = 1 << 20
-	t.Logf("devices %d, workers 256, availability every %v, ran %v (fake ICMP, real SNMPv2c via snmpsim)",
+	t.Logf("devices %d, workers 256, availability every %v, ran %v (fake ICMP, real SNMPv2c via in-process agents)",
 		len(ids), availEvery, wall.Round(time.Second))
 	t.Logf("availability start delay: p50 %v, p95 %v, max %v over %d runs (%d not started by the end, counted as late)",
 		p50.Round(time.Millisecond), p95.Round(time.Millisecond), worst.Round(time.Millisecond), len(delays), censored)
