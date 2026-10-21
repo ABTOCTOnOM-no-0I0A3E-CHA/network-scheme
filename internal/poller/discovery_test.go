@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -643,5 +644,64 @@ func TestScanRecoversPanics(t *testing.T) {
 	}
 	if p.scanRunning(scan) {
 		t.Fatal("run still claimed")
+	}
+}
+
+/*
+TestRecheckFailsClosed: one failed re-check is tolerated, two in a row cancel
+the run, and a panicking re-check cancels it too. The credential's bytes are
+wiped when the run ends.
+*/
+func TestRecheckFailsClosed(t *testing.T) {
+	for name, c := range map[string]struct {
+		fail   func(call int) bool /* the re-check fails on this call */
+		panics bool
+		stops  bool
+	}{
+		"one failure tolerated": {fail: func(n int) bool { return n == 2 }},
+		"two failures cancel":   {fail: func(n int) bool { return n >= 2 }, stops: true},
+		"panic cancels":         {panics: true, stops: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "")
+			n := byte(scanNet.Add(1))
+			pfx := netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 253, n, 0}), 24)
+			pg := newScanPinger()
+			pg.delay = 100 * time.Millisecond
+			d := newScanDialer(nil)
+			p := h.scanPoller(pg, d)
+			p.scanRecheck = 100 * time.Millisecond
+			var calls atomic.Int64
+			p.recheck = func(ctx context.Context, id int64) (scanState, error) {
+				k := int(calls.Add(1))
+				if c.panics {
+					panic("broken re-check")
+				}
+				if c.fail(k) {
+					return scanState{}, errors.New("test: database unavailable")
+				}
+				return p.scanState(ctx, id)
+			}
+			scan := h.scan(pfx, true)
+			h.sealV3(devices.Owner{Kind: devices.OwnerScan, ID: scan}, simtest.V3AuthKey)
+			run, err := p.begin(context.Background(), scan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := run.cred.AuthKey
+			start := time.Now()
+			p.sweepScan(context.Background(), &run)
+			took := time.Since(start)
+			/* 254 hosts / 32 at once x 100 ms is about 0.8 s when the run is not stopped. */
+			if all := pg.total() == 254; all == c.stops {
+				t.Fatalf("probed %d of 254 hosts in %v", pg.total(), took)
+			}
+			if strings.Trim(key.Reveal(), "\x00") != "" || !run.cred.AuthKey.IsZero() {
+				t.Fatal("credential not wiped after the run")
+			}
+			if c.panics && p.scanPanics.Load() != 1 {
+				t.Fatalf("recovered panics = %d", p.scanPanics.Load())
+			}
+		})
 	}
 }

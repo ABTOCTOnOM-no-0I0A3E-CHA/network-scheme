@@ -72,7 +72,8 @@ type Poller struct {
 	disc        *discovery
 	discEvery   time.Duration
 	scanRecheck time.Duration
-	scanPanics  atomic.Int64 /* recovered panics of discovery runs */
+	scanPanics  atomic.Int64                                           /* recovered panics of discovery runs */
+	recheck     func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
 }
 
 // New returns a poller for a validated cfg.
@@ -83,6 +84,7 @@ func New(cfg Config, d Deps) *Poller {
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
 		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
 	}
+	p.recheck = p.scanState
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
 	}

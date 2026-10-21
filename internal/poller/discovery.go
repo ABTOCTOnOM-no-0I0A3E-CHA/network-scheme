@@ -120,25 +120,34 @@ func (p *Poller) scanState(ctx context.Context, id int64) (scanState, error) {
 /*
 watchScan cancels a run when its scan is deleted, disabled, moved to another
 poller or prefix, or its profile changes; it checks every scanRecheck until
-ctx ends. A failed read is retried at the next check.
+ctx ends. It fails closed: one failed read is tolerated, a second in a row
+cancels the run.
 */
 func (p *Poller) watchScan(ctx context.Context, cancel context.CancelFunc, run *scanRun, log *slog.Logger) {
 	t := time.NewTicker(p.scanRecheck)
 	defer t.Stop()
+	failed := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		st, err := p.scanState(ctx, run.id)
+		st, err := p.recheck(ctx, run.id)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows), err == nil && st != run.state:
 			log.Info("scan changed, run cancelled")
 			cancel()
 			return
 		case err != nil && ctx.Err() == nil:
-			log.Warn("scan re-check failed", slog.String("err", err.Error()))
+			log.Warn("scan re-check failed", slog.String("err", err.Error()), slog.Bool("run_cancelled", failed))
+			if failed {
+				cancel()
+				return
+			}
+			failed = true
+		default:
+			failed = false
 		}
 	}
 }
@@ -220,17 +229,22 @@ func (p *Poller) startScan(ctx, life context.Context, id int64) error {
 
 /*
 sweepScan probes every host of the scan and records what answers SNMP. The
-run stops as soon as watchScan sees its scan change; the credential is
-dropped when the run ends.
+run stops as soon as watchScan sees its scan change or cannot check it, or
+when the watcher ends for any reason; the credential's bytes are wiped when
+the run ends.
 */
 func (p *Poller) sweepScan(ctx context.Context, run *scanRun) {
-	defer func() { run.cred = creds.Credential{} }()
+	defer func() {
+		run.cred.Wipe()
+		run.cred = creds.Credential{}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, scanTimeout)
 	var watch sync.WaitGroup
 	defer watch.Wait()
 	defer cancel() /* before Wait: stops the watcher */
 	log := p.log.With(slog.Int64("scan_id", run.id))
 	watch.Go(func() {
+		defer cancel() /* no run without its watcher, even after a panic */
 		defer p.recoverScan(run.id, "watch", nil)
 		p.watchScan(ctx, cancel, run, log)
 	})

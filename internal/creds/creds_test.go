@@ -22,6 +22,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/creds"
 	"github.com/beekamai/network-scheme/internal/creds/credstest"
 	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/secret"
 )
 
 var (
@@ -414,5 +415,16 @@ func TestPrivateKeyCap(t *testing.T) {
 	ct = credstest.Seal(pub, dev1, "ssh_read", map[string]string{"username": "u", "private_key": ok}, t0)
 	if _, err := creds.Open(priv, pub, ct, dev1, "ssh_read", time.Time{}, t0); err != nil {
 		t.Fatalf("6KiB: %v", err)
+	}
+}
+
+func TestCredentialWipe(t *testing.T) {
+	c := creds.Credential{Kind: creds.KindSNMP3, AuthKey: secret.New("auth-key-0123456789"), PrivKey: secret.New("priv-key-0123456789")}
+	held := c
+	c.Wipe()
+	for _, s := range []secret.Secret{held.AuthKey, held.PrivKey} {
+		if strings.Trim(s.Reveal(), "\x00") != "" {
+			t.Fatal("secret survived Wipe")
+		}
 	}
 }

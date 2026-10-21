@@ -33,3 +33,10 @@ func (Secret) MarshalJSON() ([]byte, error) { return []byte(`"` + mask + `"`), n
 
 // LogValue implements slog.LogValuer and always yields "***".
 func (Secret) LogValue() slog.Value { return slog.StringValue(mask) }
+
+/*
+Wipe overwrites the value's bytes with zeros, for every copy of this Secret
+(copies share them). Strings already obtained through Reveal are not
+affected.
+*/
+func (s Secret) Wipe() { clear(s.v) }

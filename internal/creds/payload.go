@@ -68,6 +68,13 @@ type Credential struct {
 	PrivateKey secret.Secret /* ssh_read only */
 }
 
+// Wipe zeroes the bytes of every secret field (see secret.Secret.Wipe).
+func (c Credential) Wipe() {
+	for _, s := range []secret.Secret{c.Community, c.AuthKey, c.PrivKey, c.Password, c.PrivateKey} {
+		s.Wipe()
+	}
+}
+
 /* envelope is the plaintext sealed by the browser. */
 type envelope struct {
 	V         int             `json:"v"`
