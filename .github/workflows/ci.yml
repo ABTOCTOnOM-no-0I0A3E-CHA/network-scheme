@@ -96,6 +96,22 @@ jobs:
       - name: Vulnerability scan
         run: osv-scanner --recursive .
 
+  # 1 000 devices on one snmpsim (one UDP port each, reached on the container's address), the poller
+  # with production defaults for 10 minutes: p95 of the availability start delay must stay within 30 s.
+  load:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet -tags load ./test/load/
+      - name: Load test
+        run: go test -tags load ./test/load/ -run . -v -count=1 -timeout 30m
+
   # Real install on a fresh runner, login through the browser, a simulated device polled
   # end to end, zero egress, egress rules of the devices network, ZAP baseline.
   e2e:

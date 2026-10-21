@@ -52,6 +52,14 @@ func (e *Env) Pool(role string) *pgxpool.Pool {
 	return p
 }
 
+// Config returns the connection settings and password of role, to open a pool with other settings.
+func (e *Env) Config(role string) (config.DB, secret.Secret) {
+	if _, ok := e.passwords[role]; !ok {
+		panic("testdb: unknown role " + role)
+	}
+	return e.cfg(role), secret.New(e.passwords[role])
+}
+
 // Connect opens one connection as role to database db and closes it (to check CONNECT privileges).
 func (e *Env) Connect(ctx context.Context, role, db string) error {
 	c := e.cfg(role)
