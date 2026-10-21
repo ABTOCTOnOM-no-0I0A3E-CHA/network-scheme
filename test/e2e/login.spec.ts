@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { currentStep, expectShell, STEP_FILE, submitCode, submitPassword, totpCode } from "./auth";
 import { expect, ORIGIN, test, watch } from "./guard";
 
-/* Sidebar sections (web/app/src/features/shell/nav.ts). */
-const SECTIONS = ["Карта", "Устройства", "Проблемы", "Логи", "Бэкапы", "Изменения", "Аудит", "Состояние системы", "Настройки"];
+/* Sidebar sections that are still placeholders (web/app/src/features/shell/nav.ts); devices and discovery have screens, see ui.spec.ts. */
+const SECTIONS = ["Карта", "Проблемы", "Логи", "Бэкапы", "Изменения", "Аудит", "Состояние системы", "Настройки"];
 
 test("admin logs in with password + TOTP and sees shell", async ({ page, context }) => {
   /* The login itself ran in global setup (one login per run: auth is rate-limited). */
