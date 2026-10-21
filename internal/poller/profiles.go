@@ -132,8 +132,13 @@ first poll.
 */
 func (p *Poller) open(ctx context.Context, owner devices.Owner, kind string, ct []byte, status string, cache *devCache) (creds.Credential, error) {
 	sum := sha256.Sum256(ct)
-	if o, ok := cache.creds[kind]; ok && o.sum == sum {
-		return o.cred, o.err
+	old, cached := cache.creds[kind]
+	if cached && old.sum == sum {
+		return old.cred, old.err
+	}
+	if cached {
+		old.cred.Wipe() /* the ciphertext changed: the old secret is dead */
+		delete(cache.creds, kind)
 	}
 	last, err := p.inv.ProfileSeen(ctx, owner, kind)
 	if err != nil {
@@ -142,6 +147,7 @@ func (p *Poller) open(ctx context.Context, owner devices.Owner, kind string, ct 
 	c, verr := creds.Open(p.priv, p.pub, ct, owner, kind, last, p.now())
 	if verr == nil && c.CreatedAt.After(last) {
 		if err := p.inv.MarkProfileSeen(ctx, owner, kind, c.CreatedAt); err != nil {
+			c.Wipe()
 			return creds.Credential{}, err
 		}
 	}
@@ -150,6 +156,7 @@ func (p *Poller) open(ctx context.Context, owner devices.Owner, kind string, ct 
 		if _, err := p.pool.Exec(ctx, `UPDATE core.access_profile SET status = $4
 			WHERE owner_kind = $1 AND owner_id = $2 AND kind = $3 AND ciphertext = $5`,
 			owner.Kind, owner.ID, kind, st, ct); err != nil {
+			c.Wipe()
 			return creds.Credential{}, fmt.Errorf("poller: set profile status: %w", err)
 		}
 		if verr != nil {

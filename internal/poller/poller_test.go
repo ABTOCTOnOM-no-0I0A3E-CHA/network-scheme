@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -560,5 +561,64 @@ func TestUnknownPollNowJobsReloadOncePerGap(t *testing.T) {
 	_ = w.Work(context.Background(), &river.Job[jobs.PollNowArgs]{Args: jobs.PollNowArgs{DeviceID: 1 << 41}})
 	if n := p.jobReloads.Load(); n != 2 {
 		t.Fatalf("%d rereads after the gap, want 2", n)
+	}
+}
+
+/* wiped reports whether every byte of s was zeroed. */
+func wiped(s string) bool {
+	return s != "" && strings.Trim(s, "\x00") == ""
+}
+
+func TestCachedCredentialWipedWhenCiphertextChanges(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	ctx := context.Background()
+	id := h.device(netip.MustParseAddrPort("198.51.100.182:161"))
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
+	seal := func(community string, age time.Duration) []byte {
+		return credstest.Seal(h.pub, owner, "snmp2c", map[string]string{"community": community}, time.Now().Add(-age))
+	}
+	h.profile(id, "snmp2c", seal("0123456789abcdef", 2*time.Minute))
+	cache := newDevCache()
+	first, err := p.credential(ctx, owner, cache, snmpKinds...)
+	if err != nil || first.Community.Reveal() != "0123456789abcdef" {
+		t.Fatalf("first credential: %v", err)
+	}
+	h.profile(id, "snmp2c", seal("fedcba9876543210", time.Minute))
+	second, err := p.credential(ctx, owner, cache, snmpKinds...)
+	if err != nil || second.Community.Reveal() != "fedcba9876543210" {
+		t.Fatalf("replacement credential: %v", err)
+	}
+	if !wiped(first.Community.Reveal()) {
+		t.Fatal("the replaced credential was not wiped")
+	}
+	cache.wipeCreds()
+	if !wiped(second.Community.Reveal()) || len(cache.creds) != 0 {
+		t.Fatal("wipeCreds left a credential")
+	}
+}
+
+func TestOpenFailureAfterVerifyDoesNotCache(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	ctx := context.Background()
+	id := h.device(netip.MustParseAddrPort("198.51.100.183:161"))
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
+	h.profile(id, "snmp2c", credstest.Seal(h.pub, owner, "snmp2c", map[string]string{"community": "0123456789abcdef"}, time.Now().Add(-time.Minute)))
+	su := h.env.Pool("postgres")
+	for _, q := range []string{
+		`CREATE FUNCTION inventory.refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`,
+		`CREATE TRIGGER refuse BEFORE INSERT ON inventory.profile_seen FOR EACH ROW EXECUTE FUNCTION inventory.refuse()`,
+	} {
+		if _, err := su.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := newDevCache()
+	if _, err := p.credential(ctx, owner, cache, snmpKinds...); !isDBErr(err) {
+		t.Fatalf("credential err = %v, want a database error", err)
+	}
+	if len(cache.creds) != 0 {
+		t.Fatal("a credential whose mark failed was cached")
 	}
 }

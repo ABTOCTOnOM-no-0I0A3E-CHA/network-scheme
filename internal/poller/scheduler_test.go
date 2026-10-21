@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/secret"
 )
 
 func testDevice(id int64, every time.Duration) device {
@@ -398,4 +401,21 @@ func TestSlowPollsLeaveSlotsForAvailability(t *testing.T) {
 			prev = at
 		}
 	}
+}
+
+func TestRemovedDeviceCredentialsWiped(t *testing.T) {
+	s := newScheduler(2, func(context.Context, device, *devCache, class, *deviceLock) error { return nil }, nil)
+	s.apply([]device{testDevice(7, time.Hour)})
+	ds := s.devs[7]
+	cache := ds.cache
+	cred := creds.Credential{Community: secret.New("0123456789abcdef")}
+	cache.creds[creds.KindSNMP2c] = opened{cred: cred}
+	s.apply(nil)
+	eventually(t, 5*time.Second, "credentials wiped", func() bool {
+		if ds.lock.Lock(context.Background()) != nil {
+			return false
+		}
+		defer ds.lock.Unlock()
+		return len(cache.creds) == 0 && wiped(cred.Community.Reveal())
+	})
 }

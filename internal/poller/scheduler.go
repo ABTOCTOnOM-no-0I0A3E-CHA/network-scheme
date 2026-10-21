@@ -176,6 +176,7 @@ func (s *scheduler) apply(devs []device) {
 	now := s.now()
 	seen := make(map[int64]bool, len(devs))
 	var gone []int64
+	var goneStates []*devState
 	s.mu.Lock()
 	for _, d := range devs {
 		seen[d.ID] = true
@@ -204,6 +205,7 @@ func (s *scheduler) apply(devs []device) {
 	}
 	for id := range s.devs {
 		if !seen[id] {
+			goneStates = append(goneStates, s.devs[id])
 			delete(s.devs, id)
 			gone = append(gone, id)
 		}
@@ -213,6 +215,18 @@ func (s *scheduler) apply(devs []device) {
 	for _, id := range gone {
 		s.onRemove(id)
 	}
+	for _, ds := range goneStates {
+		go ds.wipeWhenIdle()
+	}
+}
+
+/* wipeWhenIdle zeroes the cached credentials of a removed device once the poll in progress (if any) ends. */
+func (ds *devState) wipeWhenIdle() {
+	if ds.lock.Lock(context.Background()) != nil {
+		return
+	}
+	defer ds.lock.Unlock()
+	ds.cache.wipeCreds()
 }
 
 /* loop dispatches due runs until ctx ends, then waits for the runs in flight. */
@@ -295,6 +309,7 @@ func (s *scheduler) exec(ctx context.Context, ds *devState, it item) {
 	if s.devs[it.id] != ds {
 		s.mu.Unlock()
 		s.onRemove(it.id) /* removed while running: drop what this run may have recorded */
+		go ds.wipeWhenIdle()
 		return
 	}
 	now := s.now()

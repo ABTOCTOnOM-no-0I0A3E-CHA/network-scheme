@@ -48,6 +48,14 @@ type devCache struct {
 
 func newDevCache() *devCache { return &devCache{creds: map[string]opened{}} }
 
+/* wipeCreds zeroes and drops every cached credential; the device lock must be held. */
+func (c *devCache) wipeCreds() {
+	for k, o := range c.creds {
+		o.cred.Wipe()
+		delete(c.creds, k)
+	}
+}
+
 /*
 run polls class c of d. lk is nil when the caller holds the device lock;
 availability gets the unheld lock (see availability).
