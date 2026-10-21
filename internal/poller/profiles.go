@@ -77,6 +77,7 @@ func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *dev
 	}); err != nil {
 		return creds.Credential{}, fmt.Errorf("%w: read profiles: %w", errDB, err)
 	}
+	v3Rejected := false
 	for _, k := range kinds {
 		r, ok := got[k]
 		if !ok {
@@ -86,17 +87,32 @@ func (p *Poller) credential(ctx context.Context, owner devices.Owner, cache *dev
 			if err := p.markOversized(ctx, owner, k, r.status); err != nil {
 				return creds.Credential{}, fmt.Errorf("%w: %w", errDB, err)
 			}
+			v3Rejected = v3Rejected || k == creds.KindSNMP3
 			continue
 		}
 		c, err := p.open(ctx, owner, k, r.ct, r.status, cache)
 		if err == nil {
+			p.noteFallback(owner, cache, v3Rejected && k == creds.KindSNMP2c)
 			return c, nil
 		}
 		if !isVerifyErr(err) {
 			return creds.Credential{}, fmt.Errorf("%w: %w", errDB, err)
 		}
+		v3Rejected = v3Rejected || k == creds.KindSNMP3
 	}
 	return creds.Credential{}, errNoProfile
+}
+
+/*
+noteFallback records in cache whether an SNMPv3 profile was rejected while
+SNMPv2c is used instead (the less secure protocol must not be chosen
+silently); the warning is logged when that starts, not on every poll.
+*/
+func (p *Poller) noteFallback(owner devices.Owner, cache *devCache, fallback bool) {
+	if fallback && !cache.v3Rejected {
+		p.log.Warn("snmpv3 profile rejected, using snmpv2c", slog.String("owner_kind", owner.Kind), slog.Int64("owner_id", owner.ID))
+	}
+	cache.v3Rejected = fallback
 }
 
 /* markOversized rejects a profile whose ciphertext exceeds the cap; it is never opened or dialed with. */

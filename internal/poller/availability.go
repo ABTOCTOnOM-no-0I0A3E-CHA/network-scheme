@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	icmpTimeout   = time.Second
-	oidSysUpTime  = "1.3.6.1.2.1.1.3.0"
-	oidSysObjID   = "1.3.6.1.2.1.1.2.0"
-	oidSysDescr   = "1.3.6.1.2.1.1.1.0"
-	noProfileText = "no usable SNMP credential"
+	icmpTimeout    = time.Second
+	oidSysUpTime   = "1.3.6.1.2.1.1.3.0"
+	oidSysObjID    = "1.3.6.1.2.1.1.2.0"
+	oidSysDescr    = "1.3.6.1.2.1.1.1.0"
+	noProfileText  = "no usable SNMP credential"
+	v2FallbackText = "snmpv3 profile rejected, using v2c"
 	/* busyNoAnswerText: the session of the poll in progress has not answered within the interval. */
 	busyNoAnswerText = "no SNMP answer during the poll in progress"
 )
@@ -138,6 +139,9 @@ func (p *Poller) snmpAlive(ctx context.Context, d device, cache *devCache) (ok b
 	}
 	if _, ok := snmp.AsUint64(vars[0]); !ok {
 		return false, "sysUpTime missing", nil
+	}
+	if cache.v3Rejected {
+		return true, v2FallbackText, nil
 	}
 	return true, "", nil
 }

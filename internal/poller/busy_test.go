@@ -2,11 +2,17 @@ package poller
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/creds/credstest"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/snmp"
 )
 
@@ -106,5 +112,54 @@ func TestStampReaderMarksResponses(t *testing.T) {
 		if at.Load() != now.UnixNano() {
 			t.Fatalf("%s: stamp %d, want %d", name, at.Load(), now.UnixNano())
 		}
+	}
+}
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
+func TestRejectedV3FallbackToV2cIsVisible(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Minute, Metrics: time.Hour, Inventory: time.Hour})
+	var logs strings.Builder
+	p.log = slog.New(slog.NewTextHandler(&logs, nil))
+	p.dial = func(context.Context, netip.AddrPort, creds.Credential, snmp.Options) (snmp.Reader, io.Closer, error) {
+		return stubReader{}, nopCloser{}, nil
+	}
+	ctx := context.Background()
+	id := h.device(netip.MustParseAddrPort("198.51.100.184:161"))
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
+	h.profile(id, "snmp3", []byte("not a sealed box at all, just bytes"))
+	h.profile(id, "snmp2c", credstest.Seal(h.pub, owner, "snmp2c", map[string]string{"community": "0123456789abcdef"}, time.Now().Add(-time.Minute)))
+	devs, err := p.loadDevices(ctx)
+	if err != nil || len(devs) != 1 {
+		t.Fatalf("devices = %v, %v", devs, err)
+	}
+	cache := newDevCache()
+	for range 2 {
+		if err := p.run(ctx, devs[0], cache, classAvail, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := h.str(`SELECT state FROM inventory.device_status WHERE device_id = $1`, id); s != "up" {
+		t.Fatalf("state = %q, want up (v2c answers)", s)
+	}
+	if e := h.str(`SELECT coalesce(last_error, '') FROM inventory.device_status WHERE device_id = $1`, id); e != v2FallbackText {
+		t.Fatalf("last_error = %q, want %q", e, v2FallbackText)
+	}
+	if n := strings.Count(logs.String(), "snmpv3 profile rejected, using snmpv2c"); n != 1 {
+		t.Fatalf("%d fallback warnings in two polls, want 1:\n%s", n, logs.String())
+	}
+	if strings.Contains(logs.String(), "0123456789abcdef") {
+		t.Fatal("the community was logged")
+	}
+	/* A valid v3 profile again: the reason goes away. */
+	h.simProfile(id)
+	if err := p.run(ctx, devs[0], cache, classAvail, nil); err != nil {
+		t.Fatal(err)
+	}
+	if e := h.str(`SELECT coalesce(last_error, '') FROM inventory.device_status WHERE device_id = $1`, id); e != "" {
+		t.Fatalf("last_error = %q after v3 recovered", e)
 	}
 }

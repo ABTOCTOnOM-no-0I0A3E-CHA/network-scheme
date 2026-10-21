@@ -43,6 +43,7 @@ type devCache struct {
 	lastSNMP    atomic.Int64 /* unix ns of the last answer on any session to the device; 0: none */
 	drv         drivers.Driver
 	creds       map[string]opened
+	v3Rejected  bool /* an SNMPv3 profile was rejected and SNMPv2c is used instead */
 	lastCPU     *float64
 }
 
