@@ -26,6 +26,9 @@ const (
 	ifHCIn      = "1.3.6.1.2.1.31.1.1.1.6"
 )
 
+/* patient is the request timeout of tests that expect answers: the simulator can be slow while other containers start. */
+const patient = 10 * time.Second
+
 var fixture = simtest.Fixture("generic-switch.snmprec")
 
 func dial(t *testing.T, addr netip.AddrPort, c creds.Credential, o snmp.Options) snmp.Reader {
@@ -40,7 +43,7 @@ func dial(t *testing.T, addr netip.AddrPort, c creds.Credential, o snmp.Options)
 
 func TestGetSysObjectIDv2c(t *testing.T) {
 	addr := simtest.Start(t, fixture)
-	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{})
+	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{Timeout: patient})
 	vars, err := r.Get(context.Background(), sysObjectID, "."+sysName)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +61,7 @@ func TestGetSysObjectIDv2c(t *testing.T) {
 
 func TestWalkIfTableV3(t *testing.T) {
 	addr := simtest.Start(t, fixture)
-	r := dial(t, addr, simtest.V3Cred(), snmp.Options{ContextName: "generic-switch"})
+	r := dial(t, addr, simtest.V3Cred(), snmp.Options{Timeout: patient, ContextName: "generic-switch"})
 	n := 0
 	descr := map[string]string{}
 	err := r.Walk(context.Background(), ifTable, func(v snmp.Var) error {
@@ -94,7 +97,7 @@ func TestWalkIfTableV3(t *testing.T) {
 
 func TestGetMissingObject(t *testing.T) {
 	addr := simtest.Start(t, fixture)
-	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{MaxOIDsPerRequest: 2})
+	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{Timeout: patient, MaxOIDsPerRequest: 2})
 	_, err := r.Get(context.Background(), "1.3.6.1.2.1.1.99.0")
 	if !errors.Is(err, snmp.ErrNoSuchObject) {
 		t.Fatalf("all missing: %v", err)
@@ -171,7 +174,7 @@ func TestWrongV3KeyRejected(t *testing.T) {
 
 func TestWalkStopsOnContextCancel(t *testing.T) {
 	addr := simtest.Start(t, fixture)
-	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{})
+	r := dial(t, addr, simtest.V2Cred("generic-switch"), snmp.Options{Timeout: patient})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	n := 0

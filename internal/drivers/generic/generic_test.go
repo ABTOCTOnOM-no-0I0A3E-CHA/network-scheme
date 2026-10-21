@@ -21,7 +21,7 @@ func reader(t *testing.T, community string) snmp.Reader {
 	t.Helper()
 	t.Parallel()
 	addr := simtest.Start(t, simtest.Fixture("generic-switch.snmprec"), simtest.Fixture("generic-router.snmprec"))
-	r, c, err := snmp.Dial(context.Background(), addr, simtest.V2Cred(community), snmp.Options{})
+	r, c, err := snmp.Dial(context.Background(), addr, simtest.V2Cred(community), snmp.Options{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func reader(t *testing.T, community string) snmp.Reader {
 func u(v uint64) *uint64 { return &v }
 
 func ctx(t *testing.T) context.Context {
-	c, cancel := context.WithTimeout(context.Background(), time.Minute)
+	c, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
 	return c
 }

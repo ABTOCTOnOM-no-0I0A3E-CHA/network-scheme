@@ -47,7 +47,7 @@ func reader(t *testing.T) snmp.Reader {
 	t.Helper()
 	t.Parallel()
 	addr := simtest.Start(t, simtest.Fixture("eltex-esr.snmprec"))
-	r, c, err := snmp.Dial(context.Background(), addr, simtest.V2Cred("eltex-esr"), snmp.Options{})
+	r, c, err := snmp.Dial(context.Background(), addr, simtest.V2Cred("eltex-esr"), snmp.Options{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
