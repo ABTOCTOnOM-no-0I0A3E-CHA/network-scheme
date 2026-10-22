@@ -11,9 +11,11 @@ const WARN = "bg-red-50 dark:bg-red-950/40";
 const TH = "px-3 py-2 font-medium";
 const EVENTD_COLS = ["received", "accepted", "unknown_source", "auth_failed", "rate_limited", "dropped", "queue_depth"] as const;
 
-/** A poller that owns devices and reports on none of them is silent. */
-export function pollerSilent(p: Status["pollers"][number]): boolean {
-  return p.devices > 0 && p.devices_reporting === 0;
+/** A poller is silent when it owns devices and reports on none of them, or its heartbeat is older than this. */
+export const POLLER_SILENT_MS = 90_000;
+
+export function pollerSilent(p: Status["pollers"][number], now: number): boolean {
+  return p.devices > 0 && (p.devices_reporting === 0 || (p.heartbeat_at !== null && now - Date.parse(p.heartbeat_at) > POLLER_SILENT_MS));
 }
 
 export function eventdStale(e: Status["eventd"][number], now: number): boolean {
@@ -54,16 +56,18 @@ export function SystemStatus() {
                   <th className={TH}>{t("system.col.instance")}</th>
                   <th className={TH}>{t("system.col.devices")}</th>
                   <th className={TH}>{t("system.col.reporting")}</th>
+                  <th className={TH}>{t("system.col.heartbeat")}</th>
                   <th className={TH} />
                 </tr>
               </thead>
               <tbody>
                 {s.pollers.map((p) => (
-                  <tr key={p.id} data-alert={pollerSilent(p)} className={cn("border-t", pollerSilent(p) && WARN)}>
+                  <tr key={p.id} data-alert={pollerSilent(p, now)} className={cn("border-t", pollerSilent(p, now) && WARN)}>
                     <td className="px-3 py-2 font-mono text-xs">{safeText(p.id)}</td>
                     <td className="px-3 py-2 tabular-nums">{num(p.devices)}</td>
                     <td className="px-3 py-2 tabular-nums">{num(p.devices_reporting)}</td>
-                    <td className="px-3 py-2">{pollerSilent(p) && <Flag>{t("system.silent")}</Flag>}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums">{p.heartbeat_at ? new Date(p.heartbeat_at).toLocaleString(i18n.language) : "—"}</td>
+                    <td className="px-3 py-2">{pollerSilent(p, now) && <Flag>{t("system.silent")}</Flag>}</td>
                   </tr>
                 ))}
               </tbody>

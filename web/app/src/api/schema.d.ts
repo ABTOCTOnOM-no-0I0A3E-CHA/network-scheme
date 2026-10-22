@@ -2084,10 +2084,10 @@ export interface paths {
         };
         /**
          * State of the pollers, eventd, the database and the job queues
-         * @description Pollers are derived from the devices they own: the api has no access to
-         *     the heartbeat table, so devices_reporting (devices with a known state;
-         *     the state view hides it once a poller has been silent for 90 s) is the
-         *     liveness signal.
+         * @description Pollers are derived from the devices they own. heartbeat_at is the
+         *     poller's last heartbeat (null if it never wrote one); devices_reporting
+         *     counts the devices with a known state (the state view hides it once a
+         *     poller has been silent for 90 s).
          */
         get: {
             parameters: {
@@ -3090,6 +3090,8 @@ export interface components {
                 devices: number;
                 /** Format: int64 */
                 devices_reporting: number;
+                /** Format: date-time */
+                heartbeat_at: string | null;
             }[];
             eventd: {
                 instance: string;

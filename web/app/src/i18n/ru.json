@@ -465,6 +465,7 @@
       "instance": "Экземпляр",
       "devices": "Устройств",
       "reporting": "Отчитываются",
+      "heartbeat": "Последний сигнал",
       "updated": "Обновлено",
       "received": "Получено",
       "accepted": "Принято",

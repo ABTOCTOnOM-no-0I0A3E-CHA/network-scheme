@@ -412,9 +412,10 @@ func TestSystemStatus(t *testing.T) {
 	wantError(t, f.do(viewer.authed(req{method: "GET", path: "/api/system/status"})), http.StatusForbidden, "forbidden")
 	type status struct {
 		Pollers []struct {
-			ID               string `json:"id"`
-			Devices          int64  `json:"devices"`
-			DevicesReporting int64  `json:"devices_reporting"`
+			ID               string     `json:"id"`
+			Devices          int64      `json:"devices"`
+			DevicesReporting int64      `json:"devices_reporting"`
+			HeartbeatAt      *time.Time `json:"heartbeat_at"`
 		} `json:"pollers"`
 		Eventd []struct {
 			Instance   string `json:"instance"`
@@ -429,7 +430,7 @@ func TestSystemStatus(t *testing.T) {
 	st := decode[status](t, f.do(operator.authed(req{method: "GET", path: "/api/system/status"})))
 	var local bool
 	for _, p := range st.Pollers {
-		if p.ID == "local" && p.Devices >= 1 && p.DevicesReporting >= 1 {
+		if p.ID == "local" && p.Devices >= 1 && p.DevicesReporting >= 1 && p.HeartbeatAt != nil && time.Since(*p.HeartbeatAt).Abs() < time.Minute {
 			local = true
 		}
 	}

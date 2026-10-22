@@ -1088,10 +1088,10 @@ paths:
     get:
       summary: State of the pollers, eventd, the database and the job queues
       description: |
-        Pollers are derived from the devices they own: the api has no access to
-        the heartbeat table, so devices_reporting (devices with a known state;
-        the state view hides it once a poller has been silent for 90 s) is the
-        liveness signal.
+        Pollers are derived from the devices they own. heartbeat_at is the
+        poller's last heartbeat (null if it never wrote one); devices_reporting
+        counts the devices with a known state (the state view hides it once a
+        poller has been silent for 90 s).
       x-permission: system.read
       responses:
         "200":
@@ -1767,11 +1767,12 @@ components:
           type: array
           items:
             type: object
-            required: [id, devices, devices_reporting]
+            required: [id, devices, devices_reporting, heartbeat_at]
             properties:
               id: { type: string }
               devices: { type: integer, format: int64 }
               devices_reporting: { type: integer, format: int64 }
+              heartbeat_at: { type: [string, "null"], format: date-time }
         eventd:
           type: array
           items:

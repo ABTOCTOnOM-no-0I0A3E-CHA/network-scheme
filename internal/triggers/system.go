@@ -14,13 +14,21 @@ SystemPollerUnavailable is declared with the trigger kinds.
 const (
 	SystemUnknownSource   = "unknown_source"
 	SystemProfileMismatch = "access_profile_mismatch"
+	SystemSSHMismatch     = "ssh_host_key_mismatch"
 )
 
 /*
-There is no system problem for SSH host key mismatches (ssh_hosts.mismatch):
-the api role has no privileges on the ssh_hosts schema and the engine runs in
-the api, so the check needs a grant decision that is not the engine's to make.
+An SSH host key mismatch is a problem while the poller keeps recording
+rejected keys: ssh_hosts.mismatch rows (device_id, at; the api may read only
+these two columns) newer than sshMismatchWindow. The poller retries with every
+inventory poll (5 minutes by default), so a pin that was reset on the host with
+nmsctl stops producing rows and the problem recovers within the window and two
+evaluations.
 */
+const (
+	sshMismatchWindow = 30 * time.Minute
+	pollerSilentAfter = 90 * time.Second /* as inventory.device_state_v */
+)
 
 /* Thresholds of the eventd flood check: more than this many unknown-source packets in the window. */
 const (
@@ -40,6 +48,8 @@ func systemName(kind string) string {
 		return "Events from unknown sources"
 	case SystemProfileMismatch:
 		return "Access profile does not match the device"
+	case SystemSSHMismatch:
+		return "SSH host key does not match the pinned one"
 	}
 	return "System problem"
 }
@@ -52,19 +62,18 @@ type counterSample struct {
 }
 
 /*
-evalSystem raises and clears the system problems: a poller whose devices all
-went unknown (its heartbeat is older than 90 s; the api cannot read the
-heartbeat table, so this is inferred from the device_state_v view), a flood of
-packets from unknown sources, and access profiles in status "mismatch".
+evalSystem raises and clears the system problems: a poller that owns devices
+and whose heartbeat (inventory.poller_heartbeat, by the database clock) is
+older than 90 s, rejected SSH host keys, a flood of packets from unknown
+sources, and access profiles in status "mismatch".
 */
 func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) error {
 	want := map[pkey]sysWant{}
 
 	rows, err := e.pool.Query(ctx, `
-		SELECT d.poller_id
-		FROM core.device d JOIN inventory.device_state_v v ON v.device_id = d.id
-		GROUP BY d.poller_id
-		HAVING count(*) FILTER (WHERE v.since IS NOT NULL) > 0 AND count(*) FILTER (WHERE v.state <> 'unknown') = 0`)
+		SELECT h.poller_id FROM inventory.poller_heartbeat h
+		WHERE h.at < now() - make_interval(secs => $1)
+		  AND EXISTS (SELECT 1 FROM core.device d WHERE d.poller_id = h.poller_id)`, pollerSilentAfter.Seconds())
 	if err != nil {
 		return fmt.Errorf("triggers: poller check: %w", err)
 	}
@@ -75,12 +84,31 @@ func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) erro
 			return fmt.Errorf("triggers: poller check: %w", err)
 		}
 		if len(id) <= maxPollerObject {
-			want[pkey{sys: string(SystemPollerUnavailable), obj: "poller:" + id}] = sysWant{"high", "no device of poller " + id + " has reported for over 90 s"}
+			want[pkey{sys: string(SystemPollerUnavailable), obj: "poller:" + id}] = sysWant{"high", "poller " + id + " has not written a heartbeat for over 90 s"}
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("triggers: poller check: %w", err)
+	}
+
+	rows, err = e.pool.Query(ctx, `
+		SELECT DISTINCT m.device_id FROM ssh_hosts.mismatch m JOIN core.device d ON d.id = m.device_id
+		WHERE m.at > now() - make_interval(secs => $1)`, sshMismatchWindow.Seconds())
+	if err != nil {
+		return fmt.Errorf("triggers: ssh host key check: %w", err)
+	}
+	for rows.Next() {
+		var dev int64
+		if err := rows.Scan(&dev); err != nil {
+			rows.Close()
+			return fmt.Errorf("triggers: ssh host key check: %w", err)
+		}
+		want[pkey{sys: SystemSSHMismatch, dev: dev, obj: "ssh_host_key"}] = sysWant{"high", "the SSH host key offered by the device differs from the pinned one"}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("triggers: ssh host key check: %w", err)
 	}
 
 	rows, err = e.pool.Query(ctx, `

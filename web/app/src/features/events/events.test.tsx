@@ -331,9 +331,10 @@ describe("SystemStatus", () => {
       HttpResponse.json({
         now: new Date(now).toISOString(),
         pollers: [
-          { id: "poller-a", devices: 10, devices_reporting: 9 },
-          { id: "poller-b", devices: 5, devices_reporting: 0 },
-          { id: "poller-idle", devices: 0, devices_reporting: 0 },
+          { id: "poller-a", devices: 10, devices_reporting: 9, heartbeat_at: new Date(now - 10_000).toISOString() },
+          { id: "poller-b", devices: 5, devices_reporting: 0, heartbeat_at: null },
+          { id: "poller-idle", devices: 0, devices_reporting: 0, heartbeat_at: null },
+          { id: "poller-stale", devices: 4, devices_reporting: 4, heartbeat_at: new Date(now - 200_000).toISOString() },
         ],
         eventd: [
           { instance: "eventd-fresh", updated_at: new Date(now - 5_000).toISOString(), received: 100, accepted: 90, unknown_source: 3, auth_failed: 2, rate_limited: 1, dropped: 4, queue_depth: 7 },
@@ -348,6 +349,7 @@ describe("SystemStatus", () => {
     expect(within(await rowOf("poller-b")).getByText(ru.system.silent)).toBeInTheDocument();
     expect(await rowOf("poller-a")).toHaveAttribute("data-alert", "false");
     expect(await rowOf("poller-idle")).toHaveAttribute("data-alert", "false");
+    expect(await rowOf("poller-stale")).toHaveAttribute("data-alert", "true"); /* reports devices, but its heartbeat is old */
     expect(await rowOf("eventd-old")).toHaveAttribute("data-alert", "true");
     expect(within(await rowOf("eventd-old")).getByText(ru.system.stale)).toBeInTheDocument();
     expect(await rowOf("eventd-fresh")).toHaveAttribute("data-alert", "false");
