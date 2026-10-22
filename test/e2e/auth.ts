@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { generate } from "otplib";
@@ -44,4 +44,20 @@ export async function submitCode(page: Page, code: string): Promise<void> {
 /** The authenticated shell is visible. */
 export async function expectShell(page: Page): Promise<void> {
   await expect(page.getByRole("button", { name: "Переключить тему" })).toBeVisible();
+}
+
+/**
+ * Confirms a step-up for the logged-in session (valid for 5 minutes). A TOTP step is
+ * accepted once per user: this waits for a step after every one used so far, records
+ * it, and saves the rotated session for the tests that follow.
+ */
+export async function stepUp(page: Page): Promise<void> {
+  const used = Math.max(Number(readFileSync(STEP_FILE, "utf8")), currentStep());
+  while (currentStep() <= used) await new Promise((r) => setTimeout(r, 1000));
+  const step = currentStep();
+  const csrf = ((await (await page.request.get("/api/auth/me")).json()) as { csrf_token: string }).csrf_token;
+  const res = await page.request.post("/api/auth/stepup", { headers: { "X-CSRF-Token": csrf }, data: { code: await totpCode(step) } });
+  expect(res.status()).toBe(204);
+  writeFileSync(STEP_FILE, String(step));
+  await page.context().storageState({ path: STATE_FILE });
 }

@@ -6,13 +6,18 @@ let csrfToken: string | undefined;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const ME_PATH = "/api/auth/me";
 /* 401 on these is an expected part of the login flow or is handled by the route guard. */
-const UNAUTH_EXEMPT = new Set([ME_PATH, "/api/auth/login", "/api/auth/totp", "/api/auth/enroll"]);
+const UNAUTH_EXEMPT = new Set([ME_PATH, "/api/auth/login", "/api/auth/totp", "/api/auth/enroll", "/api/auth/stepup"]);
 
 let onUnauthorized: (() => void) | undefined;
 
 /** Registers the callback run when any non-login request returns 401 (session lost). */
 export function setUnauthorizedHandler(fn: (() => void) | undefined): void {
   onUnauthorized = fn;
+}
+
+/** Runs the registered session-lost callback (used where a 401 is exempt from the global handler but means session loss). */
+export function notifyUnauthorized(): void {
+  onUnauthorized?.();
 }
 
 /*

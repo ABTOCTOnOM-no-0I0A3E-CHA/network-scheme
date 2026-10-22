@@ -133,3 +133,8 @@
 [data-input-otp] + * {
     pointer-events: all !important;
 }
+
+/* uPlot drag-zoom area: its default fill is invisible on a dark background */
+.dark .u-select {
+    background: rgba(255, 255, 255, 0.15);
+}

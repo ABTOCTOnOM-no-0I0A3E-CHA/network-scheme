@@ -26,7 +26,7 @@ export const shellRoute = createRoute({
   component: AppShell,
 });
 
-/** One placeholder route per sidebar section; "/" is the dashboards section. */
-export const sectionRoutes = NAV.map(({ key, path }) =>
+/** One placeholder route per sidebar section that has no screen yet; "/" is the dashboards section. */
+export const sectionRoutes = NAV.filter(({ key }) => key !== "devices" && key !== "discovery").map(({ key, path }) =>
   createRoute({ getParentRoute: () => shellRoute, path, component: () => <Placeholder section={key} /> }),
 );

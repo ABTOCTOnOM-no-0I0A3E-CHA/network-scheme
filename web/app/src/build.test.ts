@@ -72,6 +72,18 @@ describe("production build", () => {
     expect(html).toMatch(/<meta\s+id="input-otp-style"/);
   });
 
+  it("uPlot styles ship in the bundled CSS file, not through script", () => {
+    const css = walk(out).filter((p) => p.endsWith(".css")).map((f) => readFileSync(f, "utf8")).join(" ");
+    expect(css).toContain(".uplot");
+    expect(html).toMatch(/<link[^>]+rel="stylesheet"/);
+  });
+
+  it("sealing is pure JS: no WebAssembly and no wasm CSP relaxation", () => {
+    for (const f of walk(out).filter((p) => /\.(js|html)$/.test(p))) {
+      expect(readFileSync(f, "utf8")).not.toMatch(/WebAssembly|wasm-unsafe-eval/);
+    }
+  });
+
   it("fonts are bundled locally", () => {
     expect(walk(out).some((f) => /inter.*\.woff2$/i.test(f))).toBe(true);
   });

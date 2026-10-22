@@ -15,6 +15,11 @@ const putImageData = vi.fn();
 const codes = Array.from({ length: 10 }, (_, i) => `BACKUPCODE00000${i}`.slice(0, 16));
 let loggedIn = false;
 let loginResponse: () => Response;
+let roles: { role: string; group_id: number | null }[] = [];
+const inventory = [
+  { id: 1, name: "core-sw", address: "192.0.2.10", group_id: 1, driver: "generic-snmp", model: "", firmware: "", insecure_protocols: false, state: "up", state_since: null },
+  { id: 2, name: "edge-rtr", address: "198.51.100.7", group_id: 1, driver: "generic-snmp", model: "", firmware: "", insecure_protocols: false, state: "down", state_since: null },
+];
 
 const apiError = (status: number, code: string) =>
   HttpResponse.json({ error: { code, message: "RAW SERVER MESSAGE" } }, { status });
@@ -33,8 +38,12 @@ const server = setupServer(
     loggedIn = false;
     return new HttpResponse(null, { status: 204 });
   }),
+  http.get("*/api/devices", () => HttpResponse.json(inventory)),
+  http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
+  http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
+  http.get("*/api/groups", () => apiError(403, "forbidden")),
   http.get("*/api/auth/me", () =>
-    loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles: [], csrf_token: "tok" }) : apiError(401, "unauthenticated"),
+    loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles, csrf_token: "tok" }) : apiError(401, "unauthenticated"),
   ),
 );
 
@@ -51,6 +60,7 @@ beforeAll(() => {
     disconnect() {}
   };
   Element.prototype.scrollIntoView ??= () => {};
+  window.scrollTo = () => {}; /* router scroll restoration; jsdom does not implement it */
   document.elementFromPoint ??= () => null; /* used by input-otp password-manager detection */
   /* jsdom has no canvas: a stub 2d context is enough for qrcode to draw into */
   HTMLCanvasElement.prototype.getContext = (() => ({
@@ -62,6 +72,7 @@ beforeAll(() => {
 afterAll(() => server.close());
 beforeEach(() => {
   loggedIn = false;
+  roles = [];
   loginResponse = () => HttpResponse.json({ stage: "totp", challenge: "ch1" });
   putImageData.mockClear();
 });
@@ -230,6 +241,33 @@ describe("shell", () => {
     expect(await screen.findByText(ru.palette.empty)).toBeInTheDocument();
     expect(document.querySelectorAll("style")).toHaveLength(0);
     expect(screen.getByPlaceholderText(ru.palette.placeholder)).toBeInTheDocument();
+  });
+
+  it("palette finds a device by name or by address and opens the list on it", async () => {
+    const user = userEvent.setup();
+    const router = renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "198.51");
+    await user.click(await screen.findByRole("option", { name: /edge-rtr/ }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/devices/2"));
+    expect(await screen.findByRole("heading", { name: "edge-rtr" })).toBeInTheDocument();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "core");
+    expect(await screen.findByRole("option", { name: /core-sw/ })).toBeInTheDocument();
+  });
+
+  it("devices screen: viewer has no add button, admin has", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    renderApp("/devices");
+    await screen.findByLabelText(ru.devices.search);
+    expect(screen.queryByRole("button", { name: ru.devices.add })).not.toBeInTheDocument();
+    cleanup();
+    roles = [{ role: "admin", group_id: null }];
+    queryClient.clear();
+    renderApp("/devices");
+    expect(await screen.findByRole("button", { name: ru.devices.add })).toBeInTheDocument();
   });
 
   it("logout returns to /login", async () => {

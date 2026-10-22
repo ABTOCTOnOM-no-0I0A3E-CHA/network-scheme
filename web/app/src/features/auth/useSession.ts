@@ -1,6 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api, clearCsrfToken } from "@/lib/api";
 import { queryClient } from "@/lib/query";
+import { stepUpStore } from "@/features/common/stepup";
 
 export type Session = { id: number; username: string; roles: { role: string; group_id: number | null }[] };
 
@@ -31,6 +32,8 @@ export async function logout(): Promise<void> {
     /* the typed header is required by the schema; the api middleware overwrites it with the real token */
     await api.POST("/api/auth/logout", { params: { header: { "X-CSRF-Token": "" } } });
   } finally {
+    /* a pending step-up prompt must not survive the session */
+    stepUpStore.settle(false);
     clearCsrfToken();
     queryClient.clear();
   }
