@@ -10,13 +10,14 @@ import type { CredKind } from "@/lib/seal";
 import { cn } from "@/lib/utils";
 import { useDevice, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
 import { ChartsTab } from "@/features/charts/ChartsTab";
+import { EventFeed } from "@/features/events/EventFeed";
 import { DeviceEditForm } from "./DeviceEditForm";
 import { InventoryTable, Text, type Column } from "./InventoryTable";
 import { ProfileForm } from "./ProfileForm";
 import { useProfiles } from "./profiles";
 
-type TabId = DeviceTable | "graphs" | "profiles";
-const TABS: TabId[] = ["interfaces", "graphs", "arp", "mac", "vlans", "lldp", "entities", "routes", "profiles"];
+type TabId = DeviceTable | "graphs" | "profiles" | "journal";
+const TABS: TabId[] = ["interfaces", "graphs", "arp", "mac", "vlans", "lldp", "entities", "routes", "journal", "profiles"];
 const KINDS: CredKind[] = ["snmp2c", "snmp3", "ssh_read"];
 
 type Props = {
@@ -150,6 +151,11 @@ function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceD
           )}
         </div>
       </div>
+      {device.last_error && (
+        <p className="truncate text-sm text-amber-700 dark:text-amber-400" title={safeText(device.last_error)}>
+          <span className="font-medium">{t("card.lastError")}:</span> {safeText(device.last_error)}
+        </p>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={cn("text-sm", note.ok ? "text-muted-foreground" : "text-destructive")}>
           {note.text}
@@ -194,6 +200,8 @@ function TabBody({ tab, deviceId, canManage, chartIf, onChartIf, onShowChart }: 
   switch (tab) {
     case "graphs":
       return <ChartsTab deviceId={deviceId} ifIndex={chartIf} onIfIndex={onChartIf} />;
+    case "journal":
+      return <EventFeed deviceId={deviceId} />;
     case "profiles":
       return <ProfilesTab deviceId={deviceId} canManage={canManage} />;
     case "interfaces":

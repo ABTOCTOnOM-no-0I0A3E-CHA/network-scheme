@@ -228,7 +228,8 @@
       "lldp": "LLDP",
       "entities": "Модули",
       "routes": "Маршруты",
-      "profiles": "Учётки"
+      "profiles": "Учётки",
+      "journal": "Журнал"
     },
     "col": {
       "seenAt": "Обновлено",
@@ -263,7 +264,8 @@
       "intervalMetrics": "Интервал метрик",
       "intervalInventory": "Интервал инвентаризации"
     },
-    "chartBtn": "График интерфейса {{name}}"
+    "chartBtn": "График интерфейса {{name}}",
+    "lastError": "Последняя ошибка"
   },
   "discovery": {
     "title": "Обнаружение",
@@ -345,6 +347,115 @@
       "gbps": "Гбит/с",
       "tbps": "Тбит/с",
       "perSec": "/с"
+    }
+  },
+  "events": {
+    "tabs": "Разделы логов",
+    "tab": {
+      "feed": "Журнал",
+      "unidentified": "Неопознанные"
+    },
+    "table": "События",
+    "unidentifiedTable": "Неопознанные трапы",
+    "loading": "Загрузка…",
+    "empty": "События не найдены",
+    "unidentifiedEmpty": "Неопознанных трапов нет",
+    "count": "Показано: {{count}}",
+    "loadMore": "Загрузить ещё",
+    "refresh": "Обновить",
+    "expand": "Показать подробности",
+    "collapse": "Скрыть подробности",
+    "unidentified": "неопознан",
+    "noVarbinds": "Varbind'ов нет или они слишком велики",
+    "truncated": "обрезано",
+    "varbinds": "Varbind'ы",
+    "varbindsOf": "Varbind'ы {{oid}}",
+    "kind": {
+      "syslog": "Syslog",
+      "trap": "Трап"
+    },
+    "severity": {
+      "none": "-",
+      "info": "Инфо",
+      "warning": "Предупреждение",
+      "average": "Средняя",
+      "high": "Высокая",
+      "disaster": "Авария"
+    },
+    "col": {
+      "time": "Время",
+      "kind": "Тип",
+      "severity": "Важность",
+      "device": "Устройство",
+      "source": "Источник",
+      "text": "Сообщение",
+      "count": "Число",
+      "lastSeen": "Последний"
+    },
+    "filter": {
+      "search": "Поиск по тексту",
+      "kind": "Тип события",
+      "allKinds": "Все типы",
+      "device": "Устройство",
+      "allDevices": "Все устройства",
+      "severity": "Важность",
+      "anySeverity": "Любая важность",
+      "atLeast": "Не ниже: {{severity}}",
+      "period": "Период"
+    },
+    "period": {
+      "1h": "Последний час",
+      "24h": "Последние 24 часа",
+      "7d": "Последние 7 дней",
+      "30d": "Последние 30 дней",
+      "custom": "Свой период",
+      "from": "С",
+      "to": "По"
+    },
+    "periodError": {
+      "required": "Укажите начало периода",
+      "order": "Начало должно быть раньше конца",
+      "tooWide": "Период не может быть длиннее 31 дня"
+    },
+    "rule": {
+      "title": "Новое правило трапа",
+      "description": "Правило задаёт имя и важность для всех трапов с этим OID.",
+      "oid": "OID трапа",
+      "name": "Название",
+      "severity": "Важность",
+      "create": "Создать правило",
+      "createFor": "Создать правило для {{oid}}",
+      "required": "Укажите название"
+    }
+  },
+  "system": {
+    "pollers": "Опросчики",
+    "eventd": "Приём событий (eventd)",
+    "database": "База данных",
+    "queues": "Очереди задач",
+    "noPollers": "Опросчиков нет",
+    "noEventd": "Данных от eventd нет",
+    "noQueues": "Очередей нет",
+    "dbSize": "Размер базы: {{size}} МиБ",
+    "silent": "молчит",
+    "stale": "нет свежих данных",
+    "forbidden": "Недостаточно прав для просмотра состояния системы",
+    "col": {
+      "instance": "Экземпляр",
+      "devices": "Устройств",
+      "reporting": "Отчитываются",
+      "updated": "Обновлено",
+      "received": "Получено",
+      "accepted": "Принято",
+      "unknown_source": "Неизвестный источник",
+      "auth_failed": "Ошибка аутентификации",
+      "rate_limited": "Лимит скорости",
+      "dropped": "Отброшено",
+      "queue_depth": "Очередь",
+      "queue": "Очередь",
+      "available": "Доступно",
+      "running": "Выполняется",
+      "retryable": "Повтор"
     }
   }
 }

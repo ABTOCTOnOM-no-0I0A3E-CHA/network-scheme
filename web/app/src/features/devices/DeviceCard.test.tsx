@@ -38,6 +38,7 @@ let deviceFn: () => Response;
 let polled = 0;
 let patched: unknown;
 let metricsQuery: Record<string, string | null> | undefined;
+let eventQuery: URLSearchParams | undefined;
 const seen = "2026-10-02T10:00:00Z";
 const server = setupServer(
   http.get("*/api/devices/7", () => deviceFn()),
@@ -63,6 +64,10 @@ const server = setupServer(
     return HttpResponse.json({ step_s: 10, points: [] });
   }),
   http.get("*/api/devices/7/profiles", () => HttpResponse.json([{ kind: "snmp3", status: "weak", updated_at: seen }])),
+  http.get("*/api/events", ({ request }) => {
+    eventQuery = new URL(request.url).searchParams;
+    return HttpResponse.json({ items: [{ ts: seen, kind: "syslog", device_id: 7, device_name: "core-sw", severity: "high", app: "sshd", text: "journal line", identified: true }], next_cursor: null });
+  }),
   http.get("*/api/groups", () => err(403, "forbidden")),
   http.post("*/api/devices/7/poll", () => {
     polled++;
@@ -82,6 +87,7 @@ afterEach(() => {
   polled = 0;
   patched = undefined;
   metricsQuery = undefined;
+  eventQuery = undefined;
 });
 afterAll(() => server.close());
 
@@ -130,6 +136,39 @@ describe("DeviceCard", () => {
     await waitFor(() => expect(screen.queryByRole("form", { name: ru.card.edit.title })).not.toBeInTheDocument());
     expect(patched8).toBe(0);
     expect(patched).toBeUndefined();
+  });
+
+  it("shows last_error as truncated plain text and hides it when empty", async () => {
+    deviceFn = () => HttpResponse.json(detail({ last_error: HOSTILE }));
+    setup(false);
+    const line = (await screen.findByText(ru.card.lastError + ":")).closest("p")!;
+    expect(line).toHaveClass("truncate");
+    expect(line).toHaveAttribute("title", safeText(HOSTILE));
+    expect(line.querySelector("script")).toBeNull();
+    expect(line.textContent).not.toContain("");
+    cleanup();
+    deviceFn = () => HttpResponse.json(detail({ last_error: "" }));
+    setup(false);
+    await screen.findByRole("heading", { name: "core-sw" });
+    expect(screen.queryByText(ru.card.lastError + ":")).not.toBeInTheDocument();
+  });
+
+  it("journal tab lists the events of this device only", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    /* jsdom has no layout: give the virtual list a viewport and rows a height */
+    const define = (prop: string, value: number) => Object.defineProperty(HTMLElement.prototype, prop, { configurable: true, get: () => value });
+    define("clientHeight", 440);
+    define("offsetHeight", 40);
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    setup(false);
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.journal }));
+    expect(await screen.findByText("journal line")).toBeInTheDocument();
+    expect(eventQuery?.get("device_id")).toBe("7");
+    expect(screen.queryByLabelText(ru.events.filter.device)).not.toBeInTheDocument();
   });
 
   it("shows the header facts", async () => {
