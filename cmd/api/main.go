@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/devices"
@@ -21,8 +23,11 @@ import (
 	"github.com/beekamai/network-scheme/internal/inventory"
 	"github.com/beekamai/network-scheme/internal/jobs"
 	"github.com/beekamai/network-scheme/internal/metrics"
+	"github.com/beekamai/network-scheme/internal/notify"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/store"
+	"github.com/beekamai/network-scheme/internal/triggers"
+	"github.com/beekamai/network-scheme/internal/triggers/metricsrc"
 )
 
 /* migratorUser is the only role allowed to change the schema. */
@@ -127,11 +132,17 @@ func serve(ctx context.Context, args []string) error {
 		return err
 	}
 
+	/* One hub: the engine publishes through the panel channel, /api/ws serves it. */
+	hub := notify.NewHub()
+	closing := make(chan struct{})
+	mstore := metrics.NewStore(pool)
+
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
-			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: metrics.NewStore(pool), Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
+			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: mstore, Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
+			Hub: hub, Shutdown: closing,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -140,6 +151,26 @@ func serve(ctx context.Context, args []string) error {
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	/* Hijacked WebSocket connections are not tracked by Shutdown: tell them to close with a close frame. */
+	srv.RegisterOnShutdown(func() { close(closing) })
+
+	/* The trigger engine reads monitoring data and writes problems; it stops with the server. */
+	engCtx, stopEngine := context.WithCancel(ctx)
+	engDone := make(chan struct{})
+	eng := triggers.New(triggers.Config{
+		Pool: pool, Samples: metricsrc.Source{Store: mstore}, Channels: []notify.Channel{notify.Panel{Hub: hub}}, Log: log,
+		PollNow: func(c context.Context, id int64) error {
+			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueuePollNow(c, tx, id) })
+		},
+	})
+	go func() {
+		defer close(engDone)
+		if err := eng.Run(engCtx); err != nil {
+			log.Error("trigger engine stopped", slog.String("error", err.Error()))
+		}
+	}()
+	defer func() { stopEngine(); <-engDone }()
+
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("api listening", slog.String("addr", cfg.ListenAddr))

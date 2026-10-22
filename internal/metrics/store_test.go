@@ -327,3 +327,68 @@ func TestIfStep(t *testing.T) {
 		}
 	}
 }
+
+func TestSysSinceAndIfSince(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	w := NewStore(env.Pool("nms_poller"))
+	r := NewStore(env.Pool("nms_api"))
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	const dev1, dev2 = int64(9101), int64(9102)
+	if err := w.WriteSys(ctx, []SysPoint{
+		{DeviceID: dev1, TS: base, CPUPct: f64(10)},
+		{DeviceID: dev1, TS: base.Add(10 * time.Second), CPUPct: f64(20)},
+		{DeviceID: dev1, TS: base.Add(20 * time.Second), CPUPct: f64(30)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := r.SysSince(ctx, base, base.Add(20*time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	/* The range is (from, to]: the first point is excluded, the last included, oldest first. */
+	if len(sys) != 2 || *sys[0].CPUPct != 20 || *sys[1].CPUPct != 30 {
+		t.Fatalf("SysSince = %+v", sys)
+	}
+	if lim, err := r.SysSince(ctx, base.Add(-time.Second), base.Add(time.Minute), 1); err != nil || len(lim) != 1 || *lim[0].CPUPct != 10 {
+		t.Fatalf("limit: %+v %v", lim, err)
+	}
+
+	ifp := func(dev int64, idx int, at time.Duration, up bool) IfPoint {
+		return IfPoint{DeviceID: dev, IfIndex: idx, TS: base.Add(at), OperUp: up, SpeedBps: 1_000_000_000, InBps: 5}
+	}
+	if err := w.WriteIf(ctx, []IfPoint{
+		ifp(dev1, 1, time.Second, true), ifp(dev1, 2, time.Second, false),
+		ifp(dev2, 1, time.Second, true), ifp(dev2, 2, 2*time.Second, false),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	from, to := base, base.Add(time.Minute)
+	count := func(f IfFilter) int {
+		t.Helper()
+		pts, err := r.IfSince(ctx, from, to, f, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(pts)
+	}
+	if n := count(IfFilter{}); n != 4 {
+		t.Errorf("all = %d, want 4", n)
+	}
+	if n := count(IfFilter{DeviceIDs: []int64{dev1}}); n != 2 {
+		t.Errorf("one device = %d, want 2", n)
+	}
+	/* Down samples of every device, plus everything of the listed devices. */
+	if n := count(IfFilter{DownOrDeviceIDs: []int64{}}); n != 2 {
+		t.Errorf("down only = %d, want 2", n)
+	}
+	if n := count(IfFilter{DownOrDeviceIDs: []int64{dev2}}); n != 3 {
+		t.Errorf("down + device 2 = %d, want 3", n)
+	}
+	if n := count(IfFilter{DeviceIDs: []int64{dev1}, DownOrDeviceIDs: []int64{}}); n != 1 {
+		t.Errorf("device 1 down only = %d, want 1", n)
+	}
+	if _, err := env.Pool("nms_eventd").Exec(ctx, `SELECT 1 FROM metrics.if_metrics`); err == nil {
+		t.Error("eventd must have no access to metrics")
+	}
+}

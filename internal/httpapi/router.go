@@ -40,6 +40,7 @@ type Deps struct {
 	Hub           *notify.Hub      /* problem notifications served on /api/ws; nil: a private hub nobody publishes to */
 	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
 	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
+	Shutdown      <-chan struct{}  /* closed on server shutdown: open WebSockets get a close frame; nil: never */
 }
 
 /*
@@ -96,13 +97,14 @@ type server struct {
 	wsConns     wsConns
 	wsRecheck   time.Duration
 	wsHeartbeat time.Duration
+	shutdown    <-chan struct{}
 }
 
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
-		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat,
+		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown,
 	}
 	if s.hub == nil {
 		s.hub = notify.NewHub()

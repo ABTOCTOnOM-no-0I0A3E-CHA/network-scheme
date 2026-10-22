@@ -22,38 +22,46 @@ import (
 
 /* WebSocket limits. */
 const (
-	wsMaxInbound       = 1024 /* bytes per client frame */
-	wsMaxPerSession    = 4
-	wsDefaultRecheck   = 30 * time.Second /* session and scope re-evaluation */
-	wsDefaultHeartbeat = 30 * time.Second /* server ping; no pong within twice this closes the socket */
-	wsWriteTimeout     = 10 * time.Second
+	wsMaxInbound        = 1024 /* bytes per client frame */
+	wsMaxPerSession     = 4
+	wsMaxPerUser        = 16 /* across all sessions of one user */
+	wsMaxFramesPerSec   = 10 /* inbound frames; more closes the socket */
+	wsRevalidateTimeout = 10 * time.Second
+	wsDefaultRecheck    = 30 * time.Second /* session and scope re-evaluation */
+	wsDefaultHeartbeat  = 30 * time.Second /* server ping; no pong within twice this closes the socket */
+	wsWriteTimeout      = 10 * time.Second
 )
 
 /* wsSeverityRank orders the severities for the client's severity_min preference. */
 var wsSeverityRank = map[string]int{"info": 0, "warning": 1, "average": 2, "high": 3, "disaster": 4}
 
-/* wsConns counts open sockets per session (keyed by the hash of the cookie token). */
+/* wsConns counts open sockets per session (keyed by the hash of the cookie token) and per user. */
 type wsConns struct {
-	mu sync.Mutex
-	n  map[[32]byte]int
+	mu     sync.Mutex
+	n      map[[32]byte]int
+	byUser map[int64]int
 }
 
-func (c *wsConns) acquire(token string) (release func(), ok bool) {
+func (c *wsConns) acquire(token string, userID int64) (release func(), ok bool) {
 	k := sha256.Sum256([]byte(token))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.n == nil {
-		c.n = map[[32]byte]int{}
+		c.n, c.byUser = map[[32]byte]int{}, map[int64]int{}
 	}
-	if c.n[k] >= wsMaxPerSession {
+	if c.n[k] >= wsMaxPerSession || c.byUser[userID] >= wsMaxPerUser {
 		return nil, false
 	}
 	c.n[k]++
+	c.byUser[userID]++
 	return func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.n[k]--; c.n[k] <= 0 {
 			delete(c.n, k)
+		}
+		if c.byUser[userID]--; c.byUser[userID] <= 0 {
+			delete(c.byUser, userID)
 		}
 	}, true
 }
@@ -105,7 +113,7 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	release, ok := s.wsConns.acquire(sc.token)
+	release, ok := s.wsConns.acquire(sc.token, sc.sess.UserID)
 	if !ok {
 		writeError(w, errRateLimited)
 		return
@@ -160,8 +168,17 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 
 	/* Reader: the only inbound traffic is ping and subscribe; anything else ends the socket. */
 	go func() {
+		/* Token bucket: wsMaxFramesPerSec per second with a burst of the same size. */
+		tokens, last := float64(wsMaxFramesPerSec), time.Now()
 		for {
 			typ, data, err := c.Read(ctx)
+			now := time.Now()
+			tokens = min(float64(wsMaxFramesPerSec), tokens+now.Sub(last).Seconds()*wsMaxFramesPerSec) - 1
+			last = now
+			if err == nil && tokens < 0 {
+				finish(websocket.StatusPolicyViolation, "too many messages")
+				return
+			}
 			if err != nil {
 				code := websocket.CloseStatus(err)
 				if code == -1 {
@@ -235,6 +252,9 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ctx.Done():
 			return
+		case <-s.shutdown:
+			closeWith(websocket.StatusGoingAway, "server shutting down")
+			return
 		case m, ok := <-msgs:
 			if !ok {
 				closeWith(websocket.StatusTryAgainLater, "too slow")
@@ -264,6 +284,8 @@ anything it had (including all device access). Errors close too, so a
 failing check never leaves a stale grant open.
 */
 func (s *server) wsRevalidate(ctx context.Context, sc sessionCtx, old groupScope) (groupScope, string) {
+	ctx, cancel := context.WithTimeout(ctx, wsRevalidateTimeout)
+	defer cancel()
 	if err := s.auth.CheckSession(ctx, sc.token); err != nil {
 		if !errors.Is(err, auth.ErrSessionExpired) {
 			s.log.WarnContext(ctx, "ws session check failed", slog.String("error", err.Error()))

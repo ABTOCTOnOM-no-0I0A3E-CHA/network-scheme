@@ -65,6 +65,26 @@ type MetricStore interface {
 	WriteSys(ctx context.Context, pts []SysPoint) error
 	WriteAvailability(ctx context.Context, pts []AvailPoint) error
 	QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, to time.Time, step time.Duration) ([]IfPoint, error)
+	/* SysSince returns the raw system samples in (from, to], oldest first, at most limit. */
+	SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysPoint, error)
+	/*
+		IfSince returns the raw interface samples in (from, to], oldest first, at most
+		limit. Only the samples of filter.DeviceIDs are returned (all devices when
+		empty); with DownOrDeviceIDs set it returns the down samples of every
+		device plus all samples of DownOrDeviceIDs (the cheap form for link-down checks).
+	*/
+	IfSince(ctx context.Context, from, to time.Time, filter IfFilter, limit int) ([]IfPoint, error)
+}
+
+/*
+IfFilter narrows IfSince. DeviceIDs restricts the result to those devices;
+when DownOrDeviceIDs is non-nil, samples with oper_up = false of any device
+(inside DeviceIDs when set) are returned together with every sample of the
+DownOrDeviceIDs devices.
+*/
+type IfFilter struct {
+	DeviceIDs       []int64
+	DownOrDeviceIDs []int64
 }
 
 // Store is the TimescaleDB MetricStore.
@@ -208,6 +228,51 @@ func (s *Store) QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query interface metrics: %w", err)
+	}
+	return pts, nil
+}
+
+// SysSince implements MetricStore.
+func (s *Store) SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysPoint, error) {
+	rows, err := s.pool.Query(ctx, `SELECT device_id, ts, cpu_pct, mem_used_pct, temp_c, psu_ok
+		FROM metrics.sys_metrics WHERE ts > $1 AND ts <= $2 ORDER BY ts LIMIT $3`, from, to, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query system samples: %w", err)
+	}
+	pts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SysPoint, error) {
+		var p SysPoint
+		err := row.Scan(&p.DeviceID, &p.TS, &p.CPUPct, &p.MemUsedPct, &p.TempC, &p.PSUOk)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query system samples: %w", err)
+	}
+	return pts, nil
+}
+
+// IfSince implements MetricStore.
+func (s *Store) IfSince(ctx context.Context, from, to time.Time, f IfFilter, limit int) ([]IfPoint, error) {
+	q := `SELECT device_id, if_index, ts, in_bps, out_bps, in_err_ps, out_err_ps, oper_up, speed_bps
+	      FROM metrics.if_metrics
+	      WHERE ts > $1 AND ts <= $2
+	        AND (coalesce(cardinality($3::bigint[]), 0) = 0 OR device_id = ANY($3))
+	        AND ($4::bigint[] IS NULL OR NOT oper_up OR device_id = ANY($4))
+	      ORDER BY ts LIMIT $5`
+	var down any
+	if f.DownOrDeviceIDs != nil {
+		down = f.DownOrDeviceIDs
+	}
+	rows, err := s.pool.Query(ctx, q, from, to, f.DeviceIDs, down, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query interface samples: %w", err)
+	}
+	pts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (IfPoint, error) {
+		var p IfPoint
+		err := row.Scan(&p.DeviceID, &p.IfIndex, &p.TS, &p.InBps, &p.OutBps, &p.InErrPS, &p.OutErrPS, &p.OperUp, &p.SpeedBps)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query interface samples: %w", err)
 	}
 	return pts, nil
 }

@@ -342,3 +342,31 @@ func TestWSClosesWhenHeartbeatIsNotAnswered(t *testing.T) {
 		t.Fatalf("close status = %d, want a policy close or drop", got)
 	}
 }
+
+func TestWSInboundFrameRateLimit(t *testing.T) {
+	e := newWSEnv(t, nil)
+	g := e.newGroup()
+	s := e.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g})
+	c := e.dial(s)
+	ctx, cancel := context.WithTimeout(context.Background(), wsWait)
+	defer cancel()
+	for range 40 {
+		if err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
+			break
+		}
+	}
+	if got := wantClosed(t, c); got != websocket.StatusPolicyViolation {
+		t.Fatalf("flooding client closed with %d, want 1008", got)
+	}
+}
+
+func TestWSClosesWithFrameOnShutdown(t *testing.T) {
+	down := make(chan struct{})
+	e := newWSEnv(t, func(d *httpapi.Deps) { d.Shutdown = down })
+	g := e.newGroup()
+	c := e.dial(e.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g}))
+	close(down)
+	if got := wantClosed(t, c); got != websocket.StatusGoingAway {
+		t.Fatalf("shutdown closed with %d, want 1001", got)
+	}
+}
