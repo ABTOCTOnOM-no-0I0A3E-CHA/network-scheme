@@ -113,6 +113,8 @@ type server struct {
 	polls   *pollTrigger
 	rules   atomic.Pointer[ruleSet]
 	conns   *conns
+	hsLast  atomic.Int64 /* unix nanoseconds of the last logged TLS handshake failure */
+	hsSkip  atomic.Int64 /* failures since then that were not logged */
 }
 
 /*
@@ -312,7 +314,8 @@ func (s *server) listen(rx *sync.WaitGroup, done <-chan struct{}) (Addrs, []inte
 			}
 			closers = append(closers, l)
 			a.SyslogTLS = l.Addr()
-			tc := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12, ClientAuth: tls.NoClientCert}
+			/* No session tickets: a sender that writes and closes without reading them makes the kernel reset the connection and lose its message. */
+			tc := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12, SessionTicketsDisabled: true, ClientAuth: tls.NoClientCert}
 			rx.Go(func() { s.serveStream(l, tc, rx, done) })
 		}
 	}

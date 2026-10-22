@@ -2,6 +2,7 @@ package eventd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,9 +11,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -184,6 +188,59 @@ func TestSyslogTLS(t *testing.T) {
 		t.Error("handshake with an unknown peer succeeded")
 	}
 	eventually(t, 10*time.Second, "unknown tls peer counted", func() bool { return h.stat("unknown_source") == 1 })
+}
+
+/*
+A sender that writes and drops the connection without close_notify while the server's
+session tickets are still unread (it never reads them) makes the kernel answer with RST; with
+tickets enabled the message was lost in front of the application. No tickets, no loss.
+*/
+func TestSyslogTLSAbruptClose(t *testing.T) {
+	h := newHarness(t)
+	id := h.device("127.0.0.2")
+	cert, key, roots := selfSigned(t)
+	h.start(func(c *config.EventD) { c.SyslogTLS, c.TLSCertFile, c.TLSKeyFile = "127.0.0.1:0", cert, key })
+	d := &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2")}, Timeout: 5 * time.Second}
+	for i := range 5 {
+		raw, err := d.Dial("tcp", h.addrs.SyslogTLS.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache := tls.NewLRUClientSessionCache(1)
+		c := tls.Client(raw, &tls.Config{RootCAs: roots, ServerName: "127.0.0.1", ClientSessionCache: cache})
+		if err := c.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond)) /* reading takes in a ticket, if one was sent */
+		_, _ = c.Read(make([]byte, 1))
+		_ = c.SetReadDeadline(time.Time{})
+		if _, ok := cache.Get("127.0.0.1"); ok {
+			t.Fatal("the server sent a session ticket")
+		}
+		if _, err := fmt.Fprintf(c, "<14>Oct 22 10:00:00 sw1 abrupt%d\n", i); err != nil {
+			t.Fatal(err)
+		}
+		_ = raw.Close()
+	}
+	eventually(t, 10*time.Second, "all frames stored", func() bool { return h.count(`SELECT count(*) FROM events.syslog WHERE device_id = $1`, id) == 5 })
+}
+
+func TestLogHandshakeIsRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	s := &server{log: slog.New(slog.NewTextHandler(&buf, nil))}
+	ip := netip.MustParseAddr("10.0.0.1")
+	for range 5 {
+		s.logHandshake(ip, errors.New("boom"))
+	}
+	if n := strings.Count(buf.String(), "handshake failed"); n != 1 {
+		t.Fatalf("%d log lines, want 1: %s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "10.0.0.1") || !strings.Contains(buf.String(), "boom") {
+		t.Errorf("peer or error missing: %s", buf.String())
+	}
+	if s.hsSkip.Load() != 4 {
+		t.Errorf("skipped %d, want 4", s.hsSkip.Load())
+	}
 }
 
 func TestSyslogTLSDisabledWithoutCertificate(t *testing.T) {

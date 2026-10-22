@@ -17,6 +17,7 @@ import (
 
 const (
 	tlsHandshakeTimeout = 10 * time.Second
+	handshakeLogEvery   = time.Minute
 	maxConnsPerSource   = 16
 	frameBuf            = 16 << 10
 )
@@ -181,11 +182,26 @@ func (s *server) serveStream(l net.Listener, cfg *tls.Config, wg *sync.WaitGroup
 	}
 }
 
+/*
+logHandshake logs a failed TLS handshake (peer address and error text only) at
+most once per handshakeLogEvery; the failures in between are only counted.
+*/
+func (s *server) logHandshake(ip netip.Addr, err error) {
+	now := time.Now().UnixNano()
+	last := s.hsLast.Load()
+	if now-last < int64(handshakeLogEvery) || !s.hsLast.CompareAndSwap(last, now) {
+		s.hsSkip.Add(1)
+		return
+	}
+	s.log.Warn("syslog tls handshake failed", slog.String("peer", ip.String()), slog.String("err", err.Error()), slog.Int64("suppressed", s.hsSkip.Swap(0)))
+}
+
 func (s *server) stream(c net.Conn, ip netip.Addr, cfg *tls.Config, done <-chan struct{}) {
 	if cfg != nil {
 		t := tls.Server(c, cfg)
 		_ = t.SetDeadline(time.Now().Add(tlsHandshakeTimeout))
 		if err := t.Handshake(); err != nil {
+			s.logHandshake(ip, err)
 			return
 		}
 		c = t
