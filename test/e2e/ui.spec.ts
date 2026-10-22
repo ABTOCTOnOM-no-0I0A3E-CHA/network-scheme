@@ -85,7 +85,7 @@ test("device added through the UI is polled, charted and a scan is scheduled", a
   await credDialog.getByLabel("Ключ шифрования", { exact: true }).fill(SIM_V3.privKey);
   await credDialog.getByRole("button", { name: "Сохранить" }).click();
   await expect(credDialog).toBeHidden();
-  await expect(page.getByRole("cell", { name: SCAN_CIDR })).toBeVisible();
+  await expect(page.getByRole("cell", { name: SCAN_CIDR, exact: true })).toBeVisible();
   await expect(page.getByText("Новых находок нет")).toBeVisible();
 
   /* Device card: poll now, wait for up and interfaces. */
