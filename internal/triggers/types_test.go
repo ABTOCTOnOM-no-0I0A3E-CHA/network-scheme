@@ -58,6 +58,10 @@ func TestParseInvalid(t *testing.T) {
 		{"trap empty", "trap", `{"name":""}`},
 		{"trap long", "trap", `{"name":"` + strings.Repeat("a", 1025) + `"}`},
 		{"trap control", "trap", `{"name":"a\u0000b"}`},
+		{"metric value missing", "metric_threshold", `{"metric":"cpu","op":"gt"}`},
+		{"syslog severity missing", "syslog", `{"contains":"x"}`},
+		{"trap format char", "trap", `{"name":"a\u202eb"}`},
+		{"syslog format char", "syslog", `{"severity_min":1,"contains":"a\u200bb"}`},
 		{"syslog severity", "syslog", `{"severity_min":8}`},
 		{"syslog negative", "syslog", `{"severity_min":-1}`},
 		{"syslog long", "syslog", `{"severity_min":1,"contains":"` + long + `"}`},
@@ -80,5 +84,22 @@ func TestValidateDuration(t *testing.T) {
 		if err := ValidateDuration(s); err == nil {
 			t.Errorf("%d accepted", s)
 		}
+	}
+}
+
+func TestParseUserRejectsSystemKinds(t *testing.T) {
+	for _, k := range []string{"poller_unavailable", "device_unreachable"} {
+		if !Kind(k).IsSystem() {
+			t.Errorf("%s not system", k)
+		}
+		if _, err := ParseUser(k, json.RawMessage(`{}`)); err == nil {
+			t.Errorf("ParseUser accepted %s", k)
+		}
+	}
+	if Kind("trap").IsSystem() {
+		t.Error("trap is system")
+	}
+	if _, err := ParseUser("trap", json.RawMessage(`{"name":"a"}`)); err != nil {
+		t.Error(err)
 	}
 }

@@ -12,7 +12,10 @@ CREATE INDEX device_parent_id_idx ON core.device (parent_id);
 
 -- Runs with the caller's rights (the api has SELECT on core.device). The
 -- advisory lock serializes parent changes so two concurrent transactions
--- cannot each pass the check and together close a cycle.
+-- cannot each pass the check and together close a cycle. This relies on READ
+-- COMMITTED (the default): each statement then takes a fresh snapshot after the
+-- lock is granted, so it sees the other transaction's committed parent change.
+-- Under REPEATABLE READ or SERIALIZABLE the snapshot predates the lock.
 -- +goose StatementBegin
 CREATE FUNCTION core.device_check_parent() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
@@ -49,6 +52,48 @@ REVOKE ALL ON FUNCTION core.device_check_parent() FROM PUBLIC;
 CREATE TRIGGER device_check_parent BEFORE INSERT OR UPDATE OF parent_id ON core.device
     FOR EACH ROW WHEN (NEW.parent_id IS NOT NULL) EXECUTE FUNCTION core.device_check_parent();
 
+-- Ids of templates and triggers come only from their identity sequences and are
+-- never reused: explicit ids (OVERRIDING SYSTEM VALUE), id changes and re-use of
+-- a deleted id are refused, as for devices.
+CREATE TABLE core.identity_retired (
+    tbl text   NOT NULL,
+    id  bigint NOT NULL,
+    PRIMARY KEY (tbl, id)
+);
+REVOKE ALL ON core.identity_retired FROM PUBLIC;
+
+-- +goose StatementBegin
+CREATE FUNCTION core.guard_identity_id() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    generated bigint;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION '% id cannot change', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
+    BEGIN
+        generated := currval(pg_get_serial_sequence(TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'id'));
+    EXCEPTION WHEN object_not_in_prerequisite_state THEN
+        generated := NULL;
+    END;
+    IF NEW.id IS DISTINCT FROM generated
+       OR EXISTS (SELECT 1 FROM core.identity_retired WHERE tbl = TG_TABLE_NAME AND id = NEW.id) THEN
+        RAISE EXCEPTION '% id must come from its identity sequence', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END $$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION core.retire_identity_id() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    INSERT INTO core.identity_retired (tbl, id) VALUES (TG_TABLE_NAME, OLD.id) ON CONFLICT DO NOTHING;
+    RETURN NULL;
+END $$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION core.guard_identity_id(), core.retire_identity_id() FROM PUBLIC;
+
 -- A template applies to every device of a driver or of a group (and its
 -- subgroups); intervals override the group/default ones for those devices.
 CREATE TABLE core.monitoring_template (
@@ -77,6 +122,19 @@ CREATE TABLE core.trigger (
 );
 CREATE INDEX trigger_template_id_idx ON core.trigger (template_id);
 
+CREATE TRIGGER monitoring_template_guard_id_insert BEFORE INSERT ON core.monitoring_template
+    FOR EACH ROW EXECUTE FUNCTION core.guard_identity_id();
+CREATE TRIGGER monitoring_template_guard_id_update BEFORE UPDATE OF id ON core.monitoring_template
+    FOR EACH ROW WHEN (NEW.id IS DISTINCT FROM OLD.id) EXECUTE FUNCTION core.guard_identity_id();
+CREATE TRIGGER monitoring_template_after_delete AFTER DELETE ON core.monitoring_template
+    FOR EACH ROW EXECUTE FUNCTION core.retire_identity_id();
+CREATE TRIGGER trigger_guard_id_insert BEFORE INSERT ON core.trigger
+    FOR EACH ROW EXECUTE FUNCTION core.guard_identity_id();
+CREATE TRIGGER trigger_guard_id_update BEFORE UPDATE OF id ON core.trigger
+    FOR EACH ROW WHEN (NEW.id IS DISTINCT FROM OLD.id) EXECUTE FUNCTION core.guard_identity_id();
+CREATE TRIGGER trigger_after_delete AFTER DELETE ON core.trigger
+    FOR EACH ROW EXECUTE FUNCTION core.retire_identity_id();
+
 -- Per-device exceptions to a template trigger; NULL means "as in the trigger".
 CREATE TABLE core.trigger_override (
     trigger_id bigint NOT NULL REFERENCES core.trigger (id) ON DELETE CASCADE,
@@ -95,7 +153,8 @@ CREATE TABLE core.maintenance_window (
     starts_at timestamptz NOT NULL,
     ends_at   timestamptz NOT NULL,
     comment   text        NOT NULL DEFAULT '' CHECK (char_length(comment) <= 1000),
-    CONSTRAINT maintenance_window_order CHECK (ends_at > starts_at)
+    CONSTRAINT maintenance_window_order CHECK (ends_at > starts_at),
+    CONSTRAINT maintenance_window_span CHECK (ends_at - starts_at <= interval '7 days')
 );
 CREATE INDEX maintenance_window_group_id_idx ON core.maintenance_window (group_id);
 
@@ -122,7 +181,8 @@ FROM tpl CROSS JOIN (VALUES
 ) AS t (kind, params, duration_s, severity, name);
 
 -- Problems. Rows are history: they carry no foreign keys to triggers, devices
--- or users (the ids come from identity sequences and are never reused), so
+-- or users (their ids come from identity sequences and are never reused: guarded
+-- for templates and triggers here, for devices by device_guard_id), so
 -- deleting any of those cannot cascade into problems or acknowledgements; the
 -- engine resolves the open problems of a deleted trigger or device.
 CREATE SCHEMA problems AUTHORIZATION nms_migrator;
@@ -151,7 +211,8 @@ CREATE TABLE problems.problem (
     last_value      text        NULL CHECK (octet_length(last_value) <= 1024),
     CONSTRAINT problem_source CHECK (num_nonnulls(trigger_id, system_kind) = 1),
     CONSTRAINT problem_trigger_device CHECK (trigger_id IS NULL OR device_id IS NOT NULL),
-    CONSTRAINT problem_trigger_object CHECK (trigger_id IS NULL OR object ~ '^(if:[0-9]{1,10})?$'),
+    CONSTRAINT problem_trigger_object CHECK (trigger_id IS NULL OR
+        CASE WHEN object ~ '^if:[1-9][0-9]{0,9}$' THEN substr(object, 4)::bigint <= 2147483647 ELSE object = '' END),
     CONSTRAINT problem_resolved CHECK ((state = 'resolved') = (resolved_at IS NOT NULL)),
     CONSTRAINT problem_acknowledged CHECK (state <> 'acknowledged' OR acknowledged_at IS NOT NULL)
 );
@@ -160,7 +221,8 @@ CREATE UNIQUE INDEX problem_open_key ON problems.problem (trigger_id, system_kin
 CREATE INDEX problem_device_state_idx ON problems.problem (device_id, state);
 CREATE INDEX problem_state_opened_idx ON problems.problem (state, opened_at DESC);
 
--- Acknowledgement history: append-only for every application role.
+-- Acknowledgement history: append-only for every application role and, through
+-- the statement-level trigger below, for the owner too (as audit.event).
 CREATE TABLE problems.ack (
     id         bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     problem_id bigint      NOT NULL REFERENCES problems.problem (id),
@@ -170,6 +232,20 @@ CREATE TABLE problems.ack (
 );
 CREATE INDEX ack_problem_id_idx ON problems.ack (problem_id);
 
+-- +goose StatementBegin
+CREATE FUNCTION problems.reject_modification() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RAISE EXCEPTION 'problems: % on %.% is forbidden', TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME
+        USING ERRCODE = 'insufficient_privilege';
+END;
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION problems.reject_modification() FROM PUBLIC;
+
+CREATE TRIGGER ack_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON problems.ack
+    FOR EACH STATEMENT EXECUTE FUNCTION problems.reject_modification();
+
 -- How far the engine has read each event stream.
 CREATE TABLE problems.engine_state (
     name      text        PRIMARY KEY CHECK (name <> '' AND octet_length(name) <= 100),
@@ -178,8 +254,11 @@ CREATE TABLE problems.engine_state (
 
 REVOKE ALL ON ALL TABLES IN SCHEMA problems FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA problems FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON problems.problem, problems.engine_state TO nms_api;
-GRANT SELECT, INSERT ON problems.ack TO nms_api;
+-- The engine resolves problems and never deletes them; `at` is always now().
+GRANT SELECT, INSERT, UPDATE ON problems.problem TO nms_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON problems.engine_state TO nms_api;
+GRANT SELECT ON problems.ack TO nms_api;
+GRANT INSERT (problem_id, user_id, comment) ON problems.ack TO nms_api;
 GRANT USAGE ON SEQUENCE problems.problem_id_seq, problems.ack_id_seq TO nms_api;
 
 -- +goose Down

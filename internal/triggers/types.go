@@ -50,6 +50,17 @@ type Params interface {
 	Validate() error
 }
 
+// IsSystem reports whether k is an engine-raised system kind.
+func (k Kind) IsSystem() bool { return k == SystemPollerUnavailable || k == SystemDeviceUnreachable }
+
+// ParseUser is Parse for the api: system kinds cannot be configured by users.
+func ParseUser(kind string, raw json.RawMessage) (Params, error) {
+	if Kind(kind).IsSystem() {
+		return nil, fmt.Errorf("trigger kind %q is reserved for the system", kind)
+	}
+	return Parse(kind, raw)
+}
+
 // Parse decodes raw as the parameters of kind and validates them. Unknown
 // fields, trailing data and unknown kinds are rejected; a null or empty raw
 // is treated as an empty object.
@@ -155,10 +166,10 @@ const (
 
 // MetricThreshold fires while Metric compares to Value by Op.
 type MetricThreshold struct {
-	Metric  string  `json:"metric"`
-	Op      string  `json:"op"`
-	Value   float64 `json:"value"`
-	IfIndex *int    `json:"if_index"`
+	Metric  string   `json:"metric"`
+	Op      string   `json:"op"`
+	Value   *float64 `json:"value"`
+	IfIndex *int     `json:"if_index"`
 }
 
 // Kind returns KindMetricThreshold.
@@ -183,7 +194,10 @@ func (m *MetricThreshold) Validate() error {
 	if m.Op != OpGreater && m.Op != OpLess {
 		return fmt.Errorf("metric_threshold: unknown operator %q", m.Op)
 	}
-	if math.IsNaN(m.Value) || m.Value < lo || m.Value > hi {
+	if m.Value == nil {
+		return errors.New("metric_threshold: value is required")
+	}
+	if math.IsNaN(*m.Value) || *m.Value < lo || *m.Value > hi {
 		return fmt.Errorf("metric_threshold: value for %s must be within %g..%g", m.Metric, lo, hi)
 	}
 	if m.IfIndex != nil && !ifMetric {
@@ -213,7 +227,7 @@ func (t *Trap) Validate() error {
 
 // Syslog fires on a syslog message at SeverityMin (0 emergency .. 7 debug) or more severe, optionally containing Contains.
 type Syslog struct {
-	SeverityMin int     `json:"severity_min"`
+	SeverityMin *int    `json:"severity_min"`
 	Contains    *string `json:"contains"`
 }
 
@@ -222,8 +236,8 @@ func (*Syslog) Kind() Kind { return KindSyslog }
 
 // Validate checks the severity and the substring (<= 128 characters, no control characters).
 func (s *Syslog) Validate() error {
-	if s.SeverityMin < 0 || s.SeverityMin > 7 {
-		return errors.New("syslog: severity_min must be within 0..7")
+	if s.SeverityMin == nil || *s.SeverityMin < 0 || *s.SeverityMin > 7 {
+		return errors.New("syslog: severity_min is required and must be within 0..7")
 	}
 	if s.Contains == nil {
 		return nil
@@ -239,7 +253,7 @@ func (s *Syslog) Validate() error {
 }
 
 func hasControl(s string) bool {
-	return slices.ContainsFunc([]rune(s), unicode.IsControl)
+	return slices.ContainsFunc([]rune(s), func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 }
 
 // System is the parameterless condition of an engine-raised system kind.
@@ -252,6 +266,3 @@ func (s *System) Kind() Kind { return s.kind }
 
 // Validate always succeeds: unknown fields are already rejected by Parse.
 func (*System) Validate() error { return nil }
-
-// IsSystem reports whether k is an engine-raised system kind.
-func IsSystem(k Kind) bool { return k == SystemPollerUnavailable || k == SystemDeviceUnreachable }
