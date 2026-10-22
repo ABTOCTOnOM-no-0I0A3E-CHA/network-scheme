@@ -29,6 +29,9 @@ const (
 	maxPollerObject     = 190 /* problem.object is bounded to 200 bytes */
 )
 
+// SystemName is the English title of a system problem kind.
+func SystemName(kind string) string { return systemName(kind) }
+
 func systemName(kind string) string {
 	switch kind {
 	case string(SystemPollerUnavailable):

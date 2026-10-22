@@ -57,6 +57,7 @@ type deviceResponse struct {
 type deviceDetailResponse struct {
 	deviceResponse
 	SNMPPort           int    `json:"snmp_port"`
+	ParentID           *int64 `json:"parent_id"`
 	IntervalAvailS     *int   `json:"interval_avail_s"`
 	IntervalMetricsS   *int   `json:"interval_metrics_s"`
 	IntervalInventoryS *int   `json:"interval_inventory_s"`
@@ -207,7 +208,7 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, deviceDetailResponse{
-		deviceResponse: toDeviceResponse(d, states[d.ID]), SNMPPort: d.SNMPPort,
+		deviceResponse: toDeviceResponse(d, states[d.ID]), SNMPPort: d.SNMPPort, ParentID: d.ParentID,
 		IntervalAvailS: d.Intervals.AvailS, IntervalMetricsS: d.Intervals.MetricsS, IntervalInventoryS: d.Intervals.InventoryS,
 		LastError: states[d.ID].LastError,
 	})
@@ -216,7 +217,8 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 /*
 updateDevice changes the given fields; an absent field is unchanged and a
 null interval falls back to the group's. Moving the device needs
-devices.manage on the target group as well.
+devices.manage on the target group as well. parent_id (null clears) must name
+a device the caller can see; cycles and chains over 16 are refused with 409.
 */
 func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -237,6 +239,7 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 		Address            *string         `json:"address"`
 		SNMPPort           *int            `json:"snmp_port"`
 		GroupID            *int64          `json:"group_id"`
+		ParentID           json.RawMessage `json:"parent_id"`
 		IntervalAvailS     json.RawMessage `json:"interval_avail_s"`
 		IntervalMetricsS   json.RawMessage `json:"interval_metrics_s"`
 		IntervalInventoryS json.RawMessage `json:"interval_inventory_s"`
@@ -267,6 +270,14 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 		set bool
 		v   *int
 	}
+	var parent *int64
+	setParent := in.ParentID != nil
+	if setParent {
+		if json.Unmarshal(in.ParentID, &parent) != nil || (parent != nil && *parent < 1) {
+			valid = false
+		}
+		details["parent_id"] = parent
+	}
 	var iv [3]intervalUpdate
 	for i, f := range []struct {
 		key string
@@ -287,6 +298,17 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errNotFound)
 		return
 	}
+	if parent != nil {
+		/* The parent need only be visible (devices.read), not manageable. */
+		readSc, err := s.scope(r, rbac.PermDevicesRead)
+		if err == nil {
+			_, err = s.deviceIn(r, readSc, *parent)
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 	ev := audit.Event{Action: "devices.update", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10), Details: details}
 	if !s.change(w, r, ev, func(tx pgx.Tx, _ *audit.Event) error {
 		if iv[0].set || iv[1].set || iv[2].set {
@@ -303,9 +325,18 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 			}
 			p.Intervals = &merged
 		}
-		return s.devices.Update(r.Context(), tx, id, p)
+		if err := s.devices.Update(r.Context(), tx, id, p); err != nil {
+			return err
+		}
+		if setParent {
+			return s.devices.SetParent(r.Context(), tx, id, parent)
+		}
+		return nil
 	}) {
 		return
+	}
+	if setParent {
+		s.configChanged() /* the engine reads parents with its configuration */
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

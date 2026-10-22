@@ -310,6 +310,9 @@ func mergeParams(base, over json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(b)
 }
 
+// MergeParams lays the keys of an override over a trigger's params (the engine's rule).
+func MergeParams(base, over json.RawMessage) (json.RawMessage, error) { return mergeParams(base, over) }
+
 func validSeverity(s string) bool {
 	switch s {
 	case "info", "warning", "average", "high", "disaster":

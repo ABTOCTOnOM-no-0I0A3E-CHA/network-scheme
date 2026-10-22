@@ -852,6 +852,9 @@ export interface paths {
         /**
          * Change device fields; absent fields are unchanged
          * @description A null interval falls back to the group's. Moving needs devices.manage on the target group (else 404).
+         *     parent_id names the device whose outage suppresses this device's problems; it must be visible to
+         *     the caller (else 404), null clears it, a cycle answers 409 parent_cycle and a chain over 16 devices
+         *     409 parent_too_deep.
          */
         patch: {
             parameters: {
@@ -872,6 +875,8 @@ export interface paths {
                         snmp_port?: number;
                         /** Format: int64 */
                         group_id?: number;
+                        /** Format: int64 */
+                        parent_id?: number | null;
                         interval_avail_s?: components["schemas"]["Interval"];
                         interval_metrics_s?: components["schemas"]["Interval"];
                         interval_inventory_s?: components["schemas"]["Interval"];
@@ -2013,6 +2018,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ws": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live problem feed (WebSocket upgrade)
+         * @description Upgrades to a WebSocket. Authentication is the session cookie only (never
+         *     a token in the URL); the Origin header must be present and equal the
+         *     public origin, otherwise 403 csrf. At most 4 sockets per session, the 5th
+         *     answers 429 rate_limited before the upgrade.
+         *
+         *     Server to client (JSON text): {"type":"problem","event":"opened|acknowledged|resolved|suppressed_changed",
+         *     "problem":ProblemSummary}, {"type":"pong"} and {"type":"subscribed","severity_min":...}.
+         *     Only problems of devices in the caller's groups are delivered; problems
+         *     without a device (system problems) go to global bindings only. Client
+         *     to server, at most 1 KiB per frame: {"type":"ping"} and
+         *     {"type":"subscribe","severity_min":"info|warning|average|high|disaster"}
+         *     (a display preference; the scope always applies). Any other frame closes
+         *     the socket with 1008. The server pings every 30 s and closes when no
+         *     pong arrives within 60 s. The session and the caller's scope are
+         *     re-checked every 30 s: the socket closes with 1008 when the session
+         *     ended or visibility shrank, and with 1013 when the client reads too
+         *     slowly. A request without the upgrade headers answers 426. All text
+         *     in problems comes from devices: render it as text only.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Switching Protocols */
+                101: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/status": {
         parameters: {
             query?: never;
@@ -2057,10 +2119,836 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/problems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Problems, newest first
+         * @description Problems of devices in the caller's groups; problems without a device
+         *     (system problems) are for global bindings only. A foreign device_id or
+         *     group_id answers 404. group_id includes subgroups. suppressed=true
+         *     returns only suppressed problems, false only the others, absent both.
+         *     The cursor is opaque; repeat the filters with it. name, object and
+         *     last_value may derive from devices: render them as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    state?: "problem" | "acknowledged" | "resolved";
+                    severity_min?: components["schemas"]["EventSeverity"];
+                    device_id?: number;
+                    group_id?: number;
+                    suppressed?: "true" | "false";
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of problems */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Problem"][];
+                            /** @description null on the last page */
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/problems/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One problem with its acknowledgement history */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The problem */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProblemDetail"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/problems/{id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge a problem
+         * @description The comment is required (1-1000 characters). The first acknowledgement
+         *     moves the problem from problem to acknowledged and is announced on
+         *     /api/ws (not for suppressed problems); later ones only add history
+         *     rows. A resolved problem answers 409 problem_resolved. Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        comment: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Acknowledged */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Monitoring templates in the caller's scope
+         * @description Group templates of the caller's groups; driver templates only for a global binding.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Templates ordered by id */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Template"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a template bound to a driver or to a group
+         * @description Exactly one of driver and group_id. A driver template needs a global
+         *     binding (a scoped caller gets 403); a group in the caller's scope is
+         *     required for a group template (else 404). Intervals override the
+         *     group's for the devices the template covers. A duplicate name answers
+         *     409 template_exists. Audited; the trigger engine reloads at once.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: components["schemas"]["GroupName"];
+                        driver?: string;
+                        /** Format: int64 */
+                        group_id?: number;
+                        interval_avail_s?: components["schemas"]["Interval"];
+                        interval_metrics_s?: components["schemas"]["Interval"];
+                        interval_inventory_s?: components["schemas"]["Interval"];
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a template with its triggers and their overrides
+         * @description The engine resolves the open problems of the removed triggers. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Rename a template or change its intervals
+         * @description The binding cannot change (delete and create instead). A null interval clears it. Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: components["schemas"]["GroupName"];
+                        interval_avail_s?: components["schemas"]["Interval"];
+                        interval_metrics_s?: components["schemas"]["Interval"];
+                        interval_inventory_s?: components["schemas"]["Interval"];
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/templates/{id}/triggers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Triggers of a template */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Triggers ordered by id */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Trigger"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Add a trigger to a template
+         * @description The kind is a closed set and params are validated per kind (see the
+         *     TriggerParams schema); invalid ones answer 400 invalid_trigger. Params
+         *     are stored re-encoded from the parsed value. Audited; the engine
+         *     reloads at once.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        kind: components["schemas"]["TriggerKind"];
+                        params: components["schemas"]["TriggerParams"];
+                        duration_s: number;
+                        severity: components["schemas"]["EventSeverity"];
+                        /** @default true */
+                        enabled?: boolean;
+                        name: components["schemas"]["GroupName"];
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/templates/{id}/triggers/{trigger_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a trigger with its overrides
+         * @description The engine resolves its open problems. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    trigger_id: components["parameters"]["TriggerId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Change a trigger; the kind is fixed
+         * @description params are validated against the stored kind. Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    trigger_id: components["parameters"]["TriggerId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        params?: components["schemas"]["TriggerParams"];
+                        duration_s?: number;
+                        severity?: components["schemas"]["EventSeverity"];
+                        enabled?: boolean;
+                        name?: components["schemas"]["GroupName"];
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/devices/{id}/trigger-overrides": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Per-trigger exceptions of a device */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Overrides ordered by trigger id */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TriggerOverride"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/trigger-overrides/{trigger_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set the device's exception to a trigger (replaces any earlier one)
+         * @description The device must be in the caller's scope and the trigger must apply to
+         *     it (its template bound to the device's driver or to the device's group
+         *     or an ancestor), else 404. At least one of enabled, severity and params
+         *     is required. params lay keys over the trigger's (null removes an
+         *     optional key); the merged result must be a valid condition, else 400
+         *     invalid_trigger. Only keys that differ from the trigger are stored.
+         *     Audited; the engine reloads at once.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    trigger_id: components["parameters"]["TriggerId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        enabled?: boolean;
+                        severity?: components["schemas"]["EventSeverity"];
+                        /** @description Keys of the trigger's params to override */
+                        params?: {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Stored */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /**
+         * Remove the device's exception to a trigger
+         * @description Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    trigger_id: components["parameters"]["TriggerId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Maintenance windows of the caller's groups
+         * @description Windows that have not ended, newest start first; include_ended=true adds the finished ones (at most 1000 rows).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    include_ended?: "true" | "false";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Windows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MaintenanceWindow"][];
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Open a maintenance window for a group
+         * @description Problems of the group's devices (subgroups included) open suppressed
+         *     while it lasts. The group must be in the caller's scope (else 404). The
+         *     window may have started already but must end in the future, after it
+         *     starts, and last at most 7 days, else 400 invalid_window. Audited; the
+         *     engine reloads at once.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        group_id: number;
+                        /** Format: date-time */
+                        starts_at: string;
+                        /** Format: date-time */
+                        ends_at: string;
+                        comment?: string;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/maintenance/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * End a maintenance window early by removing it
+         * @description Audited. The suppression it caused is released.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Problem: components["schemas"]["ProblemSummary"] & {
+            /**
+             * Format: int64
+             * @description null for a system problem
+             */
+            trigger_id: number | null;
+            /** @description Set for engine-raised problems, e.g. poller_unavailable */
+            system_kind: string | null;
+            /** @description recovered, removed or null while open */
+            resolve_reason: string | null;
+            /** @description Last observed value; comes from devices, render as text only */
+            last_value: string | null;
+        };
+        ProblemDetail: components["schemas"]["Problem"] & {
+            /** @description Acknowledgement history, oldest first */
+            acks: {
+                /** Format: int64 */
+                id: number;
+                /** Format: int64 */
+                user_id: number;
+                username: string | null;
+                comment: string;
+                /** Format: date-time */
+                at: string;
+            }[];
+        };
+        Template: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            driver: string | null;
+            /** Format: int64 */
+            group_id: number | null;
+            interval_avail_s: number | null;
+            interval_metrics_s: number | null;
+            interval_inventory_s: number | null;
+        };
+        /** @enum {string} */
+        TriggerKind: "availability" | "if_oper_down" | "metric_threshold" | "trap" | "syslog";
+        /**
+         * @description Per kind, no other keys. availability {states: [down|partial, ...]};
+         *     if_oper_down {if_index?: 1..2147483647}; metric_threshold {metric:
+         *     cpu|mem|temp|if_util_in|if_util_out|if_errors, op: gt|lt, value
+         *     (cpu, mem, if_util_* 0..100; temp -50..150; if_errors >= 0),
+         *     if_index? (interface metrics only)}; trap {name: 1-1024 bytes};
+         *     syslog {severity_min: 0..7 (0 most severe), contains?: 1-128
+         *     characters, case-insensitive}.
+         */
+        TriggerParams: {
+            [key: string]: unknown;
+        };
+        Trigger: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            template_id: number;
+            kind: components["schemas"]["TriggerKind"];
+            params: components["schemas"]["TriggerParams"];
+            duration_s: number;
+            severity: components["schemas"]["EventSeverity"];
+            enabled: boolean;
+            name: string;
+        };
+        TriggerOverride: {
+            /** Format: int64 */
+            trigger_id: number;
+            /** @description null: as in the trigger */
+            enabled: boolean | null;
+            /** @description Overridden keys only */
+            params: {
+                [key: string]: unknown;
+            } | null;
+            severity: components["schemas"]["EventSeverity"] | null;
+        };
+        MaintenanceWindow: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            group_id: number;
+            group_name: string;
+            /** Format: date-time */
+            starts_at: string;
+            /** Format: date-time */
+            ends_at: string;
+            comment: string;
+        };
         User: {
             /** Format: int64 */
             id: number;
@@ -2107,6 +2995,11 @@ export interface components {
         };
         DeviceDetail: components["schemas"]["Device"] & {
             snmp_port: number;
+            /**
+             * Format: int64
+             * @description The device whose outage suppresses this one's problems
+             */
+            parent_id: number | null;
             /** @description Fixed text of the poller why the device is not up; empty if none */
             last_error: string;
             /** @description null inherits from the group */
@@ -2116,6 +3009,27 @@ export interface components {
         };
         /** @enum {string} */
         EventSeverity: "info" | "warning" | "average" | "high" | "disaster";
+        ProblemSummary: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            device_id: number | null;
+            device_name: string;
+            /** Format: int64 */
+            group_id: number | null;
+            severity: components["schemas"]["EventSeverity"];
+            /** @enum {string} */
+            state: "problem" | "acknowledged" | "resolved";
+            suppressed: boolean;
+            name: string;
+            object: string;
+            /** Format: date-time */
+            opened_at: string;
+            /** Format: date-time */
+            acknowledged_at: string | null;
+            /** Format: date-time */
+            resolved_at: string | null;
+        };
         /** @enum {string} */
         TrapSeverity: "info" | "warning" | "average" | "high" | "disaster";
         /** @description Everything but the ids and the kind comes from the device; render as text only */
@@ -2356,7 +3270,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -2388,6 +3302,7 @@ export interface components {
     parameters: {
         Id: number;
         ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
+        TriggerId: number;
         Limit: number;
         Offset: number;
         CSRF: string;

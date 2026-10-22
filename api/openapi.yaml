@@ -429,7 +429,11 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     patch:
       summary: Change device fields; absent fields are unchanged
-      description: A null interval falls back to the group's. Moving needs devices.manage on the target group (else 404).
+      description: |
+        A null interval falls back to the group's. Moving needs devices.manage on the target group (else 404).
+        parent_id names the device whose outage suppresses this device's problems; it must be visible to
+        the caller (else 404), null clears it, a cycle answers 409 parent_cycle and a chain over 16 devices
+        409 parent_too_deep.
       x-permission: devices.manage
       x-scoped: true
       parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
@@ -446,6 +450,7 @@ paths:
                 address: { $ref: "#/components/schemas/DeviceAddress" }
                 snmp_port: { type: integer, minimum: 1, maximum: 65535 }
                 group_id: { type: integer, format: int64 }
+                parent_id: { type: [integer, "null"], format: int64, minimum: 1 }
                 interval_avail_s: { $ref: "#/components/schemas/Interval" }
                 interval_metrics_s: { $ref: "#/components/schemas/Interval" }
                 interval_inventory_s: { $ref: "#/components/schemas/Interval" }
@@ -1096,6 +1101,396 @@ paths:
               schema: { $ref: "#/components/schemas/SystemStatus" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /api/problems:
+    get:
+      summary: Problems, newest first
+      description: |
+        Problems of devices in the caller's groups; problems without a device
+        (system problems) are for global bindings only. A foreign device_id or
+        group_id answers 404. group_id includes subgroups. suppressed=true
+        returns only suppressed problems, false only the others, absent both.
+        The cursor is opaque; repeat the filters with it. name, object and
+        last_value may derive from devices: render them as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [problem, acknowledged, resolved] }
+        - name: severity_min
+          in: query
+          schema: { $ref: "#/components/schemas/EventSeverity" }
+        - name: device_id
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: group_id
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: suppressed
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 4096 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: A page of problems
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Problem" }
+                  next_cursor: { type: [string, "null"], description: null on the last page }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/problems/{id}:
+    get:
+      summary: One problem with its acknowledgement history
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: The problem
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProblemDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/problems/{id}/ack:
+    post:
+      summary: Acknowledge a problem
+      description: |
+        The comment is required (1-1000 characters). The first acknowledgement
+        moves the problem from problem to acknowledged and is announced on
+        /api/ws (not for suppressed problems); later ones only add history
+        rows. A resolved problem answers 409 problem_resolved. Audited.
+      x-permission: problems.ack
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [comment]
+              properties:
+                comment: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        "204": { description: Acknowledged }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/templates:
+    get:
+      summary: Monitoring templates in the caller's scope
+      description: Group templates of the caller's groups; driver templates only for a global binding.
+      x-permission: triggers.manage
+      x-scoped: true
+      responses:
+        "200":
+          description: Templates ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Template" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a template bound to a driver or to a group
+      description: |
+        Exactly one of driver and group_id. A driver template needs a global
+        binding (a scoped caller gets 403); a group in the caller's scope is
+        required for a group template (else 404). Intervals override the
+        group's for the devices the template covers. A duplicate name answers
+        409 template_exists. Audited; the trigger engine reloads at once.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                driver: { type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,63}$' }
+                group_id: { type: integer, format: int64, minimum: 1 }
+                interval_avail_s: { $ref: "#/components/schemas/Interval" }
+                interval_metrics_s: { $ref: "#/components/schemas/Interval" }
+                interval_inventory_s: { $ref: "#/components/schemas/Interval" }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/templates/{id}:
+    patch:
+      summary: Rename a template or change its intervals
+      description: The binding cannot change (delete and create instead). A null interval clears it. Audited.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                interval_avail_s: { $ref: "#/components/schemas/Interval" }
+                interval_metrics_s: { $ref: "#/components/schemas/Interval" }
+                interval_inventory_s: { $ref: "#/components/schemas/Interval" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a template with its triggers and their overrides
+      description: The engine resolves the open problems of the removed triggers. Audited.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/templates/{id}/triggers:
+    get:
+      summary: Triggers of a template
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Triggers ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Trigger" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Add a trigger to a template
+      description: |
+        The kind is a closed set and params are validated per kind (see the
+        TriggerParams schema); invalid ones answer 400 invalid_trigger. Params
+        are stored re-encoded from the parsed value. Audited; the engine
+        reloads at once.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, params, duration_s, severity, name]
+              properties:
+                kind: { $ref: "#/components/schemas/TriggerKind" }
+                params: { $ref: "#/components/schemas/TriggerParams" }
+                duration_s: { type: integer, minimum: 0, maximum: 86400 }
+                severity: { $ref: "#/components/schemas/EventSeverity" }
+                enabled: { type: boolean, default: true }
+                name: { $ref: "#/components/schemas/GroupName" }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/templates/{id}/triggers/{trigger_id}:
+    patch:
+      summary: Change a trigger; the kind is fixed
+      description: params are validated against the stored kind. Audited.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/TriggerId" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                params: { $ref: "#/components/schemas/TriggerParams" }
+                duration_s: { type: integer, minimum: 0, maximum: 86400 }
+                severity: { $ref: "#/components/schemas/EventSeverity" }
+                enabled: { type: boolean }
+                name: { $ref: "#/components/schemas/GroupName" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a trigger with its overrides
+      description: The engine resolves its open problems. Audited.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/TriggerId" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/trigger-overrides:
+    get:
+      summary: Per-trigger exceptions of a device
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Overrides ordered by trigger id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TriggerOverride" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/trigger-overrides/{trigger_id}:
+    put:
+      summary: Set the device's exception to a trigger (replaces any earlier one)
+      description: |
+        The device must be in the caller's scope and the trigger must apply to
+        it (its template bound to the device's driver or to the device's group
+        or an ancestor), else 404. At least one of enabled, severity and params
+        is required. params lay keys over the trigger's (null removes an
+        optional key); the merged result must be a valid condition, else 400
+        invalid_trigger. Only keys that differ from the trigger are stored.
+        Audited; the engine reloads at once.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/TriggerId" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                enabled: { type: boolean }
+                severity: { $ref: "#/components/schemas/EventSeverity" }
+                params: { type: object, additionalProperties: true, description: "Keys of the trigger's params to override" }
+      responses:
+        "204": { description: Stored }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Remove the device's exception to a trigger
+      description: Audited.
+      x-permission: triggers.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/TriggerId" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/maintenance:
+    get:
+      summary: Maintenance windows of the caller's groups
+      description: Windows that have not ended, newest start first; include_ended=true adds the finished ones (at most 1000 rows).
+      x-permission: maintenance.manage
+      x-scoped: true
+      parameters:
+        - name: include_ended
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        "200":
+          description: Windows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MaintenanceWindow" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Open a maintenance window for a group
+      description: |
+        Problems of the group's devices (subgroups included) open suppressed
+        while it lasts. The group must be in the caller's scope (else 404). The
+        window may have started already but must end in the future, after it
+        starts, and last at most 7 days, else 400 invalid_window. Audited; the
+        engine reloads at once.
+      x-permission: maintenance.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [group_id, starts_at, ends_at]
+              properties:
+                group_id: { type: integer, format: int64, minimum: 1 }
+                starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time }
+                comment: { type: string, maxLength: 1000 }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/maintenance/{id}:
+    delete:
+      summary: End a maintenance window early by removing it
+      description: Audited. The suppression it caused is released.
+      x-permission: maintenance.manage
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -1113,6 +1508,11 @@ components:
       in: path
       required: true
       schema: { type: string, enum: [snmp2c, snmp3, ssh_read, telnet_read] }
+    TriggerId:
+      name: trigger_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
     Limit:
       name: limit
       in: query
@@ -1158,6 +1558,89 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    Problem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemSummary"
+        - type: object
+          required: [trigger_id, system_kind, resolve_reason, last_value]
+          properties:
+            trigger_id: { type: [integer, "null"], format: int64, description: null for a system problem }
+            system_kind: { type: [string, "null"], description: "Set for engine-raised problems, e.g. poller_unavailable" }
+            resolve_reason: { type: [string, "null"], description: "recovered, removed or null while open" }
+            last_value: { type: [string, "null"], description: "Last observed value; comes from devices, render as text only" }
+    ProblemDetail:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - type: object
+          required: [acks]
+          properties:
+            acks:
+              type: array
+              description: Acknowledgement history, oldest first
+              items:
+                type: object
+                required: [id, user_id, username, comment, at]
+                properties:
+                  id: { type: integer, format: int64 }
+                  user_id: { type: integer, format: int64 }
+                  username: { type: [string, "null"] }
+                  comment: { type: string }
+                  at: { type: string, format: date-time }
+    Template:
+      type: object
+      required: [id, name, driver, group_id, interval_avail_s, interval_metrics_s, interval_inventory_s]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        driver: { type: [string, "null"] }
+        group_id: { type: [integer, "null"], format: int64 }
+        interval_avail_s: { type: [integer, "null"] }
+        interval_metrics_s: { type: [integer, "null"] }
+        interval_inventory_s: { type: [integer, "null"] }
+    TriggerKind:
+      type: string
+      enum: [availability, if_oper_down, metric_threshold, trap, syslog]
+    TriggerParams:
+      type: object
+      description: |
+        Per kind, no other keys. availability {states: [down|partial, ...]};
+        if_oper_down {if_index?: 1..2147483647}; metric_threshold {metric:
+        cpu|mem|temp|if_util_in|if_util_out|if_errors, op: gt|lt, value
+        (cpu, mem, if_util_* 0..100; temp -50..150; if_errors >= 0),
+        if_index? (interface metrics only)}; trap {name: 1-1024 bytes};
+        syslog {severity_min: 0..7 (0 most severe), contains?: 1-128
+        characters, case-insensitive}.
+      additionalProperties: true
+    Trigger:
+      type: object
+      required: [id, template_id, kind, params, duration_s, severity, enabled, name]
+      properties:
+        id: { type: integer, format: int64 }
+        template_id: { type: integer, format: int64 }
+        kind: { $ref: "#/components/schemas/TriggerKind" }
+        params: { $ref: "#/components/schemas/TriggerParams" }
+        duration_s: { type: integer, minimum: 0, maximum: 86400 }
+        severity: { $ref: "#/components/schemas/EventSeverity" }
+        enabled: { type: boolean }
+        name: { type: string }
+    TriggerOverride:
+      type: object
+      required: [trigger_id, enabled, params, severity]
+      properties:
+        trigger_id: { type: integer, format: int64 }
+        enabled: { type: [boolean, "null"], description: "null: as in the trigger" }
+        params: { type: [object, "null"], additionalProperties: true, description: Overridden keys only }
+        severity: { oneOf: [{ $ref: "#/components/schemas/EventSeverity" }, { type: "null" }] }
+    MaintenanceWindow:
+      type: object
+      required: [id, group_id, group_name, starts_at, ends_at, comment]
+      properties:
+        id: { type: integer, format: int64 }
+        group_id: { type: integer, format: int64 }
+        group_name: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        comment: { type: string }
     User:
       type: object
       required: [id, username, disabled, totp_enrolled]
@@ -1206,9 +1689,10 @@ components:
       allOf:
         - $ref: "#/components/schemas/Device"
         - type: object
-          required: [snmp_port, interval_avail_s, interval_metrics_s, interval_inventory_s, last_error]
+          required: [snmp_port, parent_id, interval_avail_s, interval_metrics_s, interval_inventory_s, last_error]
           properties:
             snmp_port: { type: integer }
+            parent_id: { type: [integer, "null"], format: int64, description: The device whose outage suppresses this one's problems }
             last_error: { type: string, description: Fixed text of the poller why the device is not up; empty if none }
             interval_avail_s: { type: [integer, "null"], description: null inherits from the group }
             interval_metrics_s: { type: [integer, "null"] }
@@ -1487,6 +1971,12 @@ components:
                 - stale_key
                 - cidr_too_wide
                 - trap_rule_exists
+                - problem_resolved
+                - template_exists
+                - invalid_trigger
+                - invalid_window
+                - parent_cycle
+                - parent_too_deep
                 - too_many_points
                 - locked
                 - rate_limited

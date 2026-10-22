@@ -137,12 +137,21 @@ func serve(ctx context.Context, args []string) error {
 	closing := make(chan struct{})
 	mstore := metrics.NewStore(pool)
 
+	/* The trigger engine reads monitoring data and writes problems; it stops with the server. */
+	engCtx, stopEngine := context.WithCancel(ctx)
+	engDone := make(chan struct{})
+	eng := triggers.New(triggers.Config{
+		Pool: pool, Samples: metricsrc.Source{Store: mstore}, Channels: []notify.Channel{notify.Panel{Hub: hub}}, Log: log,
+		PollNow: func(c context.Context, id int64) error {
+			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueuePollNow(c, tx, id) })
+		},
+	})
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
 			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: mstore, Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
-			Hub: hub, Shutdown: closing,
+			Hub: hub, Shutdown: closing, ConfigChanged: eng.Reload,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -154,15 +163,6 @@ func serve(ctx context.Context, args []string) error {
 	/* Hijacked WebSocket connections are not tracked by Shutdown: tell them to close with a close frame. */
 	srv.RegisterOnShutdown(func() { close(closing) })
 
-	/* The trigger engine reads monitoring data and writes problems; it stops with the server. */
-	engCtx, stopEngine := context.WithCancel(ctx)
-	engDone := make(chan struct{})
-	eng := triggers.New(triggers.Config{
-		Pool: pool, Samples: metricsrc.Source{Store: mstore}, Channels: []notify.Channel{notify.Panel{Hub: hub}}, Log: log,
-		PollNow: func(c context.Context, id int64) error {
-			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueuePollNow(c, tx, id) })
-		},
-	})
 	go func() {
 		defer close(engDone)
 		if err := eng.Run(engCtx); err != nil {

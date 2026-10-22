@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -345,4 +346,31 @@ func TestEngineNeverTouchesDevices(t *testing.T) {
 			}
 		}
 	}
+}
+
+/* Reload makes the running engine do a configuration round at once instead of waiting for the next 5 s tick. */
+func TestReloadRunsARoundAtOnce(t *testing.T) {
+	h := newHarness(t)
+	var rounds atomic.Int64
+	h.eng.AfterLoad(func() { rounds.Add(1) })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = h.eng.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFor := func(n int64) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second) /* the tick is 5 s */
+		for rounds.Load() < n {
+			if time.Now().After(deadline) {
+				t.Fatalf("only %d rounds, want %d", rounds.Load(), n)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor(1)
+	h.eng.Reload()
+	waitFor(2)
+	h.eng.Reload()
+	h.eng.Reload() /* collapses */
+	waitFor(3)
 }

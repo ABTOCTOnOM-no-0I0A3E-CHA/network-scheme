@@ -28,6 +28,12 @@ const KNOWN = new Set([
   "cidr_too_wide",
   "too_many_points",
   "trap_rule_exists",
+  "problem_resolved",
+  "template_exists",
+  "invalid_trigger",
+  "invalid_window",
+  "parent_cycle",
+  "parent_too_deep",
   "internal",
 ]);
 

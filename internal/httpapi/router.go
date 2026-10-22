@@ -41,6 +41,8 @@ type Deps struct {
 	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
 	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
 	Shutdown      <-chan struct{}  /* closed on server shutdown: open WebSockets get a close frame; nil: never */
+	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows or device parents, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
+	ConfigChanged func()
 }
 
 /*
@@ -98,13 +100,14 @@ type server struct {
 	wsRecheck   time.Duration
 	wsHeartbeat time.Duration
 	shutdown    <-chan struct{}
+	onConfig    func()
 }
 
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
-		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown,
+		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {
 		s.hub = notify.NewHub()
@@ -212,6 +215,28 @@ func (s *server) handler() http.Handler {
 	/* The problem feed follows device visibility; the handler filters every message by the caller's groups. */
 	s.route(r, http.MethodGet, "/api/ws", read, s.ws)
 	s.route(r, http.MethodGet, "/api/system/status", Policy{Perm: rbac.PermSystemRead}, s.systemStatus)
+
+	/* Problems follow device visibility; acknowledging, triggers and maintenance are group-scoped permissions of their own. */
+	ack := Policy{Perm: rbac.PermProblemsAck, Scoped: true}
+	trig := Policy{Perm: rbac.PermTriggersManage, Scoped: true}
+	maint := Policy{Perm: rbac.PermMaintenanceManage, Scoped: true}
+	s.route(r, http.MethodGet, "/api/problems", read, s.listProblems)
+	s.route(r, http.MethodGet, "/api/problems/{id}", read, s.getProblem)
+	s.route(r, http.MethodPost, "/api/problems/{id}/ack", ack, s.ackProblem)
+	s.route(r, http.MethodGet, "/api/templates", trig, s.listTemplates)
+	s.route(r, http.MethodPost, "/api/templates", trig, s.createTemplate)
+	s.route(r, http.MethodPatch, "/api/templates/{id}", trig, s.updateTemplate)
+	s.route(r, http.MethodDelete, "/api/templates/{id}", trig, s.deleteTemplate)
+	s.route(r, http.MethodGet, "/api/templates/{id}/triggers", trig, s.listTriggers)
+	s.route(r, http.MethodPost, "/api/templates/{id}/triggers", trig, s.createTrigger)
+	s.route(r, http.MethodPatch, "/api/templates/{id}/triggers/{trigger_id}", trig, s.updateTrigger)
+	s.route(r, http.MethodDelete, "/api/templates/{id}/triggers/{trigger_id}", trig, s.deleteTrigger)
+	s.route(r, http.MethodGet, "/api/devices/{id}/trigger-overrides", trig, s.listOverrides)
+	s.route(r, http.MethodPut, "/api/devices/{id}/trigger-overrides/{trigger_id}", trig, s.putOverride)
+	s.route(r, http.MethodDelete, "/api/devices/{id}/trigger-overrides/{trigger_id}", trig, s.deleteOverride)
+	s.route(r, http.MethodGet, "/api/maintenance", maint, s.listMaintenance)
+	s.route(r, http.MethodPost, "/api/maintenance", maint, s.createMaintenance)
+	s.route(r, http.MethodDelete, "/api/maintenance/{id}", maint, s.deleteMaintenance)
 	return r
 }
 

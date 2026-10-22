@@ -98,11 +98,12 @@ type Engine struct {
 	sysFalse  map[pkey]int
 	supp      *suppressCtx
 	seenUp    map[[2]int64]time.Time /* interface -> first time it was observed oper-up (zero: before the engine's data) */
+	reload    chan struct{}          /* configuration changed: run a full-config round without waiting for the 30 s one */
 }
 
 // New returns an engine over c.
 func New(c Config) *Engine {
-	e := &Engine{pool: c.Pool, samples: c.Samples, channels: c.Channels, clock: c.Clock, pollNow: c.PollNow, log: c.Log, meta: map[int64]devMeta{}}
+	e := &Engine{pool: c.Pool, samples: c.Samples, channels: c.Channels, clock: c.Clock, pollNow: c.PollNow, log: c.Log, meta: map[int64]devMeta{}, reload: make(chan struct{}, 1)}
 	if e.clock == nil {
 		e.clock = realClock{}
 	}
@@ -111,6 +112,20 @@ func New(c Config) *Engine {
 	}
 	e.resetMemory()
 	return e
+}
+
+/*
+Reload asks the running engine to reload its configuration and run a round
+now instead of at the next 30 s one. It never blocks and may be called from
+any goroutine; repeated calls before the round collapse into one. An engine
+that is not running (another api process holds the lock) ignores it, and
+that process's own 30 s reload applies the change.
+*/
+func (e *Engine) Reload() {
+	select {
+	case e.reload <- struct{}{}:
+	default:
+	}
 }
 
 /* resetMemory forgets everything derived from earlier cycles; the next cycle re-reads its windows like a fresh start. */
@@ -174,6 +189,7 @@ func (e *Engine) loop(ctx context.Context, lock *pgxpool.Conn) {
 	e.resetMemory()
 	t := time.NewTicker(tickInterval)
 	defer t.Stop()
+	forceSlow := false
 	for n := 0; ; n++ {
 		if n%lockPing == lockPing-1 {
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -193,10 +209,11 @@ func (e *Engine) loop(ctx context.Context, lock *pgxpool.Conn) {
 			if n%midEvery == 0 {
 				c |= cycleMid
 			}
-			if n%slowEvery == 0 {
+			if n%slowEvery == 0 || forceSlow {
 				c |= cycleSlow
 			}
 		}
+		forceSlow = false
 		cctx, cancel := context.WithTimeout(ctx, cycleTimeout)
 		if err := e.cycle(cctx, c); err != nil && ctx.Err() == nil {
 			e.log.Warn("trigger cycle failed", "error", err.Error())
@@ -207,6 +224,8 @@ func (e *Engine) loop(ctx context.Context, lock *pgxpool.Conn) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-e.reload:
+			forceSlow = true
 		}
 	}
 }

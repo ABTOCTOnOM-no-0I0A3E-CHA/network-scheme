@@ -46,6 +46,12 @@ var (
 	errCIDRTooWide      = apiError{http.StatusBadRequest, "cidr_too_wide", "Подсеть шире /16 (более 65 536 адресов)"}
 	errTooManyPoints    = apiError{http.StatusBadRequest, "too_many_points", "Слишком много точек: сузьте период или увеличьте шаг"}
 	errTrapRuleExists   = apiError{http.StatusConflict, "trap_rule_exists", "Правило для этого OID уже есть"}
+	errProblemResolved  = apiError{http.StatusConflict, "problem_resolved", "Проблема уже закрыта"}
+	errTemplateExists   = apiError{http.StatusConflict, "template_exists", "Шаблон с таким именем уже есть"}
+	errInvalidTrigger   = apiError{http.StatusBadRequest, "invalid_trigger", "Недопустимые параметры триггера"}
+	errInvalidWindow    = apiError{http.StatusBadRequest, "invalid_window", "Недопустимое окно обслуживания: не более 7 суток, конец в будущем и позже начала"}
+	errParentCycle      = apiError{http.StatusConflict, "parent_cycle", "Родитель образует цикл"}
+	errParentTooDeep    = apiError{http.StatusConflict, "parent_too_deep", "Цепочка родителей длиннее 16 устройств"}
 	errLocked           = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited      = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errInternal         = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
@@ -101,6 +107,14 @@ var knownErrors = []struct {
 	{errKeyVersion, errStaleKey},
 	{errTrapRuleDup, errTrapRuleExists},
 	{errTrapRuleNotFound, errNotFound},
+	{errProblemNotFound, errNotFound},
+	{errProblemClosed, errProblemResolved},
+	{errTemplateDup, errTemplateExists},
+	{errTemplateNotFound, errNotFound},
+	{errTriggerParams, errInvalidTrigger},
+	{errMaintenanceNotFound, errNotFound},
+	{devices.ErrParentCycle, errParentCycle},
+	{devices.ErrParentDepth, errParentTooDeep},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */
