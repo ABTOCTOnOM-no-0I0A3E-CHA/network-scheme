@@ -384,15 +384,22 @@ func (s *server) stormLoop(ctx context.Context) {
 	}
 }
 
-/* statsLoop mirrors the counters into events.eventd_stats and logs losses. */
+/* statsLoop mirrors the counters into events.eventd_stats, logs losses and sweeps expired replay entries. */
 func (s *server) statsLoop(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		every = statsEvery
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks, lastReplayed uint64
+	var lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks, lastReplayed, lastFull uint64
+	sweep := 0
 	for {
+		sweep = s.src.sweepReplay(s.now(), sweep, replaySweepMax)
+		if full := replayFull.Load(); full != lastFull {
+			s.log.Warn("v3 replay cache full: authenticated messages not remembered", slog.Uint64("v3_replay_cache_full", full-lastFull),
+				slog.Int64("entries", replayEntries.Load()))
+			lastFull = full
+		}
 		fctx, cancel := context.WithTimeout(ctx, callTimeout)
 		err := s.st.flush(fctx, s.pool, s.instance, s.q.depth())
 		cancel()

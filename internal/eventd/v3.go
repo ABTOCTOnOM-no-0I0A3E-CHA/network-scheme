@@ -333,12 +333,17 @@ func (v *v3Auth) noReplay(p *gosnmp.SnmpPacket, ok bool, data []byte, now time.T
 }
 
 const (
-	replayTTL    = 10 * time.Minute
-	replayPerDev = 4096
-	replayTotal  = 1 << 20 /* entries over all devices; over it a message is simply not remembered */
+	replayTTL        = 10 * time.Minute
+	replayPerDev     = 4096
+	replaySweepMax   = 1 << 18 /* expired entries dropped per sweep over all devices */
+	replayCompactMin = 256     /* below this peak a cache is never rebuilt */
 )
 
-var replayEntries atomic.Int64 /* entries over all devices */
+var (
+	replayTotal   int64         = 1 << 20 /* entries over all devices; over it a message is simply not remembered (a var for tests) */
+	replayEntries atomic.Int64            /* entries over all devices */
+	replayFull    atomic.Uint64           /* authenticated messages not remembered because replayTotal was reached */
+)
 
 type replayEntry struct {
 	sum [32]byte
@@ -349,24 +354,22 @@ type replayEntry struct {
 replayCache remembers the SHA-256 of the raw bytes of the authenticated v3
 messages of one device for replayTTL, at most replayPerDev of them (oldest
 evicted). It only ever refuses a message it has seen; being full or over the
-global cap never blocks intake, it merely forgets sooner.
+global cap never blocks intake, it merely forgets sooner. Expired entries go
+when the device sends again and at the periodic sweep (sweepReplay), so idle
+devices do not hold the global count.
 */
 type replayCache struct {
 	mu    sync.Mutex
 	set   map[[32]byte]struct{}
 	queue []replayEntry /* oldest first */
+	peak  int           /* largest len(queue) since the last rebuild: maps never shrink */
 }
 
 /* replay reports whether sum was seen within replayTTL; otherwise it remembers it. */
 func (c *replayCache) replay(sum [32]byte, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.set == nil {
-		c.set = map[[32]byte]struct{}{}
-	}
-	for len(c.queue) > 0 && now.Sub(c.queue[0].at) >= replayTTL {
-		c.drop()
-	}
+	c.expire(now, replayPerDev)
 	if _, ok := c.set[sum]; ok {
 		return true
 	}
@@ -374,12 +377,47 @@ func (c *replayCache) replay(sum [32]byte, now time.Time) bool {
 		c.drop()
 	}
 	if replayEntries.Load() >= replayTotal {
+		replayFull.Add(1)
 		return false
+	}
+	if c.set == nil {
+		c.set = map[[32]byte]struct{}{}
 	}
 	c.set[sum] = struct{}{}
 	c.queue = append(c.queue, replayEntry{sum, now})
+	c.peak = max(c.peak, len(c.queue))
 	replayEntries.Add(1)
 	return false
+}
+
+/* expire drops at most budget entries older than replayTTL, then gives memory back; c.mu is held. */
+func (c *replayCache) expire(now time.Time, budget int) int {
+	n := 0
+	for n < budget && len(c.queue) > 0 && now.Sub(c.queue[0].at) >= replayTTL {
+		c.drop()
+		n++
+	}
+	c.shrink()
+	return n
+}
+
+/*
+shrink releases what an emptied or much smaller cache still holds: the map
+keeps its buckets and the queue its backing array after a peak.
+*/
+func (c *replayCache) shrink() {
+	switch {
+	case len(c.queue) == 0:
+		c.set, c.queue, c.peak = nil, nil, 0
+	case c.peak > replayCompactMin && c.peak > 2*len(c.queue):
+		q := make([]replayEntry, len(c.queue), 2*len(c.queue))
+		copy(q, c.queue)
+		set := make(map[[32]byte]struct{}, len(q))
+		for _, e := range q {
+			set[e.sum] = struct{}{}
+		}
+		c.set, c.queue, c.peak = set, q, len(q)
+	}
 }
 
 func (c *replayCache) drop() {
@@ -392,5 +430,36 @@ func (c *replayCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	replayEntries.Add(-int64(len(c.queue)))
-	c.set, c.queue = nil, nil
+	c.set, c.queue, c.peak = nil, nil, 0
+}
+
+/*
+sweepReplay expires old replay entries of the devices of the current table,
+starting at index from, until budget entries were dropped; it returns
+where the next sweep starts. It holds no lock over the table (an immutable
+snapshot) and one device at a time, in the decode order: d.mu (read) then the
+cache's own mutex. At most replayPerDev entries are dropped per lock hold.
+*/
+func (s *sources) sweepReplay(now time.Time, from, budget int) int {
+	all := s.cur.Load().all
+	if len(all) == 0 {
+		return 0
+	}
+	from %= len(all)
+	for i := range len(all) {
+		at := (from + i) % len(all)
+		d := all[at]
+		d.mu.RLock()
+		if !d.wiped && d.v3 != nil {
+			c := &d.v3.seen
+			c.mu.Lock()
+			budget -= c.expire(now, min(budget, replayPerDev))
+			c.mu.Unlock()
+		}
+		d.mu.RUnlock()
+		if budget <= 0 {
+			return at /* this device may have more: start there */
+		}
+	}
+	return from
 }

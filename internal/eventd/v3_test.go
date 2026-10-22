@@ -2,6 +2,7 @@ package eventd
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
@@ -457,5 +458,174 @@ func TestV3ReplayCacheIsBoundedAndWiped(t *testing.T) {
 	r.dev.wipe()
 	if got := replayEntries.Load() - before; got != 0 {
 		t.Errorf("%d entries left after the device was wiped", got)
+	}
+}
+
+func sum(tag string, i int) [32]byte { return sha256.Sum256(fmt.Appendf(nil, "%s/%d", tag, i)) }
+
+/* replaySources is a device table of n devices with an snmp3 profile, without database. */
+func replaySources(t *testing.T, clk *clock, n int) *sources {
+	t.Helper()
+	src := newSources(nil, nil, drivers.Default(), clk.now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snap := &snapshot{}
+	for i := range n {
+		v, err := newV3(creds.Credential{Kind: creds.KindSNMP3, User: "nms", AuthProto: "SHA256", AuthKey: secret.New(authKey), PrivProto: "AES", PrivKey: secret.New(privKey)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap.all = append(snap.all, &device{id: int64(i + 1), v3: v})
+	}
+	src.cur.Store(snap)
+	t.Cleanup(func() {
+		for _, d := range snap.all {
+			d.wipe()
+		}
+	})
+	return src
+}
+
+func cacheLen(c *replayCache) (q, m, capQ int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.queue), len(c.set), cap(c.queue)
+}
+
+/*
+A storm fills the caches of many devices up to the global cap, then they go
+silent: after the TTL the sweep alone (bounded per call) brings the global count
+back to zero and new messages are remembered again.
+*/
+func TestReplaySweepFreesTheGlobalCapAfterAStorm(t *testing.T) {
+	clk := &clock{t: time.Now()}
+	src := replaySources(t, clk, 6)
+	before := replayEntries.Load()
+	old := replayTotal
+	replayTotal = before + 10_000
+	t.Cleanup(func() { replayTotal = old })
+	for di, d := range src.cur.Load().all[:5] {
+		for i := range 2000 {
+			if d.v3.seen.replay(sum(fmt.Sprint("storm", di), i), clk.now()) {
+				t.Fatal("distinct digest taken for a replay")
+			}
+		}
+	}
+	if got := replayEntries.Load() - before; got != 10_000 {
+		t.Fatalf("global count %d, want 10000", got)
+	}
+	late := src.cur.Load().all[5]
+	full := replayFull.Load()
+	late.v3.seen.replay(sum("late", 0), clk.now())
+	if q, _, _ := cacheLen(&late.v3.seen); q != 0 || replayFull.Load() != full+1 {
+		t.Fatalf("over the cap: %d entries stored, full counted %d", q, replayFull.Load()-full)
+	}
+
+	clk.add(replayTTL + time.Second)
+	next, sweeps := 0, 0
+	for replayEntries.Load() > before {
+		at := replayEntries.Load()
+		next = src.sweepReplay(clk.now(), next, 3000)
+		if dropped := at - replayEntries.Load(); dropped > 3000 {
+			t.Fatalf("one sweep dropped %d entries over a budget of 3000", dropped)
+		}
+		if sweeps++; sweeps > 10 {
+			t.Fatal("the sweep does not make progress")
+		}
+	}
+	if sweeps != 4 {
+		t.Errorf("%d sweeps for 10000 entries with a budget of 3000, want 4", sweeps)
+	}
+	for _, d := range src.cur.Load().all {
+		c := &d.v3.seen
+		c.mu.Lock()
+		if c.set != nil || c.queue != nil {
+			t.Errorf("device %d keeps its emptied map/queue", d.id)
+		}
+		c.mu.Unlock()
+	}
+	late.v3.seen.replay(sum("late", 1), clk.now())
+	if !late.v3.seen.replay(sum("late", 1), clk.now()) {
+		t.Error("a new digest is not remembered after the sweep")
+	}
+}
+
+/* A cache that shrank far below its peak is rebuilt small; an empty one holds nothing. */
+func TestReplayCacheGivesMemoryBack(t *testing.T) {
+	before := replayEntries.Load()
+	clk := &clock{t: time.Now()}
+	var c replayCache
+	for i := range replayPerDev {
+		c.replay(sum("peak", i), clk.now())
+	}
+	clk.add(replayTTL / 2)
+	for i := range 100 {
+		c.replay(sum("tail", i), clk.now())
+	}
+	clk.add(replayTTL/2 + time.Second) /* the first 4096 expire, the tail stays */
+	c.replay(sum("tail", 100), clk.now())
+	q, m, capQ := cacheLen(&c)
+	if q != 101 || m != 101 || capQ > 2*q+1 {
+		t.Errorf("after expiry: %d/%d entries, queue cap %d", q, m, capQ)
+	}
+	if !c.replay(sum("tail", 5), clk.now()) {
+		t.Error("a live entry was lost by the rebuild")
+	}
+	clk.add(replayTTL)
+	c.mu.Lock()
+	c.expire(clk.now(), replayPerDev)
+	if c.set != nil || c.queue != nil || c.peak != 0 {
+		t.Error("an empty cache keeps its map or queue")
+	}
+	c.mu.Unlock()
+	if got := replayEntries.Load() - before; got != 0 {
+		t.Errorf("global count off by %d", got)
+	}
+}
+
+/* Sweeps run against traffic and device wipes without deadlock and leave the global count exact. */
+func TestReplaySweepConcurrentWithTraffic(t *testing.T) {
+	clk := &clock{t: time.Now()}
+	src := replaySources(t, clk, 8)
+	before := replayEntries.Load()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var traffic sync.WaitGroup
+		stop := make(chan struct{})
+		var sweeper sync.WaitGroup
+		sweeper.Go(func() {
+			next := 0
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				clk.add(time.Second)
+				next = src.sweepReplay(clk.now(), next, 500)
+			}
+		})
+		for di, d := range src.cur.Load().all {
+			traffic.Go(func() {
+				for i := range 5000 {
+					d.mu.RLock() /* as acquire does around decode */
+					if !d.wiped {
+						d.v3.seen.replay(sum(fmt.Sprint("conc", di), i), clk.now())
+					}
+					d.mu.RUnlock()
+				}
+				d.wipe()
+			})
+		}
+		traffic.Wait()
+		close(stop)
+		sweeper.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("sweep and traffic deadlocked")
+	}
+	if got := replayEntries.Load() - before; got != 0 {
+		t.Errorf("global count off by %d after all devices were wiped", got)
 	}
 }
