@@ -65,7 +65,7 @@ func (s *server) authTrap(d *device, data []byte) (*gosnmp.SnmpPacket, bool) {
 	if d.v3 == nil {
 		return nil, false
 	}
-	return d.v3.decode(data, func() bool {
+	return d.v3.decode(data, s.now(), func() bool {
 		/* both budgets or none: a refusal of the global one must not cost the device its token */
 		if allowBoth(s.slowDev, d.id, s.slowAll, 0, s.now()) {
 			return true

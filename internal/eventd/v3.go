@@ -1,8 +1,11 @@
 package eventd
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gosnmp/gosnmp"
 
@@ -141,12 +144,7 @@ type v3Pin struct {
 	engine string
 	sp     *gosnmp.UsmSecurityParameters
 	g      *gosnmp.GoSNMP
-	/* the highest engine boots and time seen in authenticated traps (replay check) */
-	boots, time uint32
 }
-
-/* replayWindow is the tolerated lag of msgAuthoritativeEngineTime behind the highest one seen (RFC 3414 section 3.2 item 7). */
-const replayWindow = 150
 
 /*
 v3Auth checks SNMPv3 messages of one device. Its tables hold exactly the USM
@@ -155,6 +153,7 @@ accepted only for that user, whatever users exist for other devices.
 */
 type v3Auth struct {
 	user string
+	seen replayCache /* per device, whatever the engine: a re-pin does not reset it */
 
 	slowMu sync.Mutex /* serializes slow decodes */
 	fullSP *gosnmp.UsmSecurityParameters
@@ -213,7 +212,7 @@ names an engine that is not pinned; it reports whether the budget allows the
 expensive decode. The second result is false for every failure; nothing of an
 unauthenticated message is returned.
 */
-func (v *v3Auth) decode(data []byte, slow func() bool, replayed func()) (*gosnmp.SnmpPacket, bool) {
+func (v *v3Auth) decode(data []byte, now time.Time, slow func() bool, replayed func()) (*gosnmp.SnmpPacket, bool) {
 	h, ok := parseV3Header(data)
 	if !ok || h.user != v.user || h.model != int(gosnmp.UserSecurityModel) || h.flags&byte(gosnmp.AuthPriv) != byte(gosnmp.AuthPriv) {
 		return nil, false
@@ -224,11 +223,7 @@ func (v *v3Auth) decode(data []byte, slow func() bool, replayed func()) (*gosnmp
 		p, err := unmarshal(pin.g, data)
 		v.mu.Unlock()
 		p, ok := v.verified(p, err, false)
-		if ok && !v.fresh(pin, p) {
-			replayed()
-			return nil, false
-		}
-		return p, ok
+		return v.noReplay(p, ok, data, now, replayed)
 	}
 	v.mu.Unlock()
 	if !slow() {
@@ -240,7 +235,8 @@ func (v *v3Auth) decode(data []byte, slow func() bool, replayed func()) (*gosnmp
 		return nil, false
 	}
 	p, err := unmarshal(v.full, data)
-	return v.verified(p, err, true)
+	p, ok = v.verified(p, err, true)
+	return v.noReplay(p, ok, data, now, replayed)
 }
 
 /*
@@ -277,34 +273,6 @@ func (v *v3Auth) verified(p *gosnmp.SnmpPacket, err error, pinIt bool) (*gosnmp.
 	return p, true
 }
 
-/*
-fresh applies the replay check to an authenticated trap of the pinned engine:
-boots below the highest seen, or the same boots and a time more than 150 s
-behind the highest, is a replay. Accepted traps raise the mark. The mark is
-per process and per pin (a re-pin starts from the new message).
-*/
-func (v *v3Auth) fresh(pin *v3Pin, p *gosnmp.SnmpPacket) bool {
-	usm, ok := p.SecurityParameters.(*gosnmp.UsmSecurityParameters)
-	if !ok {
-		return false
-	}
-	boots, tm := usm.AuthoritativeEngineBoots, usm.AuthoritativeEngineTime
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.pin != pin {
-		return true /* re-pinned meanwhile: the new pin starts from its own message */
-	}
-	switch {
-	case boots < pin.boots, boots == pin.boots && uint64(tm)+replayWindow < uint64(pin.time):
-		return false
-	case boots > pin.boots:
-		pin.boots, pin.time = boots, tm
-	case tm > pin.time:
-		pin.time = tm
-	}
-	return true
-}
-
 /* setPin keeps the engine and the localized keys the authenticated message was verified with. */
 func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
 	if len(usm.SecretKey) == 0 || len(usm.PrivacyKey) == 0 {
@@ -325,7 +293,7 @@ func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.clearPin()
-	v.pin = &v3Pin{engine: usm.AuthoritativeEngineID, sp: sp, g: g, boots: usm.AuthoritativeEngineBoots, time: usm.AuthoritativeEngineTime}
+	v.pin = &v3Pin{engine: usm.AuthoritativeEngineID, sp: sp, g: g}
 }
 
 func (v *v3Auth) clearPin() {
@@ -349,4 +317,80 @@ func (v *v3Auth) wipe() {
 	v.mu.Lock()
 	v.clearPin()
 	v.mu.Unlock()
+	v.seen.clear()
+}
+
+/* noReplay refuses an authenticated message whose bytes were already accepted within replayTTL. */
+func (v *v3Auth) noReplay(p *gosnmp.SnmpPacket, ok bool, data []byte, now time.Time, replayed func()) (*gosnmp.SnmpPacket, bool) {
+	if !ok {
+		return nil, false
+	}
+	if v.seen.replay(sha256.Sum256(data), now) {
+		replayed()
+		return nil, false
+	}
+	return p, true
+}
+
+const (
+	replayTTL    = 10 * time.Minute
+	replayPerDev = 4096
+	replayTotal  = 1 << 20 /* entries over all devices; over it a message is simply not remembered */
+)
+
+var replayEntries atomic.Int64 /* entries over all devices */
+
+type replayEntry struct {
+	sum [32]byte
+	at  time.Time
+}
+
+/*
+replayCache remembers the SHA-256 of the raw bytes of the authenticated v3
+messages of one device for replayTTL, at most replayPerDev of them (oldest
+evicted). It only ever refuses a message it has seen; being full or over the
+global cap never blocks intake, it merely forgets sooner.
+*/
+type replayCache struct {
+	mu    sync.Mutex
+	set   map[[32]byte]struct{}
+	queue []replayEntry /* oldest first */
+}
+
+/* replay reports whether sum was seen within replayTTL; otherwise it remembers it. */
+func (c *replayCache) replay(sum [32]byte, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set == nil {
+		c.set = map[[32]byte]struct{}{}
+	}
+	for len(c.queue) > 0 && now.Sub(c.queue[0].at) >= replayTTL {
+		c.drop()
+	}
+	if _, ok := c.set[sum]; ok {
+		return true
+	}
+	if len(c.queue) >= replayPerDev {
+		c.drop()
+	}
+	if replayEntries.Load() >= replayTotal {
+		return false
+	}
+	c.set[sum] = struct{}{}
+	c.queue = append(c.queue, replayEntry{sum, now})
+	replayEntries.Add(1)
+	return false
+}
+
+func (c *replayCache) drop() {
+	delete(c.set, c.queue[0].sum)
+	c.queue = c.queue[1:]
+	replayEntries.Add(-1)
+}
+
+func (c *replayCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	replayEntries.Add(-int64(len(c.queue)))
+	c.set, c.queue = nil, nil
 }

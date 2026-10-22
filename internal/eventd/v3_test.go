@@ -88,9 +88,7 @@ func v3PacketAt(tb testing.TB, user, engine string, genuine bool, boots, tm uint
 		sp.SecretKey, sp.PrivacyKey = make([]byte, 32), make([]byte, 16)
 	}
 	if genuine {
-		if err := sp.InitSecurityKeys(); err != nil {
-			tb.Fatal(err)
-		}
+		genuineKeys(tb, sp)
 	}
 	g := &gosnmp.GoSNMP{Version: gosnmp.Version3, SecurityModel: gosnmp.UserSecurityModel, MsgFlags: gosnmp.AuthPriv, Logger: quiet, SecurityParameters: sp}
 	b, err := g.SnmpEncodePacket(gosnmp.SNMPv2Trap, linkDownTrap(false).Variables, 0, 0)
@@ -98,6 +96,27 @@ func v3PacketAt(tb testing.TB, user, engine string, genuine bool, boots, tm uint
 		tb.Fatal(err)
 	}
 	return b
+}
+
+var (
+	keyMu   sync.Mutex
+	keyMemo = map[string][2][]byte{}
+)
+
+/* genuineKeys sets the localized keys for sp's engine, deriving them once per engine (18 ms) for the whole test run. */
+func genuineKeys(tb testing.TB, sp *gosnmp.UsmSecurityParameters) {
+	tb.Helper()
+	keyMu.Lock()
+	defer keyMu.Unlock()
+	k, ok := keyMemo[sp.AuthoritativeEngineID]
+	if !ok {
+		if err := sp.InitSecurityKeys(); err != nil {
+			tb.Fatal(err)
+		}
+		keyMemo[sp.AuthoritativeEngineID] = [2][]byte{sp.SecretKey, sp.PrivacyKey}
+		return
+	}
+	sp.SecretKey, sp.PrivacyKey = k[0], k[1]
 }
 
 func TestParseV3Header(t *testing.T) {
@@ -121,8 +140,7 @@ func TestParseV3Header(t *testing.T) {
 
 func TestV3LegitimateTrapPinsEngineAndSkipsDerivation(t *testing.T) {
 	r := newV3Rig(t)
-	pkt := v3Packet(t, "nms", engineID(1), true)
-	if _, ok := r.srv.authTrap(r.dev, pkt); !ok {
+	if _, ok := r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(1), true)); !ok {
 		t.Fatal("legitimate trap refused")
 	}
 	if r.dev.v3.pin == nil || r.dev.v3.pin.engine != engineID(1) {
@@ -131,7 +149,7 @@ func TestV3LegitimateTrapPinsEngineAndSkipsDerivation(t *testing.T) {
 	/* from now on the pinned engine needs no budget: 200 traps in the same instant all pass, quickly */
 	start := time.Now()
 	for i := range 200 {
-		if _, ok := r.srv.authTrap(r.dev, pkt); !ok {
+		if _, ok := r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(1), true)); !ok {
 			t.Fatalf("pinned trap %d refused", i)
 		}
 	}
@@ -196,8 +214,8 @@ func TestV3EngineIDFloodIsBounded(t *testing.T) {
 /* Spoofed garbage must not use up what the device's real traps need (the review's second point). */
 func TestV3SpoofedGarbageDoesNotSilenceTheDevice(t *testing.T) {
 	r := newV3Rig(t)
-	legit := v3Packet(t, "nms", engineID(0), true)
-	if _, ok := r.srv.authTrap(r.dev, legit); !ok {
+	legit := func() []byte { return v3Packet(t, "nms", engineID(0), true) }
+	if _, ok := r.srv.authTrap(r.dev, legit()); !ok {
 		t.Fatal("legitimate trap refused")
 	}
 	for sec := range 5 {
@@ -210,7 +228,7 @@ func TestV3SpoofedGarbageDoesNotSilenceTheDevice(t *testing.T) {
 				t.Fatal("forged packet accepted")
 			}
 		}
-		if _, ok := r.srv.authTrap(r.dev, legit); !ok {
+		if _, ok := r.srv.authTrap(r.dev, legit()); !ok {
 			t.Fatalf("second %d: real trap refused during the flood", sec)
 		}
 		r.clk.add(time.Second)
@@ -237,7 +255,7 @@ func TestV3EngineChangeUsesTheSlowPath(t *testing.T) {
 	if r.dev.v3.pin.engine != engineID(2) {
 		t.Error("new engine not pinned")
 	}
-	if _, ok := r.srv.authTrap(r.dev, next); !ok {
+	if _, ok := r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(2), true)); !ok {
 		t.Error("pinned trap refused")
 	}
 }
@@ -306,8 +324,8 @@ func TestV3SpoofFloodOverSocketsKeepsDeviceWorking(t *testing.T) {
 	h.profile(id, "snmp3", map[string]string{"user": "nms", "auth_proto": "SHA256", "auth_key": authKey, "priv_proto": "AES", "priv_key": privKey})
 	h.start()
 	c := udpFrom(t, "127.0.0.2", h.addrs.TrapUDP)
-	legit := v3Packet(t, "nms", engineID(0), true)
-	if _, err := c.Write(legit); err != nil {
+	legit := func() []byte { return v3Packet(t, "nms", engineID(0), true) }
+	if _, err := c.Write(legit()); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 10*time.Second, "first trap stored (engine pinned)", func() bool { return h.count(`SELECT count(*) FROM events.trap`) == 1 })
@@ -320,7 +338,7 @@ func TestV3SpoofFloodOverSocketsKeepsDeviceWorking(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := c.Write(legit); err != nil {
+		if _, err := c.Write(legit()); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -365,37 +383,79 @@ func TestV3GlobalBudgetRefusalKeepsDeviceToken(t *testing.T) {
 	}
 }
 
-func TestV3ReplayCheck(t *testing.T) {
+func TestV3ReplayIsRefusedOnFastAndSlowPath(t *testing.T) {
 	r := newV3Rig(t)
-	at := func(boots, tm uint32) bool {
-		_, ok := r.srv.authTrap(r.dev, v3PacketAt(t, "nms", engineID(1), true, boots, tm))
-		return ok
-	}
-	if !at(1, 1000) {
+	captured := v3Packet(t, "nms", engineID(1), true)
+	if _, ok := r.srv.authTrap(r.dev, captured); !ok {
 		t.Fatal("first trap refused")
 	}
-	if !at(1, 1100) {
-		t.Error("increasing time refused")
+	if _, ok := r.srv.authTrap(r.dev, captured); ok {
+		t.Error("identical replay accepted on the fast path")
 	}
-	if !at(1, 1000) {
-		t.Error("100 s behind the highest refused (within the window)")
+	/* the device is replaced (engine 2 pinned), then the captured packet of engine 1 comes back through the slow path */
+	r.clk.add(11 * time.Second)
+	if _, ok := r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(2), true)); !ok {
+		t.Fatal("engine change refused")
 	}
-	if at(1, 900) {
-		t.Error("200 s behind the highest accepted (replay)")
+	r.clk.add(11 * time.Second)
+	if _, ok := r.srv.authTrap(r.dev, captured); ok {
+		t.Error("identical replay accepted on the slow path after a re-pin")
 	}
-	if at(0, 5000) {
-		t.Error("lower boots accepted (replay)")
+	if got := r.srv.st.replayed.Load(); got != 2 {
+		t.Errorf("replayed = %d, want 2", got)
 	}
-	if r.srv.st.replayed.Load() != 2 {
-		t.Errorf("replayed = %d, want 2", r.srv.st.replayed.Load())
+	/* after the TTL the same bytes are accepted again: the documented residual */
+	r.clk.add(replayTTL + time.Second)
+	if _, ok := r.srv.authTrap(r.dev, captured); !ok {
+		t.Error("replay after 10 minutes refused (the cache must forget)")
 	}
-	if !at(2, 10) {
-		t.Error("higher boots (device restarted) refused")
+}
+
+/* A device that does not persist snmpEngineBoots restarts with the same boots and time 0: its new traps are fine. */
+func TestV3RebootWithSameBootsIsAccepted(t *testing.T) {
+	r := newV3Rig(t)
+	for _, tm := range []uint32{5000, 0, 3, 4} {
+		if _, ok := r.srv.authTrap(r.dev, v3PacketAt(t, "nms", engineID(1), true, 1, tm)); !ok {
+			t.Fatalf("trap with boots 1 time %d refused", tm)
+		}
 	}
-	if at(1, 5000) {
-		t.Error("old boots accepted after a restart")
+	if r.srv.st.replayed.Load() != 0 {
+		t.Error("a fresh trap was counted as a replay")
 	}
-	if !at(2, 11) {
-		t.Error("normal trap refused")
+}
+
+func TestV3ReplayCacheIsBoundedAndWiped(t *testing.T) {
+	r := newV3Rig(t)
+	before := replayEntries.Load()
+	first := v3Packet(t, "nms", engineID(1), true)
+	if _, ok := r.srv.authTrap(r.dev, first); !ok {
+		t.Fatal("first trap refused")
+	}
+	var last []byte
+	for range 10_000 {
+		last = v3Packet(t, "nms", engineID(1), true)
+		if _, ok := r.srv.authTrap(r.dev, last); !ok {
+			t.Fatal("a distinct genuine trap was refused")
+		}
+	}
+	c := &r.dev.v3.seen
+	c.mu.Lock()
+	n, m := len(c.queue), len(c.set)
+	c.mu.Unlock()
+	if n != replayPerDev || m != replayPerDev {
+		t.Errorf("cache holds %d/%d entries, want %d", n, m, replayPerDev)
+	}
+	if got := replayEntries.Load() - before; got != replayPerDev {
+		t.Errorf("global count grew by %d", got)
+	}
+	if _, ok := r.srv.authTrap(r.dev, last); ok {
+		t.Error("the newest message is not remembered")
+	}
+	if _, ok := r.srv.authTrap(r.dev, first); !ok {
+		t.Error("the oldest message was not evicted")
+	}
+	r.dev.wipe()
+	if got := replayEntries.Load() - before; got != 0 {
+		t.Errorf("%d entries left after the device was wiped", got)
 	}
 }
