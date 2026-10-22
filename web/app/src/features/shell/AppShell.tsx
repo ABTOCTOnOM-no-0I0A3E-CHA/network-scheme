@@ -7,6 +7,7 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { logout, useSession } from "@/features/auth/useSession";
 import { StepUpDialog } from "@/features/common/StepUpDialog";
+import { NotificationCenter } from "@/features/notify/NotificationCenter";
 import { getTheme, setTheme } from "@/lib/theme";
 import { CommandPalette } from "./CommandPalette";
 import { Sidebar } from "./Sidebar";
@@ -60,6 +61,7 @@ export function AppShell() {
             <kbd className="text-xs">Ctrl K</kbd>
           </Button>
           <div className="ml-auto flex items-center gap-1">
+            <NotificationCenter onOpenProblems={() => void navigate({ to: "/problems" })} />
             <Button variant="ghost" size="icon" aria-label={t("theme.toggle")} onClick={toggleTheme}>
               {theme === "dark" ? <Sun /> : <Moon />}
             </Button>

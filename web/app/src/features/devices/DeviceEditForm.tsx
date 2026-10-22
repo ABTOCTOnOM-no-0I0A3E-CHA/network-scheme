@@ -5,7 +5,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
-import { useUpdateDevice, type DeviceDetail, type DevicePatch, type Group } from "./api";
+import { safeText } from "@/lib/text";
+import { useDevices, useUpdateDevice, type DeviceDetail, type DevicePatch, type Group } from "./api";
 
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 /* client-side bounds; the API enforces its own as well */
@@ -22,6 +23,7 @@ type Props = { device: DeviceDetail; groups?: Group[]; onDone: () => void };
 export function DeviceEditForm({ device, groups, onDone }: Props) {
   const { t } = useTranslation();
   const update = useUpdateDevice(device.id);
+  const devices = useDevices();
   const [error, setError] = useState<string | undefined>();
 
   const submit = async (e: FormEvent<HTMLFormElement>) => {
@@ -39,6 +41,8 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
     const groupId = Number(f("group_id"));
     if (!Number.isInteger(groupId) || groupId <= 0) return setError(t("card.edit.required"));
     if (groupId !== device.group_id) patch.group_id = groupId;
+    const parentId = f("parent_id") === "" ? null : Number(f("parent_id"));
+    if (parentId !== (device.parent_id ?? null)) patch.parent_id = parentId;
     for (const { field, min } of INTERVALS) {
       const raw = f(field);
       const v = raw === "" ? null : Number(raw);
@@ -84,6 +88,19 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
         ) : (
           field("group_id", t("devices.addDialog.groupId"), { type: "number", defaultValue: device.group_id })
         )}
+        <div className="grid gap-1.5">
+          <Label htmlFor="edit-parent_id">{t("card.edit.parent")}</Label>
+          <select id="edit-parent_id" name="parent_id" className={SELECT_CLASS} defaultValue={device.parent_id ?? ""}>
+            <option value="">{t("card.edit.noParent")}</option>
+            {devices.data
+              ?.filter((d) => d.id !== device.id)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {safeText(d.name)}
+                </option>
+              ))}
+          </select>
+        </div>
         {INTERVALS.map(({ field: name, label }) => field(name, t(label), { type: "number", placeholder: t("card.inherit"), defaultValue: device[name] ?? "" }))}
       </div>
       {error && (

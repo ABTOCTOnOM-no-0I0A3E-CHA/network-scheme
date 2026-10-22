@@ -42,6 +42,9 @@ const server = setupServer(
   http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
   http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
   http.get("*/api/groups", () => apiError(403, "forbidden")),
+  http.get("*/api/problems", () => HttpResponse.json({ items: [], next_cursor: null })),
+  http.get("*/api/templates", () => HttpResponse.json([])),
+  http.get("*/api/maintenance", () => HttpResponse.json([])),
   http.get("*/api/system/status", () => HttpResponse.json({ now: new Date().toISOString(), pollers: [], eventd: [], db_size_bytes: 0, queues: [] })),
   http.get("*/api/auth/me", () =>
     loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles, csrf_token: "tok" }) : apiError(401, "unauthenticated"),
@@ -257,6 +260,24 @@ describe("shell", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "core");
     expect(await screen.findByRole("option", { name: /core-sw/ })).toBeInTheDocument();
+  });
+
+  it("problems, templates and maintenance are real screens reachable from the menu", async () => {
+    loggedIn = true;
+    roles = [{ role: "admin", group_id: null }];
+    const user = userEvent.setup();
+    const router = renderApp("/");
+    const nav = await screen.findByRole("navigation", { name: ru.nav.label });
+    for (const [key, path, empty] of [
+      ["problems", "/problems", ru.problems.empty],
+      ["templates", "/templates", ru.templates.empty],
+      ["maintenance", "/maintenance", ru.maintenance.empty],
+    ] as const) {
+      await user.click(within(nav).getByRole("link", { name: ru.nav[key] }));
+      await waitFor(() => expect(router.state.location.pathname).toBe(path));
+      expect(await screen.findByText(empty)).toBeInTheDocument();
+      expect(screen.queryByText(ru.placeholder.soon)).not.toBeInTheDocument();
+    }
   });
 
   it("devices screen: viewer has no add button, admin has", async () => {
