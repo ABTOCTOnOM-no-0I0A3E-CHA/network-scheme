@@ -411,7 +411,7 @@ func TestRunInstalls(t *testing.T) {
 	}
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
-		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/infra.yaml", "config/egress.yaml",
+		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml", "config/infra.yaml", "config/egress.yaml",
 		"config/domain_read.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {

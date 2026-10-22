@@ -47,6 +47,7 @@ var goldenFiles = map[string]string{
 	"Caddyfile":          "Caddyfile.golden",
 	"config/api.yaml":    "api.yaml.golden",
 	"config/poller.yaml": "poller.yaml.golden",
+	"config/eventd.yaml": "eventd.yaml.golden",
 }
 
 func TestRenderGolden(t *testing.T) {
@@ -352,5 +353,20 @@ func TestRenderLowercasesPublicHost(t *testing.T) {
 	}
 	if !bytes.Contains(render(t, in)["Caddyfile"], []byte("https://nms.corp.example/assets/")) {
 		t.Error("Caddyfile CSP does not carry the lowercase host")
+	}
+}
+
+func TestRenderedEventdConfigLoads(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "eventd.yaml")
+	if err := os.WriteFile(p, render(t, sampleInput())["config/eventd.yaml"], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.LoadEventD(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DB.User != "nms_eventd" || c.DB.Name != "nms" || c.DB.PasswordFile != "/run/secrets/db_eventd_password" ||
+		c.ReadKeyFile != "/run/secrets/domain_read_key" || c.TLSCertFile != "" || c.RetentionDays != 90 {
+		t.Errorf("unexpected config: %+v", c)
 	}
 }

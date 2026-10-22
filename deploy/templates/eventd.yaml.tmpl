@@ -1,0 +1,17 @@
+# Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+db:
+  host: "postgres"
+  port: 5432
+  name: "{{.DBName}}"
+  user: "nms_eventd"
+  password_file: "/run/secrets/db_eventd_password"
+read_key_file: "/run/secrets/domain_read_key"
+read_pub_key_file: "/etc/nms/domain_read.pub"
+syslog_udp: "0.0.0.0:514"
+syslog_tcp: "0.0.0.0:514"
+# TLS syslog stays off until a certificate is installed:
+# syslog_tls: "0.0.0.0:6514"
+# tls_cert_file: "/etc/nms/syslog.crt"
+# tls_key_file: "/run/secrets/syslog_key"
+trap_udp: "0.0.0.0:162"
+retention_days: 90

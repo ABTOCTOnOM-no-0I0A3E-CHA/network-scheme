@@ -82,11 +82,12 @@ var outputs = map[string]string{
 	"Caddyfile":          "Caddyfile.tmpl",
 	"config/api.yaml":    "api.yaml.tmpl",
 	"config/poller.yaml": "poller.yaml.tmpl",
+	"config/eventd.yaml": "eventd.yaml.tmpl",
 }
 
 /*
 Render validates in and renders the deployment files, keyed by path relative
-to Paths.Etc: "compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml" and the postgres
+to Paths.Etc: "compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml" and the postgres
 init script "postgres/initdb/10-roles.sh" (to be written with mode 0755).
 Every value reaching a template is validated against a strict pattern, so
 input cannot inject YAML keys or Caddy directives. Output is deterministic.
