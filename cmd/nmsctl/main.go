@@ -108,7 +108,7 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 			return errors.New("usage: nmsctl egress apply|check (on the host, as root)")
 		}
 		if cmd == "egress check" { /* ExecStartPost of docker.service: fails Docker if the rules are bypassed */
-			return install.CheckDockerUsesEgress(ctx, d.sys)
+			return egressCheck(ctx, d)
 		}
 		return egressApply(ctx, d)
 	}
@@ -329,6 +329,7 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 	}
 	o.InfraNTP, o.InfraDNS, o.InfraMirror = splitList(ntp), splitList(dns), splitList(mirror)
 	o.Out = d.out
+	o.PortFree = install.ListenFree /* also for the preflight before the password prompt */
 	if !o.NonInteractive && o.AdminPasswordFile == "" {
 		if err := install.Preflight(o, d.sys); err != nil { /* before asking for anything */
 			return err
@@ -343,8 +344,20 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 }
 
 /* egressApply re-applies the recorded egress rules (the Docker drop-in runs it before Docker starts). */
+/* egressFile is the egress configuration written by install; tests point it elsewhere. */
+var egressFile = install.DefaultEtc + "/" + install.EgressFile
+
+/* egressCheck fails unless Docker uses DOCKER-USER and every rule of the egress configuration is in it. */
+func egressCheck(ctx context.Context, d deps) error {
+	e, err := install.LoadEgress(egressFile)
+	if err != nil {
+		return err
+	}
+	return install.CheckEgress(ctx, d.sys, e)
+}
+
 func egressApply(ctx context.Context, d deps) error {
-	e, err := install.LoadEgress(install.DefaultEtc + "/" + install.EgressFile)
+	e, err := install.LoadEgress(egressFile)
 	if err != nil {
 		return err
 	}

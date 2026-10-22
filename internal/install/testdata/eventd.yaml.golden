@@ -1,0 +1,19 @@
+# Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+# Fixed name of this process in the stats table (one row; the container host name changes on every recreation).
+instance: "local"
+db:
+  host: "postgres"
+  port: 5432
+  name: "nms"
+  user: "nms_eventd"
+  password_file: "/run/secrets/db_eventd_password"
+read_key_file: "/run/secrets/domain_read_key"
+read_pub_key_file: "/etc/nms/domain_read.pub"
+# Unprivileged container ports; compose publishes them as 514/udp+tcp, 6514/tcp and 162/udp.
+syslog_udp: "0.0.0.0:1514"
+syslog_tcp: "0.0.0.0:1514"
+syslog_tls: "0.0.0.0:6514"
+tls_cert_file: "/run/secrets/syslog_crt"
+tls_key_file: "/run/secrets/syslog_key"
+trap_udp: "0.0.0.0:1162"
+# Retention of syslog, traps and storm rows is fixed at 90 days by the database migration.

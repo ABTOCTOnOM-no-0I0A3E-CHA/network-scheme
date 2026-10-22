@@ -20,3 +20,13 @@ export function canListGroups(session: Session | null | undefined): boolean {
 export function canPollDevices(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
 }
+
+/** UI hint only: events.manage (trap rules) is not group-scoped, so only a global admin binding holds it. */
+export function canManageEvents(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin" && r.group_id === null);
+}
+
+/** UI hint only: system.read is not group-scoped, so only a global admin or operator binding holds it. */
+export function canReadSystem(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => (r.role === "operator" || r.role === "admin") && r.group_id === null);
+}

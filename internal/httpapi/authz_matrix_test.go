@@ -74,6 +74,12 @@ var matrix = map[string]map[string]int{
 	"GET /api/discovery/inbox":                 {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 200},
 	"POST /api/discovery/inbox/{id}/accept":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
 	"POST /api/discovery/inbox/{id}/ignore":    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
+	"GET /api/events":                          {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/events/unidentified":             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/trap-rules":                      {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"POST /api/trap-rules":                     {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"DELETE /api/trap-rules/{id}":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/system/status":                   {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 200, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
 }
 
 /*
@@ -107,6 +113,8 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/discovery/inbox":                 {"viewerA": 403, "operatorA": 403, "adminA": 200},
 	"POST /api/discovery/inbox/{id}/accept":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"POST /api/discovery/inbox/{id}/ignore":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
+	"GET /api/events":                          {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/events/unidentified":             {"viewerA": 200, "operatorA": 200, "adminA": 200},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -284,6 +292,9 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 		return req{method: "GET", path: "/api/audit?limit=5"}
 	}
 	if r, ok := m.deviceRequest(key); ok {
+		return r
+	}
+	if r, ok := m.eventRequest(key); ok {
 		return r
 	}
 	m.t.Fatalf("no valid request for %s", key)
@@ -477,3 +488,30 @@ func TestRBACLoadErrorIs500(t *testing.T) {
 	f.h = httpapi.NewRouter(d)
 	wantError(t, f.do(s.authed(req{method: "GET", path: "/api/users"})), http.StatusInternalServerError, "internal")
 }
+
+/* eventRequest builds valid requests for the event, trap rule and system routes; events are asked for a device in m.target. */
+func (m *matrixEnv) eventRequest(key string) (req, bool) {
+	switch key {
+	case "GET /api/events":
+		return req{method: "GET", path: fmt.Sprintf("/api/events?device_id=%d", m.newDevice(m.target))}, true
+	case "GET /api/events/unidentified":
+		return req{method: "GET", path: "/api/events/unidentified"}, true
+	case "GET /api/trap-rules":
+		return req{method: "GET", path: "/api/trap-rules"}, true
+	case "POST /api/trap-rules":
+		return req{method: "POST", path: "/api/trap-rules", body: map[string]string{"trap_oid": m.newOID(), "name": uniqueName("rule"), "severity": "high"}}, true
+	case "DELETE /api/trap-rules/{id}":
+		var id int64
+		if err := m.env.Pool("postgres").QueryRow(context.Background(),
+			`INSERT INTO events.trap_rule (trap_oid, name, severity) VALUES ($1, 'x', 'info') RETURNING id`, m.newOID()).Scan(&id); err != nil {
+			m.t.Fatal(err)
+		}
+		return req{method: "DELETE", path: fmt.Sprintf("/api/trap-rules/%d", id)}, true
+	case "GET /api/system/status":
+		return req{method: "GET", path: "/api/system/status"}, true
+	}
+	return req{}, false
+}
+
+/* newOID returns an unused OID under a private enterprise arc. */
+func (f *fixture) newOID() string { return fmt.Sprintf("1.3.6.1.4.1.99999.%d", seq.Add(1)) }

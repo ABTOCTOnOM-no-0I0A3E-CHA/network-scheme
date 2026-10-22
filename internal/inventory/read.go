@@ -137,13 +137,14 @@ func (s *Store) Routes(ctx context.Context, deviceID int64, p Page) ([]Route, er
 
 // DeviceState is the availability a device shows in the API; Since is nil when never polled.
 type DeviceState struct {
-	State string
-	Since *time.Time
+	State     string
+	Since     *time.Time
+	LastError string /* fixed text of the poller, empty when none */
 }
 
 /* States returns the state of each device in ids from inventory.device_state_v; missing ids are absent. */
 func (s *Store) States(ctx context.Context, ids []int64) (map[int64]DeviceState, error) {
-	rows, err := s.pool.Query(ctx, `SELECT device_id, state, since FROM inventory.device_state_v WHERE device_id = ANY($1)`, ids)
+	rows, err := s.pool.Query(ctx, `SELECT device_id, state, since, last_error FROM inventory.device_state_v WHERE device_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("inventory: states: %w", err)
 	}
@@ -152,7 +153,7 @@ func (s *Store) States(ctx context.Context, ids []int64) (map[int64]DeviceState,
 		id int64
 		st DeviceState
 	)
-	_, err = pgx.ForEachRow(rows, []any{&id, &st.State, &st.Since}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&id, &st.State, &st.Since, &st.LastError}, func() error {
 		out[id] = st
 		st.Since = nil
 		return nil

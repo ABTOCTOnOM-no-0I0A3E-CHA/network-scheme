@@ -64,3 +64,18 @@ func TestWipeClearsBytes(t *testing.T) {
 	}
 	secret.Secret{}.Wipe() /* no-op on the zero value */
 }
+
+func TestEqualString(t *testing.T) {
+	s := secret.New("community-0123456789")
+	if !s.EqualString("community-0123456789") {
+		t.Error("equal value not equal")
+	}
+	for _, v := range []string{"", "community-0123456780", "community-012345678", "community-0123456789x"} {
+		if s.EqualString(v) {
+			t.Errorf("%q equals the secret", v)
+		}
+	}
+	if (secret.Secret{}).EqualString("") || secret.New("").EqualString("") {
+		t.Error("an empty secret equals the empty string")
+	}
+}

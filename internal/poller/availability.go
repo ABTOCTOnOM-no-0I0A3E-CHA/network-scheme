@@ -23,6 +23,12 @@ const (
 	v2FallbackText = "snmpv3 profile rejected, using v2c"
 	/* busyNoAnswerText: the session of the poll in progress has not answered within the interval. */
 	busyNoAnswerText = "no SNMP answer during the poll in progress"
+	/* Fixed texts for SNMP failures: see reasonText. */
+	timeoutText    = "SNMP request timed out"
+	authFailedText = "SNMP authentication failed"
+	canceledText   = "poll canceled"
+	snmpFailedText = "SNMP request failed"
+	noUpTimeText   = "sysUpTime missing"
 )
 
 // Pinger sends one ICMP echo request and reports the round trip.
@@ -125,23 +131,45 @@ func (p *Poller) snmpAlive(ctx context.Context, d device, cache *devCache) (ok b
 		if isDBErr(err) {
 			return false, "", err
 		}
-		return false, err.Error(), nil
+		return false, reasonText(err), nil
 	}
 	defer func() { _ = closer.Close() }()
 	gctx, cancel := context.WithTimeout(ctx, p.snmpBudget())
 	defer cancel()
 	vars, err := r.Get(gctx, oidSysUpTime)
 	if err != nil {
-		return false, err.Error(), nil
+		return false, reasonText(err), nil
 	}
 	if len(vars) != 1 {
-		return false, "sysUpTime missing", nil
+		return false, noUpTimeText, nil
 	}
 	if _, ok := snmp.AsUint64(vars[0]); !ok {
-		return false, "sysUpTime missing", nil
+		return false, noUpTimeText, nil
 	}
 	if cache.v3Rejected {
 		return true, v2FallbackText, nil
 	}
 	return true, "", nil
+}
+
+/*
+reasonText maps an SNMP failure to a fixed text for last_error, which the api
+shows to users. The error's own text is never used: gosnmp and transport
+errors can quote device bytes, addresses and parts of the request, and a
+credential-shaped error (unsupported protocol, key length) names what the
+operator configured.
+*/
+func reasonText(err error) string {
+	switch {
+	case errors.Is(err, snmp.ErrAuth):
+		return authFailedText
+	case errors.Is(err, snmp.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return timeoutText
+	case errors.Is(err, context.Canceled):
+		return canceledText
+	case errors.Is(err, snmp.ErrNoSuchObject):
+		return noUpTimeText
+	default:
+		return snmpFailedText
+	}
 }

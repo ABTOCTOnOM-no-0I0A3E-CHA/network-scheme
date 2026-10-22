@@ -56,10 +56,11 @@ type deviceResponse struct {
 
 type deviceDetailResponse struct {
 	deviceResponse
-	SNMPPort           int  `json:"snmp_port"`
-	IntervalAvailS     *int `json:"interval_avail_s"`
-	IntervalMetricsS   *int `json:"interval_metrics_s"`
-	IntervalInventoryS *int `json:"interval_inventory_s"`
+	SNMPPort           int    `json:"snmp_port"`
+	IntervalAvailS     *int   `json:"interval_avail_s"`
+	IntervalMetricsS   *int   `json:"interval_metrics_s"`
+	IntervalInventoryS *int   `json:"interval_inventory_s"`
+	LastError          string `json:"last_error"`
 }
 
 /* toDeviceResponse adds the availability state; a device the state view does not list yet is "unknown". */
@@ -208,6 +209,7 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deviceDetailResponse{
 		deviceResponse: toDeviceResponse(d, states[d.ID]), SNMPPort: d.SNMPPort,
 		IntervalAvailS: d.Intervals.AvailS, IntervalMetricsS: d.Intervals.MetricsS, IntervalInventoryS: d.Intervals.InventoryS,
+		LastError: states[d.ID].LastError,
 	})
 }
 

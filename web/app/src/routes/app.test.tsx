@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
@@ -42,6 +42,7 @@ const server = setupServer(
   http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
   http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
   http.get("*/api/groups", () => apiError(403, "forbidden")),
+  http.get("*/api/system/status", () => HttpResponse.json({ now: new Date().toISOString(), pollers: [], eventd: [], db_size_bytes: 0, queues: [] })),
   http.get("*/api/auth/me", () =>
     loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles, csrf_token: "tok" }) : apiError(401, "unauthenticated"),
   ),
@@ -268,6 +269,19 @@ describe("shell", () => {
     queryClient.clear();
     renderApp("/devices");
     expect(await screen.findByRole("button", { name: ru.devices.add })).toBeInTheDocument();
+  });
+
+  it("system status: viewer has no menu item and no data, operator and admin do", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    renderApp("/health");
+    expect(await screen.findByText(ru.system.forbidden)).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: ru.nav.label })).queryByText(ru.nav.health)).not.toBeInTheDocument();
+    cleanup();
+    roles = [{ role: "operator", group_id: null }];
+    queryClient.clear();
+    renderApp("/health");
+    expect(await screen.findByText(ru.system.noPollers)).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: ru.nav.label })).getByText(ru.nav.health)).toBeInTheDocument();
   });
 
   it("logout returns to /login", async () => {

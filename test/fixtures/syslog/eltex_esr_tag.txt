@@ -1,0 +1,1 @@
+<14>Oct 22 11:59:15 esr-1 ESR_SYSTEM: process started

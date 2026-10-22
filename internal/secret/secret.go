@@ -1,7 +1,11 @@
 // Package secret provides a value type that never renders its content.
 package secret
 
-import "log/slog"
+import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"log/slog"
+)
 
 const mask = "***"
 
@@ -40,3 +44,17 @@ Wipe overwrites the value's bytes with zeros, for every copy of this Secret
 affected.
 */
 func (s Secret) Wipe() { clear(s.v) }
+
+/*
+EqualString reports whether the Secret equals v, without creating a string of
+the secret. It compares SHA-256 digests in constant time, so neither the
+content nor the length of the secret leaks through timing. An empty Secret
+equals nothing.
+*/
+func (s Secret) EqualString(v string) bool {
+	if len(s.v) == 0 {
+		return false
+	}
+	a, b := sha256.Sum256(s.v), sha256.Sum256([]byte(v))
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
+}

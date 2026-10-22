@@ -20,7 +20,7 @@ Container users that read secrets. Compose file secrets are bind mounts that
 keep the host owner and mode, so every secret is owned by its consumer.
 */
 const (
-	/* ContainerUID is the distroless "nonroot" user of api, migrate, nmsctl, poller and gateway. */
+	/* ContainerUID is the distroless "nonroot" user of api, migrate, nmsctl, poller, eventd and gateway. */
 	ContainerUID = 65532
 	/*
 		PostgresUID is uid and gid of "postgres" in DefaultDBImage, found with
@@ -64,10 +64,10 @@ type SecretsInput struct {
 
 /*
 WriteSecrets creates dir (0700) with every installation secret: role
-passwords db_{postgres,migrator,api,cli}_password (32 random bytes,
+passwords db_{postgres,migrator,api,cli,poller,eventd}_password (32 random bytes,
 base64url), api_data_key and executor_sealing_key (32 random bytes, base64),
 domain_{read,write,backup}.key (X25519 private keys, base64), ca.crt/ca.key
-and web.crt/web.key. Files are created with O_EXCL in a temporary sibling
+web.crt/web.key and syslog.crt/syslog.key. Files are created with O_EXCL in a temporary sibling
 directory and owned by their consumer container user, then the directory is
 renamed into place, so an existing dir is an error (ErrSecretsExist) and a
 failure leaves nothing behind. Existing secrets are never touched.
@@ -146,6 +146,7 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("db_api_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_cli_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_poller_password", nil, ContainerUID, PostgresUID, 0o440)
+	add("db_eventd_password", nil, ContainerUID, PostgresUID, 0o440)
 	for i := range files {
 		b, err := keys.NewSymmetricKey()
 		if err != nil {
@@ -184,17 +185,18 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("ca.crt", caCrt, 0, 0, 0o400)
 	add("ca.key", caKey, 0, 0, 0o400)
 
+	var dns []string
+	var ips []net.IP
+	in.PublicHost = strings.ToLower(in.PublicHost)
+	if ip := net.ParseIP(in.PublicHost); ip != nil {
+		ips = append(ips, ip)
+	} else {
+		dns = append(dns, in.PublicHost)
+	}
+
 	webCrt, webKey := in.WebCertPEM, in.WebKeyPEM
 	switch {
 	case webCrt == nil && webKey == nil:
-		var dns []string
-		var ips []net.IP
-		in.PublicHost = strings.ToLower(in.PublicHost)
-		if ip := net.ParseIP(in.PublicHost); ip != nil {
-			ips = append(ips, ip)
-		} else {
-			dns = append(dns, in.PublicHost)
-		}
 		if webCrt, webKey, err = pki.IssueServerCert(caCrt, caKey, dns, ips, webValidity); err != nil {
 			return nil, fmt.Errorf("install: web certificate: %w", err)
 		}
@@ -207,5 +209,16 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	}
 	add("web.crt", webCrt, ContainerUID, ContainerUID, 0o400)
 	add("web.key", webKey, ContainerUID, ContainerUID, 0o400)
+
+	/*
+		TLS syslog (eventd, 6514): always issued by the internal CA, also when the panel uses a
+		corporate certificate, so the devices trust ca.crt and nothing else. Read by eventd (uid 65532).
+	*/
+	sysCrt, sysKey, err := pki.IssueServerCert(caCrt, caKey, dns, ips, webValidity)
+	if err != nil {
+		return nil, fmt.Errorf("install: syslog certificate: %w", err)
+	}
+	add("syslog.crt", sysCrt, ContainerUID, ContainerUID, 0o400)
+	add("syslog.key", sysKey, ContainerUID, ContainerUID, 0o400)
 	return files, nil
 }

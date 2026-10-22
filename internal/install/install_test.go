@@ -3,12 +3,15 @@ package install_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -138,9 +141,9 @@ func TestPreflightErrors(t *testing.T) {
 /* secretNames is the exact set WriteSecrets must create. */
 var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
-	"db_api_password", "db_cli_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
+	"db_api_password", "db_cli_password", "db_eventd_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
-	"executor_sealing_key", "web.crt", "web.key",
+	"executor_sealing_key", "syslog.crt", "syslog.key", "web.crt", "web.key",
 }
 
 /* wantOwner is the owner table: consumer container uid/gid and mode. */
@@ -153,7 +156,10 @@ var wantOwner = map[string]struct {
 	"db_api_password":      {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_cli_password":      {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_poller_password":   {install.ContainerUID, install.PostgresUID, 0o440},
+	"db_eventd_password":   {install.ContainerUID, install.PostgresUID, 0o440},
 	"api_data_key":         {install.ContainerUID, install.ContainerUID, 0o400},
+	"syslog.crt":           {install.ContainerUID, install.ContainerUID, 0o400},
+	"syslog.key":           {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"ca.crt":               {0, 0, 0o400},
@@ -233,7 +239,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 
 	/* Contents. */
-	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password"} {
+	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password"} {
 		raw := readFile(t, filepath.Join(dir, n))
 		b, err := base64.RawURLEncoding.DecodeString(string(raw))
 		if err != nil || len(b) != 32 {
@@ -256,7 +262,8 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 		}
 		seen[v] = true
 	}
-	verifyWebCert(t, dir, "nms.example.org")
+	verifyCert(t, dir, "web.crt", "nms.example.org")
+	verifyCert(t, dir, "syslog.crt", "nms.example.org")
 
 	/* Second call: refused, nothing changed. */
 	before := snapshot(t, dir)
@@ -317,22 +324,22 @@ func TestWriteSecretsUsesSuppliedWebCert(t *testing.T) {
 	}
 }
 
-func verifyWebCert(t *testing.T, dir, host string) {
+func verifyCert(t *testing.T, dir, file, host string) {
 	t.Helper()
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(readFile(t, filepath.Join(dir, "ca.crt"))) {
 		t.Fatal("ca.crt is not PEM")
 	}
-	b, _ := pem.Decode(readFile(t, filepath.Join(dir, "web.crt")))
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir, file)))
 	if b == nil {
-		t.Fatal("web.crt is not PEM")
+		t.Fatal(file + " is not PEM")
 	}
 	c, err := x509.ParseCertificate(b.Bytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Verify(x509.VerifyOptions{DNSName: host, Roots: pool}); err != nil {
-		t.Fatalf("web.crt does not verify for %s against ca.crt: %v", host, err)
+		t.Fatalf("%s does not verify for %s against ca.crt: %v", file, host, err)
 	}
 }
 
@@ -410,7 +417,7 @@ func TestRunInstalls(t *testing.T) {
 	}
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
-		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/infra.yaml", "config/egress.yaml",
+		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml", "config/infra.yaml", "config/egress.yaml",
 		"config/domain_read.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
@@ -456,8 +463,13 @@ func TestRunInstalls(t *testing.T) {
 	for _, c := range sys.cmds {
 		lines = append(lines, cmdline(c))
 	}
-	want := []string{
-		"iptables -w -n -L DOCKER-USER",
+	want := []string{"iptables -w -n -L DOCKER-USER"}
+	/* The eventd ports (published on every host interface) accept only the management subnet. */
+	for _, pp := range [][2]string{{"udp", "1514"}, {"tcp", "1514"}, {"tcp", "6514"}, {"udp", "1162"}} {
+		m := "iptables -w -C DOCKER-USER -d 172.30.1.0/24 -p " + pp[0] + " -m " + pp[0] + " --dport " + pp[1] + " -m comment --comment nms-ingress-" + pp[0] + "-" + pp[1]
+		want = append(want, m+" -j DROP", m+" -s 10.0.0.0/8 -j RETURN")
+	}
+	want = append(want,
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
@@ -467,12 +479,12 @@ func TestRunInstalls(t *testing.T) {
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
 		"systemctl enable --now nms-audit-anchor.timer",
-	}
+	)
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[7] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[7])
+	if sys.stdins[slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, " admin create ") })] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins)
 	}
 	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
@@ -674,5 +686,73 @@ func TestAdminCreateRejectsBadTOTPOutBeforeRunning(t *testing.T) {
 		if err == nil || len(sys.cmds) != 0 {
 			t.Fatalf("%s: err=%v cmds=%v, want an error before any command", out, err, sys.cmds)
 		}
+	}
+}
+
+/* The TLS syslog certificate is signed by the internal CA also when the panel uses a corporate certificate, and it matches the public host. */
+func TestSyslogCertSignedByInternalCA(t *testing.T) {
+	corpCrt, corpCA, err := pki.NewCA("corp", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crt, key, err := pki.IssueServerCert(corpCrt, corpCA, []string{"nms.corp.example"}, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "secrets")
+	if err := install.WriteSecrets(dir, install.SecretsInput{PublicHost: "NMS.corp.example", WebCertPEM: crt, WebKeyPEM: key, Chown: newFakeSys().Chown}); err != nil {
+		t.Fatal(err)
+	}
+	verifyCert(t, dir, "syslog.crt", "nms.corp.example")
+	if _, err := tls.X509KeyPair(readFile(t, filepath.Join(dir, "syslog.crt")), readFile(t, filepath.Join(dir, "syslog.key"))); err != nil {
+		t.Fatalf("syslog certificate and key do not form a pair: %v", err)
+	}
+
+	/* An IPv4 public host becomes an IP SAN. */
+	dir2 := filepath.Join(t.TempDir(), "secrets")
+	if err := install.WriteSecrets(dir2, install.SecretsInput{PublicHost: "192.0.2.10", Chown: newFakeSys().Chown}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir2, "syslog.crt")))
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil || len(c.IPAddresses) != 1 || c.IPAddresses[0].String() != "192.0.2.10" {
+		t.Fatalf("syslog certificate SANs = %v %v (%v)", c.DNSNames, c.IPAddresses, err)
+	}
+}
+
+/* A published port that is taken stops the install before anything is written, naming the port and the likely culprit. */
+func TestPreflightHostPorts(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc", "docker", "daemon.json"), goodDaemonJSON)
+	sys := newFakeSys()
+	sys.goos, sys.docker = "linux", "28.1.1"
+	for _, c := range []struct {
+		proto   string
+		port    int
+		culprit string
+	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}} {
+		busy := errors.New("address already in use")
+		err := install.Preflight(install.Options{Root: root, PortFree: func(proto string, port int) error {
+			if proto == c.proto && port == c.port {
+				return busy
+			}
+			return nil
+		}}, sys)
+		if !errors.Is(err, install.ErrPortInUse) || !strings.Contains(err.Error(), fmt.Sprintf("%d/%s", c.port, c.proto)) || !strings.Contains(err.Error(), c.culprit) {
+			t.Errorf("%s/%d: %v", c.proto, c.port, err)
+		}
+	}
+	if err := install.Preflight(install.Options{Root: root, PortFree: func(string, int) error { return nil }}, sys); err != nil {
+		t.Errorf("all ports free: %v", err)
+	}
+
+	/* The real check sees a bound port. */
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer func() { _ = l.Close() }()
+	if install.ListenFree("tcp", l.Addr().(*net.TCPAddr).Port) == nil {
+		t.Error("ListenFree accepted a port in use")
 	}
 }

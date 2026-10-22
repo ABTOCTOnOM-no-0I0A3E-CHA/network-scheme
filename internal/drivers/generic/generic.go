@@ -13,6 +13,7 @@ import (
 	"strconv"
 
 	"github.com/beekamai/network-scheme/internal/drivers"
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -46,6 +47,9 @@ func (Driver) Match(string, string) bool { return true }
 
 /* Dialect returns the zero dialect: the generic driver uses no SSH. */
 func (Driver) Dialect() ssh.Dialect { return ssh.Dialect{} }
+
+/* MapTrap always reports false: standard traps are mapped by trap.Standard. */
+func (Driver) MapTrap(trap.Trap) (trap.Mapped, bool) { return trap.Mapped{}, false }
 
 func (d Driver) limit() int {
 	if d.maxRows <= 0 {

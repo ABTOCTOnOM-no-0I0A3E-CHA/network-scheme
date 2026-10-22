@@ -33,6 +33,8 @@ const (
 	PermGroupsManage   Perm = "groups.manage"
 	PermBindingsManage Perm = "bindings.manage"
 	PermAuditRead      Perm = "audit.read"
+	PermEventsManage   Perm = "events.manage"
+	PermSystemRead     Perm = "system.read"
 
 	PermDevicesRead       Perm = "devices.read"
 	PermDevicesPoll       Perm = "devices.poll"
@@ -43,8 +45,8 @@ const (
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
 var matrix = map[Role][]Perm{
 	RoleViewer:   {PermDevicesRead},
-	RoleOperator: {PermDevicesRead, PermDevicesPoll},
-	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead,
+	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermSystemRead},
+	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
 		PermDevicesRead, PermDevicesPoll, PermDevicesManage, PermDeviceCredentials},
 	RoleAuditor: {PermAuditRead},
 }

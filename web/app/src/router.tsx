@@ -8,8 +8,10 @@ import { devicesRoute } from "@/routes/devices";
 import { deviceRoute } from "@/routes/devices.$id";
 import { sectionRoutes, shellRoute } from "@/routes";
 import { loginRoute } from "@/routes/login";
+import { logsRoute } from "@/routes/logs";
+import { systemRoute } from "@/routes/system";
 
-const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren([...sectionRoutes, devicesRoute, deviceRoute, discoveryRoute])]);
+const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren([...sectionRoutes, devicesRoute, deviceRoute, discoveryRoute, logsRoute, systemRoute])]);
 
 /** Builds the application router (history is injectable for tests) and wires the global 401 handler. */
 export function buildRouter(history?: RouterHistory) {

@@ -2,8 +2,15 @@ import { readFileSync } from "node:fs";
 import { currentStep, expectShell, STEP_FILE, submitCode, submitPassword, totpCode } from "./auth";
 import { expect, ORIGIN, test, watch } from "./guard";
 
-/* Sidebar sections that are still placeholders (web/app/src/features/shell/nav.ts); devices and discovery have screens, see ui.spec.ts. */
-const SECTIONS = ["Карта", "Проблемы", "Логи", "Бэкапы", "Изменения", "Аудит", "Состояние системы", "Настройки"];
+/* Sidebar sections that are still placeholders (web/app/src/routes/index.tsx). */
+const SECTIONS = ["Карта", "Проблемы", "Бэкапы", "Изменения", "Аудит", "Настройки"];
+/* Sections with real screens (see ui.spec.ts, events.spec.ts): visited for the CSP and external request check only. */
+const SCREENS: [string, string][] = [
+  ["Устройства", "/devices"],
+  ["Обнаружение", "/discovery"],
+  ["Логи", "/logs"],
+  ["Состояние системы", "/health"],
+];
 
 test("admin logs in with password + TOTP and sees shell", async ({ page, context }) => {
   /* The login itself ran in global setup (one login per run: auth is rate-limited). */
@@ -31,6 +38,11 @@ test("no CSP violations and no external requests", async ({ page, browser }) => 
   for (const name of SECTIONS) {
     await page.getByRole("link", { name }).click();
     await expect(page.getByText("Будет в следующих версиях")).toBeVisible();
+  }
+  for (const [name, path] of SCREENS) {
+    await page.getByRole("link", { name }).click();
+    await expect(page).toHaveURL((u) => u.origin === ORIGIN && u.pathname === path);
+    await expect(page.getByText("Будет в следующих версиях")).toHaveCount(0);
   }
   await page.keyboard.press("Control+k");
   await expect(page.getByText("Ничего не найдено")).toBeVisible();

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -56,6 +57,19 @@ func (f *fakeIPTables) run(c install.Cmd) error {
 			f.chain = slices.Delete(f.chain, i, i+1)
 		}
 		return nil
+	case "-L": /* -L CHAIN -n --line-numbers: num target prot opt source destination, then the comment */
+		if c.Stdout == nil {
+			return nil
+		}
+		for i, r := range f.chain {
+			fields := strings.Fields(r)
+			target, comment := fields[len(fields)-1], ""
+			if j := slices.Index(fields, "--comment"); j >= 0 {
+				comment = " /* " + fields[j+1] + " */"
+			}
+			_, _ = io.WriteString(c.Stdout, strconv.Itoa(i+1)+" "+target+" all -- 0.0.0.0/0 0.0.0.0/0"+comment+"\n")
+		}
+		return nil
 	case "-I":
 		if len(rest) == 0 || rest[0] != "1" {
 			return errors.New("insert without position 1: " + cmdline(c))
@@ -73,13 +87,25 @@ func testEgress() install.Egress {
 	}
 }
 
-/* wantChain is the chain ApplyEgress must produce on top of whatever was there. */
-var wantChain = []string{
+/* wantEgress is the egress block of the chain: replies and management subnets above the closing DROP. */
+var wantEgress = []string{
 	"-s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 	"-s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
 	"-s 172.30.1.0/24 -d 192.168.10.0/24 -j RETURN",
 	"-s 172.30.1.0/24 -j DROP",
 }
+
+/* ingressBlock is the rules for one eventd port: only the management subnets may send to it. */
+func ingressBlock(proto, port string) []string {
+	m := "-d 172.30.1.0/24 -p " + proto + " -m " + proto + " --dport " + port + " -m comment --comment nms-ingress-" + proto + "-" + port
+	return []string{m + " -s 10.0.0.0/8 -j RETURN", m + " -s 192.168.10.0/24 -j RETURN", m + " -j DROP"}
+}
+
+/*
+wantChain is the chain ApplyEgress must produce on top of whatever was there: the egress block on top,
+then the eventd ingress blocks (each block is inserted above the previous one: last port first).
+*/
+var wantChain = slices.Concat(wantEgress, ingressBlock("udp", "1162"), ingressBlock("tcp", "6514"), ingressBlock("tcp", "1514"), ingressBlock("udp", "1514"))
 
 func applyEgress(t *testing.T, ipt *fakeIPTables, e install.Egress) []string {
 	t.Helper()
@@ -99,9 +125,16 @@ func TestEgressRulesArgv(t *testing.T) {
 	/* Fresh host before Docker started: the chain is created, DROP goes in first, allows above it. */
 	ipt := &fakeIPTables{}
 	got := applyEgress(t, ipt, testEgress())
+	/* The eventd ingress blocks come first (4 ports, 3 rules each: 4 checks and 3 inserts + 1 check per rule); the egress block is last. */
+	if len(got) < 2 || got[0] != "iptables -w -n -L DOCKER-USER" || got[1] != "iptables -w -N DOCKER-USER" {
+		t.Fatalf("first commands: %v", got)
+	}
+	for _, line := range got[2:] {
+		if !strings.HasPrefix(line, "iptables -w -C DOCKER-USER ") && !strings.HasPrefix(line, "iptables -w -I DOCKER-USER 1 ") {
+			t.Errorf("unexpected command: %s", line)
+		}
+	}
 	want := []string{
-		"iptables -w -n -L DOCKER-USER",
-		"iptables -w -N DOCKER-USER",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
@@ -114,8 +147,8 @@ func TestEgressRulesArgv(t *testing.T) {
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 		"iptables -w -I DOCKER-USER 1 -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("argv:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	if tail := got[len(got)-len(want):]; !slices.Equal(tail, want) {
+		t.Fatalf("egress argv:\n%s\nwant:\n%s", strings.Join(tail, "\n"), strings.Join(want, "\n"))
 	}
 	if !slices.Equal(ipt.chain, wantChain) {
 		t.Fatalf("chain:\n%s\nwant (DROP last):\n%s", strings.Join(ipt.chain, "\n"), strings.Join(wantChain, "\n"))
@@ -143,17 +176,35 @@ func TestEgressKeepsForeignRulesBelow(t *testing.T) {
 
 func TestEgressRestoresOrderWhenDropMissing(t *testing.T) {
 	/* Someone deleted the DROP: re-inserting it on top must not shadow the allows. */
-	ipt := &fakeIPTables{exist: true, chain: slices.Clone(wantChain[:3])}
+	ipt := &fakeIPTables{exist: true, chain: slices.Clone(wantEgress[:3])}
 	applyEgress(t, ipt, testEgress())
 	if !slices.Equal(ipt.chain, wantChain) {
 		t.Fatalf("chain:\n%s\nwant:\n%s", strings.Join(ipt.chain, "\n"), strings.Join(wantChain, "\n"))
 	}
 
 	/* A missing allow rule goes back above the DROP. */
-	ipt = &fakeIPTables{exist: true, chain: []string{wantChain[0], wantChain[2], wantChain[3]}}
+	ipt = &fakeIPTables{exist: true, chain: []string{wantEgress[0], wantEgress[2], wantEgress[3]}}
 	applyEgress(t, ipt, testEgress())
-	if ipt.chain[len(ipt.chain)-1] != wantChain[3] || len(ipt.chain) != 4 || !slices.Contains(ipt.chain, wantChain[1]) {
+	if !slices.Equal(slices.Sorted(slices.Values(ipt.chain)), slices.Sorted(slices.Values(wantChain))) {
 		t.Fatalf("chain:\n%s", strings.Join(ipt.chain, "\n"))
+	}
+	/* The order among a block's allow rules does not matter, only that each stays above its DROP. */
+	for _, blk := range [][]string{wantEgress, ingressBlock("udp", "1162"), ingressBlock("tcp", "6514"), ingressBlock("tcp", "1514"), ingressBlock("udp", "1514")} {
+		drop := slices.Index(ipt.chain, blk[len(blk)-1])
+		for _, allow := range blk[:len(blk)-1] {
+			if i := slices.Index(ipt.chain, allow); i < 0 || i > drop {
+				t.Fatalf("%q is not above %q:\n%s", allow, blk[len(blk)-1], strings.Join(ipt.chain, "\n"))
+			}
+		}
+	}
+
+	/* The same for an ingress block: its allow rule goes back above that port's DROP. */
+	ipt = &fakeIPTables{exist: true, chain: slices.Clone(wantChain)}
+	ipt.chain = slices.DeleteFunc(ipt.chain, func(l string) bool { return l == ingressBlock("tcp", "6514")[0] })
+	applyEgress(t, ipt, testEgress())
+	blk := ingressBlock("tcp", "6514")
+	if drop, allow := slices.Index(ipt.chain, blk[2]), slices.Index(ipt.chain, blk[0]); allow < 0 || allow > drop {
+		t.Fatalf("port 6514 allow rule not above its DROP:\n%s", strings.Join(ipt.chain, "\n"))
 	}
 }
 
@@ -234,5 +285,35 @@ func TestLoadEgress(t *testing.T) {
 		if _, err := install.LoadEgress(p); err == nil {
 			t.Errorf("LoadEgress accepted %q", bad)
 		}
+	}
+}
+
+/* CheckEgress finds every rule and refuses an ingress block whose DROP is above one of its RETURN rules. */
+func TestCheckEgressOrder(t *testing.T) {
+	check := func(ipt *fakeIPTables) error {
+		sys := newFakeSys()
+		sys.run = func(c install.Cmd) error {
+			if len(c.Args) > 2 && c.Args[2] == "FORWARD" {
+				return nil
+			}
+			return ipt.run(c)
+		}
+		return install.CheckEgress(context.Background(), sys, testEgress())
+	}
+	if err := check(&fakeIPTables{exist: true, chain: slices.Clone(wantChain)}); err != nil {
+		t.Fatalf("complete chain: %v", err)
+	}
+	/* The 6514 DROP moved above its RETURN rules: every rule is present, the order is wrong. */
+	bad := slices.Clone(wantChain)
+	blk := ingressBlock("tcp", "6514")
+	bad = slices.DeleteFunc(bad, func(l string) bool { return slices.Contains(blk, l) })
+	bad = slices.Insert(bad, 0, blk[2], blk[0], blk[1])
+	if err := check(&fakeIPTables{exist: true, chain: bad}); err == nil || !strings.Contains(err.Error(), "nms-ingress-tcp-6514") {
+		t.Fatalf("misordered block: %v", err)
+	}
+	/* A missing rule is named. */
+	missing := slices.DeleteFunc(slices.Clone(wantChain), func(l string) bool { return l == blk[2] })
+	if err := check(&fakeIPTables{exist: true, chain: missing}); err == nil || !strings.Contains(err.Error(), "--dport 6514") {
+		t.Fatalf("missing rule: %v", err)
 	}
 }

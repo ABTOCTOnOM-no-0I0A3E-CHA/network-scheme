@@ -24,6 +24,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/drivers/generic"
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -217,3 +218,13 @@ func integer(v snmp.Var) (int64, bool) {
 	}
 	return 0, false
 }
+
+/*
+MapTrap names no trap yet. [SNMP] describes polling only, and no Eltex MES
+document found lists trap OIDs (the Eltex arc 1.3.6.1.4.1.35265 and the
+RADLAN arc 1.3.6.1.4.1.89 are not documented as notification sources), so
+inventing OIDs would mislabel events. Standard traps (linkDown, ...) are
+mapped by trap.Standard; operators can add trap rules for the rest. Not
+verified on hardware.
+*/
+func (Driver) MapTrap(trap.Trap) (trap.Mapped, bool) { return trap.Mapped{}, false }

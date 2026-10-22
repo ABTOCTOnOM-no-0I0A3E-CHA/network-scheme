@@ -1,0 +1,1 @@
+<189>%STP-I-PORTSTATUS: no timestamp or host

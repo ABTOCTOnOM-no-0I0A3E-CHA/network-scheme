@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -37,6 +38,12 @@ type Driver interface {
 		the returned error is non-nil only when ctx ended.
 	*/
 	Inventory(ctx context.Context, r snmp.Reader, sh ShowRunner) (Inventory, error)
+	/*
+		MapTrap names a vendor-specific trap. It is a pure function of the
+		already decoded trap (no network, no state) and reports false for
+		traps the driver does not know; standard traps are mapped by trap.Standard.
+	*/
+	MapTrap(t trap.Trap) (trap.Mapped, bool)
 }
 
 /* ShowRunner runs an allowlisted show command over SSH; *ssh.Runner implements it. */

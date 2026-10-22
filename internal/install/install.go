@@ -60,8 +60,10 @@ type Options struct {
 	NonInteractive          bool
 	ImageTag                string
 	Paths                   Paths
-	Root                    string    /* tests only: every host path is resolved under Root */
-	Out                     io.Writer /* progress, fingerprints and the admin's QR code */
+	/* PortFree reports whether a host port can be bound (ListenFree); nil skips the check (tests). */
+	PortFree func(proto string, port int) error
+	Root     string    /* tests only: every host path is resolved under Root */
+	Out      io.Writer /* progress, fingerprints and the admin's QR code */
 }
 
 func (o Options) paths() Paths {
