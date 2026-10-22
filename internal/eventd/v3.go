@@ -191,6 +191,35 @@ func newV3(c creds.Credential) (*v3Auth, error) {
 	return &v3Auth{user: c.User, fullSP: sp, full: g}, nil
 }
 
+/*
+seedEngine pins the engine ID the poller learned from this device, localizing
+the keys now (two password hashes, once per load of a changed device), so the
+first genuine trap after a start takes the fast path whatever a flood of other
+engine IDs costs the slow path. The ID is not trusted: a message that carries
+it is verified against these keys like any other, and one that carries another
+engine ID (a replaced device) takes the slow path and re-pins.
+*/
+func (v *v3Auth) seedEngine(engine []byte) {
+	if len(engine) < minEngineID || len(engine) > maxEngineID {
+		return
+	}
+	sp := &gosnmp.UsmSecurityParameters{
+		UserName:                 v.user,
+		AuthenticationProtocol:   v.fullSP.AuthenticationProtocol,
+		AuthenticationPassphrase: v.fullSP.AuthenticationPassphrase,
+		PrivacyProtocol:          v.fullSP.PrivacyProtocol,
+		PrivacyPassphrase:        v.fullSP.PrivacyPassphrase,
+		AuthoritativeEngineID:    string(engine),
+	}
+	err := sp.InitSecurityKeys()
+	sp.AuthenticationPassphrase, sp.PrivacyPassphrase = "", ""
+	if err == nil {
+		v.setPin(sp)
+	}
+	clear(sp.SecretKey)
+	clear(sp.PrivacyKey)
+}
+
 /* usmDecoder returns a decoder whose table holds only sp. */
 func usmDecoder(user string, sp *gosnmp.UsmSecurityParameters) (*gosnmp.GoSNMP, error) {
 	tbl := gosnmp.NewSnmpV3SecurityParametersTable(quiet)

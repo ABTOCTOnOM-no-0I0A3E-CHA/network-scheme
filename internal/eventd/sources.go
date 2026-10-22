@@ -152,6 +152,7 @@ type devRow struct {
 	addr    netip.Addr
 	driver  string
 	profile map[string]profileRow
+	engine  []byte /* SNMPv3 engine ID the poller learned; nil when none */
 }
 
 type profileRow struct {
@@ -169,8 +170,9 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := pool.Query(ctx, `
-		SELECT d.id, d.address, d.driver, p.kind, p.ciphertext, p.status
+		SELECT d.id, d.address, d.driver, p.kind, p.ciphertext, p.status, e.engine_id
 		FROM core.device d
+		LEFT JOIN core.device_v3_engine e ON e.device_id = d.id
 		LEFT JOIN core.event_auth_profile_v p ON p.device_id = d.id AND octet_length(p.ciphertext) <= $1
 		ORDER BY d.id`, maxCiphertext)
 	if err != nil {
@@ -184,11 +186,12 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 		driver       string
 		kind, status *string
 		ciphertext   []byte
+		engine       []byte
 	)
-	if _, err := pgx.ForEachRow(rows, []any{&id, &addr, &driver, &kind, &ciphertext, &status}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&id, &addr, &driver, &kind, &ciphertext, &status, &engine}, func() error {
 		r := byID[id]
 		if r == nil {
-			r = &devRow{id: id, addr: addr.Unmap().WithZone(""), driver: driver, profile: map[string]profileRow{}}
+			r = &devRow{id: id, addr: addr.Unmap().WithZone(""), driver: driver, profile: map[string]profileRow{}, engine: append([]byte(nil), engine...)}
 			byID[id] = r
 			order = append(order, r)
 		}
@@ -246,7 +249,7 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 
 func fingerprint(r *devRow) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%d|%s|%s", r.id, r.addr, r.driver)
+	_, _ = fmt.Fprintf(h, "%d|%s|%s|%x", r.id, r.addr, r.driver, r.engine)
 	for _, k := range []string{creds.KindSNMP2c, creds.KindSNMP3} {
 		if p, ok := r.profile[k]; ok {
 			sum := sha256.Sum256(p.ct)
@@ -291,6 +294,8 @@ func (s *sources) build(r *devRow, fp string) *device {
 		case creds.KindSNMP3:
 			if d.v3, err = newV3(c); err != nil {
 				s.log.Warn("credential rejected", slog.Int64("device_id", r.id), slog.String("kind", k), slog.String("err", err.Error()))
+			} else {
+				d.v3.seedEngine(r.engine)
 			}
 			c.Wipe()
 		}
