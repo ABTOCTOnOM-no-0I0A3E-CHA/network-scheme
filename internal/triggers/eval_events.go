@@ -217,6 +217,7 @@ func (e *Engine) onTrap(a *actions, r trapRow, now time.Time) {
 			}
 			k := pkey{trig: t.id, dev: r.dev, obj: obj}
 			if r.name == trapLinkDown {
+				e.seenUp[[2]int64{r.dev, int64(idx)}] = struct{}{} /* a device-reported transition */
 				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx), evidence: r.ts})
 				tr := e.tracker(tkey{t.id, r.dev, obj})
 				tr.floor, tr.falses, tr.firstTrue = laterOf(tr.floor, r.ts), 0, r.ts

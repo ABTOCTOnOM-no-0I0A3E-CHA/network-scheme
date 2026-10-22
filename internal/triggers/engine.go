@@ -93,6 +93,8 @@ type Engine struct {
 	unknown   map[string][]counterSample
 	sysFalse  map[pkey]int
 	supp      *suppressCtx
+	seenUp    map[[2]int64]struct{} /* interfaces observed oper-up (device, ifIndex) */
+	upSince   time.Time             /* newest inventory seen_at folded into seenUp */
 }
 
 // New returns an engine over c.
@@ -113,6 +115,7 @@ func (e *Engine) resetMemory() {
 	e.cfg, e.open = nil, nil
 	e.trackers, e.seen, e.wm = map[tkey]*tracker{}, map[evKey]time.Time{}, map[string]time.Time{}
 	e.sampleTo = time.Time{}
+	e.seenUp, e.upSince = map[[2]int64]struct{}{}, time.Time{}
 	e.polled, e.pollHints, e.unknown, e.sysFalse = map[int64]time.Time{}, map[int64]time.Time{}, map[string][]counterSample{}, map[pkey]int{}
 }
 

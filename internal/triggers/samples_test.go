@@ -283,3 +283,43 @@ func TestSyslogBadClockAndLongMessageAreBounded(t *testing.T) {
 		t.Fatalf("future message processed early: %+v", h.problems(dev))
 	}
 }
+
+/* TestUnusedPortsStayQuiet: "any interface" reports transitions only (R5). */
+func TestUnusedPortsStayQuiet(t *testing.T) {
+	h := newHarness(t)
+	dev := h.newDevice()
+	trig := h.newTrigger(h.group, "if_oper_down", `{}`, 0, "average")
+	h.newTrigger(h.group, "trap", `{"name":"linkDown"}`, 0, "average")
+	now := h.clk.Now()
+	/* 24 ports: 20 never up; 4 up in the inventory. */
+	for i := 1; i <= 4; i++ {
+		h.exec(h.poller, `INSERT INTO inventory.interface (device_id, if_index, name, alias, speed_bps, oper_up, seen_at) VALUES ($1, $2, 'p', '', 1, true, now())`, dev, i)
+	}
+	for i := 1; i <= 24; i++ {
+		h.writeIf(dev, i, now, i <= 4)
+	}
+	h.step()
+	if got := h.openProblems(dev); len(got) != 0 {
+		t.Fatalf("never-up ports opened problems: %+v", got)
+	}
+	/* A port that was up goes down: one problem. */
+	h.clk.Advance(10 * time.Second)
+	h.writeIf(dev, 2, h.clk.Now(), false)
+	h.step()
+	got := h.openProblems(dev)
+	if len(got) != 1 || got[0].Trigger != trig || got[0].Object != "if:2" {
+		t.Fatalf("up->down: %+v", got)
+	}
+	/* A linkDown trap for a never-seen port is a device-reported transition. */
+	h.writeTrap(dev, h.clk.Now(), "linkDown", 9)
+	h.advance(6 * time.Second)
+	objs := map[string]bool{}
+	for _, p := range h.openProblems(dev) {
+		if p.Trigger == trig {
+			objs[p.Object] = true
+		}
+	}
+	if !objs["if:9"] || !objs["if:2"] || len(objs) != 2 {
+		t.Fatalf("after the trap: %v", objs)
+	}
+}

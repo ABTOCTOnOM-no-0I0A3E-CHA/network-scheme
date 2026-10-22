@@ -151,6 +151,9 @@ func (e *Engine) evalSamples(ctx context.Context, a *actions, now time.Time) err
 		}
 	}
 	if len(e.cfg.ifTrigs) > 0 {
+		if err := e.refreshSeenUp(ctx); err != nil {
+			return err
+		}
 		f := IfFilter{DeviceIDs: make([]int64, 0, len(e.cfg.ifTrigs))}
 		for d := range e.cfg.ifTrigs {
 			f.DeviceIDs = append(f.DeviceIDs, d)
@@ -176,6 +179,42 @@ func (e *Engine) evalSamples(ctx context.Context, a *actions, now time.Time) err
 	a.sampleTo = to
 	e.pruneTrackers(a, from)
 	return nil
+}
+
+/*
+refreshSeenUp folds the interfaces the inventory currently shows up into the
+seen-up set (all of them on the first call, then only rows polled since). The
+set only grows. An interface that is already down when the engine starts, with
+no open problem, therefore stays quiet until it comes up (or a linkDown trap
+reports it).
+*/
+func (e *Engine) refreshSeenUp(ctx context.Context) error {
+	need := false
+	for _, dt := range e.cfg.byKind[KindIfOperDown] {
+		if dt.t.params.(*IfOperDown).IfIndex == nil {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return nil
+	}
+	rows, err := e.pool.Query(ctx, `SELECT device_id, if_index, seen_at FROM inventory.interface WHERE oper_up AND seen_at > $1`, e.upSince)
+	if err != nil {
+		return fmt.Errorf("triggers: read interface inventory: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d int64
+		var x int32
+		var at time.Time
+		if err := rows.Scan(&d, &x, &at); err != nil {
+			return fmt.Errorf("triggers: read interface inventory: %w", err)
+		}
+		e.seenUp[[2]int64{d, int64(x)}] = struct{}{}
+		e.upSince = laterOf(e.upSince, at)
+	}
+	return rows.Err()
 }
 
 /* watchedIfDevices lists the devices with an open interface problem or a pending interface condition; never nil. */
@@ -212,6 +251,15 @@ func (e *Engine) pruneTrackers(a *actions, from time.Time) {
 func (e *Engine) ifSample(a *actions, t *effTrigger, p IfSample, obj string) {
 	switch par := t.params.(type) {
 	case *IfOperDown:
+		if par.IfIndex == nil {
+			/* "Any interface" reports transitions only: a port never seen up (unused) stays quiet. */
+			k := [2]int64{p.DeviceID, int64(p.IfIndex)}
+			if p.OperUp {
+				e.seenUp[k] = struct{}{}
+			} else if _, ok := e.seenUp[k]; !ok {
+				return
+			}
+		}
 		if par.IfIndex == nil || *par.IfIndex == p.IfIndex {
 			e.sample(a, t, p.DeviceID, obj, p.TS, !p.OperUp, "oper down", true)
 		}

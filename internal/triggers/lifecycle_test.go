@@ -142,6 +142,7 @@ func TestRemovedDevicesAndTriggersResolveTheirProblems(t *testing.T) {
 	all := []int64{gone, disabled, overridden, moved, staying}
 	h.setStates(all, "down", h.clk.Now())
 	for _, d := range all {
+		h.exec(h.poller, `INSERT INTO inventory.interface (device_id, if_index, name, alias, speed_bps, oper_up, seen_at) VALUES ($1, 3, 'p3', '', 1, true, now())`, d)
 		h.writeIf(d, 3, h.clk.Now(), false)
 	}
 	h.step()
