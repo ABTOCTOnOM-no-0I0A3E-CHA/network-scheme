@@ -23,7 +23,7 @@ func TestLoadEventDDefaults(t *testing.T) {
 		t.Errorf("listeners = %q %q %q %q", c.SyslogUDP, c.SyslogTCP, c.SyslogTLS, c.TrapUDP)
 	}
 	if c.QueueSize != 10_000 || c.BatchSize != 1000 || c.BatchInterval != time.Second || c.RatePerSource != 200 || c.RateBurst != 400 ||
-		c.MaxTCPConns != 256 || c.TCPIdle != 5*time.Minute || c.RetentionDays != 90 || c.DB.Port != 5432 {
+		c.MaxTCPConns != 256 || c.TCPIdle != 5*time.Minute || c.DB.Port != 5432 {
 		t.Errorf("defaults = %+v", c)
 	}
 }
@@ -45,8 +45,8 @@ func TestLoadEventDRejects(t *testing.T) {
 	if _, err := config.LoadEventD(write(t, "eventd.yaml", strings.Replace(eventdBase, "read_key_file: /run/secrets/domain_read_key\n", "", 1))); err == nil {
 		t.Error("missing read_key_file accepted")
 	}
-	c, err := config.LoadEventD(write(t, "eventd.yaml", eventdBase+"syslog_tls: off\ntls_cert_file: /c.pem\ntls_key_file: /k.pem\nretention_days: 30\n"))
-	if err != nil || c.SyslogTLS != config.Off || c.RetentionDays != 30 {
+	c, err := config.LoadEventD(write(t, "eventd.yaml", eventdBase+"syslog_tls: off\ntls_cert_file: /c.pem\ntls_key_file: /k.pem\n"))
+	if err != nil || c.SyslogTLS != config.Off {
 		t.Errorf("valid config: %v %+v", err, c)
 	}
 }

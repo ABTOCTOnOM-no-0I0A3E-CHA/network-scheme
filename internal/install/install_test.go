@@ -3,6 +3,7 @@ package install_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -140,7 +141,7 @@ var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
 	"db_api_password", "db_cli_password", "db_eventd_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
-	"executor_sealing_key", "web.crt", "web.key",
+	"executor_sealing_key", "syslog.crt", "syslog.key", "web.crt", "web.key",
 }
 
 /* wantOwner is the owner table: consumer container uid/gid and mode. */
@@ -155,6 +156,8 @@ var wantOwner = map[string]struct {
 	"db_poller_password":   {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_eventd_password":   {install.ContainerUID, install.PostgresUID, 0o440},
 	"api_data_key":         {install.ContainerUID, install.ContainerUID, 0o400},
+	"syslog.crt":           {install.ContainerUID, install.ContainerUID, 0o400},
+	"syslog.key":           {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"ca.crt":               {0, 0, 0o400},
@@ -257,7 +260,8 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 		}
 		seen[v] = true
 	}
-	verifyWebCert(t, dir, "nms.example.org")
+	verifyCert(t, dir, "web.crt", "nms.example.org")
+	verifyCert(t, dir, "syslog.crt", "nms.example.org")
 
 	/* Second call: refused, nothing changed. */
 	before := snapshot(t, dir)
@@ -318,22 +322,22 @@ func TestWriteSecretsUsesSuppliedWebCert(t *testing.T) {
 	}
 }
 
-func verifyWebCert(t *testing.T, dir, host string) {
+func verifyCert(t *testing.T, dir, file, host string) {
 	t.Helper()
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(readFile(t, filepath.Join(dir, "ca.crt"))) {
 		t.Fatal("ca.crt is not PEM")
 	}
-	b, _ := pem.Decode(readFile(t, filepath.Join(dir, "web.crt")))
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir, file)))
 	if b == nil {
-		t.Fatal("web.crt is not PEM")
+		t.Fatal(file + " is not PEM")
 	}
 	c, err := x509.ParseCertificate(b.Bytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Verify(x509.VerifyOptions{DNSName: host, Roots: pool}); err != nil {
-		t.Fatalf("web.crt does not verify for %s against ca.crt: %v", host, err)
+		t.Fatalf("%s does not verify for %s against ca.crt: %v", file, host, err)
 	}
 }
 
@@ -675,5 +679,36 @@ func TestAdminCreateRejectsBadTOTPOutBeforeRunning(t *testing.T) {
 		if err == nil || len(sys.cmds) != 0 {
 			t.Fatalf("%s: err=%v cmds=%v, want an error before any command", out, err, sys.cmds)
 		}
+	}
+}
+
+/* The TLS syslog certificate is signed by the internal CA also when the panel uses a corporate certificate, and it matches the public host. */
+func TestSyslogCertSignedByInternalCA(t *testing.T) {
+	corpCrt, corpCA, err := pki.NewCA("corp", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crt, key, err := pki.IssueServerCert(corpCrt, corpCA, []string{"nms.corp.example"}, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "secrets")
+	if err := install.WriteSecrets(dir, install.SecretsInput{PublicHost: "NMS.corp.example", WebCertPEM: crt, WebKeyPEM: key, Chown: newFakeSys().Chown}); err != nil {
+		t.Fatal(err)
+	}
+	verifyCert(t, dir, "syslog.crt", "nms.corp.example")
+	if _, err := tls.X509KeyPair(readFile(t, filepath.Join(dir, "syslog.crt")), readFile(t, filepath.Join(dir, "syslog.key"))); err != nil {
+		t.Fatalf("syslog certificate and key do not form a pair: %v", err)
+	}
+
+	/* An IPv4 public host becomes an IP SAN. */
+	dir2 := filepath.Join(t.TempDir(), "secrets")
+	if err := install.WriteSecrets(dir2, install.SecretsInput{PublicHost: "192.0.2.10", Chown: newFakeSys().Chown}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir2, "syslog.crt")))
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil || len(c.IPAddresses) != 1 || c.IPAddresses[0].String() != "192.0.2.10" {
+		t.Fatalf("syslog certificate SANs = %v %v (%v)", c.DNSNames, c.IPAddresses, err)
 	}
 }

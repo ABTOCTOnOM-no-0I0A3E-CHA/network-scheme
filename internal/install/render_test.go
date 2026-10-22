@@ -229,7 +229,7 @@ func TestComposeHardening(t *testing.T) {
 	if err := yaml.Unmarshal(render(t, sampleInput())["compose.yaml"], &c); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"postgres", "migrate", "api", "poller", "gateway", "nmsctl"} {
+	for _, want := range []string{"postgres", "migrate", "api", "poller", "eventd", "gateway", "nmsctl"} {
 		if _, ok := c.Services[want]; !ok {
 			t.Errorf("service %s missing", want)
 		}
@@ -249,7 +249,7 @@ func TestComposeHardening(t *testing.T) {
 				t.Errorf("%s: must run as a non-root user, got %q", name, s.User)
 			}
 		}
-		if name != "gateway" && len(s.Ports) > 0 {
+		if name != "gateway" && name != "eventd" && len(s.Ports) > 0 {
 			t.Errorf("%s: must not publish ports, got %v", name, s.Ports)
 		}
 		if s.CPUs == "" || s.MemLimit == "" {
@@ -307,12 +307,33 @@ func TestComposeHardening(t *testing.T) {
 		t.Errorf("poller networks = %v", got)
 	}
 	for name, s := range c.Services {
-		if _, ok := s.Networks["devices"]; ok && name != "poller" {
+		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" {
 			t.Errorf("%s must not join devices", name)
 		}
-		if name != "poller" && slices.Contains(s.Secrets, any("domain_read_key")) {
+		if name != "poller" && name != "eventd" && slices.Contains(s.Secrets, any("domain_read_key")) {
 			t.Errorf("%s must not get the read domain key", name)
 		}
+	}
+
+	/*
+		eventd: api image as /eventd, core + devices, unprivileged container ports (so cap_drop ALL stays
+		complete) published on the standard ports, only its own secrets, no database or api secrets.
+	*/
+	e := c.Services["eventd"]
+	if e.Image != "nms/api:1.0.0" || !slices.Equal(e.Entrypoint, []string{"/eventd"}) || !slices.Equal(e.Command, []string{"run"}) || e.User != "65532:65532" {
+		t.Errorf("eventd image/entrypoint/command/user = %q %v %v %q", e.Image, e.Entrypoint, e.Command, e.User)
+	}
+	if !slices.Equal(e.Healthcheck.Test, []string{"CMD", "/eventd", "healthcheck"}) {
+		t.Errorf("eventd healthcheck = %v", e.Healthcheck.Test)
+	}
+	if want := []string{"514:1514/udp", "514:1514/tcp", "6514:6514/tcp", "162:1162/udp"}; !slices.Equal(e.Ports, want) {
+		t.Errorf("eventd ports = %v, want %v", e.Ports, want)
+	}
+	if !slices.Equal(e.Secrets, []any{"db_eventd_password", "domain_read_key", "syslog_crt", "syslog_key"}) {
+		t.Errorf("eventd secrets = %v", e.Secrets)
+	}
+	if got := slices.Sorted(maps.Keys(e.Networks)); !slices.Equal(got, []string{"core", "devices"}) {
+		t.Errorf("eventd networks = %v", got)
 	}
 	dev := c.Networks["devices"]
 	if dev.Internal || len(dev.IPAM.Config) != 1 || dev.IPAM.Config[0].Subnet != install.DefaultDevicesSubnet {
@@ -366,7 +387,7 @@ func TestRenderedEventdConfigLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.DB.User != "nms_eventd" || c.DB.Name != "nms" || c.DB.PasswordFile != "/run/secrets/db_eventd_password" ||
-		c.ReadKeyFile != "/run/secrets/domain_read_key" || c.TLSCertFile != "" || c.RetentionDays != 90 {
+		c.ReadKeyFile != "/run/secrets/domain_read_key" || c.TLSCertFile != "/run/secrets/syslog_crt" || c.TLSKeyFile != "/run/secrets/syslog_key" || c.SyslogUDP != "0.0.0.0:1514" || c.TrapUDP != "0.0.0.0:1162" {
 		t.Errorf("unexpected config: %+v", c)
 	}
 }

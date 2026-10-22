@@ -26,6 +26,10 @@ jobs:
         run: go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
       - name: Isolation check detects violations
         run: "! scripts/check-isolation.sh test/fixtures/isolation"
+      - name: eventd (network-facing) has no write code
+        run: |
+          go list -deps ./cmd/eventd | grep -c . # the list is not empty
+          ! go list -deps ./cmd/eventd | tr -d '\r' | grep -F '/cmd/executor'
 
   licenses:
     runs-on: ubuntu-latest
@@ -183,15 +187,42 @@ jobs:
       - name: Start egress capture
         run: |
           test/egress/capture.sh start
-          # recreate the services with a route out (gateway: edge, poller: devices) so their startup is captured too
-          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller
+          # recreate the services with a route out (gateway: edge, poller and eventd: devices) so their startup is captured too
+          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller eventd
+      - name: Start the event sources on the devices network
+        run: |
+          # Two containers of the simulator image, each sending syslog (UDP, TCP) and a v2c linkDown trap to eventd
+          # from its own address (test/e2e/send_events.py, standard library only). The "device" also answers SNMPv2c
+          # (the data file name is the community, 16+ characters) so the poll the trap causes can succeed; the other
+          # address belongs to no device. Devices reach eventd on the devices network directly: the published ports
+          # are not used from inside the same bridge.
+          EVSRC=nms-e2e-evsrc EVROGUE=nms-e2e-evrogue COMMUNITY=e2e-events-community-01
+          docker run -d --name "$EVSRC" --network nms_devices \
+            -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
+            -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" nms-snmpsim:ci \
+            sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
+              --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
+              --agent-udpv4-endpoint=0.0.0.0:161'
+          docker run -d --name "$EVROGUE" --network nms_devices -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" nms-snmpsim:ci sleep infinity
+          for _ in $(seq 1 60); do docker logs "$EVSRC" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' && break; sleep 1; done
+          docker logs "$EVSRC" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' || { docker logs "$EVSRC"; exit 1; }
+          addr() { docker inspect -f '{{(index .NetworkSettings.Networks "nms_devices").IPAddress}}' "$1"; }
+          EVENTD="$(addr "$(sudo docker compose -f "$COMPOSE" ps -q eventd)")"
+          SRC="$(addr "$EVSRC")"; ROGUE="$(addr "$EVROGUE")"
+          echo "eventd $EVENTD, device $SRC, stranger $ROGUE"
+          [ -n "$EVENTD" ] && [ -n "$SRC" ] && [ -n "$ROGUE" ] && [ "$SRC" != "$ROGUE" ]
+          docker exec -d "$EVSRC" python3 /send_events.py "$EVENTD" e2eknown "$COMMUNITY"
+          docker exec -d "$EVROGUE" python3 /send_events.py "$EVENTD" e2erogue "$COMMUNITY"
+          echo "NMS_E2E_EVENT_SRC=$SRC" >> "$GITHUB_ENV"
+          echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
       - name: Playwright
         run: >-
           docker run --rm --init --ipc=host --network host
-          -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM -w /e2e
+          -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM
+          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
       - name: Audit anchor timer unit and audit verify
@@ -246,3 +277,4 @@ jobs:
         run: |
           sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
           docker logs --tail 100 "$SNMPSIM" || true
+          docker logs --tail 100 nms-e2e-evsrc || true

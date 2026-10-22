@@ -7,11 +7,11 @@ db:
   password_file: "/run/secrets/db_eventd_password"
 read_key_file: "/run/secrets/domain_read_key"
 read_pub_key_file: "/etc/nms/domain_read.pub"
-syslog_udp: "0.0.0.0:514"
-syslog_tcp: "0.0.0.0:514"
-# TLS syslog stays off until a certificate is installed:
-# syslog_tls: "0.0.0.0:6514"
-# tls_cert_file: "/etc/nms/syslog.crt"
-# tls_key_file: "/run/secrets/syslog_key"
-trap_udp: "0.0.0.0:162"
-retention_days: 90
+# Unprivileged container ports; compose publishes them as 514/udp+tcp, 6514/tcp and 162/udp.
+syslog_udp: "0.0.0.0:1514"
+syslog_tcp: "0.0.0.0:1514"
+syslog_tls: "0.0.0.0:6514"
+tls_cert_file: "/run/secrets/syslog_crt"
+tls_key_file: "/run/secrets/syslog_key"
+trap_udp: "0.0.0.0:1162"
+# Retention of syslog, traps and storm rows is fixed at 90 days by the database migration.

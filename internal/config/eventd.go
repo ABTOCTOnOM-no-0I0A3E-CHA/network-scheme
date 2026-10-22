@@ -24,11 +24,9 @@ const (
 	defaultBurst      = 400
 	defaultMaxConns   = 256
 	defaultIdle       = 5 * time.Minute
-	defaultRetention  = 90
 	defaultEventdDB   = 8
 	maxQueueSize      = 1_000_000
 	maxBatchSize      = 10_000
-	maxRetentionDays  = 3650
 )
 
 /* Off disables a listener: the address of every listener is either host:port or "off". */
@@ -62,11 +60,6 @@ type EventD struct {
 	RateBurst     int           `yaml:"rate_burst"`
 	MaxTCPConns   int           `yaml:"max_tcp_conns"`
 	TCPIdle       time.Duration `yaml:"tcp_idle_timeout"`
-	/*
-		RetentionDays is the age after which syslog and trap rows are removed. eventd has no
-		right to change the retention policy: the installer / nmsctl applies this value.
-	*/
-	RetentionDays int `yaml:"retention_days"`
 }
 
 /*
@@ -108,7 +101,7 @@ func (c *EventD) ApplyDefaults() {
 	}
 	for p, def := range map[*int]int{
 		&c.QueueSize: defaultQueueSize, &c.BatchSize: defaultBatchSize, &c.RatePerSource: defaultRate,
-		&c.RateBurst: defaultBurst, &c.MaxTCPConns: defaultMaxConns, &c.RetentionDays: defaultRetention,
+		&c.RateBurst: defaultBurst, &c.MaxTCPConns: defaultMaxConns,
 	} {
 		if *p == 0 {
 			*p = def
@@ -141,8 +134,6 @@ func (c EventD) Validate() error {
 		return errors.New("max_tcp_conns must be 1..65535")
 	case c.TCPIdle < time.Second:
 		return errors.New("tcp_idle_timeout must be at least 1s")
-	case c.RetentionDays < 1 || c.RetentionDays > maxRetentionDays:
-		return fmt.Errorf("retention_days must be 1..%d", maxRetentionDays)
 	case len(c.Instance) > 200:
 		return errors.New("instance is too long")
 	}

@@ -107,6 +107,43 @@ services:
       retries: 5
       start_period: 30s
 
+  eventd:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "nms/api:1.0.0"
+    entrypoint: ["/eventd"]
+    command: ["run"]
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cpus: "1.0"
+    mem_limit: 512m
+    # Unprivileged container ports, so no capability is needed; with the userland proxy off the
+    # source address of every packet is the device's own (the identity of an event).
+    ports:
+      - "514:1514/udp"
+      - "514:1514/tcp"
+      - "6514:6514/tcp"
+      - "162:1162/udp"
+    secrets: [db_eventd_password, domain_read_key, syslog_crt, syslog_key]
+    volumes:
+      - "/etc/nms/config/eventd.yaml:/etc/nms/eventd.yaml:ro"
+      - "/etc/nms/config/domain_read.pub:/etc/nms/domain_read.pub:ro"
+    networks:
+      core: {}
+      devices: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/eventd", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   gateway:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -188,6 +225,10 @@ secrets:
     file: "/etc/nms/secrets/db_eventd_password"
   domain_read_key:
     file: "/etc/nms/secrets/domain_read.key"
+  syslog_crt:
+    file: "/etc/nms/secrets/syslog.crt"
+  syslog_key:
+    file: "/etc/nms/secrets/syslog.key"
   api_data_key:
     file: "/etc/nms/secrets/api_data_key"
   web_crt:
