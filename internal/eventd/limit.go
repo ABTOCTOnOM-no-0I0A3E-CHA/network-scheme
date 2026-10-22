@@ -28,10 +28,8 @@ func newLimiterF(rate, burst float64) *limiter {
 	return &limiter{rate: rate, burst: burst, m: map[int64]*bucket{}}
 }
 
-/* allow takes one token of device id, if there is one. */
-func (l *limiter) allow(id int64, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+/* take refills the bucket of id and returns it; l.mu must be held. */
+func (l *limiter) take(id int64, now time.Time) *bucket {
 	b := l.m[id]
 	if b == nil {
 		b = &bucket{tokens: l.burst, last: now}
@@ -41,10 +39,37 @@ func (l *limiter) allow(id int64, now time.Time) bool {
 		b.tokens = min(l.burst, b.tokens+d.Seconds()*l.rate)
 		b.last = now
 	}
+	return b
+}
+
+/* allow takes one token of device id, if there is one. */
+func (l *limiter) allow(id int64, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.take(id, now)
 	if b.tokens < 1 {
 		return false
 	}
 	b.tokens--
+	return true
+}
+
+/*
+allowBoth takes one token from a (for ida) and one from b (for idb), or none:
+a token is never spent when the other bucket refuses. Locks are taken in the
+order a, b; callers must always pass the buckets in the same order.
+*/
+func allowBoth(a *limiter, ida int64, b *limiter, idb int64, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ba, bb := a.take(ida, now), b.take(idb, now)
+	if ba.tokens < 1 || bb.tokens < 1 {
+		return false
+	}
+	ba.tokens--
+	bb.tokens--
 	return true
 }
 

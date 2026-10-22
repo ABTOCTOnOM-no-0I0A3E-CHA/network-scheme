@@ -141,7 +141,12 @@ type v3Pin struct {
 	engine string
 	sp     *gosnmp.UsmSecurityParameters
 	g      *gosnmp.GoSNMP
+	/* the highest engine boots and time seen in authenticated traps (replay check) */
+	boots, time uint32
 }
+
+/* replayWindow is the tolerated lag of msgAuthoritativeEngineTime behind the highest one seen (RFC 3414 section 3.2 item 7). */
+const replayWindow = 150
 
 /*
 v3Auth checks SNMPv3 messages of one device. Its tables hold exactly the USM
@@ -208,7 +213,7 @@ names an engine that is not pinned; it reports whether the budget allows the
 expensive decode. The second result is false for every failure; nothing of an
 unauthenticated message is returned.
 */
-func (v *v3Auth) decode(data []byte, slow func() bool) (*gosnmp.SnmpPacket, bool) {
+func (v *v3Auth) decode(data []byte, slow func() bool, replayed func()) (*gosnmp.SnmpPacket, bool) {
 	h, ok := parseV3Header(data)
 	if !ok || h.user != v.user || h.model != int(gosnmp.UserSecurityModel) || h.flags&byte(gosnmp.AuthPriv) != byte(gosnmp.AuthPriv) {
 		return nil, false
@@ -218,7 +223,12 @@ func (v *v3Auth) decode(data []byte, slow func() bool) (*gosnmp.SnmpPacket, bool
 	if pin != nil && pin.engine == h.engine {
 		p, err := unmarshal(pin.g, data)
 		v.mu.Unlock()
-		return v.verified(p, err, false)
+		p, ok := v.verified(p, err, false)
+		if ok && !v.fresh(pin, p) {
+			replayed()
+			return nil, false
+		}
+		return p, ok
 	}
 	v.mu.Unlock()
 	if !slow() {
@@ -267,6 +277,34 @@ func (v *v3Auth) verified(p *gosnmp.SnmpPacket, err error, pinIt bool) (*gosnmp.
 	return p, true
 }
 
+/*
+fresh applies the replay check to an authenticated trap of the pinned engine:
+boots below the highest seen, or the same boots and a time more than 150 s
+behind the highest, is a replay. Accepted traps raise the mark. The mark is
+per process and per pin (a re-pin starts from the new message).
+*/
+func (v *v3Auth) fresh(pin *v3Pin, p *gosnmp.SnmpPacket) bool {
+	usm, ok := p.SecurityParameters.(*gosnmp.UsmSecurityParameters)
+	if !ok {
+		return false
+	}
+	boots, tm := usm.AuthoritativeEngineBoots, usm.AuthoritativeEngineTime
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.pin != pin {
+		return true /* re-pinned meanwhile: the new pin starts from its own message */
+	}
+	switch {
+	case boots < pin.boots, boots == pin.boots && uint64(tm)+replayWindow < uint64(pin.time):
+		return false
+	case boots > pin.boots:
+		pin.boots, pin.time = boots, tm
+	case tm > pin.time:
+		pin.time = tm
+	}
+	return true
+}
+
 /* setPin keeps the engine and the localized keys the authenticated message was verified with. */
 func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
 	if len(usm.SecretKey) == 0 || len(usm.PrivacyKey) == 0 {
@@ -287,7 +325,7 @@ func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.clearPin()
-	v.pin = &v3Pin{engine: usm.AuthoritativeEngineID, sp: sp, g: g}
+	v.pin = &v3Pin{engine: usm.AuthoritativeEngineID, sp: sp, g: g, boots: usm.AuthoritativeEngineBoots, time: usm.AuthoritativeEngineTime}
 }
 
 func (v *v3Auth) clearPin() {

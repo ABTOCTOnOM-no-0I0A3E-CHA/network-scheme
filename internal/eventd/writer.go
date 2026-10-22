@@ -130,7 +130,14 @@ func (w *writer) rowByRow(ctx context.Context, name string, cols []string, rows 
 			if err == nil {
 				break
 			}
-			if ctx.Err() != nil || classify(err) != errTransient {
+			/*
+				A single INSERT cannot fail at the client as "query canceled" (an
+				encoding error is not a PgError), so 57014 here is the server
+				cancelling the statement (restart, admin): retry, do not drop.
+			*/
+			var pe *pgconn.PgError
+			canceled := errors.As(err, &pe) && pe.Code == "57014"
+			if ctx.Err() != nil || (classify(err) != errTransient && !canceled) {
 				bad++
 				break
 			}

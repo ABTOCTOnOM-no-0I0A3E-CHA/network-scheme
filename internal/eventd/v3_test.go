@@ -72,10 +72,16 @@ keeps the generator cheap.
 */
 func v3Packet(tb testing.TB, user, engine string, genuine bool) []byte {
 	tb.Helper()
+	return v3PacketAt(tb, user, engine, genuine, 1, 100)
+}
+
+/* v3PacketAt is v3Packet with the engine boots and time the message carries. */
+func v3PacketAt(tb testing.TB, user, engine string, genuine bool, boots, tm uint32) []byte {
+	tb.Helper()
 	sp := &gosnmp.UsmSecurityParameters{
 		UserName: user, AuthenticationProtocol: gosnmp.SHA256, PrivacyProtocol: gosnmp.AES,
 		AuthenticationPassphrase: authKey, PrivacyPassphrase: privKey,
-		AuthoritativeEngineID: engine, AuthoritativeEngineBoots: 1, AuthoritativeEngineTime: 100,
+		AuthoritativeEngineID: engine, AuthoritativeEngineBoots: boots, AuthoritativeEngineTime: tm,
 	}
 	if !genuine {
 		sp.AuthenticationPassphrase, sp.PrivacyPassphrase = "wrongwrongwrong01", "wrongwrongwrong02"
@@ -218,8 +224,11 @@ func TestV3EngineChangeUsesTheSlowPath(t *testing.T) {
 		t.Fatal("first trap refused")
 	}
 	next := v3Packet(t, "nms", engineID(2), true)
+	for i := range 2 { /* a spoofer uses up the rest of the device's burst */
+		r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(10+i), false))
+	}
 	if _, ok := r.srv.authTrap(r.dev, next); ok {
-		t.Error("a second derivation inside the per-device budget was allowed")
+		t.Error("a derivation beyond the per-device budget was allowed")
 	}
 	r.clk.add(11 * time.Second)
 	if _, ok := r.srv.authTrap(r.dev, next); !ok {
@@ -319,4 +328,74 @@ func TestV3SpoofFloodOverSocketsKeepsDeviceWorking(t *testing.T) {
 	eventually(t, 15*time.Second, "all genuine traps stored", func() bool { return h.count(`SELECT count(*) FROM events.trap`) == 1+rounds })
 	eventually(t, 10*time.Second, "forgeries counted", func() bool { return h.stat("auth_failed") == rounds*forged })
 	t.Logf("%d forged v3 messages with distinct engine IDs and %d genuine traps in %v: all genuine stored, %d forged refused", rounds*forged, rounds, time.Since(start), h.stat("auth_failed"))
+}
+
+/* The global budget refusing must not cost a device its own token (review: starvation of unpinned devices). */
+func TestV3GlobalBudgetRefusalKeepsDeviceToken(t *testing.T) {
+	r := newV3Rig(t)
+	b := &device{id: 2, v3: r.dev.v3} /* device B shares the credential only to keep the rig small */
+	other, err := newV3(creds.Credential{Kind: creds.KindSNMP3, User: "nms", AuthProto: "SHA256", AuthKey: secret.New(authKey), PrivProto: "AES", PrivKey: secret.New(privKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.v3 = other
+	/* spoofers behind devices 10..: three tokens each, until the global bucket (5) is empty */
+	for id := int64(10); id < 20; id++ {
+		d := &device{id: id, v3: r.dev.v3}
+		for i := range 3 {
+			r.srv.authTrap(d, v3Packet(t, "nms", engineID(int(id)*10+i), false))
+		}
+	}
+	genuine := v3Packet(t, "nms", engineID(500), true)
+	if _, ok := r.srv.authTrap(b, genuine); ok {
+		t.Fatal("accepted with the global budget empty")
+	}
+	if _, ok := r.srv.authTrap(b, genuine); ok {
+		t.Fatal("accepted with the global budget still empty")
+	}
+	r.srv.slowDev.mu.Lock()
+	tokens := r.srv.slowDev.m[2].tokens
+	r.srv.slowDev.mu.Unlock()
+	if tokens < 2.99 {
+		t.Errorf("device B has %.2f tokens left, the refusals spent some", tokens)
+	}
+	r.clk.add(time.Second) /* the global bucket refills */
+	if _, ok := r.srv.authTrap(b, genuine); !ok {
+		t.Error("B's genuine trap refused after the global budget refilled")
+	}
+}
+
+func TestV3ReplayCheck(t *testing.T) {
+	r := newV3Rig(t)
+	at := func(boots, tm uint32) bool {
+		_, ok := r.srv.authTrap(r.dev, v3PacketAt(t, "nms", engineID(1), true, boots, tm))
+		return ok
+	}
+	if !at(1, 1000) {
+		t.Fatal("first trap refused")
+	}
+	if !at(1, 1100) {
+		t.Error("increasing time refused")
+	}
+	if !at(1, 1000) {
+		t.Error("100 s behind the highest refused (within the window)")
+	}
+	if at(1, 900) {
+		t.Error("200 s behind the highest accepted (replay)")
+	}
+	if at(0, 5000) {
+		t.Error("lower boots accepted (replay)")
+	}
+	if r.srv.st.replayed.Load() != 2 {
+		t.Errorf("replayed = %d, want 2", r.srv.st.replayed.Load())
+	}
+	if !at(2, 10) {
+		t.Error("higher boots (device restarted) refused")
+	}
+	if at(1, 5000) {
+		t.Error("old boots accepted after a restart")
+	}
+	if !at(2, 11) {
+		t.Error("normal trap refused")
+	}
 }

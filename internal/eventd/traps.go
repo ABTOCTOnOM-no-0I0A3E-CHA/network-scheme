@@ -66,13 +66,13 @@ func (s *server) authTrap(d *device, data []byte) (*gosnmp.SnmpPacket, bool) {
 		return nil, false
 	}
 	return d.v3.decode(data, func() bool {
-		now := s.now()
-		if s.slowDev.allow(d.id, now) && s.slowAll.allow(0, now) {
+		/* both budgets or none: a refusal of the global one must not cost the device its token */
+		if allowBoth(s.slowDev, d.id, s.slowAll, 0, s.now()) {
 			return true
 		}
 		s.st.slowDropped.Add(1)
 		return false
-	})
+	}, func() { s.st.replayed.Add(1) })
 }
 
 /*
@@ -93,8 +93,10 @@ func (s *server) handleTrap(ip netip.Addr, data []byte, reply func([]byte)) {
 		return
 	}
 	if pkt.Version == gosnmp.Version3 && pkt.PDUType != gosnmp.SNMPv2Trap {
-		/* v3 INFORM needs the engine discovery exchange, whose replies would reflect traffic: not offered */
-		s.st.v3Inform.Add(1)
+		if pkt.PDUType == gosnmp.InformRequest {
+			/* v3 INFORM needs the engine discovery exchange, whose replies would reflect traffic: not offered */
+			s.st.v3Inform.Add(1)
+		}
 		s.st.malformed.Add(1)
 		return
 	}

@@ -55,8 +55,9 @@ const (
 	udpQueue      = 1024
 	udpReadBuf    = 8 << 20
 	maxTrapPacket = 65535
-	slowDevRate   = 0.1 /* one SNMPv3 key derivation per 10 s per device ... */
-	slowAllRate   = 5   /* ... and 5 per second in total: ~6 ms of CPU each */
+	slowDevRate   = 0.1 /* one SNMPv3 key derivation per 10 s per device (burst 3, so a genuine first trap has a chance against a slow spoofer) ... */
+	slowDevBurst  = 3
+	slowAllRate   = 5 /* ... and 5 per second in total: ~6 ms of CPU each */
 	slowAllBurst  = 5
 )
 
@@ -199,7 +200,7 @@ func newServer(cfg config.EventD, deps Deps) *server {
 	s.src = newSources(deps.Priv, deps.Pub, reg, s.now, s.log)
 	s.q = newQueue(cfg.QueueSize)
 	s.lim = newLimiter(cfg.RatePerSource, cfg.RateBurst)
-	s.slowDev, s.slowAll = newLimiterF(slowDevRate, 1), newLimiterF(slowAllRate, slowAllBurst)
+	s.slowDev, s.slowAll = newLimiterF(slowDevRate, slowDevBurst), newLimiterF(slowAllRate, slowAllBurst)
 	s.storm = newStorm(s.emit)
 	s.polls = newPollTrigger(enq, s.now)
 	s.conns = &conns{max: cfg.MaxTCPConns, per: map[netip.Addr]int{}}
@@ -390,7 +391,7 @@ func (s *server) statsLoop(ctx context.Context, every time.Duration) {
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks uint64
+	var lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks, lastReplayed uint64
 	for {
 		fctx, cancel := context.WithTimeout(ctx, callTimeout)
 		err := s.st.flush(fctx, s.pool, s.instance, s.q.depth())
@@ -400,12 +401,13 @@ func (s *server) statsLoop(ctx context.Context, every time.Duration) {
 		}
 		d, m, f := s.st.dropped.Load(), s.st.malformed.Load(), s.st.authFailed.Load()
 		sl, in, pa, rb := s.st.slowDropped.Load(), s.st.v3Inform.Load(), s.st.panics.Load(), s.src.rollbacks.Load()
-		if d != lastDropped || m != lastMalformed || f != lastFailed || sl != lastSlow || in != lastInform || pa != lastPanics || rb != lastRollbacks {
+		rp := s.st.replayed.Load()
+		if d != lastDropped || m != lastMalformed || f != lastFailed || sl != lastSlow || in != lastInform || pa != lastPanics || rb != lastRollbacks || rp != lastReplayed {
 			s.log.Warn("events refused", slog.Uint64("dropped", d-lastDropped), slog.Uint64("malformed", m-lastMalformed),
 				slog.Uint64("auth_failed", f-lastFailed), slog.Uint64("v3_budget_exceeded", sl-lastSlow),
 				slog.Uint64("v3_inform_unsupported", in-lastInform), slog.Uint64("panics", pa-lastPanics),
-				slog.Uint64("credential_rollbacks", rb-lastRollbacks), slog.Int("queue", s.q.depth()))
-			lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks = d, m, f, sl, in, pa, rb
+				slog.Uint64("credential_rollbacks", rb-lastRollbacks), slog.Uint64("v3_replayed", rp-lastReplayed), slog.Int("queue", s.q.depth()))
+			lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks, lastReplayed = d, m, f, sl, in, pa, rb, rp
 		}
 		select {
 		case <-ctx.Done():
