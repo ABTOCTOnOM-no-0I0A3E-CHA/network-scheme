@@ -1,0 +1,1 @@
+<34>Oct 22 11:59:01 mymachine su[231]: 'su root' failed on /dev/pts/8

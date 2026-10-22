@@ -1,0 +1,1 @@
+<187>Oct 22 11:59:13 mes-sw1 %LINK-W-Down: gi1/0/3, changed state to down

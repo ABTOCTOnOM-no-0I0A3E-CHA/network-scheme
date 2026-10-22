@@ -1,0 +1,1 @@
+<13>Oct 22 2026 11:30:00 gw1 kernel: boot with year

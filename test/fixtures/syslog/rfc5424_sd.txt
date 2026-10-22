@@ -1,0 +1,1 @@
+<165>1 2026-10-22T11:59:00.003Z core1.example.net evntslog 4711 ID47 [exampleSDID@32473 iut="3" eventSource="Application" eventID="1011"][meta k="a\]b"] ﻿An application event log entry
