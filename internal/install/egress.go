@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -148,6 +149,8 @@ is not managed.
 */
 var ingressPorts = []ingressPort{{"udp", "1514"}, {"tcp", "1514"}, {"tcp", "6514"}, {"udp", "1162"}}
 
+func ingressComment(ip ingressPort) string { return "nms-ingress-" + ip.proto + "-" + ip.port }
+
 /* block is a closing DROP rule and the allow rules that must stay above it. */
 type block struct {
 	allow [][]string
@@ -159,7 +162,9 @@ func (e Egress) blocks() []block {
 	var out []block
 	dst := []string{"-d", e.DevicesSubnet.String()}
 	for _, ip := range ingressPorts {
-		match := append(append([]string{}, dst...), "-p", ip.proto, "-m", ip.proto, "--dport", ip.port)
+		/* The comment names the port in listings: CheckEgress orders the rules by it and CI reads the DROP counters. */
+		match := append(append([]string{}, dst...), "-p", ip.proto, "-m", ip.proto, "--dport", ip.port,
+			"-m", "comment", "--comment", ingressComment(ip))
 		var b block
 		for _, m := range e.MgmtSubnets {
 			b.allow = append(b.allow, append(append([]string{}, match...), "-s", m.String(), "-j", "RETURN"))
@@ -199,7 +204,61 @@ func CheckEgress(ctx context.Context, sys System, e Egress) error {
 			}
 		}
 	}
+	return checkIngressOrder(ctx, sys)
+}
+
+/*
+checkIngressOrder reads the chain with line numbers and verifies that, for every eventd port, each RETURN rule is
+above that port's DROP. The rules of a port are found by their comment. (The egress block is covered by ApplyEgress
+reinserting it on top; its rules carry no comment.)
+*/
+func checkIngressOrder(ctx context.Context, sys System) error {
+	var out, stderr bytes.Buffer
+	if err := sys.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "-L", egressChain, "-n", "--line-numbers"}, Stdout: &out, Stderr: &stderr}); err != nil {
+		return fmt.Errorf("egress: list %s: %w", egressChain, err)
+	}
+	type pos struct{ maxReturn, drop int }
+	seen := map[string]*pos{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		f := strings.Fields(line)
+		n, err := strconv.Atoi(firstField(f))
+		if err != nil || len(f) < 2 {
+			continue
+		}
+		i, j := strings.Index(line, "/* "), strings.Index(line, " */")
+		if i < 0 || j < i {
+			continue
+		}
+		c := line[i+3 : j]
+		if !strings.HasPrefix(c, "nms-ingress-") {
+			continue
+		}
+		p := seen[c]
+		if p == nil {
+			p = &pos{}
+			seen[c] = p
+		}
+		switch f[1] {
+		case "RETURN":
+			p.maxReturn = max(p.maxReturn, n)
+		case "DROP":
+			p.drop = n
+		}
+	}
+	for _, ip := range ingressPorts {
+		c := ingressComment(ip)
+		if p := seen[c]; p == nil || p.drop == 0 || p.maxReturn > p.drop {
+			return fmt.Errorf("egress: %s: a RETURN rule is not above the DROP rule (%s)", egressChain, c)
+		}
+	}
 	return nil
+}
+
+func firstField(f []string) string {
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
 }
 
 /*

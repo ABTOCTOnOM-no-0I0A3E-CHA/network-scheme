@@ -131,11 +131,13 @@ jobs:
       COMPOSE: /etc/nms/compose.yaml
       # The default devices subnet; the simulator lives there, so it is the management subnet too.
       DEVICES_SUBNET: 172.30.1.0/24
+      # A second management subnet: the veth of the off-host-like event sender (network namespace nms-ev-mgmt).
+      MGMT_EXTRA: 172.31.250.0/24
       SNMPSIM: nms-e2e-snmpsim
       INSTALL_ARGS: >-
         --non-interactive --public-host localhost --admin-user admin
         --admin-password-file /tmp/nms-e2e/admin-password --image-tag ci
-        --mgmt-subnet 172.30.1.0/24
+        --mgmt-subnet 172.30.1.0/24 --mgmt-subnet 172.31.250.0/24
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
@@ -198,11 +200,19 @@ jobs:
           # from its own address (test/e2e/send_events.py, standard library only). The "device" also answers SNMPv2c
           # (the data file name is the community, 16+ characters) so the poll the trap causes can succeed; the other
           # address belongs to no device. Devices reach eventd on the devices network directly: the published ports
-          # are not used from inside the same bridge. A third sender runs in the host network namespace and
-          # uses the PUBLISHED ports of the runner's address: that is the test that docker NAT preserves the
-          # source address (with the userland proxy it would be the bridge gateway). TLS (6514) is verified
-          # against the installation's CA, for the name of the certificate (the public host, localhost).
-          EVSRC=nms-e2e-evsrc EVROGUE=nms-e2e-evrogue EVHOST=nms-e2e-evhost COMMUNITY=e2e-events-community-01
+          # are not used from inside the same bridge.
+          #
+          # Two more senders live in network namespaces joined to the host by a veth pair, which makes them like
+          # devices on another network: their packets arrive at a host address, are DNAT'ed to the published
+          # ports (PREROUTING), forwarded (FORWARD, DOCKER-USER) and reach eventd with the source address
+          # unchanged. That proves the source address survives docker's NAT; with the userland proxy on, the proxy
+          # would terminate the connection and open its own, so the source would be the bridge gateway and the
+          # device below would not match. (A sender on the host itself would not prove it: its packets are
+          # masqueraded to the bridge gateway.)
+          #   nms-ev-mgmt  172.31.250.2, inside the management subnet MGMT_EXTRA: accepted, attributed to its device.
+          #   nms-ev-rogue 172.31.251.2, in no management subnet: dropped by the DOCKER-USER ingress rules.
+          # TLS (6514) is verified against the installation's CA, for the name of the certificate (localhost).
+          EVSRC=nms-e2e-evsrc EVROGUE=nms-e2e-evrogue COMMUNITY=e2e-events-community-01
           sudo install -m 0644 /etc/nms/secrets/ca.crt /tmp/nms-e2e-ca.crt
           docker run -d --name "$EVSRC" --network nms_devices \
             -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
@@ -221,14 +231,26 @@ jobs:
           docker exec -d "$EVSRC" python3 /send_events.py "$EVENTD" e2eknown "$COMMUNITY" /ca.crt localhost
           docker exec -d "$EVROGUE" python3 /send_events.py "$EVENTD" e2erogue "$COMMUNITY"
           echo "NMS_E2E_EVENT_SRC=$SRC" >> "$GITHUB_ENV"
-          HOSTIP="$(hostname -I | cut -d' ' -f1)"
-          [ -n "$HOSTIP" ]
-          docker run -d --name "$EVHOST" --network host -e SYSLOG_PORT=514 -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" nms-snmpsim:ci \
-            python3 /send_events.py "$HOSTIP" e2ehost
-          echo "host sender -> $HOSTIP:514"
+          netns() { # NAME HOST_IP NS_IP: namespace NAME with a veth pair, host side HOST_IP/24, namespace side NS_IP/24
+            sudo ip netns add "$1"
+            sudo ip link add "vh-$1" type veth peer name "vn-$1"
+            sudo ip link set "vn-$1" netns "$1"
+            sudo ip addr add "$2/24" dev "vh-$1"
+            sudo ip link set "vh-$1" up
+            sudo ip netns exec "$1" ip addr add "$3/24" dev "vn-$1"
+            sudo ip netns exec "$1" ip link set "vn-$1" up
+            sudo ip netns exec "$1" ip link set lo up
+            sudo ip netns exec "$1" ip route add default via "$2"
+          }
+          netns nms-ev-mgmt 172.31.250.1 172.31.250.2
+          netns nms-ev-rogue 172.31.251.1 172.31.251.2
+          sudo ip netns exec nms-ev-mgmt ping -c 1 -W 2 172.31.250.1
+          sudo ip netns exec nms-ev-rogue ping -c 1 -W 2 172.31.251.1
+          # published ports: 514 (UDP, TCP syslog) and 6514 (TLS), addressed to the host side of the veth
+          sudo setsid nohup ip netns exec nms-ev-mgmt env SYSLOG_PORT=514 python3 test/e2e/send_events.py 172.31.250.1 e2enetns - /tmp/nms-e2e-ca.crt localhost > /tmp/nms-ev-mgmt.log 2>&1 &
+          sudo setsid nohup ip netns exec nms-ev-rogue env SYSLOG_PORT=514 python3 test/e2e/send_events.py 172.31.251.1 e2eneg > /tmp/nms-ev-rogue.log 2>&1 &
           echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
-          echo "NMS_E2E_EVENT_HOST=$HOSTIP" >> "$GITHUB_ENV"
-          echo "HOSTIP=$HOSTIP" >> "$GITHUB_ENV"
+          echo "NMS_E2E_EVENT_NETNS=172.31.250.2" >> "$GITHUB_ENV"
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -236,7 +258,7 @@ jobs:
         run: >-
           docker run --rm --init --ipc=host --network host
           -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM
-          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_HOST -w /e2e
+          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
       - name: The trap, not the API, queued the poll
@@ -249,17 +271,14 @@ jobs:
           [ "$n" -ge 1 ]
       - name: Non-management sources cannot reach the eventd ports
         run: |
-          # A container on the default bridge (172.17.0.0/16, not a management subnet) sends to the PUBLISHED ports of
-          # the runner. The packets are forwarded to eventd's network and must be dropped by the DOCKER-USER ingress
-          # rules: their packet counters grow (they are dropped before MASQUERADE, so this does not depend on eventd).
-          NETSHOOT=nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70
-          pkts() { sudo iptables -w -L DOCKER-USER -n -v -x | awk -v p="$1" '$3 == "DROP" && $4 == p && $0 ~ ("dpt:" ENVIRON["PORT"]) {s += $1} END {print s + 0}'; }
-          export PORT=1514
-          u0="$(pkts udp)"; t0="$(pkts tcp)"
-          docker run --rm --network bridge "$NETSHOOT" sh -c "echo e2e-nonmgmt | nc -u -w 1 $HOSTIP 514; echo e2e-nonmgmt | nc -w 2 $HOSTIP 514" || true
-          u1="$(pkts udp)"; t1="$(pkts tcp)"
-          echo "dropped by the ingress rules: udp $u0 -> $u1, tcp $t0 -> $t1"
-          [ "$u1" -gt "$u0" ] && [ "$t1" -gt "$t0" ]
+          # The sender in nms-ev-rogue (172.31.251.2, no management subnet) has been sending to the published port 514
+          # since the start of the job. Its packets are forwarded towards eventd's network and must be dropped by the
+          # DOCKER-USER ingress rules (before MASQUERADE, so this does not depend on eventd): their counters grow,
+          # and events.spec.ts has seen nothing of it in the event feed. The rules are found by their comment.
+          pkts() { sudo iptables -w -L DOCKER-USER -n -v -x | awk -v c="nms-ingress-$1" '$3 == "DROP" && index($0, c) {s += $1} END {print s + 0}'; }
+          u="$(pkts udp-1514)"; t="$(pkts tcp-1514)"
+          echo "dropped by the ingress rules: udp $u packets, tcp $t packets"
+          [ "$u" -gt 0 ] && [ "$t" -gt 0 ]
           sudo iptables -w -S DOCKER-USER
       - name: Audit anchor timer unit and audit verify
         run: |
@@ -273,7 +292,7 @@ jobs:
           echo "$out"
           grep -q "already installed" <<<"$out"
       - name: Zero egress
-        run: test/egress/capture.sh check
+        run: EGRESS_ALLOW="$MGMT_EXTRA" test/egress/capture.sh check
       - name: Devices network reaches only the management subnets
         run: |
           # NETSHOOT: nicolaka/netshoot v0.16 (as in test/egress/capture.sh)
@@ -315,4 +334,4 @@ jobs:
           sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
           docker logs --tail 100 "$SNMPSIM" || true
           docker logs --tail 100 nms-e2e-evsrc || true
-          docker logs --tail 50 nms-e2e-evhost || true
+          cat /tmp/nms-ev-mgmt.log /tmp/nms-ev-rogue.log || true

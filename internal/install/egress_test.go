@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -56,6 +57,19 @@ func (f *fakeIPTables) run(c install.Cmd) error {
 			f.chain = slices.Delete(f.chain, i, i+1)
 		}
 		return nil
+	case "-L": // -L CHAIN -n --line-numbers: num target prot opt source destination [comment]
+		if c.Stdout == nil {
+			return nil
+		}
+		for i, r := range f.chain {
+			fields := strings.Fields(r)
+			target, comment := fields[len(fields)-1], ""
+			if j := slices.Index(fields, "--comment"); j >= 0 {
+				comment = " /* " + fields[j+1] + " */"
+			}
+			_, _ = io.WriteString(c.Stdout, strconv.Itoa(i+1)+" "+target+" all -- 0.0.0.0/0 0.0.0.0/0"+comment+"\n")
+		}
+		return nil
 	case "-I":
 		if len(rest) == 0 || rest[0] != "1" {
 			return errors.New("insert without position 1: " + cmdline(c))
@@ -83,7 +97,7 @@ var wantEgress = []string{
 
 /* ingressBlock is the rules for one eventd port: only the management subnets may send to it. */
 func ingressBlock(proto, port string) []string {
-	m := "-d 172.30.1.0/24 -p " + proto + " -m " + proto + " --dport " + port
+	m := "-d 172.30.1.0/24 -p " + proto + " -m " + proto + " --dport " + port + " -m comment --comment nms-ingress-" + proto + "-" + port
 	return []string{m + " -s 10.0.0.0/8 -j RETURN", m + " -s 192.168.10.0/24 -j RETURN", m + " -j DROP"}
 }
 
@@ -271,5 +285,35 @@ func TestLoadEgress(t *testing.T) {
 		if _, err := install.LoadEgress(p); err == nil {
 			t.Errorf("LoadEgress accepted %q", bad)
 		}
+	}
+}
+
+/* CheckEgress finds every rule and refuses an ingress block whose DROP is above one of its RETURN rules. */
+func TestCheckEgressOrder(t *testing.T) {
+	check := func(ipt *fakeIPTables) error {
+		sys := newFakeSys()
+		sys.run = func(c install.Cmd) error {
+			if len(c.Args) > 2 && c.Args[2] == "FORWARD" {
+				return nil
+			}
+			return ipt.run(c)
+		}
+		return install.CheckEgress(context.Background(), sys, testEgress())
+	}
+	if err := check(&fakeIPTables{exist: true, chain: slices.Clone(wantChain)}); err != nil {
+		t.Fatalf("complete chain: %v", err)
+	}
+	/* The 6514 DROP moved above its RETURN rules: every rule is present, the order is wrong. */
+	bad := slices.Clone(wantChain)
+	blk := ingressBlock("tcp", "6514")
+	bad = slices.DeleteFunc(bad, func(l string) bool { return slices.Contains(blk, l) })
+	bad = slices.Insert(bad, 0, blk[2], blk[0], blk[1])
+	if err := check(&fakeIPTables{exist: true, chain: bad}); err == nil || !strings.Contains(err.Error(), "nms-ingress-tcp-6514") {
+		t.Fatalf("misordered block: %v", err)
+	}
+	/* A missing rule is named. */
+	missing := slices.DeleteFunc(slices.Clone(wantChain), func(l string) bool { return l == blk[2] })
+	if err := check(&fakeIPTables{exist: true, chain: missing}); err == nil || !strings.Contains(err.Error(), "--dport 6514") {
+		t.Fatalf("missing rule: %v", err)
 	}
 }

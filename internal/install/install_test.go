@@ -466,7 +466,7 @@ func TestRunInstalls(t *testing.T) {
 	want := []string{"iptables -w -n -L DOCKER-USER"}
 	/* The eventd ports (published on every host interface) accept only the management subnet. */
 	for _, pp := range [][2]string{{"udp", "1514"}, {"tcp", "1514"}, {"tcp", "6514"}, {"udp", "1162"}} {
-		m := "iptables -w -C DOCKER-USER -d 172.30.1.0/24 -p " + pp[0] + " -m " + pp[0] + " --dport " + pp[1]
+		m := "iptables -w -C DOCKER-USER -d 172.30.1.0/24 -p " + pp[0] + " -m " + pp[0] + " --dport " + pp[1] + " -m comment --comment nms-ingress-" + pp[0] + "-" + pp[1]
 		want = append(want, m+" -j DROP", m+" -s 10.0.0.0/8 -j RETURN")
 	}
 	want = append(want,

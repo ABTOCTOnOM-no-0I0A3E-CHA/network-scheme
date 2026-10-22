@@ -8,23 +8,27 @@ import { expect, test } from "./guard";
  *  - NMS_E2E_EVENT_SRC: the device. It answers SNMPv2c (community COMMUNITY, served by an snmpsim
  *    data file) and sends syslog over UDP and TCP and a linkDown trap, all from its own address.
  *  - NMS_E2E_EVENT_ROGUE: no device has this address; it sends syslog and a trap with the same community.
- *  - NMS_E2E_EVENT_HOST: the primary address of the runner. A sender in the host network namespace
- *    sends syslog to the PUBLISHED ports 514/udp and 514/tcp of this address. The event is attributed
- *    to the device registered with that address only if eventd sees the sender's own address as the
- *    source. With the docker userland proxy on, the source would be the bridge gateway, no device
- *    would match and this test would fail: that is the proof that source addresses are preserved.
+ *  - NMS_E2E_EVENT_NETNS: the address of a sender in a network namespace joined to the runner by a veth
+ *    pair, inside a configured management subnet. It sends syslog to the PUBLISHED ports (514 UDP and TCP,
+ *    6514 TLS) of the runner, so its packets pass DNAT and FORWARD like a device's on another network. The
+ *    event is attributed to the device registered with that address only if eventd sees the sender's own
+ *    address as the source: that is the proof that docker's NAT preserves it. With the userland proxy on,
+ *    the proxy would terminate the connection and open its own, the source would be the bridge gateway,
+ *    no device would match and this test would fail.
+ *  - A second namespace outside every management subnet sends to 514 as well: the DOCKER-USER ingress
+ *    rules drop it (a later CI step reads their counters) and nothing of it may be stored.
  * All run test/e2e/send_events.py every few seconds; the messages carry the markers below.
  */
 const SRC = process.env.NMS_E2E_EVENT_SRC ?? "";
 const ROGUE = process.env.NMS_E2E_EVENT_ROGUE ?? "";
-const HOST = process.env.NMS_E2E_EVENT_HOST ?? "";
+const NETNS = process.env.NMS_E2E_EVENT_NETNS ?? "";
 const COMMUNITY = "e2e-events-community-01";
 const GROUP = "events-e2e";
 const MARK_UDP = "e2eknownudp";
 const MARK_TCP = "e2eknowntcp";
 const MARK_TLS = "e2eknowntls";
-const MARKS_ROGUE = ["e2erogueudp", "e2eroguetcp"];
-const MARKS_HOST = ["e2ehostudp", "e2ehosttcp"];
+const MARKS_ROGUE = ["e2erogueudp", "e2eroguetcp", "e2enegudp", "e2enegtcp"];
+const MARKS_NETNS = ["e2enetnsudp", "e2enetnstcp", "e2enetnstls"];
 const DAY_S = 86400;
 
 type EventItem = { kind: "syslog" | "trap"; device_id: number; name?: string; text: string };
@@ -49,7 +53,7 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
   test.setTimeout(5 * 60_000);
   expect(SRC, "NMS_E2E_EVENT_SRC (event source container on the devices network)").not.toBe("");
   expect(ROGUE, "NMS_E2E_EVENT_ROGUE (second container, no device)").not.toBe("");
-  expect(HOST, "NMS_E2E_EVENT_HOST (runner address, published ports)").not.toBe("");
+  expect(NETNS, "NMS_E2E_EVENT_NETNS (namespace sender address, published ports)").not.toBe("");
   expect(ROGUE).not.toBe(SRC);
   const api = page.request;
   const csrf = async () => ({ "X-CSRF-Token": ((await (await api.get("/api/auth/me")).json()) as { csrf_token: string }).csrf_token });
@@ -66,7 +70,7 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
     expect(res.status()).toBe(201);
     group = (await res.json()).id as number;
   }
-  /* Polls are pushed a day away right away: nothing but an event may cause one, and the runner's own address is never probed. */
+  /* Polls are pushed a day away right away: nothing but an event may cause one, and the poller does not probe the namespace address more than needed. */
   const addDevice = async (name: string, address: string): Promise<number> => {
     const created = await api.post("/api/devices", { headers: await csrf(), data: { name, address, group_id: group } });
     expect(created.status()).toBe(201);
@@ -81,8 +85,8 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
     expect(patched.status()).toBe(204);
   };
   const id = await addDevice("events-src", SRC);
-  const hostId = await addDevice("events-host", HOST);
-  await slowPolls(hostId);
+  const netnsId = await addDevice("events-netns", NETNS);
+  await slowPolls(netnsId);
   /* Recorded for the CI step that looks for the poll_now job eventd queued. */
   writeFileSync(".auth/events-device-id", String(id));
 
@@ -99,14 +103,14 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
       .poll(async () => (await events(`kind=syslog&device_id=${id}&q=${mark}`)).length > 0, { timeout: 30_000, intervals: [1_000], message: mark })
       .toBe(true);
   }
-  /* Through the published ports of the host (docker NAT), attributed to the device with the sender's own address. */
-  for (const mark of MARKS_HOST) {
+  /* Through the published ports of the host (docker NAT, FORWARD), attributed to the device with the sender's own address. */
+  for (const mark of MARKS_NETNS) {
     await expect
-      .poll(async () => (await events(`kind=syslog&device_id=${hostId}&q=${mark}`)).length > 0, { timeout: 30_000, intervals: [1_000], message: mark })
+      .poll(async () => (await events(`kind=syslog&device_id=${netnsId}&q=${mark}`)).length > 0, { timeout: 30_000, intervals: [1_000], message: mark })
       .toBe(true);
   }
-  /* Nothing more is needed from this device; deleting it keeps the poller away from the runner's address. */
-  expect((await api.delete(`/api/devices/${hostId}`, { headers: await csrf() })).status()).toBe(204);
+  /* Nothing more is needed from this device. */
+  expect((await api.delete(`/api/devices/${netnsId}`, { headers: await csrf() })).status()).toBe(204);
   /* The trap: linkDown is a standard trap, named without a rule. */
   await expect
     .poll(async () => (await events(`kind=trap&device_id=${id}`)).some((e) => e.name === "linkDown"), { timeout: 30_000, intervals: [1_000] })

@@ -12,7 +12,10 @@
 #                   (IPv4 224.0.0.0/4, 255.255.255.255, IPv6 multicast);
 #          devices  DESTINATION outside the devices subnet (the CI management
 #                   subnet) and not multicast/broadcast: the poller may talk to
-#                   the simulated device only.
+#                   the simulated device only. EGRESS_ALLOW (space-separated
+#                   CIDRs) lists further management subnets, which are allowed
+#                   destinations by configuration (e.g. replies to a sender
+#                   that reaches eventd from another network).
 #          Expected 0 on both; otherwise prints the packets and exits 1.
 #
 # Filter rationale: on the edge bridge, everything the stack sends to the
@@ -85,6 +88,7 @@ case "${1:-}" in
 
     filter="$base"
     for subnet in $(subnets "$(network devices)"); do filter="$filter and not dst net $subnet"; done
+    for cidr in ${EGRESS_ALLOW:-}; do filter="$filter and not dst net $cidr"; done
     count devices "($filter) or (ip6 and not ip6 multicast)"
     [ "$edge" -eq 0 ] && [ "$count" -eq 0 ] || exit 1
     ;;

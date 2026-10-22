@@ -329,6 +329,7 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 	}
 	o.InfraNTP, o.InfraDNS, o.InfraMirror = splitList(ntp), splitList(dns), splitList(mirror)
 	o.Out = d.out
+	o.PortFree = install.ListenFree /* also for the preflight before the password prompt */
 	if !o.NonInteractive && o.AdminPasswordFile == "" {
 		if err := install.Preflight(o, d.sys); err != nil { /* before asking for anything */
 			return err
@@ -339,7 +340,6 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 		}
 		o.AdminPassword = pw
 	}
-	o.PortFree = install.ListenFree
 	return install.Run(ctx, o, d.sys)
 }
 

@@ -31,6 +31,7 @@ type fakeSys struct {
 	stdins      []string
 	err         error  /* result of every command */
 	failMatch   string /* when set, only commands whose argv contains it fail (with err) */
+	listing     string /* stdout of iptables -L ... --line-numbers */
 }
 
 func (*fakeSys) GOOS() string                         { return "linux" }
@@ -45,6 +46,9 @@ func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
 		_, _ = b.ReadFrom(c.Stdin)
 	}
 	f.stdins = append(f.stdins, b.String())
+	if c.Stdout != nil && strings.Contains(strings.Join(c.Args, " "), "--line-numbers") {
+		_, _ = c.Stdout.Write([]byte(f.listing))
+	}
 	if f.failMatch != "" && !strings.Contains(strings.Join(c.Args, " "), f.failMatch) {
 		return nil
 	}
@@ -479,6 +483,22 @@ func TestEgressCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	argv := func(c install.Cmd) string { return c.Name + " " + strings.Join(c.Args, " ") }
+	/* The chain as "iptables -L --line-numbers" prints it: per port the RETURN rule, then the DROP. */
+	listing := func(dropFirst bool) string {
+		var b strings.Builder
+		n := 0
+		for _, p := range []string{"udp-1514", "tcp-1514", "tcp-6514", "udp-1162"} {
+			rows := []string{"RETURN", "DROP"}
+			if dropFirst {
+				rows = []string{"DROP", "RETURN"}
+			}
+			for _, tgt := range rows {
+				n++
+				fmt.Fprintf(&b, "%d    %s     all  --  0.0.0.0/0   172.30.1.0/24   /* nms-ingress-%s */\n", n, tgt, p)
+			}
+		}
+		return b.String()
+	}
 	for _, c := range []struct {
 		err   error
 		match string
@@ -486,21 +506,25 @@ func TestEgressCheck(t *testing.T) {
 		note  string
 	}{
 		{nil, "", 0, ""},
+		{nil, "order", 1, "nms-ingress-udp-1514"},
 		{errors.New("exit status 1"), "", 1, "DOCKER-USER"},
 		/* Docker passes traffic to DOCKER-USER, but the eventd ingress rule is gone. */
-		{errors.New("exit status 1"), "--dport 6514 -j DROP", 1, "--dport 6514"},
+		{errors.New("exit status 1"), "nms-ingress-tcp-6514 -j DROP", 1, "--dport 6514"},
 		{errors.New("exit status 1"), "-s 172.30.1.0/24 -j DROP", 1, "-s 172.30.1.0/24 -j DROP"},
 	} {
-		sys := &fakeSys{err: c.err, failMatch: c.match}
+		sys := &fakeSys{err: c.err, failMatch: c.match, listing: listing(c.match == "order")}
+		if c.match == "order" {
+			sys.failMatch, sys.err = "", nil
+		}
 		var out bytes.Buffer
 		code := run(context.Background(), []string{"egress", "check"}, deps{out: &out, errw: &out, sys: sys})
 		if code != c.code || len(sys.cmds) == 0 || argv(sys.cmds[0]) != "iptables -w -C FORWARD -j DOCKER-USER" {
 			t.Fatalf("err %v: exit %d, commands %v\n%s", c.err, code, sys.cmds, out.String())
 		}
-		if c.err == nil && len(sys.cmds) != 1+4*2+3 { /* FORWARD jump, 4 ports x (1 allow + DROP), conntrack + 1 subnet + DROP */
+		if c.err == nil && c.code == 0 && len(sys.cmds) != 1+4*2+3+1 { /* FORWARD jump, 4 ports x (1 allow + DROP), conntrack + 1 subnet + DROP */
 			t.Fatalf("checked %d rules: %v", len(sys.cmds), sys.cmds)
 		}
-		if c.err != nil && !strings.Contains(out.String(), c.note) {
+		if c.note != "" && !strings.Contains(out.String(), c.note) {
 			t.Fatalf("failure not explained (%q): %s", c.note, out.String())
 		}
 	}
