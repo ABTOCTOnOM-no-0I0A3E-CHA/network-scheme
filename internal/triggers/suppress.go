@@ -36,6 +36,7 @@ visible; when the cause ends the problem is un-suppressed with one
 suppressed_changed event instead of a fresh "opened".
 */
 func (e *Engine) planSuppression(a *actions, now time.Time) {
+	e.holdPending(a, now)
 	s := &suppressCtx{avail: map[int64]time.Time{}, win: e.cfg.windowStarts(now)}
 	note := func(dev int64, at time.Time) {
 		if t, ok := s.avail[dev]; !ok || at.Before(t) {
@@ -88,6 +89,89 @@ func (e *Engine) suppressedBy(dev int64, openedAt time.Time) bool {
 			break
 		}
 		par = pd.parentID
+	}
+	return false
+}
+
+/* holdMax bounds how long an opening waits for an ancestor's outage to be decided. */
+const holdMax = 15 * time.Minute
+
+/* heldReq is an opening postponed because an ancestor's outage is still pending. */
+type heldReq struct {
+	req   openReq
+	since time.Time
+}
+
+/*
+holdPending postpones the openings of devices that have an ancestor whose
+availability condition fires but whose problem is not open yet (its duration
+has not elapsed). Without this, children whose own timers end first would
+open unsuppressed and notify, defeating the suppression. A held opening is
+offered again every cycle: when the ancestor's problem opens, it opens
+suppressed; when the ancestor recovers, it opens normally (its own condition
+has been satisfied meanwhile). Nothing is held longer than holdMax. Openings
+that were never actually opened are dropped when their own condition ends
+(see actions.resolve and the evaluators).
+*/
+func (e *Engine) holdPending(a *actions, now time.Time) {
+	for k, h := range e.held {
+		if e.open[k] != nil {
+			delete(e.held, k)
+			continue
+		}
+		if !a.openSet[k] {
+			a.openSet[k] = true
+			a.opens = append(a.opens, h.req)
+		}
+	}
+	hasOpen := map[int64]bool{}
+	for k := range e.open {
+		if e.isAvailability(k) && !a.resSet[k] {
+			hasOpen[k.dev] = true
+		}
+	}
+	for k := range a.openSet {
+		if e.isAvailability(k) {
+			hasOpen[k.dev] = true
+		}
+	}
+	pending := map[int64]bool{}
+	for dev := range e.availFire {
+		if !hasOpen[dev] {
+			pending[dev] = true
+		}
+	}
+	if len(pending) == 0 {
+		for k := range e.held {
+			delete(e.held, k)
+		}
+		return
+	}
+	kept := a.opens[:0]
+	for _, r := range a.opens {
+		h, wasHeld := e.held[r.key]
+		if !wasHeld {
+			h = heldReq{req: r, since: now}
+		}
+		if r.key.dev != 0 && now.Sub(h.since) < holdMax && e.ancestorPending(r.key.dev, pending) {
+			e.held[r.key] = h
+			delete(a.openSet, r.key)
+			continue
+		}
+		delete(e.held, r.key)
+		kept = append(kept, r)
+	}
+	a.opens = kept
+}
+
+/* ancestorPending reports whether an ancestor of dev (not dev itself) is in pending. */
+func (e *Engine) ancestorPending(dev int64, pending map[int64]bool) bool {
+	d := e.cfg.devices[dev]
+	for hops := 0; d != nil && d.parentID != 0 && hops < maxParentHops; hops++ {
+		if pending[d.parentID] {
+			return true
+		}
+		d = e.cfg.devices[d.parentID]
 	}
 	return false
 }

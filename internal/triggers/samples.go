@@ -12,6 +12,14 @@ device drivers, and the engine must not be able to reach anything that talks
 to devices. internal/triggers/metricsrc adapts a metrics.MetricStore.
 */
 
+/* Paging and range sizes (variables only so that tests can shrink them). */
+var (
+	samplePage  = 200_000 /* rows per sample read */
+	samplePages = 10      /* pages per round */
+	seqRange    = 200_000 /* event rows per range */
+	maxRanges   = 4       /* ranges per stream and cycle */
+)
+
 // IfSample is one raw interface sample.
 type IfSample struct {
 	DeviceID          int64
@@ -40,8 +48,16 @@ type IfFilter struct {
 	DownOrDeviceIDs []int64
 }
 
+// IfKey names an interface.
+type IfKey struct {
+	DeviceID int64
+	IfIndex  int
+}
+
 // SampleSource reads the samples written in (from, to], oldest first, at most limit.
 type SampleSource interface {
 	SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysSample, error)
 	IfSince(ctx context.Context, from, to time.Time, f IfFilter, limit int) ([]IfSample, error)
+	/* IfUpSince lists the distinct interfaces that reported oper-up in (from, to]. */
+	IfUpSince(ctx context.Context, from, to time.Time) ([]IfKey, error)
 }

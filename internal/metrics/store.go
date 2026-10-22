@@ -74,6 +74,8 @@ type MetricStore interface {
 		device plus all samples of DownOrDeviceIDs (the cheap form for link-down checks).
 	*/
 	IfSince(ctx context.Context, from, to time.Time, filter IfFilter, limit int) ([]IfPoint, error)
+	/* IfUpSince lists the distinct (device, interface) pairs that reported oper_up in (from, to]. */
+	IfUpSince(ctx context.Context, from, to time.Time) ([][2]int64, error)
 }
 
 /*
@@ -275,4 +277,22 @@ func (s *Store) IfSince(ctx context.Context, from, to time.Time, f IfFilter, lim
 		return nil, fmt.Errorf("query interface samples: %w", err)
 	}
 	return pts, nil
+}
+
+// IfUpSince implements MetricStore.
+func (s *Store) IfUpSince(ctx context.Context, from, to time.Time) ([][2]int64, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT device_id, if_index FROM metrics.if_metrics WHERE ts > $1 AND ts <= $2 AND oper_up`, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("query up interfaces: %w", err)
+	}
+	pairs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) ([2]int64, error) {
+		var d int64
+		var x int32
+		err := row.Scan(&d, &x)
+		return [2]int64{d, int64(x)}, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query up interfaces: %w", err)
+	}
+	return pairs, nil
 }

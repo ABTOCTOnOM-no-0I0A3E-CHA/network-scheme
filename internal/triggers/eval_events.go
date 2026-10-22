@@ -2,11 +2,9 @@ package triggers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,21 +16,24 @@ const (
 	trapLinkUp   = "linkUp"
 )
 
-/* oidIfIndex is the prefix of the ifIndex varbind of a link trap. */
-const oidIfIndex = "1.3.6.1.2.1.2.2.1.1."
-
 /*
-Event streams. Traps are timestamped by eventd on receipt, so they are read
-exactly: from the persisted watermark up to now minus eventSettle (rows still
-being flushed are left for the next round). Syslog timestamps come from the
-device, so its window overlaps the watermark and a seen-set drops duplicates.
+Event streams. Syslog and traps are read by insertion order, not by time:
+eventd stamps every row with ingest_seq (migration 00016) and its single
+writer commits batches sequentially, so once the engine has processed every
+row up to a sequence number, no smaller one can still appear. Device clocks,
+commit delays and backlogs therefore cannot hide an event, and no timestamp
+takes part in deciding what was already seen. The position of each stream
+(engine_state.seq) only moves forward and is saved in the same transaction as
+the problems it produced, so a restart neither repeats nor loses an event.
+Each round reads at most seqRange rows per stream (up to maxRanges ranges per
+cycle) and aggregates them in SQL, so the cost is O(devices x triggers), not
+O(rows): a device flooding one trigger is one result row. Only rows younger
+than eventTSFloor are considered, which lets the database skip old chunks.
 */
 const (
-	eventSettle    = 5 * time.Second
-	syslogOverlap  = 2 * time.Minute
-	eventBatch     = 5000
-	defaultQuiet   = 15 * time.Minute /* event problems resolve after this long without a matching message */
-	maxSyslogBytes = 8192
+	eventTSFloor = 25 * time.Hour
+	defaultQuiet = 15 * time.Minute /* event problems resolve after this long without a matching message */
+	sampleRunes  = 200
 )
 
 const (
@@ -40,29 +41,58 @@ const (
 	streamSyslog = "syslog"
 )
 
-/* evKey identifies an event row: the tables have no id, so the cursor is (ts, device, content hash). */
-type evKey struct {
-	ts     time.Time
-	dev    int64
-	hash   string
-	syslog bool
+/* streamPos returns the position of a stream; a stream seen for the first time starts at the current end of its table. */
+func (e *Engine) streamPos(ctx context.Context, a *actions, stream string) (int64, error) {
+	if v, ok := e.wmSeq[stream]; ok {
+		return v, nil
+	}
+	var seq *int64
+	err := e.pool.QueryRow(ctx, `SELECT seq FROM problems.engine_state WHERE name = $1`, stream).Scan(&seq)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("triggers: read stream position: %w", err)
+	}
+	if seq == nil {
+		head, err := e.streamHead(ctx, stream)
+		if err != nil {
+			return 0, err
+		}
+		a.wmSeq[stream] = head
+		seq = &head
+	}
+	e.wmSeq[stream] = *seq
+	return *seq, nil
 }
 
-/* streamStart returns the persisted watermark of a stream; a stream seen for the first time starts at now. */
-func (e *Engine) streamStart(ctx context.Context, a *actions, name string, now time.Time) (time.Time, error) {
-	if w, ok := e.wm[name]; ok {
-		return w, nil
+/* eventTable names the table of a stream (a constant, never user input). */
+func eventTable(stream string) string {
+	if stream == streamTrap {
+		return "events.trap"
 	}
-	var w time.Time
-	err := e.pool.QueryRow(ctx, `SELECT watermark FROM problems.engine_state WHERE name = $1`, name).Scan(&w)
-	if errors.Is(err, pgx.ErrNoRows) {
-		w = now
-		a.wm[name] = w
-	} else if err != nil {
-		return time.Time{}, fmt.Errorf("triggers: read watermark: %w", err)
+	return "events.syslog"
+}
+
+func (e *Engine) streamHead(ctx context.Context, stream string) (int64, error) {
+	var head int64
+	if err := e.pool.QueryRow(ctx, `SELECT coalesce(max(ingest_seq), 0) FROM `+eventTable(stream)).Scan(&head); err != nil {
+		return 0, fmt.Errorf("triggers: read stream head: %w", err)
 	}
-	e.wm[name] = w
-	return w, nil
+	return head, nil
+}
+
+/*
+nextRange returns the end of the next range after lo (0: nothing new) and
+whether more rows remain beyond it. The end is the seq of the seqRange-th
+following row, so every row up to it is inside the range.
+*/
+func (e *Engine) nextRange(ctx context.Context, stream string, lo int64, floor time.Time) (hi int64, more bool, err error) {
+	var n int
+	err = e.pool.QueryRow(ctx, `SELECT coalesce(max(s), 0), count(*) FROM
+		(SELECT ingest_seq s FROM `+eventTable(stream)+` WHERE ingest_seq > $1 AND ts > $2 ORDER BY ingest_seq LIMIT $3) x`,
+		lo, floor, seqRange).Scan(&hi, &n)
+	if err != nil {
+		return 0, false, fmt.Errorf("triggers: read %s range: %w", stream, err)
+	}
+	return hi, n == seqRange, nil
 }
 
 /* evalEvents reads new traps and syslog messages and lets quiet event problems expire. */
@@ -77,20 +107,21 @@ func (e *Engine) evalEvents(ctx context.Context, a *actions, now time.Time) erro
 	return nil
 }
 
-type trapRow struct {
-	ts       time.Time
-	dev      int64
-	name     string
-	varbinds *string
-	hash     string
+/* trapGroup is the aggregate of the traps of one name from one device (and interface) in a range. */
+type trapGroup struct {
+	dev     int64
+	name    string
+	ifIndex int
+	n       int64
+	maxSeq  int64
+	maxTS   time.Time
 }
 
 func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error {
-	start, err := e.streamStart(ctx, a, streamTrap, now)
+	pos, err := e.streamPos(ctx, a, streamTrap)
 	if err != nil {
 		return err
 	}
-	upto := now.Add(-eventSettle)
 	names := map[string]bool{}
 	for _, dt := range e.cfg.byKind[KindTrap] {
 		n := dt.t.params.(*Trap).Name
@@ -102,93 +133,81 @@ func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error
 	if len(e.cfg.byKind[KindIfOperDown]) > 0 {
 		names[trapLinkDown], names[trapLinkUp] = true, true
 	}
-	if len(names) == 0 || !upto.After(start) {
-		if upto.After(start) {
-			a.wm[streamTrap] = upto
-		}
-		return nil
-	}
-	e.pruneSeen(false, start)
 	list := make([]string, 0, len(names))
 	for n := range names {
 		list = append(list, n)
 	}
-	rows, err := e.pool.Query(ctx, `
-		SELECT ts, device_id, name,
-		       CASE WHEN name IN ('linkDown', 'linkUp') THEN varbinds::text END,
-		       md5(trap_oid || ':' || name || ':' || varbinds::text)
-		FROM events.trap
-		WHERE ts >= $1 AND ts <= $2 AND name = ANY($3)
-		ORDER BY ts LIMIT $4`, start, upto, list, eventBatch)
-	if err != nil {
-		return fmt.Errorf("triggers: read traps: %w", err)
-	}
-	var batch []trapRow
-	for rows.Next() {
-		var r trapRow
-		if err := rows.Scan(&r.ts, &r.dev, &r.name, &r.varbinds, &r.hash); err != nil {
-			rows.Close()
-			return fmt.Errorf("triggers: read traps: %w", err)
+	floor := now.Add(-eventTSFloor)
+	for range maxRanges {
+		hi, more, err := e.nextRange(ctx, streamTrap, pos, floor)
+		if err != nil {
+			return err
 		}
-		batch = append(batch, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("triggers: read traps: %w", err)
-	}
-	for _, r := range batch {
-		k := evKey{r.ts, r.dev, r.hash, false}
-		if _, dup := e.seen[k]; dup {
-			continue
+		if hi == 0 {
+			break
 		}
-		a.seen = append(a.seen, k)
-		e.onTrap(a, r, now)
+		if len(list) > 0 {
+			groups, err := e.trapGroups(ctx, pos, hi, floor, list)
+			if err != nil {
+				return err
+			}
+			for _, g := range groups {
+				e.onTrap(a, g, now)
+			}
+		}
+		pos = hi
+		a.wmSeq[streamTrap] = hi
+		if !more {
+			break
+		}
 	}
-	next := upto
-	if len(batch) == eventBatch {
-		next = batch[len(batch)-1].ts
-	}
-	a.wm[streamTrap] = next
 	return nil
 }
 
-/* pruneSeen forgets the seen events of a stream that precede its read window. */
-func (e *Engine) pruneSeen(syslog bool, from time.Time) {
-	for k := range e.seen {
-		if k.syslog == syslog && k.ts.Before(from) {
-			delete(e.seen, k)
-		}
+/*
+trapGroups aggregates the traps of the wanted names in (lo, hi] per device,
+name and interface (for link traps: the ifIndex varbind), ordered by the
+newest row, so a down/up pair keeps its order and a flapping device is one
+row per direction.
+*/
+func (e *Engine) trapGroups(ctx context.Context, lo, hi int64, floor time.Time, names []string) ([]trapGroup, error) {
+	rows, err := e.pool.Query(ctx, `
+		SELECT device_id, name, coalesce(ifidx, 0), count(*), max(ingest_seq), max(ts)
+		FROM (
+		    SELECT device_id, name, ingest_seq, ts,
+		           CASE WHEN name IN ('linkDown', 'linkUp') AND jsonb_typeof(varbinds) = 'array' THEN
+		                (SELECT (v->>'value')::bigint FROM jsonb_array_elements(varbinds) v
+		                 WHERE v->>'oid' LIKE '1.3.6.1.2.1.2.2.1.1.%' AND v->>'type' = 'Integer'
+		                   AND v->>'value' ~ '^[1-9][0-9]{0,9}$' LIMIT 1)
+		           END AS ifidx
+		    FROM events.trap
+		    WHERE ingest_seq > $1 AND ingest_seq <= $2 AND ts > $3 AND name = ANY($4)
+		) t
+		GROUP BY device_id, name, ifidx
+		ORDER BY max(ingest_seq)`, lo, hi, floor, names)
+	if err != nil {
+		return nil, fmt.Errorf("triggers: read traps: %w", err)
 	}
+	defer rows.Close()
+	var out []trapGroup
+	for rows.Next() {
+		var g trapGroup
+		var idx int64
+		if err := rows.Scan(&g.dev, &g.name, &idx, &g.n, &g.maxSeq, &g.maxTS); err != nil {
+			return nil, fmt.Errorf("triggers: read traps: %w", err)
+		}
+		if idx > 0 && idx <= MaxIfIndex {
+			g.ifIndex = int(idx)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
-/* trapIfIndex extracts the interface index from the varbinds of a link trap (0: none). */
-func trapIfIndex(varbinds *string) int {
-	if varbinds == nil {
-		return 0
-	}
-	var vbs []struct {
-		OID, Type, Value string
-	}
-	if json.Unmarshal([]byte(*varbinds), &vbs) != nil {
-		return 0
-	}
-	for _, v := range vbs {
-		if strings.HasPrefix(strings.ToLower(v.OID), oidIfIndex) && v.Type == "Integer" {
-			if n, err := strconv.Atoi(v.Value); err == nil && n > 0 && n <= MaxIfIndex {
-				return n
-			}
-		}
-	}
-	return 0
-}
-
-/* onTrap applies one trap to the trap triggers (by name) and the interface triggers (link traps) of its device. */
-func (e *Engine) onTrap(a *actions, r trapRow, now time.Time) {
+/* onTrap applies the traps of one group to the trap triggers (by name) and the interface triggers (link traps) of its device. */
+func (e *Engine) onTrap(a *actions, r trapGroup, now time.Time) {
 	link := r.name == trapLinkDown || r.name == trapLinkUp
-	idx := 0
-	if link {
-		idx = trapIfIndex(r.varbinds)
-	}
+	idx := r.ifIndex
 	obj := ""
 	if idx > 0 {
 		obj = "if:" + strconv.Itoa(idx)
@@ -203,12 +222,12 @@ func (e *Engine) onTrap(a *actions, r trapRow, now time.Time) {
 			}
 			switch {
 			case par.Name == r.name:
-				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx), evidence: r.ts})
+				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx)})
 				tr := e.tracker(tkey{t.id, r.dev, k.obj})
-				tr.lastEvent, tr.floor, tr.falses = r.ts, laterOf(tr.floor, r.ts), 0
+				tr.lastEvent, tr.floor, tr.falses = now, laterOf(tr.floor, r.maxTS), 0
 				hinted = hinted || link
 			case par.Name == trapLinkDown && r.name == trapLinkUp:
-				e.closeByTrap(a, k, r.ts, describeTrap(r.name, idx))
+				e.closeByTrap(a, k, r.maxTS, describeTrap(r.name, idx))
 				hinted = true
 			}
 		case *IfOperDown:
@@ -218,11 +237,11 @@ func (e *Engine) onTrap(a *actions, r trapRow, now time.Time) {
 			k := pkey{trig: t.id, dev: r.dev, obj: obj}
 			if r.name == trapLinkDown {
 				e.seenUp[[2]int64{r.dev, int64(idx)}] = struct{}{} /* a device-reported transition */
-				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx), evidence: r.ts})
+				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx)})
 				tr := e.tracker(tkey{t.id, r.dev, obj})
-				tr.floor, tr.falses, tr.firstTrue = laterOf(tr.floor, r.ts), 0, r.ts
+				tr.floor, tr.falses, tr.firstTrue = laterOf(tr.floor, r.maxTS), 0, r.maxTS
 			} else {
-				e.closeByTrap(a, k, r.ts, describeTrap(r.name, idx))
+				e.closeByTrap(a, k, r.maxTS, describeTrap(r.name, idx))
 			}
 			hinted = true
 		}
@@ -253,83 +272,117 @@ func (e *Engine) closeByTrap(a *actions, k pkey, ts time.Time, value string) {
 	a.resolve(e, k, reasonRecovered, value, ts)
 }
 
-type syslogRow struct {
-	ts       time.Time
-	dev      int64
-	severity int
-	msg      string
-	hash     string
+/* sysFilter is the bound parameters of one syslog trigger condition; triggers with equal filters share one aggregate. */
+type sysFilter struct {
+	sev      int
+	contains string
+}
+
+func syslogFilter(p *Syslog) sysFilter {
+	f := sysFilter{sev: *p.SeverityMin}
+	if p.Contains != nil {
+		f.contains = *p.Contains
+	}
+	return f
 }
 
 func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) error {
-	start, err := e.streamStart(ctx, a, streamSyslog, now)
+	pos, err := e.streamPos(ctx, a, streamSyslog)
 	if err != nil {
 		return err
 	}
-	upto := now.Add(-eventSettle)
-	maxSev, devSet := -1, map[int64]bool{}
+	filterIdx := map[sysFilter]int{}
+	var sevs []int32
+	var subs []string
+	devSet := map[int64]bool{}
 	for _, dt := range e.cfg.byKind[KindSyslog] {
-		maxSev = max(maxSev, *dt.t.params.(*Syslog).SeverityMin)
-		devSet[dt.dev] = true
-	}
-	if maxSev < 0 || !upto.After(start) {
-		if upto.After(start) {
-			a.wm[streamSyslog] = upto
+		f := syslogFilter(dt.t.params.(*Syslog))
+		if _, ok := filterIdx[f]; !ok {
+			filterIdx[f] = len(sevs)
+			sevs, subs = append(sevs, int32(f.sev)), append(subs, f.contains) // #nosec G115 -- 0..7
 		}
-		return nil
+		devSet[dt.dev] = true
 	}
 	devs := make([]int64, 0, len(devSet))
 	for d := range devSet {
 		devs = append(devs, d)
 	}
-	from := start.Add(-syslogOverlap)
-	e.pruneSeen(true, from)
+	floor := now.Add(-eventTSFloor)
+	for range maxRanges {
+		hi, more, err := e.nextRange(ctx, streamSyslog, pos, floor)
+		if err != nil {
+			return err
+		}
+		if hi == 0 {
+			break
+		}
+		if len(sevs) > 0 {
+			if err := e.syslogRange(ctx, a, pos, hi, floor, sevs, subs, devs, filterIdx, now); err != nil {
+				return err
+			}
+		}
+		pos = hi
+		a.wmSeq[streamSyslog] = hi
+		if !more {
+			break
+		}
+	}
+	return nil
+}
+
+/*
+syslogRange aggregates (lo, hi] per trigger filter and device in SQL; every
+filter value is a bound parameter (the substring is compared with position(),
+never as a pattern).
+*/
+func (e *Engine) syslogRange(ctx context.Context, a *actions, lo, hi int64, floor time.Time, sevs []int32, subs []string, devs []int64, idx map[sysFilter]int, now time.Time) error {
 	rows, err := e.pool.Query(ctx, `
-		SELECT ts, device_id, severity, left(msg, $6), md5(host || ':' || app || ':' || msg)
-		FROM events.syslog
-		WHERE ts >= $1 AND ts <= $2 AND severity <= $3 AND device_id = ANY($4)
-		ORDER BY ts LIMIT $5`, from, upto, maxSev, devs, eventBatch, maxSyslogBytes)
+		SELECT g.f, g.dev,
+		       (SELECT left(s2.msg, $7) FROM events.syslog s2 WHERE s2.ingest_seq = g.mx AND s2.ts > $3 LIMIT 1)
+		FROM (
+		    SELECT (f.ord - 1)::int AS f, s.device_id AS dev, max(s.ingest_seq) AS mx
+		    FROM unnest($4::int[], $5::text[]) WITH ORDINALITY AS f(sev, c, ord)
+		    JOIN events.syslog s
+		      ON s.ingest_seq > $1 AND s.ingest_seq <= $2 AND s.ts > $3
+		     AND s.severity <= f.sev AND s.device_id = ANY($6)
+		     AND (f.c = '' OR position(lower(f.c) in lower(s.msg)) > 0)
+		    GROUP BY f.ord, s.device_id
+		) g`, lo, hi, floor, sevs, subs, devs, sampleRunes)
 	if err != nil {
 		return fmt.Errorf("triggers: read syslog: %w", err)
 	}
-	var batch []syslogRow
+	type hit struct {
+		f      int
+		dev    int64
+		sample *string
+	}
+	var hits []hit
 	for rows.Next() {
-		var r syslogRow
-		if err := rows.Scan(&r.ts, &r.dev, &r.severity, &r.msg, &r.hash); err != nil {
+		var h hit
+		if err := rows.Scan(&h.f, &h.dev, &h.sample); err != nil {
 			rows.Close()
 			return fmt.Errorf("triggers: read syslog: %w", err)
 		}
-		batch = append(batch, r)
+		hits = append(hits, h)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("triggers: read syslog: %w", err)
 	}
-	for _, r := range batch {
-		k := evKey{r.ts, r.dev, r.hash, true}
-		if _, dup := e.seen[k]; dup {
-			continue
+	for _, h := range hits {
+		msg := ""
+		if h.sample != nil {
+			msg = *h.sample
 		}
-		a.seen = append(a.seen, k)
-		lower := strings.ToLower(r.msg)
-		for _, t := range e.cfg.eff[r.dev] {
+		for _, t := range e.cfg.eff[h.dev] {
 			par, ok := t.params.(*Syslog)
-			if !ok || r.severity > *par.SeverityMin {
+			if !ok || idx[syslogFilter(par)] != h.f {
 				continue
 			}
-			if par.Contains != nil && !strings.Contains(lower, strings.ToLower(*par.Contains)) {
-				continue
-			}
-			k := pkey{trig: t.id, dev: r.dev}
-			a.open(e, openReq{key: k, severity: t.severity, value: r.msg, evidence: r.ts})
-			e.tracker(tkey{t.id, r.dev, ""}).lastEvent = r.ts
+			a.open(e, openReq{key: pkey{trig: t.id, dev: h.dev}, severity: t.severity, value: msg})
+			e.tracker(tkey{t.id, h.dev, ""}).lastEvent = now
 		}
 	}
-	next := upto
-	if len(batch) == eventBatch {
-		next = batch[len(batch)-1].ts
-	}
-	a.wm[streamSyslog] = next
 	return nil
 }
 

@@ -40,3 +40,16 @@ func (s Source) IfSince(ctx context.Context, from, to time.Time, f triggers.IfFi
 	}
 	return out, nil
 }
+
+// IfUpSince implements triggers.SampleSource.
+func (s Source) IfUpSince(ctx context.Context, from, to time.Time) ([]triggers.IfKey, error) {
+	pairs, err := s.Store.IfUpSince(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]triggers.IfKey, len(pairs))
+	for i, p := range pairs {
+		out[i] = triggers.IfKey{DeviceID: p[0], IfIndex: int(p[1])}
+	}
+	return out, nil
+}

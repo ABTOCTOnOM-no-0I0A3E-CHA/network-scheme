@@ -45,6 +45,7 @@ func (e *Engine) sample(a *actions, t *effTrigger, dev int64, obj string, ts tim
 		return
 	}
 	tr.firstTrue = time.Time{}
+	delete(e.held, k) /* a postponed opening of a condition that has ended is dropped */
 	if p != nil {
 		if tr.falses++; tr.falses >= recoverEvals {
 			a.resolve(e, k, reasonRecovered, value, ts)
@@ -65,6 +66,7 @@ problem for the poller covers that case.
 */
 func (e *Engine) evalAvailability(ctx context.Context, a *actions, now time.Time) error {
 	trigs := e.cfg.byKind[KindAvailability]
+	e.availFire = map[int64]bool{}
 	if len(trigs) == 0 {
 		return nil
 	}
@@ -95,6 +97,7 @@ func (e *Engine) evalAvailability(ctx context.Context, a *actions, now time.Time
 		p := e.open[k]
 		fires := slices.Contains(dt.t.params.(*Availability).States, st.state)
 		if fires {
+			e.availFire[dt.dev] = true
 			if p != nil {
 				e.tracker(tkey{dt.t.id, dt.dev, ""}).falses = 0
 			} else if st.since != nil && now.Sub(*st.since) >= dt.t.duration {
@@ -108,6 +111,7 @@ func (e *Engine) evalAvailability(ctx context.Context, a *actions, now time.Time
 		}
 		if p == nil {
 			delete(e.trackers, tkey{dt.t.id, dt.dev, ""})
+			delete(e.held, k)
 			continue
 		}
 		tr := e.tracker(tkey{dt.t.id, dt.dev, ""})
@@ -118,40 +122,54 @@ func (e *Engine) evalAvailability(ctx context.Context, a *actions, now time.Time
 	return nil
 }
 
-/* Windows of the sample reads: an overlap against late rows, and how far back a fresh start looks. */
+/* Windows of the sample reads: an overlap against late rows, how far back a fresh start looks, and the paging. */
 const (
-	sampleOverlap = 45 * time.Second
-	sampleInitial = 3 * time.Minute
-	sampleLimit   = 1_000_000
+	sampleOverlap  = 45 * time.Second
+	sampleInitial  = 3 * time.Minute
+	inventoryEvery = 5 * time.Minute /* full re-read of the interface inventory for the seen-up set */
 )
 
 /*
 evalSamples reads the interface and system samples written since the last
 round (with an overlap; applying a sample twice is a no-op) and applies the
-link-state and metric-threshold triggers.
+link-state and metric-threshold triggers. Reads are paged by timestamp, up to
+samplePages pages per round: a round that cannot reach "now" saves the point it
+reached, and the next round continues from there (minus the overlap), so a
+large backlog or overlap cannot stall the stream.
 */
 func (e *Engine) evalSamples(ctx context.Context, a *actions, now time.Time) error {
 	from := now.Add(-sampleInitial)
 	if !e.sampleTo.IsZero() {
-		from = e.sampleTo.Add(-sampleOverlap)
+		from = e.sampleTo
+		if !e.sampleCut {
+			from = e.sampleTo.Add(-sampleOverlap) /* the overlap only guards against late rows; a continued backlog needs none */
+		}
 	}
-	to := now
+	done := now
 	if len(e.cfg.sysTrigs) > 0 {
-		pts, err := e.samples.SysSince(ctx, from, to, sampleLimit)
-		if err != nil {
-			return err
-		}
-		if len(pts) == sampleLimit {
-			to = pts[len(pts)-1].TS
-		}
-		for _, p := range pts {
-			for _, t := range e.cfg.sysTrigs[p.DeviceID] {
-				e.sysSample(a, t, p)
+		cur := from
+		for page := 0; ; page++ {
+			pts, err := e.samples.SysSince(ctx, cur, now, samplePage)
+			if err != nil {
+				return err
+			}
+			for _, p := range pts {
+				for _, t := range e.cfg.sysTrigs[p.DeviceID] {
+					e.sysSample(a, t, p)
+				}
+			}
+			if len(pts) < samplePage {
+				break
+			}
+			cur = nextCursor(cur, pts[len(pts)-1].TS)
+			if page+1 >= samplePages {
+				done = minTime(done, cur)
+				break
 			}
 		}
 	}
 	if len(e.cfg.ifTrigs) > 0 {
-		if err := e.refreshSeenUp(ctx); err != nil {
+		if err := e.refreshSeenUp(ctx, from, now); err != nil {
 			return err
 		}
 		f := IfFilter{DeviceIDs: make([]int64, 0, len(e.cfg.ifTrigs))}
@@ -162,33 +180,64 @@ func (e *Engine) evalSamples(ctx context.Context, a *actions, now time.Time) err
 			/* Only down samples matter, plus the samples of devices that have something to recover or confirm. */
 			f.DownOrDeviceIDs = e.watchedIfDevices()
 		}
-		pts, err := e.samples.IfSince(ctx, from, to, f, sampleLimit)
-		if err != nil {
-			return err
-		}
-		if len(pts) == sampleLimit {
-			to = pts[len(pts)-1].TS
-		}
-		for _, p := range pts {
-			obj := "if:" + strconv.Itoa(p.IfIndex)
-			for _, t := range e.cfg.ifTrigs[p.DeviceID] {
-				e.ifSample(a, t, p, obj)
+		cur := from
+		for page := 0; ; page++ {
+			pts, err := e.samples.IfSince(ctx, cur, now, f, samplePage)
+			if err != nil {
+				return err
+			}
+			for _, p := range pts {
+				obj := "if:" + strconv.Itoa(p.IfIndex)
+				for _, t := range e.cfg.ifTrigs[p.DeviceID] {
+					e.ifSample(a, t, p, obj)
+				}
+			}
+			if len(pts) < samplePage {
+				break
+			}
+			cur = nextCursor(cur, pts[len(pts)-1].TS)
+			if page+1 >= samplePages {
+				done = minTime(done, cur)
+				break
 			}
 		}
 	}
-	a.sampleTo = to
+	a.sampleTo, a.sampleCut = done, done.Before(now)
 	e.pruneTrackers(a, from)
 	return nil
 }
 
 /*
-refreshSeenUp folds the interfaces the inventory currently shows up into the
-seen-up set (all of them on the first call, then only rows polled since). The
-set only grows. An interface that is already down when the engine starts, with
-no open problem, therefore stays quiet until it comes up (or a linkDown trap
-reports it).
+nextCursor is where the next page starts: just before the last timestamp read
+(reading that instant again is harmless, the trackers ignore applied samples),
+so rows sharing the boundary timestamp are not skipped; if that would not move
+forward, the last timestamp itself, which guarantees progress.
 */
-func (e *Engine) refreshSeenUp(ctx context.Context) error {
+func nextCursor(cur, last time.Time) time.Time {
+	if n := last.Add(-time.Microsecond); n.After(cur) {
+		return n
+	}
+	return last
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+/*
+refreshSeenUp feeds the seen-up set that "any interface" triggers use to tell
+a transition from a port that was never up. Two sources: the metric samples
+of the read window (every port that reported oper-up, also on devices the
+cheap down-only read does not fetch), and the interface inventory, read in
+full at start and every inventoryEvery (a full read, not a cursor, so a late
+or older row cannot be missed). The set only grows. A port that is already
+down when the engine starts, with no open problem, stays quiet until it comes
+up (or a linkDown trap reports it).
+*/
+func (e *Engine) refreshSeenUp(ctx context.Context, from, to time.Time) error {
 	need := false
 	for _, dt := range e.cfg.byKind[KindIfOperDown] {
 		if dt.t.params.(*IfOperDown).IfIndex == nil {
@@ -199,7 +248,17 @@ func (e *Engine) refreshSeenUp(ctx context.Context) error {
 	if !need {
 		return nil
 	}
-	rows, err := e.pool.Query(ctx, `SELECT device_id, if_index, seen_at FROM inventory.interface WHERE oper_up AND seen_at > $1`, e.upSince)
+	keys, err := e.samples.IfUpSince(ctx, from, to)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		e.seenUp[[2]int64{k.DeviceID, int64(k.IfIndex)}] = struct{}{}
+	}
+	if !e.upAt.IsZero() && to.Sub(e.upAt) < inventoryEvery {
+		return nil
+	}
+	rows, err := e.pool.Query(ctx, `SELECT device_id, if_index FROM inventory.interface WHERE oper_up`)
 	if err != nil {
 		return fmt.Errorf("triggers: read interface inventory: %w", err)
 	}
@@ -207,14 +266,16 @@ func (e *Engine) refreshSeenUp(ctx context.Context) error {
 	for rows.Next() {
 		var d int64
 		var x int32
-		var at time.Time
-		if err := rows.Scan(&d, &x, &at); err != nil {
+		if err := rows.Scan(&d, &x); err != nil {
 			return fmt.Errorf("triggers: read interface inventory: %w", err)
 		}
 		e.seenUp[[2]int64{d, int64(x)}] = struct{}{}
-		e.upSince = laterOf(e.upSince, at)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("triggers: read interface inventory: %w", err)
+	}
+	e.upAt = to
+	return nil
 }
 
 /* watchedIfDevices lists the devices with an open interface problem or a pending interface condition; never nil. */

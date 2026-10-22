@@ -62,18 +62,18 @@ type flipReq struct {
 
 /* actions are the changes one cycle wants to make; apply writes them in one transaction. */
 type actions struct {
-	opens    []openReq
-	resolves []resolveReq
-	flips    []flipReq
-	seen     []evKey
-	wm       map[string]time.Time
-	sampleTo time.Time
-	openSet  map[pkey]bool
-	resSet   map[pkey]bool
+	opens     []openReq
+	resolves  []resolveReq
+	flips     []flipReq
+	wmSeq     map[string]int64
+	sampleTo  time.Time
+	sampleCut bool
+	openSet   map[pkey]bool
+	resSet    map[pkey]bool
 }
 
 func newActions() *actions {
-	return &actions{wm: map[string]time.Time{}, openSet: map[pkey]bool{}, resSet: map[pkey]bool{}}
+	return &actions{wmSeq: map[string]int64{}, openSet: map[pkey]bool{}, resSet: map[pkey]bool{}}
 }
 
 /* sanitize makes device-derived text safe for storage and display: no control or format characters, bounded length. */
@@ -138,6 +138,7 @@ func (a *actions) open(e *Engine, r openReq) {
 
 /* resolve asks to close the problem of key (open now or requested in this cycle). */
 func (a *actions) resolve(e *Engine, k pkey, reason, value string, at time.Time) {
+	delete(e.held, k) /* a held opening is moot once its condition ended */
 	if a.resSet[k] || (e.open[k] == nil && !a.openSet[k]) {
 		return
 	}
@@ -175,7 +176,7 @@ func (e *Engine) summary(id int64, k pkey, severity, state string, suppressed bo
 
 /* apply writes the actions and the stream watermarks in one transaction and publishes the notifications after the commit. */
 func (e *Engine) apply(ctx context.Context, a *actions, now time.Time) error {
-	if len(a.opens) == 0 && len(a.resolves) == 0 && len(a.flips) == 0 && len(a.wm) == 0 {
+	if len(a.opens) == 0 && len(a.resolves) == 0 && len(a.flips) == 0 && len(a.wmSeq) == 0 {
 		return nil
 	}
 	var msgs []notify.Message
@@ -264,20 +265,35 @@ func (e *Engine) apply(ctx context.Context, a *actions, now time.Time) error {
 			rid, reason, val, at = append(rid, p.id), append(reason, r.reason), append(val, r.value), append(at, when)
 			done = append(done, res{p, r})
 		}
+		/* Only rows this transaction really changed are announced: another engine may have resolved them first. */
+		changed := map[int64]bool{}
 		for start := 0; start < len(rid); start += writeChunk {
 			end := min(start+writeChunk, len(rid))
-			_, err := tx.Exec(ctx, `
+			rows, err := tx.Query(ctx, `
 				UPDATE problems.problem p SET state = 'resolved', resolved_at = greatest(u.at, p.opened_at), resolve_reason = u.reason,
 				       last_value = coalesce(nullif(u.val, ''), p.last_value)
 				FROM unnest($1::bigint[], $2::text[], $3::text[], $4::timestamptz[]) AS u(id, reason, val, at)
-				WHERE p.id = u.id AND p.state <> 'resolved'`, rid[start:end], reason[start:end], val[start:end], at[start:end])
+				WHERE p.id = u.id AND p.state <> 'resolved'
+				RETURNING p.id`, rid[start:end], reason[start:end], val[start:end], at[start:end])
 			if err != nil {
+				return fmt.Errorf("resolve problems: %w", err)
+			}
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return fmt.Errorf("resolve problems: %w", err)
+				}
+				changed[id] = true
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
 				return fmt.Errorf("resolve problems: %w", err)
 			}
 		}
 		for _, d := range done {
-			if d.p.suppressed {
-				continue /* never announced, so nothing to retract */
+			if d.p.suppressed || !changed[d.p.id] {
+				continue /* never announced, so nothing to retract; or resolved by someone else */
 			}
 			t := d.r.at
 			if t.IsZero() || t.Before(d.p.openedAt) {
@@ -296,22 +312,39 @@ func (e *Engine) apply(ctx context.Context, a *actions, now time.Time) error {
 					fid, fl = append(fid, f.p.id), append(fl, f)
 				}
 			}
+			flipped := map[int64]bool{}
 			for start := 0; start < len(fid); start += writeChunk {
 				end := min(start+writeChunk, len(fid))
-				if _, err := tx.Exec(ctx, `UPDATE problems.problem SET suppressed = $2 WHERE id = ANY($1) AND state <> 'resolved' AND suppressed <> $2`, fid[start:end], to); err != nil {
+				rows, err := tx.Query(ctx, `UPDATE problems.problem SET suppressed = $2 WHERE id = ANY($1) AND state <> 'resolved' AND suppressed <> $2 RETURNING id`, fid[start:end], to)
+				if err != nil {
+					return fmt.Errorf("update suppression: %w", err)
+				}
+				for rows.Next() {
+					var id int64
+					if err := rows.Scan(&id); err != nil {
+						rows.Close()
+						return fmt.Errorf("update suppression: %w", err)
+					}
+					flipped[id] = true
+				}
+				rows.Close()
+				if err := rows.Err(); err != nil {
 					return fmt.Errorf("update suppression: %w", err)
 				}
 			}
 			for _, f := range fl {
+				if !flipped[f.p.id] {
+					continue
+				}
 				msgs = append(msgs, notify.Message{Type: notify.MessageTypeProblem, Event: notify.EventSuppressedChanged,
 					Problem: e.summary(f.p.id, f.p.key, f.p.severity, f.p.state, to, f.p.openedAt, f.p.ackedAt, nil)})
 			}
 		}
 
-		for name, w := range a.wm {
+		for name, w := range a.wmSeq {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO problems.engine_state (name, watermark) VALUES ($1, $2)
-				ON CONFLICT (name) DO UPDATE SET watermark = greatest(problems.engine_state.watermark, excluded.watermark)`, name, w); err != nil {
+				INSERT INTO problems.engine_state (name, watermark, seq) VALUES ($1, $3, $2)
+				ON CONFLICT (name) DO UPDATE SET seq = greatest(problems.engine_state.seq, excluded.seq), watermark = excluded.watermark`, name, w, now); err != nil {
 				return fmt.Errorf("save watermark: %w", err)
 			}
 		}

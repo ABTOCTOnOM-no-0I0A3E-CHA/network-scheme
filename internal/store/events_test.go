@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"github.com/jackc/pgx/v5"
 	"strings"
 	"testing"
 	"time"
@@ -358,5 +359,30 @@ func TestEventsCompression(t *testing.T) {
 	}
 	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.syslog WHERE device_id = 901 AND tsv @@ plainto_tsquery('simple', 'latecomer')`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("late event not found = %d, %v", n, err)
+	}
+	/* ingest_seq: assigned to every row (INSERT and COPY alike) by the sequence default, increasing in commit order, readable from compressed chunks. */
+	var seqs []int64
+	rows, err := api.Query(ctx, `SELECT ingest_seq FROM events.syslog WHERE device_id = 901 ORDER BY ingest_seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var q *int64
+		if err := rows.Scan(&q); err != nil || q == nil {
+			t.Fatalf("ingest_seq missing: %v", err)
+		}
+		seqs = append(seqs, *q)
+	}
+	rows.Close()
+	if len(seqs) != 3 || seqs[0] >= seqs[1] || seqs[1] >= seqs[2] {
+		t.Fatalf("ingest_seq = %v", seqs)
+	}
+	if _, err := ev.CopyFrom(ctx, pgx.Identifier{"events", "trap"}, []string{"ts", "device_id", "version", "trap_oid", "name", "severity", "varbinds", "identified"},
+		pgx.CopyFromRows([][]any{{old, int64(901), int16(2), "1.3.6.1.6.3.1.1.5.4", "linkUp", nil, "[]", true}})); err != nil {
+		t.Fatalf("COPY as nms_eventd with the existing column list: %v", err)
+	}
+	var cnt int
+	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.trap WHERE device_id = 901 AND ingest_seq IS NOT NULL AND ingest_seq > 0`).Scan(&cnt); err != nil || cnt != 2 {
+		t.Fatalf("trap rows with ingest_seq = %d, %v", cnt, err)
 	}
 }

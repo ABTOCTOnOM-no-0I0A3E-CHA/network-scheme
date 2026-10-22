@@ -91,20 +91,62 @@ func TestSuppressedProblemResolvesQuietly(t *testing.T) {
 	}
 }
 
-func TestChildThatOpenedJustBeforeTheParentIsSuppressedRetroactively(t *testing.T) {
+func TestChildOpeningIsHeldWhileTheParentOutageIsPending(t *testing.T) {
 	h := newHarness(t)
 	parent := h.newDevice()
 	child := h.newDevice(withParent(parent))
-	trig := h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
-	_ = trig
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
 	t0 := h.clk.Now()
-	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second)) /* its timer ends first */
+	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second)) /* its own timer is already over */
 	h.setStates([]int64{parent}, "down", t0)
+	h.step()
+	if ps := h.problems(0); len(ps) != 0 {
+		t.Fatalf("the child opened while the parent's outage is pending: %+v", ps)
+	}
+	h.advance(31 * time.Second)
+	ps := byDevice(h.openProblems(0))
+	if len(ps) != 2 || !ps[child].Suppressed || ps[parent].Suppressed {
+		t.Fatalf("after the parent opened: %+v", ps)
+	}
+	if ev := events(h.take()); ev[notify.EventOpened] != 1 || len(ev) != 1 {
+		t.Fatalf("notifications = %v, want only the parent's opened", ev)
+	}
+}
+
+func TestPendingParentThatRecoversReleasesTheChild(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	child := h.newDevice(withParent(parent))
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
+	t0 := h.clk.Now()
+	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second))
+	h.setStates([]int64{parent}, "down", t0)
+	h.step()
+	h.setStates([]int64{parent}, "up", h.clk.Now()) /* the blip is over before the duration */
+	h.advance(5 * time.Second)
+	ps := byDevice(h.openProblems(0))
+	if len(ps) != 1 || ps[child].Suppressed {
+		t.Fatalf("child after the parent recovered: %+v", ps)
+	}
+	if ev := events(h.take()); ev[notify.EventOpened] != 1 {
+		t.Fatalf("notifications = %v", ev)
+	}
+}
+
+func TestChildThatOpenedBeforeTheParentFailedIsSuppressedRetroactively(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	child := h.newDevice(withParent(parent))
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
+	t0 := h.clk.Now()
+	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second))
+	h.setStates([]int64{parent}, "up", t0)
 	h.step()
 	if ps := byDevice(h.openProblems(0)); len(ps) != 1 || ps[child].Suppressed {
 		t.Fatalf("child alone: %+v", ps)
 	}
 	h.take()
+	h.setStates([]int64{parent}, "down", h.clk.Now())
 	h.advance(31 * time.Second)
 	ps := byDevice(h.openProblems(0))
 	if len(ps) != 2 || !ps[child].Suppressed || ps[parent].Suppressed {
@@ -113,6 +155,50 @@ func TestChildThatOpenedJustBeforeTheParentIsSuppressedRetroactively(t *testing.
 	ev := events(h.take())
 	if ev[notify.EventOpened] != 1 || ev[notify.EventSuppressedChanged] != 1 {
 		t.Fatalf("notifications = %v", ev)
+	}
+}
+
+/* TestStaggeredStormNeverNotifiesForChildren: children whose timers end before and after the parent's. */
+func TestStaggeredStormNeverNotifiesForChildren(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 60, "high")
+	kids := make([]int64, 500)
+	for i := range kids {
+		kids[i] = h.newDevice(withParent(parent))
+	}
+	t0 := h.clk.Now()
+	h.setStates([]int64{parent}, "down", t0)
+	for i, k := range kids { /* since spread over [-40 s, +40 s] around the parent's */
+		h.setStates([]int64{k}, "down", t0.Add(time.Duration(i*80/len(kids)-40)*time.Second))
+	}
+	h.step()
+	for range 30 { /* 150 s in 5 s rounds: every child timer ends, some before and some after the parent's */
+		h.advance(5 * time.Second)
+	}
+	ps := h.openProblems(0)
+	suppressed := 0
+	for _, p := range ps {
+		if p.Suppressed {
+			suppressed++
+		}
+	}
+	if len(ps) != 501 || suppressed != 500 {
+		t.Fatalf("problems = %d, suppressed = %d", len(ps), suppressed)
+	}
+	var childEv, parentEv int
+	for _, m := range h.take() {
+		if m.Event != notify.EventOpened {
+			t.Fatalf("unexpected event %v", m.Event)
+		}
+		if m.Problem.DeviceID != nil && *m.Problem.DeviceID == parent {
+			parentEv++
+		} else {
+			childEv++
+		}
+	}
+	if childEv != 0 || parentEv != 1 {
+		t.Fatalf("opened notifications: children %d, parent %d, want 0 and 1", childEv, parentEv)
 	}
 }
 

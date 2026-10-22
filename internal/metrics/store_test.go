@@ -388,6 +388,9 @@ func TestSysSinceAndIfSince(t *testing.T) {
 	if n := count(IfFilter{DeviceIDs: []int64{dev1}, DownOrDeviceIDs: []int64{}}); n != 1 {
 		t.Errorf("device 1 down only = %d, want 1", n)
 	}
+	if up, err := r.IfUpSince(ctx, from, to); err != nil || len(up) != 2 {
+		t.Errorf("IfUpSince = %v, %v; want the two up interfaces", up, err)
+	}
 	if _, err := env.Pool("nms_eventd").Exec(ctx, `SELECT 1 FROM metrics.if_metrics`); err == nil {
 		t.Error("eventd must have no access to metrics")
 	}

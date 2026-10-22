@@ -85,16 +85,19 @@ type Engine struct {
 	open      map[pkey]*openP
 	meta      map[int64]devMeta
 	trackers  map[tkey]*tracker
-	seen      map[evKey]time.Time
-	wm        map[string]time.Time
+	wmSeq     map[string]int64 /* position of each event stream (ingest_seq) */
+	held      map[pkey]heldReq /* openings postponed while an ancestor's outage is still pending */
+	afterLoad func()           /* test hook: runs after the open problems were loaded */
+	availFire map[int64]bool   /* devices whose availability condition fires now (set by evalAvailability) */
+	upAt      time.Time        /* last full read of the interface inventory */
 	sampleTo  time.Time
+	sampleCut bool /* the last sample round stopped before reaching now */
 	polled    map[int64]time.Time
 	pollHints map[int64]time.Time
 	unknown   map[string][]counterSample
 	sysFalse  map[pkey]int
 	supp      *suppressCtx
 	seenUp    map[[2]int64]struct{} /* interfaces observed oper-up (device, ifIndex) */
-	upSince   time.Time             /* newest inventory seen_at folded into seenUp */
 }
 
 // New returns an engine over c.
@@ -113,9 +116,10 @@ func New(c Config) *Engine {
 /* resetMemory forgets everything derived from earlier cycles; the next cycle re-reads its windows like a fresh start. */
 func (e *Engine) resetMemory() {
 	e.cfg, e.open = nil, nil
-	e.trackers, e.seen, e.wm = map[tkey]*tracker{}, map[evKey]time.Time{}, map[string]time.Time{}
+	e.trackers, e.wmSeq = map[tkey]*tracker{}, map[string]int64{}
+	e.held, e.availFire, e.upAt = map[pkey]heldReq{}, map[int64]bool{}, time.Time{}
 	e.sampleTo = time.Time{}
-	e.seenUp, e.upSince = map[[2]int64]struct{}{}, time.Time{}
+	e.seenUp = map[[2]int64]struct{}{}
 	e.polled, e.pollHints, e.unknown, e.sysFalse = map[int64]time.Time{}, map[int64]time.Time{}, map[string][]counterSample{}, map[pkey]int{}
 }
 
@@ -237,6 +241,27 @@ func (e *Engine) cycle(ctx context.Context, kind cycleKind) error {
 	if err := e.loadOpen(ctx); err != nil {
 		return err
 	}
+	if e.afterLoad != nil {
+		e.afterLoad()
+	}
+	if reloaded {
+		/* Names are kept for devices that still have an open problem (their resolution is announced this round). */
+		for id := range e.meta {
+			if _, ok := e.cfg.devices[id]; ok {
+				continue
+			}
+			inUse := false
+			for k := range e.open {
+				if k.dev == id {
+					inUse = true
+					break
+				}
+			}
+			if !inUse {
+				delete(e.meta, id)
+			}
+		}
+	}
 	a := newActions()
 	if reloaded {
 		e.reconcile(a)
@@ -267,13 +292,10 @@ func (e *Engine) cycle(ctx context.Context, kind cycleKind) error {
 		return err
 	}
 	if !a.sampleTo.IsZero() {
-		e.sampleTo = a.sampleTo
+		e.sampleTo, e.sampleCut = a.sampleTo, a.sampleCut
 	}
-	for _, k := range a.seen {
-		e.seen[k] = k.ts
-	}
-	for name, w := range a.wm {
-		e.wm[name] = w
+	for name, w := range a.wmSeq {
+		e.wmSeq[name] = max(e.wmSeq[name], w)
 	}
 	e.requestPolls(ctx, now)
 	return nil
@@ -316,6 +338,11 @@ func (e *Engine) tracker(k tkey) *tracker {
 
 /* requestPolls asks for the extra polls the cycle's traps called for. */
 func (e *Engine) requestPolls(ctx context.Context, now time.Time) {
+	for dev, at := range e.polled {
+		if now.Sub(at) > PollNowGap {
+			delete(e.polled, dev)
+		}
+	}
 	for dev, at := range e.pollHints {
 		delete(e.pollHints, dev)
 		if e.pollNow == nil || at.Before(now.Add(-time.Minute)) {
