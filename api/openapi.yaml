@@ -1049,6 +1049,36 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/ws:
+    get:
+      summary: Live problem feed (WebSocket upgrade)
+      description: |
+        Upgrades to a WebSocket. Authentication is the session cookie only (never
+        a token in the URL); the Origin header must be present and equal the
+        public origin, otherwise 403 csrf. At most 4 sockets per session, the 5th
+        answers 429 rate_limited before the upgrade.
+
+        Server to client (JSON text): {"type":"problem","event":"opened|acknowledged|resolved|suppressed_changed",
+        "problem":ProblemSummary}, {"type":"pong"} and {"type":"subscribed","severity_min":...}.
+        Only problems of devices in the caller's groups are delivered; problems
+        without a device (system problems) go to global bindings only. Client
+        to server, at most 1 KiB per frame: {"type":"ping"} and
+        {"type":"subscribe","severity_min":"info|warning|average|high|disaster"}
+        (a display preference; the scope always applies). Any other frame closes
+        the socket with 1008. The server pings every 30 s and closes when no
+        pong arrives within 60 s. The session and the caller's scope are
+        re-checked every 30 s: the socket closes with 1008 when the session
+        ended or visibility shrank, and with 1013 when the client reads too
+        slowly. A request without the upgrade headers answers 426. All text
+        in problems comes from devices: render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      responses:
+        "101":
+          description: Switching Protocols
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /api/system/status:
     get:
       summary: State of the pollers, eventd, the database and the job queues
@@ -1186,6 +1216,22 @@ components:
     EventSeverity:
       type: string
       enum: [info, warning, average, high, disaster]
+    ProblemSummary:
+      type: object
+      required: [id, device_id, device_name, group_id, severity, state, suppressed, name, object, opened_at, acknowledged_at, resolved_at]
+      properties:
+        id: { type: integer, format: int64 }
+        device_id: { type: integer, format: int64, nullable: true }
+        device_name: { type: string }
+        group_id: { type: integer, format: int64, nullable: true }
+        severity: { $ref: "#/components/schemas/EventSeverity" }
+        state: { type: string, enum: [problem, acknowledged, resolved] }
+        suppressed: { type: boolean }
+        name: { type: string }
+        object: { type: string }
+        opened_at: { type: string, format: date-time }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
     TrapSeverity:
       type: string
       enum: [info, warning, average, high, disaster]

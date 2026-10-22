@@ -79,6 +79,7 @@ var matrix = map[string]map[string]int{
 	"GET /api/trap-rules":                      {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
 	"POST /api/trap-rules":                     {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
 	"DELETE /api/trap-rules/{id}":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/ws":                              {"anon": 401, "viewer": 426, "viewerA": 426, "operator": 426, "operatorA": 426, "auditor": 403, "admin": 426, "adminA": 426},
 	"GET /api/system/status":                   {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 200, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
 }
 
@@ -115,6 +116,7 @@ var foreignMatrix = map[string]map[string]int{
 	"POST /api/discovery/inbox/{id}/ignore":    {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"GET /api/events":                          {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/events/unidentified":             {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/ws":                              {"viewerA": 426, "operatorA": 426, "adminA": 426},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -509,6 +511,8 @@ func (m *matrixEnv) eventRequest(key string) (req, bool) {
 		return req{method: "DELETE", path: fmt.Sprintf("/api/trap-rules/%d", id)}, true
 	case "GET /api/system/status":
 		return req{method: "GET", path: "/api/system/status"}, true
+	case "GET /api/ws": /* a recorder cannot upgrade: admitted callers reach the handshake and are told to upgrade */
+		return req{method: "GET", path: "/api/ws", origin: publicOrigin}, true
 	}
 	return req{}, false
 }

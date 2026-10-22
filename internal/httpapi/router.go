@@ -19,6 +19,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/inventory"
 	"github.com/beekamai/network-scheme/internal/metrics"
+	"github.com/beekamai/network-scheme/internal/notify"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -36,6 +37,9 @@ type Deps struct {
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
 	AuthRateLimit int              /* requests per minute per client IP on credential endpoints; 0: 10 */
+	Hub           *notify.Hub      /* problem notifications served on /api/ws; nil: a private hub nobody publishes to */
+	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
+	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
 }
 
 /*
@@ -87,12 +91,27 @@ type server struct {
 	authRL    *httprate.RateLimiter
 	loginSem  chan struct{}
 	loginWait time.Duration
+
+	hub         *notify.Hub
+	wsConns     wsConns
+	wsRecheck   time.Duration
+	wsHeartbeat time.Duration
 }
 
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
+		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat,
+	}
+	if s.hub == nil {
+		s.hub = notify.NewHub()
+	}
+	if s.wsRecheck <= 0 {
+		s.wsRecheck = wsDefaultRecheck
+	}
+	if s.wsHeartbeat <= 0 {
+		s.wsHeartbeat = wsDefaultHeartbeat
 	}
 	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
 	if o, err := config.NormalizeOrigin(s.cfg.PublicOrigin); err == nil {
@@ -188,6 +207,8 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/trap-rules", rules, s.listTrapRules)
 	s.route(r, http.MethodPost, "/api/trap-rules", rules, s.createTrapRule)
 	s.route(r, http.MethodDelete, "/api/trap-rules/{id}", rules, s.deleteTrapRule)
+	/* The problem feed follows device visibility; the handler filters every message by the caller's groups. */
+	s.route(r, http.MethodGet, "/api/ws", read, s.ws)
 	s.route(r, http.MethodGet, "/api/system/status", Policy{Perm: rbac.PermSystemRead}, s.systemStatus)
 	return r
 }

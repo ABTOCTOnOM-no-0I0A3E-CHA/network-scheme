@@ -52,6 +52,17 @@
 			}
 		}
 
+		# WebSocket feed: reverse_proxy upgrades the connection itself and keeps it open (no stream
+		# timeout); no body headers are forced on the 101 response. Origin and cookies pass through.
+		handle /api/ws {
+			reverse_proxy api:8080 {
+				header_up X-Forwarded-For {remote_host}
+				header_down -Service-Worker-Allowed
+				header_down -Content-Security-Policy
+				header_down -Set-Cookie
+			}
+		}
+
 		handle /api/* {
 			reverse_proxy api:8080 {
 				header_up X-Forwarded-For {remote_host}
