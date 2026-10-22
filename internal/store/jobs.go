@@ -14,7 +14,7 @@ const JobsSchema = "jobs"
 
 /*
 jobGrants run after every River migration (GRANT is idempotent). The api
-only enqueues: INSERT plus what INSERT ... ON CONFLICT DO UPDATE SET kind ...
+(and eventd, which enqueues poll_now) only enqueues: INSERT plus what INSERT ... ON CONFLICT DO UPDATE SET kind ...
 RETURNING needs. The poller works the queue and runs River's maintenance
 (leader election, cleanup), so it gets DML on the queue tables but never on
 river_migration.
@@ -23,7 +23,8 @@ const jobGrants = `
 REVOKE ALL ON ALL TABLES IN SCHEMA jobs FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA jobs FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE (kind) ON jobs.river_job TO nms_api;
-GRANT USAGE ON SEQUENCE jobs.river_job_id_seq TO nms_api;
+GRANT SELECT, INSERT, UPDATE (kind) ON jobs.river_job TO nms_eventd;
+GRANT USAGE ON SEQUENCE jobs.river_job_id_seq TO nms_api, nms_eventd;
 GRANT SELECT, INSERT, UPDATE, DELETE ON jobs.river_job, jobs.river_leader, jobs.river_queue,
     jobs.river_notification TO nms_poller;
 GRANT SELECT ON jobs.river_migration TO nms_poller;

@@ -614,6 +614,8 @@ func TestOpenFailureAfterVerifyDoesNotCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	/* The shared database outlives this test: later tests must not hit the trigger. */
+	t.Cleanup(func() { _, _ = su.Exec(ctx, `DROP FUNCTION inventory.refuse() CASCADE`) })
 	cache := newDevCache()
 	if _, err := p.credential(ctx, owner, cache, snmpKinds...); !isDBErr(err) {
 		t.Fatalf("credential err = %v, want a database error", err)

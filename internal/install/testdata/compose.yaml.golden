@@ -15,7 +15,7 @@ services:
     environment:
       POSTGRES_DB: "nms"
       POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
-    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password]
+    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password, db_eventd_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - "/etc/nms/postgres/initdb:/docker-entrypoint-initdb.d:ro"
@@ -184,6 +184,8 @@ secrets:
     file: "/etc/nms/secrets/db_cli_password"
   db_poller_password:
     file: "/etc/nms/secrets/db_poller_password"
+  db_eventd_password:
+    file: "/etc/nms/secrets/db_eventd_password"
   domain_read_key:
     file: "/etc/nms/secrets/domain_read.key"
   api_data_key:

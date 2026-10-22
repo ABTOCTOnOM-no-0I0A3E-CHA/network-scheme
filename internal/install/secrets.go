@@ -146,6 +146,7 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("db_api_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_cli_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_poller_password", nil, ContainerUID, PostgresUID, 0o440)
+	add("db_eventd_password", nil, ContainerUID, PostgresUID, 0o440)
 	for i := range files {
 		b, err := keys.NewSymmetricKey()
 		if err != nil {

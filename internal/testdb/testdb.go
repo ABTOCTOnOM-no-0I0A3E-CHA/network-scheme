@@ -34,7 +34,7 @@ const Image = "timescale/timescaledb:2.30.2-pg17@sha256:b346edcdb51a1fd6020e3965
 
 const dbName = "nms"
 
-var roles = []string{"nms_migrator", "nms_api", "nms_cli", "nms_poller", "postgres"}
+var roles = []string{"nms_migrator", "nms_api", "nms_cli", "nms_poller", "nms_eventd", "postgres"}
 
 // Env is a running, migrated test database.
 type Env struct {
@@ -43,7 +43,7 @@ type Env struct {
 	passwords map[string]string
 }
 
-// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli, nms_poller or postgres.
+// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd or postgres.
 func (e *Env) Pool(role string) *pgxpool.Pool {
 	p, ok := e.pools[role]
 	if !ok {
@@ -162,6 +162,7 @@ func start() (*Env, error) {
 		"nms_api":      "db_api_password",
 		"nms_cli":      "db_cli_password",
 		"nms_poller":   "db_poller_password",
+		"nms_eventd":   "db_eventd_password",
 	} {
 		pw, err := randomPassword()
 		if err != nil {

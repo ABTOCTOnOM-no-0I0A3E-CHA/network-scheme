@@ -138,7 +138,7 @@ func TestPreflightErrors(t *testing.T) {
 /* secretNames is the exact set WriteSecrets must create. */
 var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
-	"db_api_password", "db_cli_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
+	"db_api_password", "db_cli_password", "db_eventd_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
 	"executor_sealing_key", "web.crt", "web.key",
 }
@@ -153,6 +153,7 @@ var wantOwner = map[string]struct {
 	"db_api_password":      {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_cli_password":      {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_poller_password":   {install.ContainerUID, install.PostgresUID, 0o440},
+	"db_eventd_password":   {install.ContainerUID, install.PostgresUID, 0o440},
 	"api_data_key":         {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
@@ -233,7 +234,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 
 	/* Contents. */
-	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password"} {
+	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password"} {
 		raw := readFile(t, filepath.Join(dir, n))
 		b, err := base64.RawURLEncoding.DecodeString(string(raw))
 		if err != nil || len(b) != 32 {
