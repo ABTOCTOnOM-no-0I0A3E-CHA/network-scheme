@@ -8,7 +8,9 @@
 -- Trust: an engine ID only selects the fast path of eventd. A wrong one (a
 -- compromised poller, or a replaced device) costs the slow path, never an
 -- accepted message: the keys are derived from the device's own secrets. The
--- api has no rights on the table, so it cannot plant one. All pollers share
+-- api has no rights on the table, so it cannot plant one. A compromised poller
+-- that flips engine IDs only forces the slow path: no worse than its existing
+-- UPDATE (status) on access_profile. All pollers share
 -- the nms_poller role, so SQL cannot tell them apart; the poller writes only
 -- devices assigned to it (INSERT ... SELECT ... WHERE poller_id), and the
 -- grant itself is the boundary against the api and eventd.
@@ -35,11 +37,14 @@ CREATE TRIGGER monitoring_template_changed AFTER INSERT OR UPDATE OR DELETE ON c
     FOR EACH STATEMENT EXECUTE FUNCTION core.notify_device_changed();
 
 -- System problems of the engine: a host key mismatch per device and a silent
--- poller, from the real tables. Columns only: the fingerprints and addresses of
--- mismatch rows and nothing else stay out of the api's reach.
+-- poller, from the real tables. Columns only: the fingerprints, algorithm and
+-- addresses (key material) stay out of the api's reach. A mismatch is open
+-- while the device has a pin and its newest rejection is later than the pin's
+-- last successful use (last_seen); a reset of the pin removes the row.
 GRANT USAGE ON SCHEMA ssh_hosts TO nms_api;
 GRANT SELECT (device_id, at) ON ssh_hosts.mismatch TO nms_api;
-CREATE INDEX mismatch_at_idx ON ssh_hosts.mismatch (at);
+GRANT SELECT (device_id, last_seen) ON ssh_hosts.host_key TO nms_api;
+CREATE INDEX mismatch_device_at_idx ON ssh_hosts.mismatch (device_id, at);
 GRANT SELECT (poller_id, at) ON inventory.poller_heartbeat TO nms_api;
 
 -- +goose Down

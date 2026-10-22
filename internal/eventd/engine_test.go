@@ -1,7 +1,13 @@
 package eventd
 
 import (
+	"io"
+	"log/slog"
+	"runtime"
+
 	"context"
+	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/secret"
 	"net/netip"
 	"testing"
 	"time"
@@ -35,6 +41,7 @@ func TestReloadPinsTheEngineThePollerLearned(t *testing.T) {
 	h.setEngine(a, engineID(1))
 	s := h.sources()
 	h.reload(s)
+	s.seedPending(context.Background())
 	da, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.2"))
 	rel()
 	db, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.3"))
@@ -52,6 +59,7 @@ func TestReloadPinsTheEngineThePollerLearned(t *testing.T) {
 	}
 	/* Unchanged reread keeps the object (and its keys); a changed engine replaces it with a new pin. */
 	h.reload(s)
+	s.seedPending(context.Background())
 	if d, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.2")); d != da {
 		t.Error("unchanged device was rebuilt")
 	} else {
@@ -59,6 +67,7 @@ func TestReloadPinsTheEngineThePollerLearned(t *testing.T) {
 	}
 	h.setEngine(a, engineID(2))
 	h.reload(s)
+	s.seedPending(context.Background())
 	d2, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.2"))
 	rel()
 	if d2 == da || pinnedEngine(d2) != engineID(2) {
@@ -74,6 +83,7 @@ func TestFloodAfterRestartDoesNotDelayTheFirstGenuineTrap(t *testing.T) {
 	h.setEngine(a, engineID(0))
 	s := h.sources()
 	h.reload(s)
+	s.seedPending(context.Background())
 	d, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.2"))
 	rel()
 	r := newV3Rig(t)
@@ -103,6 +113,7 @@ func TestReplacedDeviceTakesTheSlowPathOnce(t *testing.T) {
 	h.setEngine(a, engineID(1))
 	s := h.sources()
 	h.reload(s)
+	s.seedPending(context.Background())
 	d, rel, _ := s.acquire(netip.MustParseAddr("127.0.0.2"))
 	rel()
 	r := newV3Rig(t)
@@ -132,5 +143,48 @@ func TestEventdMayReadButNotWriteEngineIDs(t *testing.T) {
 		if pe, ok := err.(*pgconn.PgError); !ok || pe.Code != "42501" {
 			t.Errorf("%s as nms_eventd: %v", sql, err)
 		}
+	}
+}
+
+/* Seeding is parallel, bounded and does not need the listeners to wait: timing of 1000 synthetic v3 devices. */
+func TestSeedPendingIsParallelAndStopsWithTheContext(t *testing.T) {
+	const n = 1000
+	mk := func() *sources {
+		s := newSources(nil, nil, nil, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		snap := &snapshot{byAddr: map[netip.Addr]*device{}}
+		for i := range n {
+			v, err := newV3(creds.Credential{Kind: creds.KindSNMP3, User: "nms", AuthProto: "SHA256", AuthKey: secret.New(authKey), PrivProto: "AES", PrivKey: secret.New(privKey)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap.all = append(snap.all, &device{id: int64(i + 1), v3: v, engine: []byte(engineID(i))})
+		}
+		s.cur.Store(snap)
+		return s
+	}
+	s := mk()
+	start := time.Now()
+	s.seedPending(context.Background())
+	el := time.Since(start)
+	for _, d := range s.cur.Load().all {
+		if pinnedEngine(d) != string(d.engine) {
+			t.Fatalf("device %d not seeded", d.id)
+		}
+	}
+	t.Logf("seeded %d v3 devices on %d CPUs in %v (%.1f ms/device wall)", n, runtime.GOMAXPROCS(0), el, float64(el.Microseconds())/n/1000)
+
+	/* A cancelled context stops the work early and leaves the rest on the slow path. */
+	s2 := mk()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s2.seedPending(ctx)
+	seeded := 0
+	for _, d := range s2.cur.Load().all {
+		if pinnedEngine(d) != "" {
+			seeded++
+		}
+	}
+	if seeded > runtime.GOMAXPROCS(0) {
+		t.Errorf("%d devices seeded after cancellation", seeded)
 	}
 }

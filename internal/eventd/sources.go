@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,7 @@ type device struct {
 	driver string
 	drv    drivers.Driver /* nil when the driver name is unknown or "auto" */
 	fp     string
+	engine []byte /* SNMPv3 engine ID the poller learned; seeded into v3 by seedPending */
 
 	mu        sync.RWMutex
 	wiped     bool
@@ -247,6 +249,50 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+/*
+seedPending pins the recorded engine of every v3 device that has none yet,
+deriving the keys on GOMAXPROCS workers (two password hashes, ~12 ms, per
+device). It runs after reload, outside it: listeners are up meanwhile, and a
+device not yet seeded simply takes the slow path (budgeted) for its traps. It
+stops early when ctx ends. A device wiped or replaced meanwhile is skipped
+(d.mu excludes wipe).
+*/
+func (s *sources) seedPending(ctx context.Context) {
+	var todo []*device
+	for _, d := range s.cur.Load().all {
+		if d.v3 != nil && len(d.engine) > 0 {
+			todo = append(todo, d)
+		}
+	}
+	if len(todo) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	next := make(chan *device)
+	for range min(runtime.GOMAXPROCS(0), len(todo)) {
+		wg.Go(func() {
+			for d := range next {
+				d.mu.RLock()
+				if !d.wiped && ctx.Err() == nil {
+					d.v3.seedEngine(d.engine)
+				}
+				d.mu.RUnlock()
+			}
+		})
+	}
+	for _, d := range todo {
+		select {
+		case next <- d:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	close(next)
+	wg.Wait()
+}
+
 func fingerprint(r *devRow) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%d|%s|%s|%x", r.id, r.addr, r.driver, r.engine)
@@ -261,7 +307,7 @@ func fingerprint(r *devRow) string {
 
 /* build verifies the SNMP profiles of one device; a refused profile is logged once and leaves its protocol unusable. */
 func (s *sources) build(r *devRow, fp string) *device {
-	d := &device{id: r.id, addr: r.addr, driver: r.driver, fp: fp}
+	d := &device{id: r.id, addr: r.addr, driver: r.driver, fp: fp, engine: r.engine}
 	if s.reg != nil {
 		d.drv = s.reg.ByName(r.driver)
 	}
@@ -294,8 +340,6 @@ func (s *sources) build(r *devRow, fp string) *device {
 		case creds.KindSNMP3:
 			if d.v3, err = newV3(c); err != nil {
 				s.log.Warn("credential rejected", slog.Int64("device_id", r.id), slog.String("kind", k), slog.String("err", err.Error()))
-			} else {
-				d.v3.seedEngine(r.engine)
 			}
 			c.Wipe()
 		}

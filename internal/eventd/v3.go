@@ -200,7 +200,10 @@ it is verified against these keys like any other, and one that carries another
 engine ID (a replaced device) takes the slow path and re-pins.
 */
 func (v *v3Auth) seedEngine(engine []byte) {
-	if len(engine) < minEngineID || len(engine) > maxEngineID {
+	v.mu.Lock()
+	pinned := v.pin != nil
+	v.mu.Unlock()
+	if pinned || len(engine) < minEngineID || len(engine) > maxEngineID {
 		return
 	}
 	sp := &gosnmp.UsmSecurityParameters{

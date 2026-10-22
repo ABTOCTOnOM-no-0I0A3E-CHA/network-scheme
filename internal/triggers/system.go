@@ -18,17 +18,23 @@ const (
 )
 
 /*
-An SSH host key mismatch is a problem while the poller keeps recording
-rejected keys: ssh_hosts.mismatch rows (device_id, at; the api may read only
-these two columns) newer than sshMismatchWindow. The poller retries with every
-inventory poll (5 minutes by default), so a pin that was reset on the host with
-nmsctl stops producing rows and the problem recovers within the window and two
-evaluations.
+An SSH host key mismatch is a problem while the device has a pinned key
+(ssh_hosts.host_key) and its newest rejected key (ssh_hosts.mismatch.at) is
+later than the pin's last successful use (host_key.last_seen). Mismatch rows
+are written only by inventory polls, which can be hours apart, so there is no
+time window: only a later successful connection with the pinned key, or a reset
+of the pin on the host (nmsctl removes the row), recovers it. A failing SNMP or
+SSH poll changes neither column and so leaves the problem open. The api reads
+only (device_id, at) and (device_id, last_seen), never fingerprints.
 */
-const (
-	sshMismatchWindow = 30 * time.Minute
-	pollerSilentAfter = 90 * time.Second /* as inventory.device_state_v */
-)
+/*
+poller_unavailable uses the heartbeat by the database clock: the poller's own
+timestamp is stored as LEAST(poller time, now()), so a fast poller clock cannot
+hide a stop, and a slow one only makes it look silent sooner. A poller that
+never wrote a heartbeat has no row, hence no problem (a misconfigured or never
+started poller id is not detected here), and neither has one without devices.
+*/
+const pollerSilentAfter = 90 * time.Second /* as inventory.device_state_v */
 
 /* Thresholds of the eventd flood check: more than this many unknown-source packets in the window. */
 const (
@@ -93,8 +99,8 @@ func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) erro
 	}
 
 	rows, err = e.pool.Query(ctx, `
-		SELECT DISTINCT m.device_id FROM ssh_hosts.mismatch m JOIN core.device d ON d.id = m.device_id
-		WHERE m.at > now() - make_interval(secs => $1)`, sshMismatchWindow.Seconds())
+		SELECT k.device_id FROM ssh_hosts.host_key k JOIN core.device d ON d.id = k.device_id
+		WHERE (SELECT max(m.at) FROM ssh_hosts.mismatch m WHERE m.device_id = k.device_id) > k.last_seen`)
 	if err != nil {
 		return fmt.Errorf("triggers: ssh host key check: %w", err)
 	}

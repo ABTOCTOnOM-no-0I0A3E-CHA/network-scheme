@@ -379,7 +379,9 @@ func TestHostKeyGrants(t *testing.T) {
 		}
 	}
 	api, poller, cli := env.Pool("nms_api"), env.Pool("nms_poller"), env.Pool("nms_cli")
-	denied(api, `SELECT 1 FROM ssh_hosts.host_key`)
+	denied(api, `SELECT fingerprint_sha256 FROM ssh_hosts.host_key`)
+	denied(api, `SELECT algorithm FROM ssh_hosts.host_key`)
+	denied(api, `UPDATE ssh_hosts.host_key SET last_seen = now()`)
 	/* The api (problem engine) reads when a mismatch happened, never the fingerprint or address. */
 	denied(api, `SELECT seen_fingerprint FROM ssh_hosts.mismatch`)
 	denied(api, `SELECT address FROM ssh_hosts.mismatch`)

@@ -147,6 +147,7 @@ func Run(ctx context.Context, cfg config.EventD, deps Deps) error {
 	w := &writer{pool: s.pool, st: &s.st, log: s.log, size: cfg.BatchSize, wait: cfg.BatchInterval}
 	wdone := make(chan struct{})
 	go func() { defer close(wdone); w.run(wctx, s.q) }()
+	bg.Go(func() { s.src.seedPending(ctx) })
 	bg.Go(func() { s.listenDB(ctx) })
 	bg.Go(func() { s.statsLoop(ctx, deps.StatsEvery) })
 	bg.Go(func() { s.stormLoop(ctx) })
@@ -536,6 +537,7 @@ func (s *server) reloadAll(ctx context.Context, devs, rules bool) error {
 		if err != nil {
 			return err
 		}
+		s.src.seedPending(ctx)
 		ids := s.src.ids()
 		keep := func(id int64) bool { _, ok := ids[id]; return ok }
 		s.lim.prune(keep)
