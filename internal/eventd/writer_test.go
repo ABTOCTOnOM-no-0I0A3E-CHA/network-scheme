@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,9 @@ func TestEncodeVarbindsFitsAndTruncates(t *testing.T) {
 	var got []map[string]any
 	if err := json.Unmarshal(out, &got); err != nil || len(got) != 3 || dropped != 0 {
 		t.Fatalf("small: %v len=%d dropped=%d", err, len(got), dropped)
+	}
+	if out, _ := encodeVarbinds([]trap.Varbind{{OID: "1.3", Type: "OctetString", Value: "a<b>&c"}}); !strings.Contains(string(out), "a<b>&c") {
+		t.Errorf("HTML characters escaped: %s", out)
 	}
 	/* worst case of the limits: 128 varbinds, 128 sub-ids, 2 KiB values of characters that JSON escapes */
 	for _, val := range []string{strings.Repeat("a", trap.MaxValueLen), strings.Repeat(`"`, trap.MaxValueLen), strings.Repeat("\t", trap.MaxValueLen), strings.Repeat("é", trap.MaxValueLen/2)} {
@@ -107,7 +111,7 @@ func TestOneBadRowNeverFailsTheBatch(t *testing.T) {
 
 /* The queue is bounded, never blocks the receivers, and hands over batches by size or time. */
 func TestQueueBoundsAndBatches(t *testing.T) {
-	q := newQueue(3)
+	q := newQueue(3, 1<<20)
 	for i := range 3 {
 		if !q.push(event{dev: int64(i)}) {
 			t.Fatalf("push %d refused", i)
@@ -335,4 +339,54 @@ func (f *flakyEnq) EnqueuePollNow(context.Context, pgx.Tx, int64) error {
 		return errors.New("boom")
 	}
 	return nil
+}
+
+/* A writer that never finishes and max-size traps cannot grow the queue past its byte budget, nor the heap past a bound. */
+func TestQueueByteBudgetBoundsMemory(t *testing.T) {
+	const budget = 8 << 20
+	q := newQueue(10_000, budget)
+	oid := strings.TrimSuffix(strings.Repeat("1.", trap.MaxOIDSubIDs), ".")
+	vs := make([]trap.Varbind, trap.MaxVarbinds)
+	for i := range vs {
+		vs[i] = trap.Varbind{OID: oid, Type: "OctetString", Value: strings.Repeat("a", trap.MaxValueLen)}
+	}
+	vb, _ := encodeVarbinds(vs)
+	if len(vb) > maxVarbindsJSON {
+		t.Fatalf("serialized %d bytes, limit %d", len(vb), maxVarbindsJSON)
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	var kept [][]byte /* every event owns its bytes, as a decoded trap does */
+	accepted, dropped := 0, 0
+	for range 5_000 { /* 5000 x ~15 KiB = 75 MiB offered to an 8 MiB budget */
+		own := append([]byte(nil), vb...)
+		if q.push(event{kind: kindTrap, trapOID: "1.3.6.1.4.1.1", name: "x", varbinds: own}) {
+			accepted++
+			kept = append(kept, own)
+		} else {
+			dropped++
+		}
+		if q.usedBytes() > budget {
+			t.Fatalf("queue holds %d bytes, budget %d", q.usedBytes(), budget)
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if dropped == 0 || accepted == 0 || accepted*len(vb) > budget {
+		t.Errorf("accepted %d dropped %d", accepted, dropped)
+	}
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 2*budget {
+		t.Errorf("heap grew by %d bytes, budget %d", grown, budget)
+	}
+	runtime.KeepAlive(kept)
+	/* the batch in flight keeps its bytes until the writer releases it */
+	batch, _ := q.next(100, time.Millisecond)
+	if q.usedBytes() <= budget-int64(len(batch))*int64(len(vb)) {
+		t.Errorf("bytes of the batch in flight were returned early: %d", q.usedBytes())
+	}
+	q.release(batch)
+	if !q.push(event{kind: kindTrap, varbinds: vb}) {
+		t.Error("released budget not reusable")
+	}
 }

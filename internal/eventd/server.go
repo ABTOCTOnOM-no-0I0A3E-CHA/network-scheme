@@ -198,7 +198,7 @@ func newServer(cfg config.EventD, deps Deps) *server {
 		enq = e
 	}
 	s.src = newSources(deps.Priv, deps.Pub, reg, s.now, s.log)
-	s.q = newQueue(cfg.QueueSize)
+	s.q = newQueue(cfg.QueueSize, cfg.QueueBytes)
 	s.lim = newLimiter(cfg.RatePerSource, cfg.RateBurst)
 	s.slowDev, s.slowAll = newLimiterF(slowDevRate, slowDevBurst), newLimiterF(slowAllRate, slowAllBurst)
 	s.storm = newStorm(s.emit)

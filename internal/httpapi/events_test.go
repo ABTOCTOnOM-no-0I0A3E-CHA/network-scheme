@@ -119,6 +119,21 @@ func TestEventsFullTextSearch(t *testing.T) {
 	if len(got.Items) != 1 || got.Items[0].Kind != "trap" || got.Items[0].Severity != nil || got.Items[0].Identified {
 		t.Errorf("q=trap name = %+v", got.Items)
 	}
+	/* the search covers varbind values, not the JSON key names of the stored varbinds */
+	if _, err := f.env.Pool("postgres").Exec(context.Background(),
+		`INSERT INTO events.trap (ts, device_id, version, trap_oid, name, severity, varbinds, identified) VALUES ($1, $2, 2, '1.3.6.1.4.1.99.8', 'portEvent', NULL, '[{"oid":"1.3.6.1.2.1.2.2.1.1","type":"OctetString","value":"uplinkport"}]', false)`,
+		now.Add(-4*time.Minute), dev); err != nil {
+		t.Fatal(err)
+	}
+	type kinds struct{ Items []struct{ Kind string } }
+	for _, word := range []string{"oid", "type", "value"} {
+		if got := decode[kinds](t, f.getEvents(viewer, url.Values{"q": {word}})); len(got.Items) != 0 {
+			t.Errorf("q=%s matched JSON keys or types: %+v", word, got.Items)
+		}
+	}
+	if got := decode[kinds](t, f.getEvents(viewer, url.Values{"q": {"uplinkport"}})); len(got.Items) != 1 || got.Items[0].Kind != "trap" {
+		t.Errorf("q=varbind value = %+v", got.Items)
+	}
 	if got := decode[eventsResp](t, f.getEvents(viewer, url.Values{"q": {"nonexistentword"}})); len(got.Items) != 0 {
 		t.Errorf("no match = %+v", got.Items)
 	}
@@ -349,15 +364,17 @@ func TestTrapRules(t *testing.T) {
 	}
 
 	for name, b := range map[string]map[string]string{
-		"leading dot":    {"trap_oid": "." + oid, "name": "x", "severity": "info"},
-		"letters":        {"trap_oid": "1.3.6.a", "name": "x", "severity": "info"},
-		"empty sub-id":   {"trap_oid": "1.3..6", "name": "x", "severity": "info"},
-		"sub-id too big": {"trap_oid": "1.3.4294967296", "name": "x", "severity": "info"},
-		"129 sub-ids":    {"trap_oid": strings.TrimSuffix(strings.Repeat("1.", 129), "."), "name": "x", "severity": "info"},
-		"empty name":     {"trap_oid": f.newOID(), "name": "", "severity": "info"},
-		"long name":      {"trap_oid": f.newOID(), "name": strings.Repeat("n", 1025), "severity": "info"},
-		"control char":   {"trap_oid": f.newOID(), "name": "a\x07b", "severity": "info"},
-		"bad severity":   {"trap_oid": f.newOID(), "name": "x", "severity": "critical"},
+		"leading dot":     {"trap_oid": "." + oid, "name": "x", "severity": "info"},
+		"letters":         {"trap_oid": "1.3.6.a", "name": "x", "severity": "info"},
+		"empty sub-id":    {"trap_oid": "1.3..6", "name": "x", "severity": "info"},
+		"sub-id too big":  {"trap_oid": "1.3.4294967296", "name": "x", "severity": "info"},
+		"leading zero":    {"trap_oid": "1.3.06", "name": "x", "severity": "info"},
+		"over 1024 bytes": {"trap_oid": strings.TrimSuffix(strings.Repeat("4294967295.", 100), "."), "name": "x", "severity": "info"},
+		"129 sub-ids":     {"trap_oid": strings.TrimSuffix(strings.Repeat("1.", 129), "."), "name": "x", "severity": "info"},
+		"empty name":      {"trap_oid": f.newOID(), "name": "", "severity": "info"},
+		"long name":       {"trap_oid": f.newOID(), "name": strings.Repeat("n", 1025), "severity": "info"},
+		"control char":    {"trap_oid": f.newOID(), "name": "a\x07b", "severity": "info"},
+		"bad severity":    {"trap_oid": f.newOID(), "name": "x", "severity": "critical"},
 	} {
 		t.Run(name, func(t *testing.T) { wantError(t, post(admin, b), http.StatusBadRequest, "bad_request") })
 	}

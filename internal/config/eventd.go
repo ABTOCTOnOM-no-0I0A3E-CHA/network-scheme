@@ -18,6 +18,9 @@ const (
 	DefaultSyslogTLS  = "0.0.0.0:6514"
 	DefaultTrapUDP    = "0.0.0.0:162"
 	defaultQueueSize  = 10_000
+	defaultQueueBytes = 64 << 20
+	minQueueBytes     = 1 << 20
+	maxQueueBytes     = 4 << 30
 	defaultBatchSize  = 1_000
 	defaultBatchEvery = time.Second
 	defaultRate       = 200
@@ -39,7 +42,7 @@ read-domain key pair are files named here. A listener address is host:port, or
 The TLS listener stays disabled while tls_cert_file / tls_key_file are unset.
 */
 type EventD struct {
-	/* Instance names this process in events.eventd_stats; empty selects the host name. */
+	/* Instance names this process in events.eventd_stats; empty selects the host name (a new name per container, so deployments set it). */
 	Instance       string `yaml:"instance"`
 	DB             DB     `yaml:"db"`
 	ReadKeyFile    string `yaml:"read_key_file"`
@@ -52,7 +55,9 @@ type EventD struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 
-	QueueSize     int           `yaml:"queue_size"`
+	QueueSize int `yaml:"queue_size"`
+	/* QueueBytes is the memory budget of the queue (and the batch being written); events over it are dropped. */
+	QueueBytes    int64         `yaml:"queue_bytes"`
 	BatchSize     int           `yaml:"batch_size"`
 	BatchInterval time.Duration `yaml:"batch_interval"`
 	/* RatePerSource is events per second per source; RateBurst is the bucket size. */
@@ -107,6 +112,9 @@ func (c *EventD) ApplyDefaults() {
 			*p = def
 		}
 	}
+	if c.QueueBytes == 0 {
+		c.QueueBytes = defaultQueueBytes
+	}
 	if c.BatchInterval == 0 {
 		c.BatchInterval = defaultBatchEvery
 	}
@@ -124,6 +132,8 @@ func (c EventD) Validate() error {
 		return errors.New("tls_cert_file and tls_key_file go together")
 	case c.QueueSize < 1 || c.QueueSize > maxQueueSize:
 		return fmt.Errorf("queue_size must be 1..%d", maxQueueSize)
+	case c.QueueBytes < minQueueBytes || c.QueueBytes > maxQueueBytes:
+		return fmt.Errorf("queue_bytes must be %d..%d", minQueueBytes, int64(maxQueueBytes))
 	case c.BatchSize < 1 || c.BatchSize > maxBatchSize:
 		return fmt.Errorf("batch_size must be 1..%d", maxBatchSize)
 	case c.BatchInterval < 10*time.Millisecond || c.BatchInterval > time.Minute:

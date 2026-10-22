@@ -34,8 +34,10 @@ CREATE TABLE events.trap (
     -- 128 varbinds x 2 KiB values plus JSON overhead stays under 300000 bytes.
     varbinds   jsonb       NOT NULL CHECK (octet_length(varbinds::text) <= 300000),
     identified bool        NOT NULL,
+    -- Full-text search covers the varbind string values only, not the JSON keys (oid, type, value).
     tsv        tsvector    GENERATED ALWAYS AS (
-        to_tsvector('simple', name || ' ' || trap_oid || ' ' || varbinds::text)) STORED
+        jsonb_to_tsvector('simple', varbinds, '["string"]') ||
+        to_tsvector('simple', coalesce(name, '') || ' ' || trap_oid)) STORED
 );
 
 -- Per source and minute: how many events above the rate limit were folded.

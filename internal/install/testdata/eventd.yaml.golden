@@ -1,4 +1,6 @@
 # Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+# Fixed name of this process in the stats table (one row; the container host name changes on every recreation).
+instance: "local"
 db:
   host: "postgres"
   port: 5432

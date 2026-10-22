@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/beekamai/network-scheme/internal/audit"
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -402,9 +403,9 @@ func (s *server) listTrapRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-/* validTrapOID accepts a dotted numeric OID of 1..128 sub-identifiers, each below 2^32, without a leading dot. */
+/* validTrapOID accepts the canonical form the trap decoder produces: 1..128 sub-identifiers, each below 2^32, no leading dot or zeros, at most trap.MaxTrapOIDLen bytes. */
 func validTrapOID(oid string) bool {
-	if oid == "" || len(oid) > maxTrapRuleOID {
+	if oid == "" || len(oid) > trap.MaxTrapOIDLen {
 		return false
 	}
 	parts := strings.Split(oid, ".")
@@ -412,7 +413,7 @@ func validTrapOID(oid string) bool {
 		return false
 	}
 	for _, p := range parts {
-		if p == "" || len(p) > 10 {
+		if p == "" || len(p) > 10 || (len(p) > 1 && p[0] == '0') {
 			return false
 		}
 		for _, c := range p {

@@ -64,7 +64,7 @@ type SecretsInput struct {
 
 /*
 WriteSecrets creates dir (0700) with every installation secret: role
-passwords db_{postgres,migrator,api,cli}_password (32 random bytes,
+passwords db_{postgres,migrator,api,cli,poller,eventd}_password (32 random bytes,
 base64url), api_data_key and executor_sealing_key (32 random bytes, base64),
 domain_{read,write,backup}.key (X25519 private keys, base64), ca.crt/ca.key
 web.crt/web.key and syslog.crt/syslog.key. Files are created with O_EXCL in a temporary sibling

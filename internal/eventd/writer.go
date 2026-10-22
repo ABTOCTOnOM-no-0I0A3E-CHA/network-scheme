@@ -54,6 +54,7 @@ func (w *writer) run(ctx context.Context, q *queue) {
 			return
 		}
 		w.write(ctx, batch)
+		q.release(batch)
 	}
 }
 

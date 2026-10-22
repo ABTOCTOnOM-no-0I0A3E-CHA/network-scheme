@@ -93,7 +93,7 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
   const ciphertext = await seal(read.public_key, `device:${id}`, "snmp2c", { community: COMMUNITY });
   let res = await api.put(`/api/devices/${id}/profiles/snmp2c`, { headers: await csrf(), data: { ciphertext, key_version: read.key_version } });
   expect(res.status()).toBe(204);
-  /* A profile change sends no notification to eventd, a device change does: this one makes it reread the profile now. */
+  /* The profile change updates core.device (RefreshInsecure), whose device_changed NOTIFY makes eventd reread the profile; this patch only slows the polls. */
   await slowPolls(id);
 
   /* Syslog over UDP and TCP, attributed to the device by the packet's source address. */
@@ -149,6 +149,9 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
       { timeout: 60_000, intervals: [2_000] },
     )
     .toBe(true);
+  /* eventd was force-recreated in CI: the fixed instance name keeps it one row, not one per container. */
+  const status = (await (await api.get("/api/system/status")).json()) as { eventd: { instance: string }[] };
+  expect(status.eventd.map((e) => e.instance)).toEqual(["local"]);
   await page.reload();
   await expect(page.getByRole("table", { name: "Приём событий (eventd)" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Неизвестный источник" })).toBeVisible();

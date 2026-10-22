@@ -11,8 +11,14 @@ import (
 	"github.com/beekamai/network-scheme/internal/events/trap"
 )
 
-/* maxVarbindsJSON bounds the serialized varbinds; the table allows 300000 bytes of jsonb text, which renders a little wider than compact JSON. */
-const maxVarbindsJSON = 290_000
+/*
+maxVarbindsJSON bounds the serialized varbinds. It is below the 16384 bytes of
+jsonb text up to which the API shows varbinds in listings (jsonb renders about
+5 bytes wider per varbind than compact JSON, 128 varbinds at most), so every
+stored trap is displayable, and a queue of traps stays small. The table CHECK
+(300000) only guards against bugs.
+*/
+const maxVarbindsJSON = 15_360
 
 /* snmpVersion reads the version from the BER header of an SNMP message without decoding anything else. */
 func snmpVersion(b []byte) (gosnmp.SnmpVersion, bool) {
@@ -147,7 +153,7 @@ func encodeVarbinds(vbs []trap.Varbind) (out []byte, dropped int) {
 	var buf bytes.Buffer
 	buf.WriteByte('[')
 	for i, v := range vbs {
-		item, err := json.Marshal(varbindJSON{OID: v.OID, Type: v.Type, Value: v.Value, Truncated: v.Truncated})
+		item, err := marshalVarbind(varbindJSON{OID: v.OID, Type: v.Type, Value: v.Value, Truncated: v.Truncated})
 		if err != nil || buf.Len()+len(item)+1+markerRoom > maxVarbindsJSON {
 			dropped = len(vbs) - i
 			if i > 0 {
@@ -163,6 +169,17 @@ func encodeVarbinds(vbs []trap.Varbind) (out []byte, dropped int) {
 	}
 	buf.WriteByte(']')
 	return buf.Bytes(), dropped
+}
+
+/* marshalVarbind is json.Marshal without HTML escaping (<, >, & stay one byte instead of six). */
+func marshalVarbind(v varbindJSON) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 /* markerRoom is the space kept for the truncation marker: an OID of at most 128 sub-identifiers plus the field names. */

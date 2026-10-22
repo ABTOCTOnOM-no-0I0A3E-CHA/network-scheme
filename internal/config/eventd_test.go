@@ -23,7 +23,7 @@ func TestLoadEventDDefaults(t *testing.T) {
 		t.Errorf("listeners = %q %q %q %q", c.SyslogUDP, c.SyslogTCP, c.SyslogTLS, c.TrapUDP)
 	}
 	if c.QueueSize != 10_000 || c.BatchSize != 1000 || c.BatchInterval != time.Second || c.RatePerSource != 200 || c.RateBurst != 400 ||
-		c.MaxTCPConns != 256 || c.TCPIdle != 5*time.Minute || c.DB.Port != 5432 {
+		c.QueueBytes != 64<<20 || c.MaxTCPConns != 256 || c.TCPIdle != 5*time.Minute || c.DB.Port != 5432 {
 		t.Errorf("defaults = %+v", c)
 	}
 }
