@@ -1,6 +1,7 @@
 package trap_test
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,8 +49,8 @@ func TestStandardTraps(t *testing.T) {
 		{"1.3.6.1.6.3.1.1.5.5", "authenticationFailure", "warning", false, 0, nil},
 		{"1.0.8802.1.1.2.0.0.1", "lldpRemTablesChange", "info", false, 0, nil},
 		{"1.3.6.1.2.1.47.2.0.1", "entConfigChange", "info", false, 0, nil},
-		{"1.3.6.1.2.1.131.0.1", "entStateOperEnabled", "info", false, 0, nil},
-		{"1.3.6.1.2.1.131.0.2", "entStateOperDisabled", "high", false, 0, nil},
+		{"1.3.6.1.2.1.131.0.1", "entStateOperEnabled", "info", true, 0, nil},
+		{"1.3.6.1.2.1.131.0.2", "entStateOperDisabled", "high", true, 0, nil},
 	}
 	for _, c := range tests {
 		t.Run(c.name, func(t *testing.T) {
@@ -232,5 +233,93 @@ func TestRejects(t *testing.T) {
 	p.Variables = p.Variables[:1]
 	if _, err := trap.Normalize(p); err == nil {
 		t.Fatal("missing snmpTrapOID accepted")
+	}
+}
+
+func TestTrapOIDBound(t *testing.T) {
+	big := strings.TrimSuffix(strings.Repeat("4294967295.", 128), ".") /* 128 sub-identifiers, 1407 bytes */
+	if len(big) != 1407 {
+		t.Fatalf("fixture len %d", len(big))
+	}
+	if _, err := trap.Normalize(v2(big)); err == nil {
+		t.Fatal("1407-byte trap OID accepted")
+	}
+	p := &gosnmp.SnmpPacket{Version: gosnmp.Version1, PDUType: gosnmp.Trap}
+	p.Enterprise, p.GenericTrap = big, 6
+	if _, err := trap.Normalize(p); err == nil {
+		t.Fatal("v1 enterprise OID over bound accepted")
+	}
+	ok := strings.TrimSuffix(strings.Repeat("4294967295.", 93), ".") /* 1022 bytes */
+	tr := norm(t, v2(ok))
+	m, identified := trap.Map(nil, tr, nil)
+	if identified || len(m.Name) > 1024 || m.Severity != "" {
+		t.Fatalf("unidentified: name %d bytes, %+v", len(m.Name), m)
+	}
+}
+
+func TestBadRunesBecomeHex(t *testing.T) {
+	val := func(b string) string {
+		return norm(t, v2("1.3.6.1.4.1.1", pdu(".1.3.6.1.4.1.1.1", gosnmp.OctetString, []byte(b)))).Varbinds[0].Value
+	}
+	for _, r := range []rune{0x2028, 0x2029, 0x80, 0x9f, 0x202a, 0x202e, 0x2066, 0x2069, 0x7f, 0x01} {
+		if got := val("a" + string(r) + "b"); strings.ContainsRune(got, r) {
+			t.Fatalf("U+%04X kept: %q", r, got)
+		}
+	}
+	if got := val("a\tb"); got != "a\tb" {
+		t.Fatalf("tab: %q", got)
+	}
+	ip := norm(t, v2("1.3.6.1.4.1.1", pdu(".1.3.6.1.4.1.1.1", gosnmp.IPAddress, "1.2.3.4\u2028"))).Varbinds[0].Value
+	if ip != "1.2.3.4" {
+		t.Fatalf("ip: %q", ip)
+	}
+}
+
+func TestDuplicateHeaderVarbinds(t *testing.T) {
+	tr := norm(t, v2("1.3.6.1.4.1.1",
+		pdu(".1.3.6.1.2.1.1.3.0", gosnmp.TimeTicks, uint32(5)),
+		pdu(".1.3.6.1.6.3.1.1.4.1.0", gosnmp.ObjectIdentifier, ".1.3.6.1.6.3.1.1.5.3"),
+		pdu(".1.3.6.1.6.3.1.1.4.3.0", gosnmp.ObjectIdentifier, ".1.3.6.1.4.1.9"),
+		pdu(".1.3.6.1.4.1.1.1", gosnmp.Integer, 1)))
+	if tr.OID != "1.3.6.1.4.1.1" || tr.Uptime != 1234 || len(tr.Varbinds) != 1 || tr.Varbinds[0].OID != "1.3.6.1.4.1.1.1" {
+		t.Fatalf("%+v", tr)
+	}
+	p := &gosnmp.SnmpPacket{Version: gosnmp.Version1, PDUType: gosnmp.Trap, Variables: []gosnmp.SnmpPDU{
+		pdu(".1.3.6.1.6.3.1.1.4.3.0", gosnmp.ObjectIdentifier, ".1.3.6.1.4.1.666"),
+		pdu(".1.3.6.1.4.1.1.1", gosnmp.Integer, 1)}}
+	p.Enterprise, p.GenericTrap = "1.3.6.1.4.1.35265", 6
+	tr = norm(t, p)
+	n := 0
+	for _, v := range tr.Varbinds {
+		if v.OID == "1.3.6.1.6.3.1.1.4.3.0" {
+			n++
+			if v.Value != "1.3.6.1.4.1.35265" {
+				t.Fatalf("enterprise value %q", v.Value)
+			}
+		}
+	}
+	if n != 1 || len(tr.Varbinds) != 2 {
+		t.Fatalf("%+v", tr.Varbinds)
+	}
+}
+
+func TestTruncatedFlag(t *testing.T) {
+	vb := func(typ gosnmp.Asn1BER, v any) trap.Varbind {
+		return norm(t, v2("1.3.6.1.4.1.1", pdu(".1.3.6.1.4.1.1.1", typ, v))).Varbinds[0]
+	}
+	if v := vb(gosnmp.OctetString, []byte(strings.Repeat("a", 2048))); v.Truncated {
+		t.Fatal("exact fit flagged")
+	}
+	if v := vb(gosnmp.OctetString, []byte(strings.Repeat("a", 2049))); !v.Truncated || len(v.Value) != 2048 {
+		t.Fatalf("text: %v %d", v.Truncated, len(v.Value))
+	}
+	if v := vb(gosnmp.OctetString, bytes.Repeat([]byte{0xff}, 1025)); !v.Truncated || len(v.Value) != 2048 {
+		t.Fatalf("hex: %v %d", v.Truncated, len(v.Value))
+	}
+	if v := vb(gosnmp.Opaque, make([]byte, 2000)); !v.Truncated {
+		t.Fatal("opaque hex not flagged")
+	}
+	if v := vb(gosnmp.OctetString, []byte("short")); v.Truncated {
+		t.Fatal("short flagged")
 	}
 }

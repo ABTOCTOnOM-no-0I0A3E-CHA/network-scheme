@@ -114,6 +114,9 @@ func FuzzNormalize(f *testing.F) {
 		if len(tr.Varbinds) > trap.MaxVarbinds {
 			t.Fatalf("%d varbinds", len(tr.Varbinds))
 		}
+		if len(tr.OID) > trap.MaxTrapOIDLen {
+			t.Fatalf("trap OID %d bytes", len(tr.OID))
+		}
 		oids := []string{tr.OID}
 		for _, v := range tr.Varbinds {
 			oids = append(oids, v.OID)
@@ -121,8 +124,8 @@ func FuzzNormalize(f *testing.F) {
 				t.Fatalf("bad value %q", v.Value)
 			}
 			for _, r := range v.Value {
-				if r < 0x20 || r == 0x7f {
-					t.Fatalf("control char in %q", v.Value)
+				if badRune(r) {
+					t.Fatalf("bad character U+%04X in %q", r, v.Value)
 				}
 			}
 		}
@@ -133,4 +136,10 @@ func FuzzNormalize(f *testing.F) {
 		}
 		trap.Map(nil, tr, nil)
 	})
+}
+
+/* badRune is the set of characters that must never appear in a rendered value: C0 except tab, DEL, C1, bidi controls, U+2028/U+2029. */
+func badRune(r rune) bool {
+	return (r < 0x20 && r != '	') || (r >= 0x7f && r <= 0x9f) ||
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029
 }

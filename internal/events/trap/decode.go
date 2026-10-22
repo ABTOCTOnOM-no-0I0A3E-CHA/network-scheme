@@ -13,7 +13,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/gosnmp/gosnmp"
@@ -24,6 +23,8 @@ const (
 	MaxVarbinds  = 128
 	MaxValueLen  = 2048
 	MaxOIDSubIDs = 128
+	/* MaxTrapOIDLen is the byte bound of the trap OID, matching the events.trap name CHECK (Map uses the OID as the name of unidentified traps). */
+	MaxTrapOIDLen = 1024
 
 	maxHexBytes   = MaxValueLen / 2
 	maxSubID      = math.MaxUint32
@@ -37,6 +38,8 @@ const (
 /* Varbind is one variable binding; Value is always text (see Normalize). */
 type Varbind struct {
 	OID, Type, Value string
+	/* Truncated is true when Value was cut to the limit (text) or to half the limit in bytes (hex). */
+	Truncated bool
 }
 
 /* Trap is a trap in SNMPv2 form: Version is the version of the received packet (1, 2 or 3). */
@@ -53,7 +56,12 @@ SNMPv1 traps are converted as in RFC 3584: snmpTrapOID is the standard
 snmpTraps arc for generic 0..5 and enterprise.0.specific otherwise, and an
 snmpTrapEnterprise.0 varbind is appended. For v2c/v3 the leading sysUpTime.0
 and snmpTrapOID.0 varbinds are removed into Uptime and OID. Packets over the
-limits or with malformed OIDs are rejected as a whole.
+limits or with malformed OIDs are rejected as a whole. Duplicate sysUpTime.0,
+snmpTrapOID.0 and snmpTrapEnterprise.0 varbinds after the fixed positions are
+dropped, so a v1 trap carries exactly one snmpTrapEnterprise.0 (the packet's).
+
+The v1 agent-addr and any snmpTrapAddress.0 varbind are claimed by the device
+and are never used to identify the source: eventd uses the UDP peer address.
 */
 func Normalize(p *gosnmp.SnmpPacket) (Trap, error) {
 	if p == nil {
@@ -86,6 +94,9 @@ func normalizeV1(p *gosnmp.SnmpPacket) (Trap, error) {
 		return Trap{}, fmt.Errorf("trap: %d varbinds, limit %d", len(p.Variables)+1, MaxVarbinds)
 	}
 	ent, err := cleanOID(p.Enterprise)
+	if err == nil && len(ent) > MaxTrapOIDLen {
+		err = errors.New("OID too long")
+	}
 	if err != nil {
 		return Trap{}, fmt.Errorf("trap: enterprise: %w", err)
 	}
@@ -100,7 +111,7 @@ func normalizeV1(p *gosnmp.SnmpPacket) (Trap, error) {
 			return Trap{}, errors.New("trap: bad specific-trap")
 		}
 		oid = ent + ".0." + strconv.Itoa(p.SpecificTrap)
-		if strings.Count(oid, ".")+1 > MaxOIDSubIDs {
+		if strings.Count(oid, ".")+1 > MaxOIDSubIDs || len(oid) > MaxTrapOIDLen {
 			return Trap{}, errors.New("trap: trap OID too long")
 		}
 	}
@@ -132,7 +143,7 @@ func normalizeV2(p *gosnmp.SnmpPacket, version uint8) (Trap, error) {
 	}
 	s, _ := vs[1].Value.(string)
 	oid, err := cleanOID(s)
-	if vs[1].Type != gosnmp.ObjectIdentifier || err != nil {
+	if vs[1].Type != gosnmp.ObjectIdentifier || err != nil || len(oid) > MaxTrapOIDLen {
 		return Trap{}, errors.New("trap: bad snmpTrapOID value")
 	}
 	t := Trap{Version: version, OID: oid, Uptime: uint32(up)}
@@ -149,11 +160,15 @@ func renderAll(vs []gosnmp.SnmpPDU) ([]Varbind, error) {
 		if err != nil {
 			return nil, fmt.Errorf("trap: varbind name: %w", err)
 		}
-		typ, val, err := render(v)
+		switch oid {
+		case oidSysUpTime, oidTrapOID, oidTrapEnt:
+			continue
+		}
+		typ, val, cut, err := render(v)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Varbind{OID: oid, Type: typ, Value: val})
+		out = append(out, Varbind{OID: oid, Type: typ, Value: val, Truncated: cut})
 	}
 	return out, nil
 }
@@ -221,8 +236,8 @@ var uintTypes = map[gosnmp.Asn1BER]string{
 	gosnmp.TimeTicks: "TimeTicks", gosnmp.Counter64: "Counter64",
 }
 
-/* render returns the type name and bounded text of a value. */
-func render(v gosnmp.SnmpPDU) (typ, val string, err error) {
+/* render returns the type name and bounded text of a value; cut reports a truncated value. */
+func render(v gosnmp.SnmpPDU) (typ, val string, cut bool, err error) {
 	switch v.Type {
 	case gosnmp.Integer:
 		typ = "Integer"
@@ -239,23 +254,23 @@ func render(v gosnmp.SnmpPDU) (typ, val string, err error) {
 	case gosnmp.OctetString:
 		typ = "OctetString"
 		if b, ok := v.Value.([]byte); ok {
-			val = octets(b)
+			val, cut = octets(b)
 		}
 	case gosnmp.Opaque, gosnmp.BitString, gosnmp.NsapAddress:
 		typ = "Opaque"
 		if b, ok := v.Value.([]byte); ok {
-			val = hexOf(b)
+			val, cut = hexOf(b)
 		}
 	case gosnmp.ObjectIdentifier:
 		typ = "ObjectIdentifier"
 		s, _ := v.Value.(string)
 		if val, err = cleanOID(s); err != nil {
-			return "", "", fmt.Errorf("trap: OID value: %w", err)
+			return "", "", false, fmt.Errorf("trap: OID value: %w", err)
 		}
 	case gosnmp.IPAddress:
 		typ = "IpAddress"
 		if s, ok := v.Value.(string); ok {
-			val = sanitize(s)
+			val, cut = sanitize(s)
 		}
 	case gosnmp.OpaqueFloat:
 		typ = "Float"
@@ -283,18 +298,37 @@ func render(v gosnmp.SnmpPDU) (typ, val string, err error) {
 	default:
 		typ = "Unknown"
 	}
-	return typ, truncate(val), nil
+	return typ, val, cut, nil
 }
 
-func hexOf(b []byte) string {
-	if len(b) > maxHexBytes {
+func hexOf(b []byte) (string, bool) {
+	cut := len(b) > maxHexBytes
+	if cut {
 		b = b[:maxHexBytes]
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), cut
 }
 
-/* octets renders an OCTET STRING as text when it is clean UTF-8 without control characters, else as hex. */
-func octets(b []byte) string {
+/*
+badRune reports characters that must not reach stored text: C0 controls
+except tab, DEL, C1 controls, bidi embeddings/overrides/isolates and the
+line and paragraph separators. It is identical to badRune in the syslog
+parser (internal/events/syslog); keep the two in sync.
+*/
+func badRune(r rune) bool {
+	switch {
+	case r < 0x20:
+		return r != '\t'
+	case r == 0x7f, r >= 0x80 && r <= 0x9f:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x2028, r == 0x2029:
+		return true
+	}
+	return false
+}
+
+/* octets renders an OCTET STRING as text when it is clean UTF-8 without bad characters, else as hex. */
+func octets(b []byte) (string, bool) {
 	for len(b) > 0 && b[len(b)-1] == 0 {
 		b = b[:len(b)-1]
 	}
@@ -306,35 +340,35 @@ func octets(b []byte) string {
 			c = c[:len(c)-1]
 		}
 	}
-	if !utf8.Valid(c) {
-		return hexOf(b)
-	}
-	for _, r := range string(c) {
-		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return hexOf(b)
+	if utf8.Valid(c) {
+		clean := true
+		for _, r := range string(c) {
+			if r == utf8.RuneError || badRune(r) {
+				clean = false
+				break
+			}
+		}
+		if clean {
+			return string(c), len(b) > MaxValueLen
 		}
 	}
-	return string(c)
+	return hexOf(b)
 }
 
-/* sanitize drops invalid UTF-8 and control or format characters. */
-func sanitize(s string) string {
-	return truncate(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+/* sanitize drops invalid UTF-8 and bad characters, then cuts to MaxValueLen on a rune boundary. */
+func sanitize(s string) (string, bool) {
+	s = strings.Map(func(r rune) rune {
+		if badRune(r) {
 			return -1
 		}
 		return r
-	}, strings.ToValidUTF8(s, "�")))
-}
-
-/* truncate cuts s to MaxValueLen bytes on a rune boundary. */
-func truncate(s string) string {
+	}, strings.ToValidUTF8(s, "�"))
 	if len(s) <= MaxValueLen {
-		return s
+		return s, false
 	}
 	cut := MaxValueLen
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut]
+	return s[:cut], true
 }

@@ -14,7 +14,11 @@ const (
 	SevDisaster = "disaster"
 )
 
-/* Mapped is the named event a trap stands for; IfIndex is 0 when not applicable. */
+/*
+Mapped is the named event a trap stands for; IfIndex is 0 when not applicable.
+Severity == "" means unknown (unidentified trap) and is stored as SQL NULL.
+Name is at most 1024 bytes for traps produced by Normalize (OID bound).
+*/
 type Mapped struct {
 	Name, Severity string
 	AffectsState   bool
@@ -48,8 +52,8 @@ var standard = map[string]Mapped{
 		ENTITY-STATE-MIB (RFC 4268). ENTITY-SENSOR-MIB defines no
 		notifications, so power, fan and temperature alarms are vendor traps.
 	*/
-	"1.3.6.1.2.1.131.0.1": {Name: "entStateOperEnabled", Severity: SevInfo},
-	"1.3.6.1.2.1.131.0.2": {Name: "entStateOperDisabled", Severity: SevHigh},
+	"1.3.6.1.2.1.131.0.1": {Name: "entStateOperEnabled", Severity: SevInfo, AffectsState: true},
+	"1.3.6.1.2.1.131.0.2": {Name: "entStateOperDisabled", Severity: SevHigh, AffectsState: true},
 }
 
 /* Standard maps the traps of standard MIBs; linkUp and linkDown carry ifIndex. */
