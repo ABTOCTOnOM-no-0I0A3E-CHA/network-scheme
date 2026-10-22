@@ -180,6 +180,15 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/discovery/inbox", manage, s.listInbox)
 	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/accept", manage, s.acceptDiscovered)
 	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/ignore", manage, s.ignoreDiscovered)
+
+	/* Events follow device visibility; rules and system status are global permissions. */
+	rules := Policy{Perm: rbac.PermEventsManage}
+	s.route(r, http.MethodGet, "/api/events", read, s.listEvents)
+	s.route(r, http.MethodGet, "/api/events/unidentified", read, s.listUnidentified)
+	s.route(r, http.MethodGet, "/api/trap-rules", rules, s.listTrapRules)
+	s.route(r, http.MethodPost, "/api/trap-rules", rules, s.createTrapRule)
+	s.route(r, http.MethodDelete, "/api/trap-rules/{id}", rules, s.deleteTrapRule)
+	s.route(r, http.MethodGet, "/api/system/status", Policy{Perm: rbac.PermSystemRead}, s.systemStatus)
 	return r
 }
 

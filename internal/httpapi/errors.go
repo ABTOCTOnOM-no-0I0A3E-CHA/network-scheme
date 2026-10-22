@@ -45,6 +45,7 @@ var (
 	errStaleKey         = apiError{http.StatusBadRequest, "stale_key", "Учётные данные зашифрованы устаревшим ключом, обновите страницу"}
 	errCIDRTooWide      = apiError{http.StatusBadRequest, "cidr_too_wide", "Подсеть шире /16 (более 65 536 адресов)"}
 	errTooManyPoints    = apiError{http.StatusBadRequest, "too_many_points", "Слишком много точек: сузьте период или увеличьте шаг"}
+	errTrapRuleExists   = apiError{http.StatusConflict, "trap_rule_exists", "Правило для этого OID уже есть"}
 	errLocked           = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited      = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errInternal         = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
@@ -98,6 +99,8 @@ var knownErrors = []struct {
 	{devices.ErrNotPending, errNotPending},
 	{devices.ErrInvalid, errBadRequest},
 	{errKeyVersion, errStaleKey},
+	{errTrapRuleDup, errTrapRuleExists},
+	{errTrapRuleNotFound, errNotFound},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

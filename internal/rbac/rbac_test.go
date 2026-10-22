@@ -48,6 +48,23 @@ func TestCanGlobalAndGroupScoped(t *testing.T) {
 	}
 }
 
+func TestEventsAndSystemPermissions(t *testing.T) {
+	has := func(r rbac.Role, p rbac.Perm) bool {
+		return rbac.Subject{Bindings: []rbac.Binding{{Role: r}}}.Can(p, nil, nil)
+	}
+	for _, c := range []struct {
+		role           rbac.Role
+		events, system bool
+	}{
+		{rbac.RoleAdmin, true, true}, {rbac.RoleOperator, false, true},
+		{rbac.RoleViewer, false, false}, {rbac.RoleAuditor, false, false},
+	} {
+		if has(c.role, rbac.PermEventsManage) != c.events || has(c.role, rbac.PermSystemRead) != c.system {
+			t.Errorf("%s: events.manage=%v system.read=%v", c.role, has(c.role, rbac.PermEventsManage), has(c.role, rbac.PermSystemRead))
+		}
+	}
+}
+
 func TestGroupBindingCoversDescendants(t *testing.T) {
 	env := testdb.New(t)
 	ctx := context.Background()

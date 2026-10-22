@@ -1784,6 +1784,279 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Syslog and trap feed, newest first
+         * @description Only events of devices in the caller's groups are returned; a foreign
+         *     device_id answers 404. The window is at most 31 days (to defaults to now,
+         *     from to a day before to); a wider or empty one answers 400 bad_request.
+         *     q is a plain-text full-text search (words are ANDed). The cursor is opaque
+         *     and stable for events at the same instant; repeat the filters with it.
+         *     Syslog severity 0-1 maps to disaster, 2 high, 3 average, 4 warning,
+         *     5-7 info; a trap no rule named has severity null and counts as info
+         *     for severity_min. Varbinds over 16 KiB are left out. All text comes from
+         *     devices: render it as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "syslog" | "trap";
+                    device_id?: number;
+                    severity_min?: components["schemas"]["EventSeverity"];
+                    from?: string;
+                    /** @description Exclusive */
+                    to?: string;
+                    q?: string;
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of events */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Event"][];
+                            /** @description null on the last page */
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/events/unidentified": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Traps nobody could name, grouped by trap OID, newest group first
+         * @description Same visibility, window and cursor rules as the feed. last_* describe the newest trap of the group.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    from?: string;
+                    /** @description Exclusive */
+                    to?: string;
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of groups */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["UnidentifiedTrap"][];
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trap-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Operator-defined trap names and severities */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Rules ordered by id */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TrapRule"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Name a trap OID; eventd picks the rule up at once
+         * @description A second rule for the same OID answers 409 trap_rule_exists. Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Dotted numeric OID without a leading dot, at most 128 sub-identifiers below 2^32 */
+                        trap_oid: string;
+                        /** @description No control characters, no leading or trailing spaces */
+                        name: string;
+                        severity: components["schemas"]["TrapSeverity"];
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trap-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a trap rule
+         * @description Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * State of the pollers, eventd, the database and the job queues
+         * @description Pollers are derived from the devices they own: the api has no access to
+         *     the heartbeat table, so devices_reporting (devices with a known state;
+         *     the state view hides it once a poller has been silent for 90 s) is the
+         *     liveness signal.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Status */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SystemStatus"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1834,10 +2107,96 @@ export interface components {
         };
         DeviceDetail: components["schemas"]["Device"] & {
             snmp_port: number;
+            /** @description Fixed text of the poller why the device is not up; empty if none */
+            last_error: string;
             /** @description null inherits from the group */
             interval_avail_s: number | null;
             interval_metrics_s: number | null;
             interval_inventory_s: number | null;
+        };
+        /** @enum {string} */
+        EventSeverity: "info" | "warning" | "average" | "high" | "disaster";
+        /** @enum {string} */
+        TrapSeverity: "info" | "warning" | "average" | "high" | "disaster";
+        /** @description Everything but the ids and the kind comes from the device; render as text only */
+        Event: {
+            /** Format: date-time */
+            ts: string;
+            /** @enum {string} */
+            kind: "syslog" | "trap";
+            /** Format: int64 */
+            device_id: number;
+            device_name: string;
+            severity: components["schemas"]["EventSeverity"] | null;
+            /** @description Trap name (traps only) */
+            name?: string;
+            /** @description Syslog application (syslog only) */
+            app?: string;
+            /** @description Syslog message, or the trap OID */
+            text: string;
+            /** @description Always true for syslog */
+            identified: boolean;
+            /** @description Trap varbinds as received (traps only; omitted over 16 KiB) */
+            varbinds?: unknown;
+        };
+        UnidentifiedTrap: {
+            trap_oid: string;
+            /** Format: int64 */
+            count: number;
+            /** Format: date-time */
+            last_ts: string;
+            /** Format: int64 */
+            last_device_id: number;
+            last_device_name: string;
+            /** @description Varbinds of the newest trap (omitted over 16 KiB) */
+            last_varbinds?: unknown;
+        };
+        TrapRule: {
+            /** Format: int64 */
+            id: number;
+            trap_oid: string;
+            name: string;
+            severity: components["schemas"]["TrapSeverity"];
+            /** Format: date-time */
+            created_at: string;
+        };
+        SystemStatus: {
+            pollers: {
+                id: string;
+                /** Format: int64 */
+                devices: number;
+                /** Format: int64 */
+                devices_reporting: number;
+            }[];
+            eventd: {
+                instance: string;
+                /** Format: date-time */
+                updated_at: string;
+                /** Format: int64 */
+                received: number;
+                /** Format: int64 */
+                accepted: number;
+                /** Format: int64 */
+                unknown_source: number;
+                /** Format: int64 */
+                auth_failed: number;
+                /** Format: int64 */
+                rate_limited: number;
+                /** Format: int64 */
+                dropped: number;
+                queue_depth: number;
+            }[];
+            /** Format: int64 */
+            db_size_bytes: number;
+            queues: {
+                name: string;
+                /** Format: int64 */
+                available: number;
+                /** Format: int64 */
+                running: number;
+                /** Format: int64 */
+                retryable: number;
+            }[];
         };
         /**
          * @description IPv4 or IPv6 unicast host address; loopback, multicast, broadcast and unspecified are refused
@@ -1988,7 +2347,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

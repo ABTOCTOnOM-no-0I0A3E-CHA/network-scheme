@@ -903,6 +903,169 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /api/events:
+    get:
+      summary: Syslog and trap feed, newest first
+      description: |
+        Only events of devices in the caller's groups are returned; a foreign
+        device_id answers 404. The window is at most 31 days (to defaults to now,
+        from to a day before to); a wider or empty one answers 400 bad_request.
+        q is a plain-text full-text search (words are ANDed). The cursor is opaque
+        and stable for events at the same instant; repeat the filters with it.
+        Syslog severity 0-1 maps to disaster, 2 high, 3 average, 4 warning,
+        5-7 info; a trap no rule named has severity null and counts as info
+        for severity_min. Varbinds over 16 KiB are left out. All text comes from
+        devices: render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: kind
+          in: query
+          schema: { type: string, enum: [syslog, trap] }
+        - name: device_id
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: severity_min
+          in: query
+          schema: { $ref: "#/components/schemas/EventSeverity" }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Exclusive
+          schema: { type: string, format: date-time }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 4096 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: A page of events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+                  next_cursor: { type: [string, "null"], description: null on the last page }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/events/unidentified:
+    get:
+      summary: Traps nobody could name, grouped by trap OID, newest group first
+      description: Same visibility, window and cursor rules as the feed. last_* describe the newest trap of the group.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Exclusive
+          schema: { type: string, format: date-time }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 4096 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: A page of groups
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/UnidentifiedTrap" }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/trap-rules:
+    get:
+      summary: Operator-defined trap names and severities
+      x-permission: events.manage
+      responses:
+        "200":
+          description: Rules ordered by id
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TrapRule" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Name a trap OID; eventd picks the rule up at once
+      description: A second rule for the same OID answers 409 trap_rule_exists. Audited.
+      x-permission: events.manage
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [trap_oid, name, severity]
+              properties:
+                trap_oid:
+                  type: string
+                  pattern: '^[0-9]+(\.[0-9]+)*$'
+                  maxLength: 2048
+                  description: Dotted numeric OID without a leading dot, at most 128 sub-identifiers below 2^32
+                name: { type: string, minLength: 1, maxLength: 1024, description: "No control characters, no leading or trailing spaces" }
+                severity: { $ref: "#/components/schemas/TrapSeverity" }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/trap-rules/{id}:
+    delete:
+      summary: Remove a trap rule
+      description: Audited.
+      x-permission: events.manage
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/system/status:
+    get:
+      summary: State of the pollers, eventd, the database and the job queues
+      description: |
+        Pollers are derived from the devices they own: the api has no access to
+        the heartbeat table, so devices_reporting (devices with a known state;
+        the state view hides it once a poller has been silent for 90 s) is the
+        liveness signal.
+      x-permission: system.read
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemStatus" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -1013,12 +1176,95 @@ components:
       allOf:
         - $ref: "#/components/schemas/Device"
         - type: object
-          required: [snmp_port, interval_avail_s, interval_metrics_s, interval_inventory_s]
+          required: [snmp_port, interval_avail_s, interval_metrics_s, interval_inventory_s, last_error]
           properties:
             snmp_port: { type: integer }
+            last_error: { type: string, description: Fixed text of the poller why the device is not up; empty if none }
             interval_avail_s: { type: [integer, "null"], description: null inherits from the group }
             interval_metrics_s: { type: [integer, "null"] }
             interval_inventory_s: { type: [integer, "null"] }
+    EventSeverity:
+      type: string
+      enum: [info, warning, average, high, disaster]
+    TrapSeverity:
+      type: string
+      enum: [info, warning, average, high, disaster]
+    Event:
+      type: object
+      required: [ts, kind, device_id, device_name, severity, text, identified]
+      description: Everything but the ids and the kind comes from the device; render as text only
+      properties:
+        ts: { type: string, format: date-time }
+        kind: { type: string, enum: [syslog, trap] }
+        device_id: { type: integer, format: int64 }
+        device_name: { type: string }
+        severity:
+          oneOf:
+            - { $ref: "#/components/schemas/EventSeverity" }
+            - { type: "null" }
+        name: { type: string, description: Trap name (traps only) }
+        app: { type: string, description: Syslog application (syslog only) }
+        text: { type: string, description: "Syslog message, or the trap OID" }
+        identified: { type: boolean, description: Always true for syslog }
+        varbinds: { description: Trap varbinds as received (traps only; omitted over 16 KiB) }
+    UnidentifiedTrap:
+      type: object
+      required: [trap_oid, count, last_ts, last_device_id, last_device_name]
+      properties:
+        trap_oid: { type: string }
+        count: { type: integer, format: int64 }
+        last_ts: { type: string, format: date-time }
+        last_device_id: { type: integer, format: int64 }
+        last_device_name: { type: string }
+        last_varbinds: { description: Varbinds of the newest trap (omitted over 16 KiB) }
+    TrapRule:
+      type: object
+      required: [id, trap_oid, name, severity, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        trap_oid: { type: string }
+        name: { type: string }
+        severity: { $ref: "#/components/schemas/TrapSeverity" }
+        created_at: { type: string, format: date-time }
+    SystemStatus:
+      type: object
+      required: [pollers, eventd, db_size_bytes, queues]
+      properties:
+        pollers:
+          type: array
+          items:
+            type: object
+            required: [id, devices, devices_reporting]
+            properties:
+              id: { type: string }
+              devices: { type: integer, format: int64 }
+              devices_reporting: { type: integer, format: int64 }
+        eventd:
+          type: array
+          items:
+            type: object
+            required: [instance, updated_at, received, accepted, unknown_source, auth_failed, rate_limited, dropped, queue_depth]
+            properties:
+              instance: { type: string }
+              updated_at: { type: string, format: date-time }
+              received: { type: integer, format: int64 }
+              accepted: { type: integer, format: int64 }
+              unknown_source: { type: integer, format: int64 }
+              auth_failed: { type: integer, format: int64 }
+              rate_limited: { type: integer, format: int64 }
+              dropped: { type: integer, format: int64 }
+              queue_depth: { type: integer }
+        db_size_bytes: { type: integer, format: int64 }
+        queues:
+          type: array
+          items:
+            type: object
+            required: [name, available, running, retryable]
+            properties:
+              name: { type: string }
+              available: { type: integer, format: int64 }
+              running: { type: integer, format: int64 }
+              retryable: { type: integer, format: int64 }
     DeviceAddress:
       type: string
       description: IPv4 or IPv6 unicast host address; loopback, multicast, broadcast and unspecified are refused
@@ -1191,6 +1437,7 @@ components:
                 - not_pending
                 - stale_key
                 - cidr_too_wide
+                - trap_rule_exists
                 - too_many_points
                 - locked
                 - rate_limited

@@ -27,6 +27,7 @@ const KNOWN = new Set([
   "stale_key",
   "cidr_too_wide",
   "too_many_points",
+  "trap_rule_exists",
   "internal",
 ]);
 
