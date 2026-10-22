@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -461,8 +463,13 @@ func TestRunInstalls(t *testing.T) {
 	for _, c := range sys.cmds {
 		lines = append(lines, cmdline(c))
 	}
-	want := []string{
-		"iptables -w -n -L DOCKER-USER",
+	want := []string{"iptables -w -n -L DOCKER-USER"}
+	/* The eventd ports (published on every host interface) accept only the management subnet. */
+	for _, pp := range [][2]string{{"udp", "1514"}, {"tcp", "1514"}, {"tcp", "6514"}, {"udp", "1162"}} {
+		m := "iptables -w -C DOCKER-USER -d 172.30.1.0/24 -p " + pp[0] + " -m " + pp[0] + " --dport " + pp[1]
+		want = append(want, m+" -j DROP", m+" -s 10.0.0.0/8 -j RETURN")
+	}
+	want = append(want,
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
 		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
@@ -472,12 +479,12 @@ func TestRunInstalls(t *testing.T) {
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
 		"systemctl enable --now nms-audit-anchor.timer",
-	}
+	)
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[7] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[7])
+	if sys.stdins[slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, " admin create ") })] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins)
 	}
 	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
@@ -710,5 +717,42 @@ func TestSyslogCertSignedByInternalCA(t *testing.T) {
 	c, err := x509.ParseCertificate(b.Bytes)
 	if err != nil || len(c.IPAddresses) != 1 || c.IPAddresses[0].String() != "192.0.2.10" {
 		t.Fatalf("syslog certificate SANs = %v %v (%v)", c.DNSNames, c.IPAddresses, err)
+	}
+}
+
+/* A published port that is taken stops the install before anything is written, naming the port and the likely culprit. */
+func TestPreflightHostPorts(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc", "docker", "daemon.json"), goodDaemonJSON)
+	sys := newFakeSys()
+	sys.goos, sys.docker = "linux", "28.1.1"
+	for _, c := range []struct {
+		proto   string
+		port    int
+		culprit string
+	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}} {
+		busy := errors.New("address already in use")
+		err := install.Preflight(install.Options{Root: root, PortFree: func(proto string, port int) error {
+			if proto == c.proto && port == c.port {
+				return busy
+			}
+			return nil
+		}}, sys)
+		if !errors.Is(err, install.ErrPortInUse) || !strings.Contains(err.Error(), fmt.Sprintf("%d/%s", c.port, c.proto)) || !strings.Contains(err.Error(), c.culprit) {
+			t.Errorf("%s/%d: %v", c.proto, c.port, err)
+		}
+	}
+	if err := install.Preflight(install.Options{Root: root, PortFree: func(string, int) error { return nil }}, sys); err != nil {
+		t.Errorf("all ports free: %v", err)
+	}
+
+	/* The real check sees a bound port. */
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer func() { _ = l.Close() }()
+	if install.ListenFree("tcp", l.Addr().(*net.TCPAddr).Port) == nil {
+		t.Error("ListenFree accepted a port in use")
 	}
 }

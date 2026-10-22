@@ -23,7 +23,10 @@ jobs:
       - name: Check
         run: scripts/check.sh
       - name: Race detector
-        run: go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
+        run: |
+          go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
+          # -short: the 5 000 events/s throughput test measures speed, which the race detector distorts
+          go test -race -short ./internal/eventd/...
       - name: Isolation check detects violations
         run: "! scripts/check-isolation.sh test/fixtures/isolation"
       - name: eventd (network-facing) has no write code
@@ -195,11 +198,15 @@ jobs:
           # from its own address (test/e2e/send_events.py, standard library only). The "device" also answers SNMPv2c
           # (the data file name is the community, 16+ characters) so the poll the trap causes can succeed; the other
           # address belongs to no device. Devices reach eventd on the devices network directly: the published ports
-          # are not used from inside the same bridge.
-          EVSRC=nms-e2e-evsrc EVROGUE=nms-e2e-evrogue COMMUNITY=e2e-events-community-01
+          # are not used from inside the same bridge. A third sender runs in the host network namespace and
+          # uses the PUBLISHED ports of the runner's address: that is the test that docker NAT preserves the
+          # source address (with the userland proxy it would be the bridge gateway). TLS (6514) is verified
+          # against the installation's CA, for the name of the certificate (the public host, localhost).
+          EVSRC=nms-e2e-evsrc EVROGUE=nms-e2e-evrogue EVHOST=nms-e2e-evhost COMMUNITY=e2e-events-community-01
+          sudo install -m 0644 /etc/nms/secrets/ca.crt /tmp/nms-e2e-ca.crt
           docker run -d --name "$EVSRC" --network nms_devices \
             -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
-            -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" nms-snmpsim:ci \
+            -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" -v /tmp/nms-e2e-ca.crt:/ca.crt:ro nms-snmpsim:ci \
             sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
               --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
               --agent-udpv4-endpoint=0.0.0.0:161'
@@ -211,10 +218,17 @@ jobs:
           SRC="$(addr "$EVSRC")"; ROGUE="$(addr "$EVROGUE")"
           echo "eventd $EVENTD, device $SRC, stranger $ROGUE"
           [ -n "$EVENTD" ] && [ -n "$SRC" ] && [ -n "$ROGUE" ] && [ "$SRC" != "$ROGUE" ]
-          docker exec -d "$EVSRC" python3 /send_events.py "$EVENTD" e2eknown "$COMMUNITY"
+          docker exec -d "$EVSRC" python3 /send_events.py "$EVENTD" e2eknown "$COMMUNITY" /ca.crt localhost
           docker exec -d "$EVROGUE" python3 /send_events.py "$EVENTD" e2erogue "$COMMUNITY"
           echo "NMS_E2E_EVENT_SRC=$SRC" >> "$GITHUB_ENV"
+          HOSTIP="$(hostname -I | cut -d' ' -f1)"
+          [ -n "$HOSTIP" ]
+          docker run -d --name "$EVHOST" --network host -e SYSLOG_PORT=514 -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" nms-snmpsim:ci \
+            python3 /send_events.py "$HOSTIP" e2ehost
+          echo "host sender -> $HOSTIP:514"
           echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
+          echo "NMS_E2E_EVENT_HOST=$HOSTIP" >> "$GITHUB_ENV"
+          echo "HOSTIP=$HOSTIP" >> "$GITHUB_ENV"
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -222,9 +236,31 @@ jobs:
         run: >-
           docker run --rm --init --ipc=host --network host
           -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM
-          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -w /e2e
+          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_HOST -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
+      - name: The trap, not the API, queued the poll
+        run: |
+          # poll_now is queued by the API (POST /poll, not used by events.spec.ts) or by eventd: a job row for the device
+          # that events.spec.ts watched proves that eventd queued it.
+          id="$(sudo cat test/e2e/.auth/events-device-id)"
+          n="$(sudo docker compose -f "$COMPOSE" exec -T postgres psql -U postgres -d nms -tA -c "select count(*) from jobs.river_job where kind = 'poll_now' and (args->>'device_id')::bigint = $id")"
+          echo "poll_now jobs for device $id: $n"
+          [ "$n" -ge 1 ]
+      - name: Non-management sources cannot reach the eventd ports
+        run: |
+          # A container on the default bridge (172.17.0.0/16, not a management subnet) sends to the PUBLISHED ports of
+          # the runner. The packets are forwarded to eventd's network and must be dropped by the DOCKER-USER ingress
+          # rules: their packet counters grow (they are dropped before MASQUERADE, so this does not depend on eventd).
+          NETSHOOT=nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70
+          pkts() { sudo iptables -w -L DOCKER-USER -n -v -x | awk -v p="$1" '$3 == "DROP" && $4 == p && $0 ~ ("dpt:" ENVIRON["PORT"]) {s += $1} END {print s + 0}'; }
+          export PORT=1514
+          u0="$(pkts udp)"; t0="$(pkts tcp)"
+          docker run --rm --network bridge "$NETSHOOT" sh -c "echo e2e-nonmgmt | nc -u -w 1 $HOSTIP 514; echo e2e-nonmgmt | nc -w 2 $HOSTIP 514" || true
+          u1="$(pkts udp)"; t1="$(pkts tcp)"
+          echo "dropped by the ingress rules: udp $u0 -> $u1, tcp $t0 -> $t1"
+          [ "$u1" -gt "$u0" ] && [ "$t1" -gt "$t0" ]
+          sudo iptables -w -S DOCKER-USER
       - name: Audit anchor timer unit and audit verify
         run: |
           sudo systemctl start nms-audit-anchor.service
@@ -270,6 +306,7 @@ jobs:
           sudo iptables -w -D DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
           sudo systemctl restart docker
           sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
+          sudo iptables -w -C DOCKER-USER -d "$DEVICES_SUBNET" -p udp -m udp --dport 1514 -j DROP
           sudo iptables -w -C FORWARD -j DOCKER-USER
           sudo iptables -w -S DOCKER-USER
       - name: Service logs
@@ -278,3 +315,4 @@ jobs:
           sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
           docker logs --tail 100 "$SNMPSIM" || true
           docker logs --tail 100 nms-e2e-evsrc || true
+          docker logs --tail 50 nms-e2e-evhost || true

@@ -7,11 +7,18 @@ SNMPv2c linkDown trap. The source address is the container's own address: that i
 identity eventd checks. The trap is encoded by hand (BER), so the script needs only the
 Python standard library.
 
-usage: send_events.py TARGET_IP MARKER [COMMUNITY]
+usage: send_events.py TARGET_IP MARKER [COMMUNITY [CAFILE TLS_NAME]]
   MARKER     one word (letters, digits) that ends up in the message text
-  COMMUNITY  when given, a linkDown trap is sent as well
+  COMMUNITY  when given (not "-"), a linkDown trap is sent as well
+  CAFILE     when given, one message per round goes over TLS (port 6514), verified against this CA
+             for the host name TLS_NAME
+
+Ports default to the container ports of eventd (1514 syslog, 1162 traps, 6514 TLS); the environment
+variables SYSLOG_PORT, TRAP_PORT and TLS_PORT replace them, e.g. 514 for the published port.
 """
+import os
 import socket
+import ssl
 import sys
 import time
 
@@ -61,21 +68,33 @@ def link_down_trap(community, request_id):
 
 def main():
     target, marker = sys.argv[1], sys.argv[2]
-    community = sys.argv[3] if len(sys.argv) > 3 else ""
+    community = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "-" else ""
+    cafile, tls_name = (sys.argv[4], sys.argv[5]) if len(sys.argv) > 5 else ("", "")
+    syslog_port = int(os.environ.get("SYSLOG_PORT", "1514"))
+    trap_port = int(os.environ.get("TRAP_PORT", "1162"))
+    tls_port = int(os.environ.get("TLS_PORT", "6514"))
+    ctx = ssl.create_default_context(cafile=cafile) if cafile else None
     n = 0
     while True:
         n += 1
         text = "<14>%s e2ehost e2eapp: %s%s" % (time.strftime("%b %e %H:%M:%S"), marker, "udp")
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.sendto(text.encode(), (target, 1514))
+        udp.sendto(text.encode(), (target, syslog_port))
         if community:
-            udp.sendto(link_down_trap(community, n), (target, 1162))
+            udp.sendto(link_down_trap(community, n), (target, trap_port))
         udp.close()
         try:
-            with socket.create_connection((target, 1514), timeout=3) as tcp:
+            with socket.create_connection((target, syslog_port), timeout=3) as tcp:
                 tcp.sendall(("<14>%s e2ehost e2eapp: %stcp\n" % (time.strftime("%b %e %H:%M:%S"), marker)).encode())
         except OSError as e:
             print("tcp syslog:", e, flush=True)
+        if ctx:
+            try:
+                with socket.create_connection((target, tls_port), timeout=3) as raw:
+                    with ctx.wrap_socket(raw, server_hostname=tls_name) as tls:
+                        tls.sendall(("<14>%s e2ehost e2eapp: %stls\n" % (time.strftime("%b %e %H:%M:%S"), marker)).encode())
+            except (OSError, ssl.SSLError) as e:
+                print("tls syslog:", e, flush=True)
         time.sleep(3)
 
 

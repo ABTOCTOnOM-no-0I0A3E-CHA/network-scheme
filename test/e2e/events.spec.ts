@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import sodium from "libsodium-wrappers";
 import { stepUp } from "./auth";
 import { expect, test } from "./guard";
@@ -7,15 +8,23 @@ import { expect, test } from "./guard";
  *  - NMS_E2E_EVENT_SRC: the device. It answers SNMPv2c (community COMMUNITY, served by an snmpsim
  *    data file) and sends syslog over UDP and TCP and a linkDown trap, all from its own address.
  *  - NMS_E2E_EVENT_ROGUE: no device has this address; it sends syslog and a trap with the same community.
- * Both run test/e2e/send_events.py every few seconds; the messages carry the markers below.
+ *  - NMS_E2E_EVENT_HOST: the primary address of the runner. A sender in the host network namespace
+ *    sends syslog to the PUBLISHED ports 514/udp and 514/tcp of this address. The event is attributed
+ *    to the device registered with that address only if eventd sees the sender's own address as the
+ *    source. With the docker userland proxy on, the source would be the bridge gateway, no device
+ *    would match and this test would fail: that is the proof that source addresses are preserved.
+ * All run test/e2e/send_events.py every few seconds; the messages carry the markers below.
  */
 const SRC = process.env.NMS_E2E_EVENT_SRC ?? "";
 const ROGUE = process.env.NMS_E2E_EVENT_ROGUE ?? "";
+const HOST = process.env.NMS_E2E_EVENT_HOST ?? "";
 const COMMUNITY = "e2e-events-community-01";
 const GROUP = "events-e2e";
 const MARK_UDP = "e2eknownudp";
 const MARK_TCP = "e2eknowntcp";
-const MARK_ROGUE = "e2erogueudp";
+const MARK_TLS = "e2eknowntls";
+const MARKS_ROGUE = ["e2erogueudp", "e2eroguetcp"];
+const MARKS_HOST = ["e2ehostudp", "e2ehosttcp"];
 const DAY_S = 86400;
 
 type EventItem = { kind: "syslog" | "trap"; device_id: number; name?: string; text: string };
@@ -40,6 +49,7 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
   test.setTimeout(5 * 60_000);
   expect(SRC, "NMS_E2E_EVENT_SRC (event source container on the devices network)").not.toBe("");
   expect(ROGUE, "NMS_E2E_EVENT_ROGUE (second container, no device)").not.toBe("");
+  expect(HOST, "NMS_E2E_EVENT_HOST (runner address, published ports)").not.toBe("");
   expect(ROGUE).not.toBe(SRC);
   const api = page.request;
   const csrf = async () => ({ "X-CSRF-Token": ((await (await api.get("/api/auth/me")).json()) as { csrf_token: string }).csrf_token });
@@ -56,33 +66,54 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
     expect(res.status()).toBe(201);
     group = (await res.json()).id as number;
   }
-  let res = await api.post("/api/devices", { headers: await csrf(), data: { name: "events-src", address: SRC, group_id: group } });
-  expect(res.status()).toBe(201);
-  const id = (await res.json()).id as number;
+  /* Polls are pushed a day away right away: nothing but an event may cause one, and the runner's own address is never probed. */
+  const addDevice = async (name: string, address: string): Promise<number> => {
+    const created = await api.post("/api/devices", { headers: await csrf(), data: { name, address, group_id: group } });
+    expect(created.status()).toBe(201);
+    const devId = (await created.json()).id as number;
+    return devId;
+  };
+  const slowPolls = async (devId: number) => {
+    const patched = await api.patch(`/api/devices/${devId}`, {
+      headers: await csrf(),
+      data: { interval_avail_s: DAY_S, interval_metrics_s: DAY_S, interval_inventory_s: DAY_S },
+    });
+    expect(patched.status()).toBe(204);
+  };
+  const id = await addDevice("events-src", SRC);
+  const hostId = await addDevice("events-host", HOST);
+  await slowPolls(hostId);
+  /* Recorded for the CI step that looks for the poll_now job eventd queued. */
+  writeFileSync(".auth/events-device-id", String(id));
 
   const read = (await (await api.get("/keys.json")).json()).domains.read as { public_key: string; key_version: number };
   const ciphertext = await seal(read.public_key, `device:${id}`, "snmp2c", { community: COMMUNITY });
-  res = await api.put(`/api/devices/${id}/profiles/snmp2c`, { headers: await csrf(), data: { ciphertext, key_version: read.key_version } });
+  let res = await api.put(`/api/devices/${id}/profiles/snmp2c`, { headers: await csrf(), data: { ciphertext, key_version: read.key_version } });
   expect(res.status()).toBe(204);
   /* A profile change sends no notification to eventd, a device change does: this one makes it reread the profile now. */
-  res = await api.patch(`/api/devices/${id}`, {
-    headers: await csrf(),
-    data: { interval_avail_s: DAY_S, interval_metrics_s: DAY_S, interval_inventory_s: DAY_S },
-  });
-  expect(res.status()).toBe(204);
+  await slowPolls(id);
 
   /* Syslog over UDP and TCP, attributed to the device by the packet's source address. */
-  for (const mark of [MARK_UDP, MARK_TCP]) {
+  for (const mark of [MARK_UDP, MARK_TCP, MARK_TLS]) {
     await expect
       .poll(async () => (await events(`kind=syslog&device_id=${id}&q=${mark}`)).length > 0, { timeout: 30_000, intervals: [1_000], message: mark })
       .toBe(true);
   }
+  /* Through the published ports of the host (docker NAT), attributed to the device with the sender's own address. */
+  for (const mark of MARKS_HOST) {
+    await expect
+      .poll(async () => (await events(`kind=syslog&device_id=${hostId}&q=${mark}`)).length > 0, { timeout: 30_000, intervals: [1_000], message: mark })
+      .toBe(true);
+  }
+  /* Nothing more is needed from this device; deleting it keeps the poller away from the runner's address. */
+  expect((await api.delete(`/api/devices/${hostId}`, { headers: await csrf() })).status()).toBe(204);
   /* The trap: linkDown is a standard trap, named without a rule. */
   await expect
     .poll(async () => (await events(`kind=trap&device_id=${id}`)).some((e) => e.name === "linkDown"), { timeout: 30_000, intervals: [1_000] })
     .toBe(true);
 
-  /* The trap made the poller poll now: the device is up and its interfaces are stored. */
+  /* The trap made the poller poll now: the device is up and its interfaces are stored. (That eventd, and nobody else, queued the
+     poll_now job is checked from the database by the CI step that follows.) */
   await expect
     .poll(
       async () => {
@@ -95,8 +126,7 @@ test("events from a known device arrive and a stranger's do not", async ({ page 
     .toEqual({ state: "up", interfaces: true });
 
   /* The stranger has been sending all along: nothing of it is stored, anywhere. */
-  expect(await events(`q=${MARK_ROGUE}`)).toEqual([]);
-  expect((await events(`kind=trap&device_id=${id}&limit=500`)).every((e) => e.device_id === id)).toBe(true);
+  for (const mark of MARKS_ROGUE) expect(await events(`q=${mark}`), mark).toEqual([]);
 
   /* Logs page: the device's messages are listed. */
   await page.goto("/");

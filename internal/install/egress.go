@@ -26,7 +26,9 @@ const egressDropIn = "docker.service.d/nms-egress.conf"
 /*
 Egress limits where the devices network may send packets: only to the
 management subnets. Everything else coming from DevicesSubnet is dropped in
-the DOCKER-USER chain.
+the DOCKER-USER chain. In the other direction only the management subnets
+may reach the eventd ports of DevicesSubnet (published on every host
+interface): other sources are dropped there too.
 */
 type Egress struct {
 	DevicesSubnet netip.Prefix   `yaml:"devices_subnet"`
@@ -132,6 +134,43 @@ func iptables(ctx context.Context, sys System, args ...string) error {
 	return err
 }
 
+/* ingressPort is a port of the eventd container (see compose.yaml.tmpl) that receives from the devices. */
+type ingressPort struct {
+	proto string
+	port  string
+}
+
+/*
+ingressPorts are the container ports eventd listens on. They are published on every host
+interface, so the source of a packet is checked here: accepted events are attributed to
+a device by source address alone, and an address is easy to forge from a network that
+is not managed.
+*/
+var ingressPorts = []ingressPort{{"udp", "1514"}, {"tcp", "1514"}, {"tcp", "6514"}, {"udp", "1162"}}
+
+/* block is a closing DROP rule and the allow rules that must stay above it. */
+type block struct {
+	allow [][]string
+	drop  []string
+}
+
+/* blocks returns the ingress blocks (one per eventd port) followed by the egress block. */
+func (e Egress) blocks() []block {
+	var out []block
+	dst := []string{"-d", e.DevicesSubnet.String()}
+	for _, ip := range ingressPorts {
+		match := append(append([]string{}, dst...), "-p", ip.proto, "-m", ip.proto, "--dport", ip.port)
+		var b block
+		for _, m := range e.MgmtSubnets {
+			b.allow = append(b.allow, append(append([]string{}, match...), "-s", m.String(), "-j", "RETURN"))
+		}
+		b.drop = append(append([]string{}, match...), "-j", "DROP")
+		out = append(out, b)
+	}
+	allow, drop := e.rules()
+	return append(out, block{allow, drop})
+}
+
 /* rules returns the allow rules (in their final order) and the closing DROP rule. */
 func (e Egress) rules() (allow [][]string, drop []string) {
 	src := []string{"-s", e.DevicesSubnet.String()}
@@ -140,6 +179,27 @@ func (e Egress) rules() (allow [][]string, drop []string) {
 		allow = append(allow, append(append([]string{}, src...), "-d", m.String(), "-j", "RETURN"))
 	}
 	return allow, append(append([]string{}, src...), "-j", "DROP")
+}
+
+/*
+CheckEgress verifies that every rule ApplyEgress installs is present and that Docker sends
+forwarded traffic through DOCKER-USER; a missing rule means unfiltered traffic.
+*/
+func CheckEgress(ctx context.Context, sys System, e Egress) error {
+	if err := e.validate(); err != nil {
+		return err
+	}
+	if err := CheckDockerUsesEgress(ctx, sys); err != nil {
+		return err
+	}
+	for _, bl := range e.blocks() {
+		for _, r := range append(append([][]string{}, bl.allow...), bl.drop) {
+			if err := iptables(ctx, sys, append([]string{"-w", "-C", egressChain}, r...)...); err != nil {
+				return fmt.Errorf("egress: rule missing in %s (%s): %w", egressChain, strings.Join(r, " "), err)
+			}
+		}
+	}
+	return nil
 }
 
 /*
@@ -169,24 +229,27 @@ func ApplyEgress(ctx context.Context, sys System, e Egress) error {
 			return fmt.Errorf("egress: create %s: %w", egressChain, err)
 		}
 	}
-	allow, drop := e.rules()
-	if !has(drop) {
-		for _, r := range allow {
-			if has(r) {
-				if err := ipt(append([]string{"-D", egressChain}, r...)...); err != nil {
-					return fmt.Errorf("egress: iptables delete: %w", err)
+	/* Ingress blocks first, the egress block last: it ends up on top. */
+	for _, bl := range e.blocks() {
+		allow, drop := bl.allow, bl.drop
+		if !has(drop) {
+			for _, r := range allow {
+				if has(r) {
+					if err := ipt(append([]string{"-D", egressChain}, r...)...); err != nil {
+						return fmt.Errorf("egress: iptables delete: %w", err)
+					}
 				}
 			}
-		}
-		if err := insert(drop); err != nil {
-			return err
-		}
-	}
-	/* Inserted at the top in reverse, so they keep their order above the DROP. */
-	for i := len(allow) - 1; i >= 0; i-- {
-		if !has(allow[i]) {
-			if err := insert(allow[i]); err != nil {
+			if err := insert(drop); err != nil {
 				return err
+			}
+		}
+		/* Inserted at the top in reverse, so they keep their order above the DROP. */
+		for i := len(allow) - 1; i >= 0; i-- {
+			if !has(allow[i]) {
+				if err := insert(allow[i]); err != nil {
+					return err
+				}
 			}
 		}
 	}

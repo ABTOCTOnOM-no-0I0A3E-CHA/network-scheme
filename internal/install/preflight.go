@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,7 @@ var (
 	ErrUserlandProxy    = errors.New("install: docker userland-proxy must be disabled")
 	ErrDockerFirewall   = errors.New("install: docker must manage iptables (the egress rules live in DOCKER-USER)")
 	ErrAlreadyInstalled = errors.New("install: already installed")
+	ErrPortInUse        = errors.New("install: a port the stack publishes is already in use")
 )
 
 /* minDockerMajor is the oldest supported Docker Engine major version. */
@@ -91,7 +93,52 @@ func Preflight(o Options, sys System) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("install: %w", err)
 	}
+	return checkHostPorts(o.PortFree)
+}
+
+/* hostPort is a host port the stack publishes, with the service that most likely holds it. */
+type hostPort struct {
+	proto, culprit string
+	port           int
+}
+
+var hostPorts = []hostPort{
+	{"tcp", "a web server or another proxy", 443},
+	{"udp", "rsyslog or syslog-ng", 514},
+	{"tcp", "rsyslog or syslog-ng", 514},
+	{"tcp", "rsyslog or syslog-ng (TLS)", 6514},
+	{"udp", "snmptrapd", 162},
+}
+
+/* checkHostPorts fails, before anything is written, when a published port is taken. */
+func checkHostPorts(free func(proto string, port int) error) error {
+	if free == nil {
+		return nil
+	}
+	for _, p := range hostPorts {
+		if err := free(p.proto, p.port); err != nil {
+			return fmt.Errorf("%w: %d/%s (%v); stop %s on this host, or free the port, and run install again",
+				ErrPortInUse, p.port, p.proto, err, p.culprit)
+		}
+	}
 	return nil
+}
+
+/* ListenFree binds proto (tcp or udp) on every address of the host at port and closes it again. */
+func ListenFree(proto string, port int) error {
+	addr := ":" + strconv.Itoa(port)
+	if proto == "udp" {
+		c, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			return err
+		}
+		return c.Close()
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return l.Close()
 }
 
 func checkDaemonJSON(path string) error {

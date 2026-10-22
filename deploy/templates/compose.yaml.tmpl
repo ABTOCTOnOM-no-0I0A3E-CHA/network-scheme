@@ -120,6 +120,10 @@ services:
     mem_limit: 512m
     # Unprivileged container ports, so no capability is needed; with the userland proxy off the
     # source address of every packet is the device's own (the identity of an event).
+    # On devices (not only core) because core is internal: Docker publishes ports only through a
+    # routed network. The published ports listen on every host interface; DOCKER-USER (nmsctl egress)
+    # lets only the management subnets reach them. domain_read_key opens the read credentials
+    # (community, SNMPv3 user) the sources are authenticated with.
     ports:
       - "514:1514/udp"
       - "514:1514/tcp"
