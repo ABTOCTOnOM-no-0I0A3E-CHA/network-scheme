@@ -37,7 +37,7 @@ export function SystemStatus() {
     );
   }
   const s = q.data;
-  const now = q.dataUpdatedAt;
+  const now = Date.parse(s.now);
   const num = (n: number) => n.toLocaleString(i18n.language);
 
   return (

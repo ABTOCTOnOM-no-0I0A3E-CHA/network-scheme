@@ -10,6 +10,8 @@ import { safeText } from "@/lib/text";
 import { useCreateTrapRule, type EventSeverity } from "./api";
 import { SEVERITIES } from "./EventFilters";
 
+/** Server limit of a rule name, in bytes of UTF-8. */
+const MAX_NAME_BYTES = 1024;
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 
 type Props = {
@@ -44,6 +46,7 @@ function RuleForm({ oid, onClose }: { oid: string; onClose: () => void }) {
     const fd = new FormData(e.currentTarget);
     const name = String(fd.get("name") ?? "").trim();
     if (!name) return setError(t("events.rule.required"));
+    if (new TextEncoder().encode(name).length > MAX_NAME_BYTES) return setError(t("events.rule.tooLong", { max: MAX_NAME_BYTES }));
     try {
       await create.mutateAsync({ trap_oid: oid, name, severity: String(fd.get("severity")) as EventSeverity });
       onClose();
@@ -64,7 +67,7 @@ function RuleForm({ oid, onClose }: { oid: string; onClose: () => void }) {
       </div>
       <div className="grid gap-2">
         <Label htmlFor="rule-name">{t("events.rule.name")}</Label>
-        <Input id="rule-name" name="name" autoComplete="off" autoFocus maxLength={200} />
+        <Input id="rule-name" name="name" autoComplete="off" autoFocus />
       </div>
       <div className="grid gap-2">
         <Label htmlFor="rule-severity">{t("events.rule.severity")}</Label>

@@ -2138,6 +2138,8 @@ export interface components {
             identified: boolean;
             /** @description Trap varbinds as received (traps only; omitted over 16 KiB) */
             varbinds?: unknown;
+            /** @description True when the varbinds were left out because they exceed 16 KiB */
+            varbinds_omitted?: boolean;
         };
         UnidentifiedTrap: {
             trap_oid: string;
@@ -2150,6 +2152,8 @@ export interface components {
             last_device_name: string;
             /** @description Varbinds of the newest trap (omitted over 16 KiB) */
             last_varbinds?: unknown;
+            /** @description True when last_varbinds were left out because they exceed 16 KiB */
+            last_varbinds_omitted?: boolean;
         };
         TrapRule: {
             /** Format: int64 */
@@ -2161,6 +2165,11 @@ export interface components {
             created_at: string;
         };
         SystemStatus: {
+            /**
+             * Format: date-time
+             * @description Server time of the report; compare updated_at against it, not the browser clock
+             */
+            now: string;
             pollers: {
                 id: string;
                 /** Format: int64 */

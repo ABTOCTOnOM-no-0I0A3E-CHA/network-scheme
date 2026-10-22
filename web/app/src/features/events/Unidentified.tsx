@@ -8,6 +8,7 @@ import { useUnidentified, type UnidentifiedTrap } from "./api";
 import { VarbindList } from "./EventFeed";
 import { PRESETS, resolveWindow, type Preset } from "./EventFilters";
 import { TrapRuleDialog } from "./TrapRuleDialog";
+import { TrapRules } from "./TrapRules";
 
 const NO_ROWS: UnidentifiedTrap[] = [];
 const SELECT_CLASS = "h-9 rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
@@ -90,6 +91,7 @@ export function Unidentified({ canManage }: { canManage: boolean }) {
           {t("events.loadMore")}
         </Button>
       )}
+      {canManage && <TrapRules />}
       {canManage && <TrapRuleDialog oid={rule} onOpenChange={(o) => !o && setRule(undefined)} />}
     </section>
   );
@@ -121,7 +123,7 @@ function UnidentifiedRow({ r, expanded, onToggle, onCreate, locale }: { r: Unide
       {expanded && (
         <tr className="border-t bg-muted/30">
           <td colSpan={5} className="px-4 py-3">
-            <VarbindList raw={r.last_varbinds} />
+            <VarbindList raw={r.last_varbinds} omitted={r.last_varbinds_omitted} />
           </td>
         </tr>
       )}

@@ -19,6 +19,7 @@ export const eventKeys = {
   all: ["events"] as const,
   feed: (f: EventQuery) => ["events", "feed", f] as const,
   unidentified: (from: string, to?: string) => ["events", "unidentified", from, to ?? null] as const,
+  rules: ["events", "rules"] as const,
   status: ["system", "status"] as const,
 };
 
@@ -61,6 +62,25 @@ export function useCreateTrapRule() {
     mutationFn: (body: TrapRuleCreate) =>
       withStepUp(async () => {
         unwrap(await api.POST("/api/trap-rules", { params: CSRF, body }));
+      }),
+    onSettled: () => qc.invalidateQueries({ queryKey: eventKeys.all }),
+  });
+}
+
+export type TrapRule = S["TrapRule"];
+
+/** All trap rules (events.manage). */
+export function useTrapRules(enabled = true) {
+  return useQuery({ queryKey: eventKeys.rules, enabled, retry: false, queryFn: async () => unwrap(await api.GET("/api/trap-rules")) });
+}
+
+/** Removes a trap rule; its OID shows up as unidentified again once new traps arrive. */
+export function useDeleteTrapRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      withStepUp(async () => {
+        unwrap(await api.DELETE("/api/trap-rules/{id}", { params: { path: { id }, ...CSRF } }));
       }),
     onSettled: () => qc.invalidateQueries({ queryKey: eventKeys.all }),
   });

@@ -134,6 +134,8 @@ type eventResponse struct {
 	Text       string          `json:"text"`
 	Identified bool            `json:"identified"`
 	Varbinds   json.RawMessage `json:"varbinds,omitempty"`
+	/* VarbindsOmitted is set when the varbinds exceed the listing limit and were left out. */
+	VarbindsOmitted bool `json:"varbinds_omitted,omitempty"`
 }
 
 type eventsPage struct {
@@ -147,29 +149,32 @@ the NMS scale (0-1 disaster, 2 high, 3 average, 4 warning, 5-7 info); a trap
 without a severity ranks as info. Rows of devices outside the caller's groups
 and of deleted devices drop out in the join. $1 all, $2 group ids, $3 kind,
 $4 device (0: any), $5 from, $6 to, $7 query, $8 min rank, $9 cursor given,
-$10-$13 cursor, $14 limit.
+$10-$13 cursor ($10 also bounds ts inside each branch so the planner can exclude chunks), $14 limit.
 */
 /* Varbind sets over 16384 bytes of JSON text are left out of listings (they stay in the database). */
 const eventsSQL = `
 WITH ev AS (
   SELECT s.ts, 'syslog'::text AS kind, s.device_id, s.app AS label, s.msg AS body, true AS identified,
-         NULL::jsonb AS varbinds,
+         NULL::jsonb AS varbinds, false AS omitted,
          CASE WHEN s.severity <= 1 THEN 'disaster' WHEN s.severity = 2 THEN 'high'
               WHEN s.severity = 3 THEN 'average' WHEN s.severity = 4 THEN 'warning' ELSE 'info' END AS severity,
          md5(concat_ws(chr(31), s.facility, s.severity, s.host, s.app, s.msg)) AS dig
   FROM events.syslog s
   WHERE $3::text IN ('', 'syslog') AND s.ts >= $5 AND s.ts < $6 AND ($4::bigint = 0 OR s.device_id = $4)
+    AND (NOT $9::bool OR s.ts <= $10)
     AND ($7::text = '' OR s.tsv @@ plainto_tsquery('simple', $7))
   UNION ALL
   SELECT t.ts, 'trap', t.device_id, t.name, t.trap_oid, t.identified,
          CASE WHEN octet_length(t.varbinds::text) <= 16384 THEN t.varbinds END,
+         coalesce(octet_length(t.varbinds::text) > 16384, false),
          t.severity,
          md5(concat_ws(chr(31), t.version, t.trap_oid, t.name, t.severity, t.identified, t.varbinds::text))
   FROM events.trap t
   WHERE $3::text IN ('', 'trap') AND t.ts >= $5 AND t.ts < $6 AND ($4::bigint = 0 OR t.device_id = $4)
+    AND (NOT $9::bool OR t.ts <= $10)
     AND ($7::text = '' OR t.tsv @@ plainto_tsquery('simple', $7))
 )
-SELECT ev.ts, ev.kind, ev.device_id, d.name, ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.dig
+SELECT ev.ts, ev.kind, ev.device_id, d.name, ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.omitted, ev.dig
 FROM ev JOIN core.device d ON d.id = ev.device_id
 WHERE ($1::bool OR d.group_id = ANY($2))
   AND CASE ev.severity WHEN 'disaster' THEN 4 WHEN 'high' THEN 3 WHEN 'average' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= $8::int
@@ -186,6 +191,7 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	kind, okK := single(q, "kind")
 	qtext, okQ := single(q, "q")
+	qtext = strings.TrimSpace(qtext)
 	sevMin, okS := single(q, "severity_min")
 	curS, okC := single(q, "cursor")
 	limit, okL := queryInt(q, "limit", defaultEventPage, 1, maxEventPage)
@@ -245,7 +251,7 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 			vb    []byte
 			dig   string
 		)
-		if err := row.Scan(&e.TS, &e.Kind, &e.DeviceID, &e.DeviceName, &e.Severity, &label, &e.Text, &e.Identified, &vb, &dig); err != nil {
+		if err := row.Scan(&e.TS, &e.Kind, &e.DeviceID, &e.DeviceName, &e.Severity, &label, &e.Text, &e.Identified, &vb, &e.VarbindsOmitted, &dig); err != nil {
 			return e, err
 		}
 		if e.Kind == "syslog" {
@@ -281,6 +287,8 @@ type unidentifiedResponse struct {
 	LastDeviceID   int64           `json:"last_device_id"`
 	LastDeviceName string          `json:"last_device_name"`
 	LastVarbinds   json.RawMessage `json:"last_varbinds,omitempty"`
+	/* LastVarbindsOmitted is set when the varbinds exceed the listing limit and were left out. */
+	LastVarbindsOmitted bool `json:"last_varbinds_omitted,omitempty"`
 }
 
 type unidentifiedPage struct {
@@ -297,16 +305,17 @@ type unidentifiedCursor struct {
 const unidentifiedSQL = `
 WITH u AS MATERIALIZED (
   SELECT t.trap_oid, t.ts, t.device_id, d.name AS device_name,
-         CASE WHEN octet_length(t.varbinds::text) <= 16384 THEN t.varbinds END AS varbinds
+         CASE WHEN octet_length(t.varbinds::text) <= 16384 THEN t.varbinds END AS varbinds,
+         coalesce(octet_length(t.varbinds::text) > 16384, false) AS omitted
   FROM events.trap t JOIN core.device d ON d.id = t.device_id
-  WHERE NOT t.identified AND t.ts >= $3 AND t.ts < $4 AND ($1::bool OR d.group_id = ANY($2))
+  WHERE NOT t.identified AND NOT EXISTS (SELECT 1 FROM events.trap_rule r WHERE r.trap_oid = t.trap_oid) AND t.ts >= $3 AND t.ts < $4 AND ($1::bool OR d.group_id = ANY($2))
 ), g AS (
   SELECT trap_oid, count(*) AS cnt, max(ts) AS last_ts FROM u GROUP BY trap_oid
 ), l AS (
-  SELECT DISTINCT ON (trap_oid) trap_oid, device_id, device_name, varbinds
+  SELECT DISTINCT ON (trap_oid) trap_oid, device_id, device_name, varbinds, omitted
   FROM u ORDER BY trap_oid, ts DESC, device_id DESC
 )
-SELECT g.trap_oid, g.cnt, g.last_ts, l.device_id, l.device_name, l.varbinds
+SELECT g.trap_oid, g.cnt, g.last_ts, l.device_id, l.device_name, l.varbinds, l.omitted
 FROM g JOIN l USING (trap_oid)
 WHERE NOT $5::bool OR (g.last_ts, g.trap_oid) < ($6, $7)
 ORDER BY g.last_ts DESC, g.trap_oid DESC
@@ -347,7 +356,7 @@ func (s *server) listUnidentified(w http.ResponseWriter, r *http.Request) {
 			u  unidentifiedResponse
 			vb []byte
 		)
-		err := row.Scan(&u.TrapOID, &u.Count, &u.LastTS, &u.LastDeviceID, &u.LastDeviceName, &vb)
+		err := row.Scan(&u.TrapOID, &u.Count, &u.LastTS, &u.LastDeviceID, &u.LastDeviceName, &vb, &u.LastVarbindsOmitted)
 		u.LastVarbinds = vb
 		return u, err
 	})

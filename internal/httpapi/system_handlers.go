@@ -33,6 +33,7 @@ type queueStatus struct {
 }
 
 type systemStatus struct {
+	Now         time.Time      `json:"now"` /* server clock, the reference for updated_at */
 	Pollers     []pollerStatus `json:"pollers"`
 	Eventd      []eventdStatus `json:"eventd"`
 	DBSizeBytes int64          `json:"db_size_bytes"`
@@ -47,7 +48,7 @@ devices whose poller has been silent for 90 s), not the heartbeat itself.
 */
 func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var out systemStatus
+	out := systemStatus{Now: s.now().UTC()}
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.poller_id, count(*), count(*) FILTER (WHERE v.state <> 'unknown')
 		FROM core.device d LEFT JOIN inventory.device_state_v v ON v.device_id = d.id

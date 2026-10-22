@@ -1207,6 +1207,7 @@ components:
         text: { type: string, description: "Syslog message, or the trap OID" }
         identified: { type: boolean, description: Always true for syslog }
         varbinds: { description: Trap varbinds as received (traps only; omitted over 16 KiB) }
+        varbinds_omitted: { type: boolean, description: "True when the varbinds were left out because they exceed 16 KiB" }
     UnidentifiedTrap:
       type: object
       required: [trap_oid, count, last_ts, last_device_id, last_device_name]
@@ -1217,6 +1218,7 @@ components:
         last_device_id: { type: integer, format: int64 }
         last_device_name: { type: string }
         last_varbinds: { description: Varbinds of the newest trap (omitted over 16 KiB) }
+        last_varbinds_omitted: { type: boolean, description: "True when last_varbinds were left out because they exceed 16 KiB" }
     TrapRule:
       type: object
       required: [id, trap_oid, name, severity, created_at]
@@ -1228,8 +1230,9 @@ components:
         created_at: { type: string, format: date-time }
     SystemStatus:
       type: object
-      required: [pollers, eventd, db_size_bytes, queues]
+      required: [now, pollers, eventd, db_size_bytes, queues]
       properties:
+        now: { type: string, format: date-time, description: "Server time of the report; compare updated_at against it, not the browser clock" }
         pollers:
           type: array
           items:

@@ -240,6 +240,71 @@ func TestUnidentifiedTrapsGrouped(t *testing.T) {
 	wantError(t, f.do(viewerA.authed(req{method: "GET", path: "/api/events/unidentified?cursor=%21"})), http.StatusBadRequest, "bad_request")
 }
 
+func TestUnidentifiedDropsOIDsWithRule(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	dev := f.newDevice(g)
+	oid := f.newOID()
+	f.trap(dev, time.Now().UTC().Add(-time.Minute), oid, oid, nil, false)
+	list := func() int {
+		type page struct {
+			Items []struct {
+				TrapOID string `json:"trap_oid"`
+			} `json:"items"`
+		}
+		n := 0
+		for _, it := range decode[page](t, f.do(admin.authed(req{method: "GET", path: "/api/events/unidentified"}))).Items {
+			if it.TrapOID == oid {
+				n++
+			}
+		}
+		return n
+	}
+	if list() != 1 {
+		t.Fatal("unidentified trap not listed")
+	}
+	resp := f.do(admin.authed(req{method: "POST", path: "/api/trap-rules", body: map[string]string{"trap_oid": oid, "name": "Named", "severity": "info"}}))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d", resp.StatusCode)
+	}
+	if list() != 0 {
+		t.Error("OID with a rule is still listed as unidentified")
+	}
+}
+
+func TestEventsBlankQueryAndOmittedVarbinds(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	viewer := f.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g})
+	dev := f.newDevice(g)
+	now := time.Now().UTC()
+	f.syslog(dev, now.Add(-time.Minute), 5, "sw", "hello")
+	if _, err := f.env.Pool("postgres").Exec(context.Background(),
+		`INSERT INTO events.trap (ts, device_id, version, trap_oid, name, severity, varbinds, identified) VALUES ($1, $2, 2, $3, 'big', 'info', jsonb_build_object('k', repeat('x', 20000)), true)`,
+		now.Add(-2*time.Minute), dev, f.newOID()); err != nil {
+		t.Fatal(err)
+	}
+	got := decode[struct {
+		Items []struct {
+			Kind            string `json:"kind"`
+			Varbinds        any    `json:"varbinds"`
+			VarbindsOmitted bool   `json:"varbinds_omitted"`
+		} `json:"items"`
+	}](t, f.getEvents(viewer, url.Values{"q": {"   "}}))
+	if len(got.Items) != 2 {
+		t.Fatalf("blank q should match everything: %+v", got.Items)
+	}
+	for _, it := range got.Items {
+		if it.Kind == "trap" && (it.Varbinds != nil || !it.VarbindsOmitted) {
+			t.Errorf("big trap = %+v", it)
+		}
+		if it.Kind == "syslog" && it.VarbindsOmitted {
+			t.Errorf("syslog flagged omitted: %+v", it)
+		}
+	}
+}
+
 func TestTrapRules(t *testing.T) {
 	f := newFixture(t, nil)
 	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
@@ -340,8 +405,9 @@ func TestSystemStatus(t *testing.T) {
 			Dropped    int64  `json:"dropped"`
 			QueueDepth int    `json:"queue_depth"`
 		} `json:"eventd"`
-		DBSize int64 `json:"db_size_bytes"`
-		Queues []any `json:"queues"`
+		DBSize int64     `json:"db_size_bytes"`
+		Queues []any     `json:"queues"`
+		Now    time.Time `json:"now"`
 	}
 	st := decode[status](t, f.do(operator.authed(req{method: "GET", path: "/api/system/status"})))
 	var local bool
@@ -354,7 +420,7 @@ func TestSystemStatus(t *testing.T) {
 	for _, e := range st.Eventd {
 		ed = ed || (e.Instance == "eventd-1" && e.Received == 10 && e.Dropped == 1 && e.QueueDepth == 3)
 	}
-	if !local || !ed || st.DBSize <= 0 || st.Queues == nil {
+	if !local || !ed || st.DBSize <= 0 || st.Queues == nil || time.Since(st.Now).Abs() > time.Minute {
 		t.Errorf("status = %+v", st)
 	}
 }

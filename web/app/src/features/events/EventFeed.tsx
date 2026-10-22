@@ -36,10 +36,10 @@ export function SeverityBadge({ severity }: { severity: EventSeverity | null }) 
 }
 
 /** Varbinds of a trap as monospace text; truncated values are marked. */
-export function VarbindList({ raw }: { raw: unknown }) {
+export function VarbindList({ raw, omitted }: { raw: unknown; omitted?: boolean }) {
   const { t } = useTranslation();
   const vb = parseVarbinds(raw);
-  if (vb === undefined) return <p className="text-xs text-muted-foreground">{t("events.noVarbinds")}</p>;
+  if (vb === undefined) return <p className="text-xs text-muted-foreground">{t(omitted ? "events.varbindsOmitted" : "events.noVarbinds")}</p>;
   if (typeof vb === "string") return <pre className="overflow-x-auto font-mono text-xs break-words whitespace-pre-wrap">{safeText(vb)}</pre>;
   return (
     <ul className="grid gap-1 font-mono text-xs">
@@ -84,11 +84,29 @@ function EventRow({ e, expanded, onToggle, showDevice }: { e: NmsEvent; expanded
       {expanded && (
         <div className="grid gap-2 border-t bg-muted/30 px-4 py-3" data-testid="event-details">
           <p className="font-mono text-xs break-words whitespace-pre-wrap">{text}</p>
-          {e.kind === "trap" && <VarbindList raw={e.varbinds} />}
+          {e.kind === "trap" && <VarbindList raw={e.varbinds} omitted={e.varbinds_omitted} />}
         </div>
       )}
     </>
   );
+}
+
+/** Stable per-row keys: time, device, kind and a hash of the content; the n-th identical row gets "#n". */
+export function eventKeys(events: NmsEvent[]): string[] {
+  const seen = new Map<string, number>();
+  return events.map((e) => {
+    const base = `${e.ts}|${e.device_id}|${e.kind}|${hashText(`${e.name ?? e.app ?? ""}\u001f${e.text}`)}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return n ? `${base}#${n}` : base;
+  });
+}
+
+/* FNV-1a over UTF-16 code units; only for telling rows apart, not for security */
+function hashText(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
 }
 
 type Props = {
@@ -114,7 +132,8 @@ export function EventFeed({ deviceId }: Props) {
   const events = useMemo(() => feed.data?.pages.flatMap((p) => p.items) ?? NO_EVENTS, [feed.data]);
 
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const keyOf = (e: NmsEvent, i: number) => `${e.ts}|${e.device_id}|${e.kind}|${i}`;
+  /* keys come from the row content, not its position, so they survive refreshes and new pages; identical rows get a counter */
+  const keys = useMemo(() => eventKeys(events), [events]);
   const toggle = (k: string) =>
     setOpen((s) => {
       const n = new Set(s);
@@ -158,7 +177,7 @@ export function EventFeed({ deviceId }: Props) {
             <div className="relative w-full" style={{ height: virtual.getTotalSize() }}>
               {items.map((v) => {
                 const e = events[v.index];
-                const k = keyOf(e, v.index);
+                const k = keys[v.index];
                 return (
                   <div
                     key={k}

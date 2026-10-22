@@ -42,7 +42,7 @@ const server = setupServer(
   http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
   http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
   http.get("*/api/groups", () => apiError(403, "forbidden")),
-  http.get("*/api/system/status", () => HttpResponse.json({ pollers: [], eventd: [], db_size_bytes: 0, queues: [] })),
+  http.get("*/api/system/status", () => HttpResponse.json({ now: new Date().toISOString(), pollers: [], eventd: [], db_size_bytes: 0, queues: [] })),
   http.get("*/api/auth/me", () =>
     loggedIn ? HttpResponse.json({ id: 1, username: "admin", roles, csrf_token: "tok" }) : apiError(401, "unauthenticated"),
   ),
