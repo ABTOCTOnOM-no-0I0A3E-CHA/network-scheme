@@ -12,9 +12,8 @@ import { expect, test } from "./guard";
  *    pair, inside a configured management subnet. It sends syslog to the PUBLISHED ports (514 UDP and TCP,
  *    6514 TLS) of the runner, so its packets pass DNAT and FORWARD like a device's on another network. The
  *    event is attributed to the device registered with that address only if eventd sees the sender's own
- *    address as the source: that is the proof that docker's NAT preserves it. With the userland proxy on,
- *    the proxy would terminate the connection and open its own, the source would be the bridge gateway,
- *    no device would match and this test would fail.
+ *    address as the source: that is the proof that DNAT and FORWARD preserve the source address of off-host
+ *    devices. (The userland-proxy setting is enforced by the install preflight, preflight.go.)
  *  - A second namespace outside every management subnet sends to 514 as well: the DOCKER-USER ingress
  *    rules drop it (a later CI step reads their counters) and nothing of it may be stored.
  * All run test/e2e/send_events.py every few seconds; the messages carry the markers below.

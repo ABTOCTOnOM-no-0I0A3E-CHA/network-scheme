@@ -57,7 +57,7 @@ func (f *fakeIPTables) run(c install.Cmd) error {
 			f.chain = slices.Delete(f.chain, i, i+1)
 		}
 		return nil
-	case "-L": // -L CHAIN -n --line-numbers: num target prot opt source destination [comment]
+	case "-L": /* -L CHAIN -n --line-numbers: num target prot opt source destination, then the comment */
 		if c.Stdout == nil {
 			return nil
 		}

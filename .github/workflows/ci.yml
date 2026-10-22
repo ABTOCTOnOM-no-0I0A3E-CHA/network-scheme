@@ -205,10 +205,9 @@ jobs:
           # Two more senders live in network namespaces joined to the host by a veth pair, which makes them like
           # devices on another network: their packets arrive at a host address, are DNAT'ed to the published
           # ports (PREROUTING), forwarded (FORWARD, DOCKER-USER) and reach eventd with the source address
-          # unchanged. That proves the source address survives docker's NAT; with the userland proxy on, the proxy
-          # would terminate the connection and open its own, so the source would be the bridge gateway and the
-          # device below would not match. (A sender on the host itself would not prove it: its packets are
-          # masqueraded to the bridge gateway.)
+          # unchanged. That proves that DNAT and FORWARD preserve the source address of off-host devices. (The
+          # userland-proxy setting itself is enforced by the install preflight, preflight.go. A sender on the host
+          # would prove nothing: its packets are masqueraded to the bridge gateway.)
           #   nms-ev-mgmt  172.31.250.2, inside the management subnet MGMT_EXTRA: accepted, attributed to its device.
           #   nms-ev-rogue 172.31.251.2, in no management subnet: dropped by the DOCKER-USER ingress rules.
           # TLS (6514) is verified against the installation's CA, for the name of the certificate (localhost).
@@ -325,7 +324,7 @@ jobs:
           sudo iptables -w -D DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
           sudo systemctl restart docker
           sudo iptables -w -C DOCKER-USER -s "$DEVICES_SUBNET" -j DROP
-          sudo iptables -w -C DOCKER-USER -d "$DEVICES_SUBNET" -p udp -m udp --dport 1514 -j DROP
+          sudo iptables -w -C DOCKER-USER -d "$DEVICES_SUBNET" -p udp -m udp --dport 1514 -m comment --comment nms-ingress-udp-1514 -j DROP
           sudo iptables -w -C FORWARD -j DOCKER-USER
           sudo iptables -w -S DOCKER-USER
       - name: Service logs
