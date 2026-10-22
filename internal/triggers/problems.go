@@ -45,6 +45,7 @@ type openReq struct {
 	key      pkey
 	severity string
 	value    string
+	event    bool      /* sourced from a syslog or trap row: persisted at once, never held (it is not recomputed after a restart) */
 	evidence time.Time /* when the evidence occurred; a problem resolved at or after it is not reopened */
 }
 

@@ -52,12 +52,13 @@ type IfFilter struct {
 type IfKey struct {
 	DeviceID int64
 	IfIndex  int
+	FirstUp  time.Time /* earliest oper-up sample in the window */
 }
 
 // SampleSource reads the samples written in (from, to], oldest first, at most limit.
 type SampleSource interface {
 	SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysSample, error)
 	IfSince(ctx context.Context, from, to time.Time, f IfFilter, limit int) ([]IfSample, error)
-	/* IfUpSince lists the distinct interfaces that reported oper-up in (from, to]. */
+	/* IfUpSince lists the interfaces that reported oper-up in (from, to] with the time of the first such sample. */
 	IfUpSince(ctx context.Context, from, to time.Time) ([]IfKey, error)
 }

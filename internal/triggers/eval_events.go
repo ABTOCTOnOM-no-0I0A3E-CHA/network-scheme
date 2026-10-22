@@ -42,7 +42,7 @@ const (
 )
 
 /* streamPos returns the position of a stream; a stream seen for the first time starts at the current end of its table. */
-func (e *Engine) streamPos(ctx context.Context, a *actions, stream string) (int64, error) {
+func (e *Engine) streamPos(ctx context.Context, a *actions, stream string, now time.Time) (int64, error) {
 	if v, ok := e.wmSeq[stream]; ok {
 		return v, nil
 	}
@@ -52,7 +52,7 @@ func (e *Engine) streamPos(ctx context.Context, a *actions, stream string) (int6
 		return 0, fmt.Errorf("triggers: read stream position: %w", err)
 	}
 	if seq == nil {
-		head, err := e.streamHead(ctx, stream)
+		head, err := e.streamHead(ctx, stream, now)
 		if err != nil {
 			return 0, err
 		}
@@ -63,6 +63,18 @@ func (e *Engine) streamPos(ctx context.Context, a *actions, stream string) (int6
 	return *seq, nil
 }
 
+/* skipToHead moves a stream nobody listens to straight to its end (one bounded query), so a trigger added later starts from now. */
+func (e *Engine) skipToHead(ctx context.Context, a *actions, stream string, pos int64, now time.Time) error {
+	head, err := e.streamHead(ctx, stream, now)
+	if err != nil {
+		return err
+	}
+	if head > pos {
+		a.wmSeq[stream] = head
+	}
+	return nil
+}
+
 /* eventTable names the table of a stream (a constant, never user input). */
 func eventTable(stream string) string {
 	if stream == streamTrap {
@@ -71,9 +83,9 @@ func eventTable(stream string) string {
 	return "events.syslog"
 }
 
-func (e *Engine) streamHead(ctx context.Context, stream string) (int64, error) {
+func (e *Engine) streamHead(ctx context.Context, stream string, now time.Time) (int64, error) {
 	var head int64
-	if err := e.pool.QueryRow(ctx, `SELECT coalesce(max(ingest_seq), 0) FROM `+eventTable(stream)).Scan(&head); err != nil {
+	if err := e.pool.QueryRow(ctx, `SELECT coalesce(max(ingest_seq), 0) FROM `+eventTable(stream)+` WHERE ts > $1`, now.Add(-eventTSFloor)).Scan(&head); err != nil {
 		return 0, fmt.Errorf("triggers: read stream head: %w", err)
 	}
 	return head, nil
@@ -118,7 +130,7 @@ type trapGroup struct {
 }
 
 func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error {
-	pos, err := e.streamPos(ctx, a, streamTrap)
+	pos, err := e.streamPos(ctx, a, streamTrap, now)
 	if err != nil {
 		return err
 	}
@@ -136,6 +148,9 @@ func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error
 	list := make([]string, 0, len(names))
 	for n := range names {
 		list = append(list, n)
+	}
+	if len(list) == 0 {
+		return e.skipToHead(ctx, a, streamTrap, pos, now)
 	}
 	floor := now.Add(-eventTSFloor)
 	for range maxRanges {
@@ -222,7 +237,7 @@ func (e *Engine) onTrap(a *actions, r trapGroup, now time.Time) {
 			}
 			switch {
 			case par.Name == r.name:
-				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx)})
+				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx), event: true})
 				tr := e.tracker(tkey{t.id, r.dev, k.obj})
 				tr.lastEvent, tr.floor, tr.falses = now, laterOf(tr.floor, r.maxTS), 0
 				hinted = hinted || link
@@ -236,8 +251,8 @@ func (e *Engine) onTrap(a *actions, r trapGroup, now time.Time) {
 			}
 			k := pkey{trig: t.id, dev: r.dev, obj: obj}
 			if r.name == trapLinkDown {
-				e.seenUp[[2]int64{r.dev, int64(idx)}] = struct{}{} /* a device-reported transition */
-				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx)})
+				e.markUp([2]int64{r.dev, int64(idx)}, time.Time{}) /* a device-reported transition */
+				a.open(e, openReq{key: k, severity: t.severity, value: describeTrap(r.name, idx), event: true})
 				tr := e.tracker(tkey{t.id, r.dev, obj})
 				tr.floor, tr.falses, tr.firstTrue = laterOf(tr.floor, r.maxTS), 0, r.maxTS
 			} else {
@@ -287,7 +302,7 @@ func syslogFilter(p *Syslog) sysFilter {
 }
 
 func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) error {
-	pos, err := e.streamPos(ctx, a, streamSyslog)
+	pos, err := e.streamPos(ctx, a, streamSyslog, now)
 	if err != nil {
 		return err
 	}
@@ -306,6 +321,9 @@ func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) erro
 	devs := make([]int64, 0, len(devSet))
 	for d := range devSet {
 		devs = append(devs, d)
+	}
+	if len(sevs) == 0 {
+		return e.skipToHead(ctx, a, streamSyslog, pos, now)
 	}
 	floor := now.Add(-eventTSFloor)
 	for range maxRanges {
@@ -379,7 +397,7 @@ func (e *Engine) syslogRange(ctx context.Context, a *actions, lo, hi int64, floo
 			if !ok || idx[syslogFilter(par)] != h.f {
 				continue
 			}
-			a.open(e, openReq{key: pkey{trig: t.id, dev: h.dev}, severity: t.severity, value: msg})
+			a.open(e, openReq{key: pkey{trig: t.id, dev: h.dev}, severity: t.severity, value: msg, event: true})
 			e.tracker(tkey{t.id, h.dev, ""}).lastEvent = now
 		}
 	}

@@ -309,3 +309,70 @@ func TestOutageStorm(t *testing.T) {
 		t.Fatalf("release notifications = %v, want 500 suppressed_changed + 1 resolved", ev)
 	}
 }
+
+/* TestEventOpeningsAreNeverHeld: a syslog row is stored at once even while the parent's outage is pending, and survives a restart. */
+func TestEventOpeningsAreNeverHeld(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	child := h.newDevice(withParent(parent))
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
+	sys := h.newTrigger(h.group, "syslog", `{"severity_min":3}`, 0, "warning")
+	h.setStates([]int64{parent}, "down", h.clk.Now())
+	h.writeSyslog(child, h.clk.Now(), 2, "fan failure")
+	h.advance(time.Second)
+	got := h.openProblems(child)
+	if len(got) != 1 || got[0].Trigger != sys {
+		t.Fatalf("the syslog opening was held or lost: %+v", h.problems(child))
+	}
+	h.eng = h.newEngine(nil) /* the position already moved past the row: a restart must not lose it */
+	h.advance(5 * time.Second)
+	if len(h.openProblems(child)) != 1 {
+		t.Fatalf("lost across a restart: %+v", h.problems(child))
+	}
+	h.advance(30 * time.Second) /* the parent's outage opens: the stored problem is suppressed retroactively */
+	if p := byDevice(h.openProblems(0))[child]; !p.Suppressed {
+		t.Fatalf("not suppressed after the parent opened: %+v", h.problems(0))
+	}
+}
+
+/* TestHeldSampleOpeningReappearsAfterARestart: held openings are recomputed from current data. */
+func TestHeldSampleOpeningReappearsAfterARestart(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	child := h.newDevice(withParent(parent))
+	h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
+	t0 := h.clk.Now()
+	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second))
+	h.setStates([]int64{parent}, "down", t0)
+	h.step()
+	if len(h.problems(0)) != 0 {
+		t.Fatalf("not held: %+v", h.problems(0))
+	}
+	h.eng = h.newEngine(nil) /* held requests are in memory only */
+	h.advance(5 * time.Second)
+	if len(h.problems(0)) != 0 {
+		t.Fatalf("opened early after the restart: %+v", h.problems(0))
+	}
+	h.advance(30 * time.Second)
+	ps := byDevice(h.openProblems(0))
+	if len(ps) != 2 || !ps[child].Suppressed || ps[parent].Suppressed {
+		t.Fatalf("after the parent opened: %+v", ps)
+	}
+}
+
+/* TestHeldOpeningIsDroppedWhenItsTriggerGoesAway. */
+func TestHeldOpeningIsDroppedWhenItsTriggerGoesAway(t *testing.T) {
+	h := newHarness(t)
+	parent := h.newDevice()
+	child := h.newDevice(withParent(parent))
+	trig := h.newTrigger(h.group, "availability", `{"states":["down"]}`, 30, "high")
+	t0 := h.clk.Now()
+	h.setStates([]int64{child}, "down", t0.Add(-35*time.Second))
+	h.setStates([]int64{parent}, "down", t0)
+	h.step()
+	h.exec(h.api, `INSERT INTO core.trigger_override (trigger_id, device_id, enabled) VALUES ($1, $2, false)`, trig, child)
+	h.advance(31 * time.Second)
+	if len(h.problems(child)) != 0 {
+		t.Fatalf("a disabled trigger got its held opening: %+v", h.problems(child))
+	}
+}

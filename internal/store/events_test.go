@@ -386,3 +386,24 @@ func TestEventsCompression(t *testing.T) {
 		t.Fatalf("trap rows with ingest_seq = %d, %v", cnt, err)
 	}
 }
+
+/* TestEventdCannotChooseIngestSeq: eventd inserts every column but ingest_seq, which only the sequence default may fill. */
+func TestEventdCannotChooseIngestSeq(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	ev := env.Pool("nms_eventd")
+	_, err := ev.Exec(ctx, `INSERT INTO events.syslog (ts, device_id, facility, severity, host, app, msg, raw_len, ingest_seq) VALUES (now(), 1, 1, 1, 'h', 'a', 'm', 1, 5)`)
+	requireCode(t, err, "42501", "syslog insert naming ingest_seq")
+	_, err = ev.Exec(ctx, `INSERT INTO events.trap (ts, device_id, version, trap_oid, name, varbinds, identified, ingest_seq) VALUES (now(), 1, 2, '1.3', 'n', '[]', true, 5)`)
+	requireCode(t, err, "42501", "trap insert naming ingest_seq")
+	_, err = ev.CopyFrom(ctx, pgx.Identifier{"events", "syslog"}, []string{"ts", "device_id", "facility", "severity", "host", "app", "msg", "raw_len", "ingest_seq"},
+		pgx.CopyFromRows([][]any{{time.Now(), int64(1), int16(1), int16(1), "h", "a", "m", 1, int64(5)}}))
+	requireCode(t, err, "42501", "syslog COPY naming ingest_seq")
+	if _, err := ev.CopyFrom(ctx, pgx.Identifier{"events", "syslog"}, []string{"ts", "device_id", "facility", "severity", "host", "app", "msg", "raw_len"},
+		pgx.CopyFromRows([][]any{{time.Now(), int64(1), int16(1), int16(1), "h", "a", "m", 1}})); err != nil {
+		t.Fatalf("the normal COPY must work: %v", err)
+	}
+	if _, err := ev.Exec(ctx, `UPDATE events.syslog SET ingest_seq = 1`); err == nil {
+		t.Fatal("eventd must not update rows")
+	}
+}

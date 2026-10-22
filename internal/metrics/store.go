@@ -74,8 +74,15 @@ type MetricStore interface {
 		device plus all samples of DownOrDeviceIDs (the cheap form for link-down checks).
 	*/
 	IfSince(ctx context.Context, from, to time.Time, filter IfFilter, limit int) ([]IfPoint, error)
-	/* IfUpSince lists the distinct (device, interface) pairs that reported oper_up in (from, to]. */
-	IfUpSince(ctx context.Context, from, to time.Time) ([][2]int64, error)
+	/* IfUpSince lists the (device, interface) pairs that reported oper_up in (from, to] with their first such sample. */
+	IfUpSince(ctx context.Context, from, to time.Time) ([]IfFirstUp, error)
+}
+
+// IfFirstUp is an interface and the time of its first oper_up sample in a range.
+type IfFirstUp struct {
+	DeviceID int64
+	IfIndex  int
+	FirstUp  time.Time
 }
 
 /*
@@ -280,16 +287,15 @@ func (s *Store) IfSince(ctx context.Context, from, to time.Time, f IfFilter, lim
 }
 
 // IfUpSince implements MetricStore.
-func (s *Store) IfUpSince(ctx context.Context, from, to time.Time) ([][2]int64, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT device_id, if_index FROM metrics.if_metrics WHERE ts > $1 AND ts <= $2 AND oper_up`, from, to)
+func (s *Store) IfUpSince(ctx context.Context, from, to time.Time) ([]IfFirstUp, error) {
+	rows, err := s.pool.Query(ctx, `SELECT device_id, if_index, min(ts) FROM metrics.if_metrics WHERE ts > $1 AND ts <= $2 AND oper_up GROUP BY device_id, if_index`, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("query up interfaces: %w", err)
 	}
-	pairs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) ([2]int64, error) {
-		var d int64
-		var x int32
-		err := row.Scan(&d, &x)
-		return [2]int64{d, int64(x)}, err
+	pairs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (IfFirstUp, error) {
+		var u IfFirstUp
+		err := row.Scan(&u.DeviceID, &u.IfIndex, &u.FirstUp)
+		return u, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query up interfaces: %w", err)

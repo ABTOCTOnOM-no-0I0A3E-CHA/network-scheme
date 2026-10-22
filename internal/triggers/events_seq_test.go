@@ -242,3 +242,22 @@ func TestRacingEnginesAnnounceOnce(t *testing.T) {
 		t.Fatalf("resolved announced %d times, want exactly once", ev[notify.EventResolved])
 	}
 }
+
+/* TestSeenUpRespectsTimeOrder: a down sample that precedes the port's first up sample is not a transition. */
+func TestSeenUpRespectsTimeOrder(t *testing.T) {
+	h := newHarness(t)
+	dev := h.newDevice()
+	h.newTrigger(h.group, "if_oper_down", `{}`, 0, "average")
+	now := h.clk.Now()
+	h.writeIf(dev, 6, now.Add(-10*time.Second), false) /* an unused port that later came up */
+	h.writeIf(dev, 6, now.Add(-5*time.Second), true)
+	h.advance(time.Second)
+	if len(h.problems(dev)) != 0 {
+		t.Fatalf("problems = %+v", h.problems(dev))
+	}
+	h.writeIf(dev, 6, h.clk.Now(), false)
+	h.advance(5 * time.Second)
+	if got := h.openProblems(dev); len(got) != 1 || got[0].Object != "if:6" {
+		t.Fatalf("up -> down: %+v", h.problems(dev))
+	}
+}

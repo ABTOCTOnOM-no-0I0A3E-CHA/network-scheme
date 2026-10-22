@@ -253,7 +253,7 @@ func (e *Engine) refreshSeenUp(ctx context.Context, from, to time.Time) error {
 		return err
 	}
 	for _, k := range keys {
-		e.seenUp[[2]int64{k.DeviceID, int64(k.IfIndex)}] = struct{}{}
+		e.markUp([2]int64{k.DeviceID, int64(k.IfIndex)}, k.FirstUp)
 	}
 	if !e.upAt.IsZero() && to.Sub(e.upAt) < inventoryEvery {
 		return nil
@@ -269,13 +269,20 @@ func (e *Engine) refreshSeenUp(ctx context.Context, from, to time.Time) error {
 		if err := rows.Scan(&d, &x); err != nil {
 			return fmt.Errorf("triggers: read interface inventory: %w", err)
 		}
-		e.seenUp[[2]int64{d, int64(x)}] = struct{}{}
+		e.markUp([2]int64{d, int64(x)}, time.Time{}) /* up before any sample we hold */
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("triggers: read interface inventory: %w", err)
 	}
 	e.upAt = to
 	return nil
+}
+
+/* markUp records that an interface was up at ts, keeping the earliest such time. */
+func (e *Engine) markUp(k [2]int64, ts time.Time) {
+	if cur, ok := e.seenUp[k]; !ok || ts.Before(cur) {
+		e.seenUp[k] = ts
+	}
 }
 
 /* watchedIfDevices lists the devices with an open interface problem or a pending interface condition; never nil. */
@@ -316,9 +323,9 @@ func (e *Engine) ifSample(a *actions, t *effTrigger, p IfSample, obj string) {
 			/* "Any interface" reports transitions only: a port never seen up (unused) stays quiet. */
 			k := [2]int64{p.DeviceID, int64(p.IfIndex)}
 			if p.OperUp {
-				e.seenUp[k] = struct{}{}
-			} else if _, ok := e.seenUp[k]; !ok {
-				return
+				e.markUp(k, p.TS)
+			} else if fu, ok := e.seenUp[k]; !ok || !p.TS.After(fu) {
+				return /* never up, or this sample precedes the first time it was seen up */
 			}
 		}
 		if par.IfIndex == nil || *par.IfIndex == p.IfIndex {

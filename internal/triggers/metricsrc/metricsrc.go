@@ -49,7 +49,7 @@ func (s Source) IfUpSince(ctx context.Context, from, to time.Time) ([]triggers.I
 	}
 	out := make([]triggers.IfKey, len(pairs))
 	for i, p := range pairs {
-		out[i] = triggers.IfKey{DeviceID: p[0], IfIndex: int(p[1])}
+		out[i] = triggers.IfKey{DeviceID: p.DeviceID, IfIndex: p.IfIndex, FirstUp: p.FirstUp}
 	}
 	return out, nil
 }

@@ -105,7 +105,11 @@ type heldReq struct {
 /*
 holdPending postpones the openings of devices that have an ancestor whose
 availability condition fires but whose problem is not open yet (its duration
-has not elapsed). Without this, children whose own timers end first would
+has not elapsed). Only openings that are recomputed from current data (availability,
+samples, system checks) are held: an opening that came from a syslog or trap row is
+stored at once, because the stream position moves past the row in the same
+transaction and nothing would read it again after a restart; if its ancestor's
+problem opens later, the retroactive flip suppresses it. Without this, children whose own timers end first would
 open unsuppressed and notify, defeating the suppression. A held opening is
 offered again every cycle: when the ancestor's problem opens, it opens
 suppressed; when the ancestor recovers, it opens normally (its own condition
@@ -116,6 +120,11 @@ that were never actually opened are dropped when their own condition ends
 func (e *Engine) holdPending(a *actions, now time.Time) {
 	for k, h := range e.held {
 		if e.open[k] != nil {
+			delete(e.held, k)
+			continue
+		}
+		/* A trigger that no longer applies (or a device that is gone) must not get its postponed opening. */
+		if _, ok := e.cfg.devices[k.dev]; (k.dev != 0 && !ok) || (k.trig != 0 && e.cfg.eff[k.dev][k.trig] == nil) {
 			delete(e.held, k)
 			continue
 		}
@@ -153,7 +162,7 @@ func (e *Engine) holdPending(a *actions, now time.Time) {
 		if !wasHeld {
 			h = heldReq{req: r, since: now}
 		}
-		if r.key.dev != 0 && now.Sub(h.since) < holdMax && e.ancestorPending(r.key.dev, pending) {
+		if !r.event && r.key.dev != 0 && now.Sub(h.since) < holdMax && e.ancestorPending(r.key.dev, pending) {
 			e.held[r.key] = h
 			delete(a.openSet, r.key)
 			continue
