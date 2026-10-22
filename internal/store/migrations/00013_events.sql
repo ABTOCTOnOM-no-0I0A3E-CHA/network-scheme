@@ -31,7 +31,8 @@ CREATE TABLE events.trap (
     trap_oid   text        NOT NULL CHECK (octet_length(trap_oid) <= 2048),
     name       text        NOT NULL CHECK (octet_length(name) <= 1024),
     severity   text        NULL CHECK (severity IN ('info', 'warning', 'average', 'high', 'disaster')),
-    varbinds   jsonb       NOT NULL,
+    -- 128 varbinds x 2 KiB values plus JSON overhead stays under 300000 bytes.
+    varbinds   jsonb       NOT NULL CHECK (octet_length(varbinds::text) <= 300000),
     identified bool        NOT NULL,
     tsv        tsvector    GENERATED ALWAYS AS (
         to_tsvector('simple', name || ' ' || trap_oid || ' ' || varbinds::text)) STORED
@@ -111,8 +112,16 @@ GRANT INSERT ON events.syslog, events.trap, events.storm TO nms_eventd;
 -- SELECT: the counters are bumped with INSERT ... ON CONFLICT DO UPDATE SET x = t.x + ...
 GRANT SELECT, INSERT, UPDATE ON events.eventd_stats TO nms_eventd;
 GRANT SELECT ON events.trap_rule TO nms_eventd;
--- The core tables eventd resolves sources with; no write access.
-GRANT SELECT ON core.device, core.access_profile TO nms_eventd;
+-- The core data eventd resolves sources with; no write access. Never the whole
+-- access_profile table: ssh_read/telnet_read and scan-owned rows stay out of
+-- reach of a network-facing parser. The view runs with the owner's rights.
+CREATE VIEW core.event_auth_profile_v WITH (security_barrier = true) AS
+SELECT owner_id AS device_id, kind, ciphertext, key_version, status, updated_at
+FROM core.access_profile
+WHERE owner_kind = 'device' AND kind IN ('snmp2c', 'snmp3');
+REVOKE ALL ON core.event_auth_profile_v FROM PUBLIC;
+GRANT SELECT ON core.device TO nms_eventd;
+GRANT SELECT ON core.event_auth_profile_v TO nms_eventd;
 
 GRANT SELECT ON events.syslog, events.trap, events.storm, events.eventd_stats TO nms_api;
 GRANT SELECT, INSERT, UPDATE, DELETE ON events.trap_rule TO nms_api;

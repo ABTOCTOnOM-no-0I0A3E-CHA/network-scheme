@@ -15,7 +15,7 @@ const JobsSchema = "jobs"
 /*
 jobGrants run after every River migration (GRANT is idempotent). The api
 (and eventd, which enqueues poll_now) only enqueues: INSERT plus what INSERT ... ON CONFLICT DO UPDATE SET kind ...
-RETURNING needs. The poller works the queue and runs River's maintenance
+RETURNING needs. A trigger further limits eventd to poll_now. The poller works the queue and runs River's maintenance
 (leader election, cleanup), so it gets DML on the queue tables but never on
 river_migration.
 */
@@ -28,6 +28,22 @@ GRANT USAGE ON SEQUENCE jobs.river_job_id_seq TO nms_api, nms_eventd;
 GRANT SELECT, INSERT, UPDATE, DELETE ON jobs.river_job, jobs.river_leader, jobs.river_queue,
     jobs.river_notification TO nms_poller;
 GRANT SELECT ON jobs.river_migration TO nms_poller;
+
+CREATE OR REPLACE FUNCTION jobs.eventd_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
+BEGIN
+    IF current_user = 'nms_eventd' THEN
+        IF NEW.kind IS DISTINCT FROM 'poll_now' OR (TG_OP = 'UPDATE' AND OLD.kind IS DISTINCT FROM NEW.kind) THEN
+            RAISE EXCEPTION 'eventd may only enqueue poll_now' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION jobs.eventd_guard() FROM PUBLIC;
+DROP TRIGGER IF EXISTS eventd_guard ON jobs.river_job;
+CREATE TRIGGER eventd_guard BEFORE INSERT OR UPDATE ON jobs.river_job
+    FOR EACH ROW EXECUTE FUNCTION jobs.eventd_guard();
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA jobs TO nms_poller;
 `
 

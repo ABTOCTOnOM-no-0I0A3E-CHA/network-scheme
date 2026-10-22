@@ -21,7 +21,7 @@ func TestEventdRoleGrants(t *testing.T) {
 			ON CONFLICT (instance) DO UPDATE SET received = events.eventd_stats.received + excluded.received, updated_at = excluded.updated_at`,
 		`UPDATE events.eventd_stats SET dropped = dropped + 1 WHERE instance = 't1'`,
 		`SELECT id, address, snmp_port FROM core.device LIMIT 1`,
-		`SELECT kind, ciphertext FROM core.access_profile LIMIT 1`,
+		`SELECT device_id, kind, ciphertext, key_version, status FROM core.event_auth_profile_v LIMIT 1`,
 		`SELECT trap_oid, name, severity FROM events.trap_rule`,
 	} {
 		if _, err := eventd.Exec(ctx, sql); err != nil {
@@ -31,7 +31,7 @@ func TestEventdRoleGrants(t *testing.T) {
 	/* The poll_now enqueue: the same insert as the api's. */
 	var id int64
 	if err := eventd.QueryRow(ctx, `INSERT INTO jobs.river_job (args, kind, max_attempts, queue, state)
-		VALUES ('{}', 'probe', 1, 'probe', 'available') RETURNING id`).Scan(&id); err != nil {
+		VALUES ('{}', 'poll_now', 1, 'probe', 'available') RETURNING id`).Scan(&id); err != nil {
 		t.Errorf("eventd enqueue: %v", err)
 	}
 	for _, sql := range []string{
@@ -65,6 +65,10 @@ func TestEventdRoleGrants(t *testing.T) {
 		`UPDATE core.device SET driver = 'x'`,
 		`DELETE FROM core.device`,
 		`UPDATE core.access_profile SET status = 'ok'`,
+		`SELECT 1 FROM core.access_profile`,
+		`SELECT kind FROM core.access_profile`,
+		`INSERT INTO jobs.river_job (args, kind, max_attempts, queue, state) VALUES ('{}', 'discovery_scan', 1, 'probe', 'available')`,
+		`UPDATE jobs.river_job SET kind = 'discovery_scan'`,
 		/* The queue: enqueue only. */
 		`UPDATE jobs.river_job SET state = 'completed'`,
 		`UPDATE jobs.river_job SET args = '{}'`,
@@ -254,5 +258,105 @@ func TestDeviceStateViewShowsLastError(t *testing.T) {
 	}
 	if got := read(); got != "SNMP request timed out" {
 		t.Fatalf("last_error = %q", got)
+	}
+}
+
+func TestEventAuthProfileViewExposesOnlySNMPDeviceProfiles(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	pg := env.Pool("postgres")
+	var gid, did, sid int64
+	if err := pg.QueryRow(ctx, `INSERT INTO core.device_group (name) VALUES ('view-group') RETURNING id`).Scan(&gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.QueryRow(ctx, `INSERT INTO core.device (name, address, group_id) VALUES ('v', '198.51.100.251', $1) RETURNING id`, gid).Scan(&did); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.QueryRow(ctx, `INSERT INTO core.discovery_scan (cidr, group_id) VALUES ('198.51.100.0/24', $1) RETURNING id`, gid).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		kind, owner string
+		id          int64
+	}{{"snmp2c", "device", did}, {"snmp3", "device", did}, {"ssh_read", "device", did}, {"telnet_read", "device", did}, {"snmp2c", "scan", sid}, {"ssh_read", "scan", sid}} {
+		if _, err := pg.Exec(ctx, `INSERT INTO core.access_profile (owner_kind, owner_id, kind, ciphertext, key_version) VALUES ($1, $2, $3, decode('00', 'hex'), 1)`, r.owner, r.id, r.kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := env.Pool("nms_eventd").Query(ctx, `SELECT device_id, kind FROM core.event_auth_profile_v WHERE device_id = $1 OR device_id = $2`, did, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]int{}
+	for rows.Next() {
+		var id int64
+		var kind string
+		if err := rows.Scan(&id, &kind); err != nil {
+			t.Fatal(err)
+		}
+		if id != did {
+			t.Errorf("view returned a scan-owned row: %d %s", id, kind)
+		}
+		got[kind]++
+	}
+	if len(got) != 2 || got["snmp2c"] != 1 || got["snmp3"] != 1 {
+		t.Errorf("view kinds = %v, want exactly snmp2c and snmp3 of the device", got)
+	}
+	/* Nobody but eventd reads the view. */
+	requireDenied(t, "nms_poller", `SELECT 1 FROM core.event_auth_profile_v`)
+	requireDenied(t, "nms_api", `SELECT 1 FROM core.event_auth_profile_v`)
+}
+
+func TestTrapVarbindsBound(t *testing.T) {
+	env := testdb.New(t)
+	big := `"` + strings.Repeat("a", 300001) + `"`
+	if _, err := env.Pool("nms_eventd").Exec(context.Background(), `INSERT INTO events.trap (ts, device_id, version, trap_oid, name, varbinds, identified)
+		VALUES (now(), 1, 2, '1', 'n', $1::jsonb, true)`, big); err == nil {
+		t.Fatal("oversized varbinds accepted")
+	}
+}
+
+/* TestEventsCompression compresses old chunks (generated tsv + GIN) and checks reads and a late insert. */
+func TestEventsCompression(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	pg, ev, api := env.Pool("postgres"), env.Pool("nms_eventd"), env.Pool("nms_api")
+	old := time.Now().Add(-30 * 24 * time.Hour).Truncate(time.Second)
+	if _, err := ev.Exec(ctx, `INSERT INTO events.syslog (ts, device_id, facility, severity, host, app, msg, raw_len)
+		VALUES ($1, 901, 3, 4, 'h', 'a', 'compressme one', 10), ($1, 901, 3, 4, 'h', 'a', 'other two', 10)`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ev.Exec(ctx, `INSERT INTO events.trap (ts, device_id, version, trap_oid, name, varbinds, identified)
+		VALUES ($1, 901, 2, '1.3.6.1.6.3.1.1.5.3', 'linkDown', '[{"value":"compressvb"}]', true)`, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, tbl := range []string{"events.syslog", "events.trap"} {
+		var n int
+		if err := pg.QueryRow(ctx, `SELECT count(*) FROM (SELECT compress_chunk(c, if_not_compressed => true)
+			FROM show_chunks($1::regclass, older_than => now() - interval '10 days') c) x`, tbl).Scan(&n); err != nil || n == 0 {
+			t.Fatalf("compress %s: %d chunks, %v", tbl, n, err)
+		}
+		if err := pg.QueryRow(ctx, `SELECT count(*) FROM chunk_compression_stats($1::regclass) WHERE compression_status = 'Compressed'`, tbl).Scan(&n); err != nil || n == 0 {
+			t.Fatalf("%s: no compressed chunk (%d, %v)", tbl, n, err)
+		}
+	}
+	var n int
+	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.syslog WHERE device_id = 901 AND tsv @@ plainto_tsquery('simple', 'compressme')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("tsv search in compressed chunk = %d, %v", n, err)
+	}
+	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.syslog WHERE device_id = 901 AND ts >= $1 AND ts <= $1`, old).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("(device_id, ts) read in compressed chunk = %d, %v", n, err)
+	}
+	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.trap WHERE device_id = 901 AND tsv @@ plainto_tsquery('simple', 'compressvb')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("trap tsv search in compressed chunk = %d, %v", n, err)
+	}
+	/* A late event lands in the compressed chunk as the unprivileged writer. */
+	if _, err := ev.Exec(ctx, `INSERT INTO events.syslog (ts, device_id, facility, severity, host, app, msg, raw_len)
+		VALUES ($1, 901, 3, 4, 'h', 'a', 'latecomer', 10)`, old.Add(time.Minute)); err != nil {
+		t.Fatalf("late insert into a compressed chunk as nms_eventd: %v", err)
+	}
+	if err := api.QueryRow(ctx, `SELECT count(*) FROM events.syslog WHERE device_id = 901 AND tsv @@ plainto_tsquery('simple', 'latecomer')`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("late event not found = %d, %v", n, err)
 	}
 }

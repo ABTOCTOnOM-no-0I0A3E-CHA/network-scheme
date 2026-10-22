@@ -243,8 +243,8 @@ func (s *Store) Apply(ctx context.Context, deviceID int64, inv drivers.Inventory
 /*
 SetStatus records the availability state of a device as seen by the poller
 it is assigned to. since changes only when the state changes; a status older
-than the stored one is ignored. errText is device-influenced and is stored
-cleaned and bounded. A deleted device is not an error.
+than the stored one is ignored. errText is fixed text chosen by the poller
+(see reasonText); it is still stored cleaned and bounded as defence in depth. A deleted device is not an error.
 */
 func (s *Store) SetStatus(ctx context.Context, deviceID int64, state string, at time.Time, errText string) error {
 	switch state {
