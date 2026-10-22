@@ -5,7 +5,12 @@ Eltex MES/ESR flavours) into a normalized Message.
 The parser is pure (no I/O) and strict: limits are enforced, text is
 sanitized to valid UTF-8 without control characters, and fields are only
 extracted from the header when the layout is unambiguous. Message text is
-never dropped, only the recognised header parts are split off it.
+never dropped, only the recognised header parts are split off it. A malformed
+RFC 5424 header therefore keeps the whole remainder as Text (TS=now, no
+Host/App); only a bad PRI or an oversized message is rejected.
+
+Host and App are text claimed by the device: for display only. They must never
+be used to identify the source (eventd identifies it by IP address alone).
 */
 package syslog
 
@@ -25,6 +30,9 @@ const (
 	MaxApp = 48
 	// maxFuture is how far ahead of now a device timestamp may be.
 	maxFuture = time.Hour
+	// maxPast is how far behind now a device timestamp may be; the timestamp
+	// is a hypertable partition key, so claimed days must not create chunks.
+	maxPast = 24 * time.Hour
 )
 
 var (
@@ -34,7 +42,11 @@ var (
 	ErrMalformed = errors.New("syslog: malformed message")
 )
 
-// Message is a normalized syslog message. TS is always UTC.
+/*
+Message is a normalized syslog message. TS is always UTC and within
+[now-24h, now+1h]. Host and App are device-claimed text, display only, never
+used for source identification.
+*/
 type Message struct {
 	TS       time.Time
 	Facility uint8
@@ -46,7 +58,7 @@ type Message struct {
 
 /*
 Parse parses one syslog message. Timestamps without a zone are taken as UTC;
-a missing timestamp, or one more than an hour ahead of now, becomes now.
+a missing timestamp, or one outside [now-24h, now+1h], becomes now.
 */
 func Parse(b []byte, now time.Time) (Message, error) {
 	if len(b) > MaxMessage {
@@ -58,16 +70,15 @@ func Parse(b []byte, now time.Time) (Message, error) {
 		return Message{}, ErrMalformed
 	}
 	m := Message{Facility: uint8(pri >> 3), Severity: uint8(pri & 7)} //nolint:gosec // pri <= 191
-	var err error
 	if isV1(rest) {
-		err = parse5424(&m, rest)
+		if err := parse5424(&m, rest); err != nil {
+			/* keep the text: reset the header fields and use the whole remainder */
+			m.TS, m.Host, m.App, m.Text = time.Time{}, "", "", rest
+		}
 	} else {
 		parse3164(&m, rest, now)
 	}
-	if err != nil {
-		return Message{}, err
-	}
-	if m.TS.IsZero() || m.TS.After(now.Add(maxFuture)) {
+	if m.TS.IsZero() || m.TS.After(now.Add(maxFuture)) || m.TS.Before(now.Add(-maxPast)) {
 		m.TS = now
 	}
 	m.TS = m.TS.UTC()
@@ -123,7 +134,7 @@ func sanitize(s string) string {
 	sb.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if (r == utf8.RuneError && n <= 1) || (r < 0x20 && r != '\t') || r == 0x7f {
+		if (r == utf8.RuneError && n <= 1) || badRune(r) {
 			sb.WriteRune(utf8.RuneError)
 		} else {
 			sb.WriteString(s[i : i+n])
@@ -131,6 +142,15 @@ func sanitize(s string) string {
 		i += n
 	}
 	return sb.String()
+}
+
+/*
+badRune: C0 controls except \t, DEL, C1 controls, bidi embedding/override/isolate
+controls and the line/paragraph separators (log-line display spoofing).
+*/
+func badRune(r rune) bool {
+	return (r < 0x20 && r != '\t') || (r >= 0x7f && r <= 0x9f) ||
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) || r == 0x2028 || r == 0x2029
 }
 
 /* clip cuts s to at most n bytes on a rune boundary. */
@@ -281,8 +301,8 @@ func parse3164(m *Message, s string, now time.Time) {
 
 /*
 timestamp3164 recognises "Mmm dd hh:mm:ss", "Mmm dd yyyy hh:mm:ss" (Eltex) and
-an RFC 3339 timestamp. Without a year the candidate year closest to now wins,
-which handles the new-year rollover. An out-of-range date yields a zero time.
+an RFC 3339 timestamp. Without a year the latest candidate year (now-1..now+1) not more than an
+hour ahead of now wins, which handles the new-year rollover. An out-of-range date yields a zero time.
 */
 func timestamp3164(s string, now time.Time) (ts time.Time, rest string, ok bool) {
 	if len(s) >= 20 && isDigit(s[0]) && isDigit(s[1]) && isDigit(s[2]) && isDigit(s[3]) && s[4] == '-' {
@@ -361,18 +381,9 @@ func timestamp3164(s string, now time.Time) (ts time.Time, rest string, ok bool)
 		}
 		return
 	}
-	var best time.Duration
 	for y := now.Year() - 1; y <= now.Year()+1; y++ {
-		t, v := build(y)
-		if !v {
-			continue
-		}
-		d := t.Sub(now)
-		if d < 0 {
-			d = -d
-		}
-		if ts.IsZero() || d < best {
-			ts, best = t, d
+		if t, v := build(y); v && !t.After(now.Add(maxFuture)) {
+			ts = t /* years ascend: the latest candidate not in the future wins */
 		}
 	}
 	return

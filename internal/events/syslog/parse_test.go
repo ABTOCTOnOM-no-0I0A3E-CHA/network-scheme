@@ -41,7 +41,7 @@ func TestRFC3164(t *testing.T) {
 	if m != want {
 		t.Fatalf("got %+v, want %+v", m, want)
 	}
-	m = mustParse(t, string(fixture(t, "rfc3164_padded_day.txt")), testNow)
+	m = mustParse(t, string(fixture(t, "rfc3164_padded_day.txt")), time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC))
 	if m.TS != time.Date(2026, 10, 2, 8, 15, 0, 0, time.UTC) || m.Host != "gw1" || m.App != "cron" || m.Text != "job done" {
 		t.Fatalf("padded day: %+v", m)
 	}
@@ -53,8 +53,8 @@ func TestRFC3164Year(t *testing.T) {
 		t.Fatalf("with year: %+v", m)
 	}
 	m = mustParse(t, "<13>Oct 22 2025 11:30:00 gw1 x: y", testNow)
-	if m.TS.Year() != 2025 {
-		t.Fatalf("explicit year ignored: %v", m.TS)
+	if m.TS != testNow {
+		t.Fatalf("explicit year far in the past must clamp to now: %v", m.TS)
 	}
 }
 
@@ -135,9 +135,54 @@ func TestRFC5424Malformed(t *testing.T) {
 		"<13>1 - " + strings.Repeat("h", 256) + " a 1 2 - x",
 		"<13>1 - h " + strings.Repeat("a", 49) + " 1 2 - x",
 	} {
-		if _, err := Parse([]byte(in), testNow); !errors.Is(err, ErrMalformed) {
-			t.Errorf("%q: err = %v, want ErrMalformed", in, err)
+		m, err := Parse([]byte(in), testNow)
+		if err != nil {
+			t.Errorf("%q: %v", in, err)
+			continue
 		}
+		/* header fields are dropped, the text is kept (control chars sanitized) */
+		if m.TS != testNow || m.Host != "" || m.App != "" || m.Text != sanitize(in[len("<13>"):]) {
+			t.Errorf("%q: %+v", in, m)
+		}
+	}
+}
+
+func TestTimestampBounds(t *testing.T) {
+	cases := []struct {
+		ts   string
+		want time.Time
+	}{
+		{"2026-10-21T12:00:01Z", time.Date(2026, 10, 21, 12, 0, 1, 0, time.UTC)}, /* just inside -24h */
+		{"2026-10-21T11:59:59Z", testNow},                                        /* just outside -24h */
+		{"2026-10-22T13:00:00Z", time.Date(2026, 10, 22, 13, 0, 0, 0, time.UTC)}, /* exactly +1h */
+		{"2026-10-22T13:00:01Z", testNow},
+		{"0001-01-01T00:00:00Z", testNow},
+		{"9999-12-31T23:59:59Z", testNow},
+	}
+	for _, c := range cases {
+		if m := mustParse(t, "<13>1 "+c.ts+" h a - - - x", testNow); m.TS != c.want {
+			t.Errorf("5424 %s: %v, want %v", c.ts, m.TS, c.want)
+		}
+	}
+	m := mustParse(t, "<13>Oct 22 2000 12:00:00 h a: x", testNow)
+	if m.TS != testNow {
+		t.Errorf("3164 year 2000: %v", m.TS)
+	}
+}
+
+func TestYearlessPicksLatestNotFuture(t *testing.T) {
+	/* a buffered April message on Oct 22 belongs to this year (then clamped to now) */
+	ts, _, ok := timestamp3164("Apr  1 10:00:00 h x", testNow)
+	if !ok || ts != time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC) {
+		t.Fatalf("ts = %v ok=%v", ts, ok)
+	}
+	if m := mustParse(t, "<13>Apr  1 10:00:00 h x: y", testNow); m.TS != testNow {
+		t.Fatalf("clamped: %v", m.TS)
+	}
+	/* November on Oct 22 is last year's */
+	ts, _, _ = timestamp3164("Nov  1 10:00:00 h x", testNow)
+	if ts != time.Date(2025, 11, 1, 10, 0, 0, 0, time.UTC) {
+		t.Fatalf("ts = %v", ts)
 	}
 }
 
@@ -219,6 +264,10 @@ func TestSanitize(t *testing.T) {
 	m = mustParse(t, "<13>Oct 22 11:59:00 h a: буквы", testNow)
 	if m.Text != "буквы" {
 		t.Fatalf("valid UTF-8 must pass: %q", m.Text)
+	}
+	m = mustParse(t, "<13>Oct 22 11:59:00 h a: a\u0085b\u202ec\u2066d\u2069e\u2028f\u2029g\u009fh", testNow)
+	if want := "a\uFFFDb\uFFFDc\uFFFDd\uFFFDe\uFFFDf\uFFFDg\uFFFDh"; m.Text != want {
+		t.Fatalf("unicode controls: %q, want %q", m.Text, want)
 	}
 	m = mustParse(t, "<13>1 - h a 1 2 - x\r\n\r\n", testNow)
 	if m.Text != "x" {

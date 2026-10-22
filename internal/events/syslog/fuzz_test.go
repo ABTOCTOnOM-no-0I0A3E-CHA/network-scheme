@@ -36,7 +36,7 @@ func FuzzParse(f *testing.F) {
 		if len(m.Host) > MaxHost || len(m.App) > MaxApp || len(m.Text) > MaxMessage {
 			t.Fatalf("limits: %d %d %d", len(m.Host), len(m.App), len(m.Text))
 		}
-		if m.TS.IsZero() || m.TS.After(now.Add(maxFuture)) {
+		if m.TS.IsZero() || m.TS.After(now.Add(maxFuture)) || m.TS.Before(now.Add(-24*time.Hour)) {
 			t.Fatalf("bad TS %v", m.TS)
 		}
 		for _, s := range []string{m.Host, m.App, m.Text} {
@@ -44,7 +44,7 @@ func FuzzParse(f *testing.F) {
 				t.Fatalf("invalid UTF-8 %q", s)
 			}
 			for _, r := range s {
-				if (r < 0x20 && r != '\t') || r == 0x7f {
+				if badRune(r) {
 					t.Fatalf("control char in %q", s)
 				}
 			}
