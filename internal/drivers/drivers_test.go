@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -22,6 +23,8 @@ func (f fakeDriver) Collect(context.Context, snmp.Reader) (Sample, error) { retu
 func (f fakeDriver) Inventory(context.Context, snmp.Reader, ShowRunner) (Inventory, error) {
 	return Inventory{}, nil
 }
+
+func (f fakeDriver) MapTrap(trap.Trap) (trap.Mapped, bool) { return trap.Mapped{}, false }
 
 func TestDefaultOrder(t *testing.T) {
 	/* registration order must not matter: eltex-esr, eltex-mes, others, generic-snmp */

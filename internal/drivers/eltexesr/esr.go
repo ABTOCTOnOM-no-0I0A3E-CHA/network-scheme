@@ -25,6 +25,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/drivers/generic"
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -236,3 +237,26 @@ func integer(v snmp.Var) (int64, bool) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+/*
+envMonTraps are the CISCO-ENVMON-MIB notifications (ciscoEnvMonMIBNotifPrefix
+1.3.6.1.4.1.9.9.13.3.0). The ESR documentation [MON] polls Cisco MIB objects
+for system parameters (CISCO-PROCESS-MIB above), so the Cisco environmental
+notifications are the traps assumed here for power supply, fan, temperature
+and voltage alarms. No Eltex document found lists ESR trap OIDs and Eltex's
+own enterprise arc (1.3.6.1.4.1.35265) has no documented notifications, so
+nothing else is mapped. Not verified on hardware.
+*/
+var envMonTraps = map[string]trap.Mapped{
+	"1.3.6.1.4.1.9.9.13.3.0.1": {Name: "envMonShutdown", Severity: trap.SevDisaster},
+	"1.3.6.1.4.1.9.9.13.3.0.2": {Name: "envMonVoltageAlarm", Severity: trap.SevHigh},
+	"1.3.6.1.4.1.9.9.13.3.0.3": {Name: "envMonTemperatureAlarm", Severity: trap.SevHigh},
+	"1.3.6.1.4.1.9.9.13.3.0.4": {Name: "envMonFanAlarm", Severity: trap.SevHigh},
+	"1.3.6.1.4.1.9.9.13.3.0.5": {Name: "envMonRedundantSupplyAlarm", Severity: trap.SevAverage},
+}
+
+/* MapTrap names the environmental traps in envMonTraps; it reads no device state. */
+func (Driver) MapTrap(t trap.Trap) (trap.Mapped, bool) {
+	m, ok := envMonTraps[t.OID]
+	return m, ok
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/creds/credstest"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/drivers"
+	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
@@ -44,9 +45,10 @@ type budgetDriver struct {
 	skipHeavy *bool
 }
 
-func (budgetDriver) Name() string              { return drivers.GenericName }
-func (budgetDriver) Match(string, string) bool { return true }
-func (budgetDriver) Dialect() ssh.Dialect      { return ssh.Dialect{} }
+func (budgetDriver) Name() string                          { return drivers.GenericName }
+func (budgetDriver) Match(string, string) bool             { return true }
+func (budgetDriver) Dialect() ssh.Dialect                  { return ssh.Dialect{} }
+func (budgetDriver) MapTrap(trap.Trap) (trap.Mapped, bool) { return trap.Mapped{}, false }
 func (budgetDriver) Identify(context.Context, snmp.Reader) (drivers.Identity, error) {
 	return drivers.Identity{SysObjectID: "1.3.6.1.4.1.32473.7", Model: "fake"}, nil
 }
