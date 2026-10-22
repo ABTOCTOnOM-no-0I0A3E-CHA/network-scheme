@@ -28,10 +28,14 @@ public_origin: https://nms.example.org
 trusted_proxy_cidrs: [172.30.0.2/32]
 db: {host: postgres, name: nms, user: nms_api, password_file: /run/secrets/db_api_password}
 data_key_file: /run/secrets/data_key
+read_key_version: 3
 `)
 	c, err := config.LoadAPI(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if c.ReadKeyVersion != 3 {
+		t.Errorf("read_key_version = %d, want 3", c.ReadKeyVersion)
 	}
 	if c.DB.Port != 5432 {
 		t.Errorf("default port = %d, want 5432", c.DB.Port)
@@ -48,6 +52,13 @@ func TestLoadAPIRejectsUnknownFields(t *testing.T) {
 	p := write(t, "api.yaml", "listen_addr: :8080\ndb_password: hunter2\n")
 	if _, err := config.LoadAPI(p); err == nil {
 		t.Fatal("expected error for unknown field")
+	}
+}
+
+func TestLoadAPIRejectsNegativeReadKeyVersion(t *testing.T) {
+	p := write(t, "api.yaml", "read_key_version: -1\ndb: {host: h, name: n, user: u, password_file: /p}\n")
+	if _, err := config.LoadAPI(p); err == nil {
+		t.Fatal("expected error for a negative read_key_version")
 	}
 }
 

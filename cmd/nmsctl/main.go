@@ -1,6 +1,7 @@
 /*
 Command nmsctl is the host-only administration CLI: installation, the
-break-glass admin, user resets and unlocks, and audit chain verification. Database
+break-glass admin, user resets and unlocks, audit chain verification and the
+egress rules of the devices network. Database
 commands run in the one-shot "nmsctl" tools container of the compose
 project; on the host nmsctl only prompts and forwards them.
 */
@@ -29,9 +30,11 @@ import (
 )
 
 const usage = `usage:
-  nmsctl install --public-host HOST --image-tag TAG [--admin-user U] [--admin-password-file F]
+  nmsctl install --public-host HOST --image-tag TAG --mgmt-subnet CIDR [--mgmt-subnet CIDR ..]
+                 [--devices-subnet CIDR] [--admin-user U] [--admin-password-file F]
                  [--web-cert F --web-key F] [--infra-ntp H,..] [--infra-dns H,..] [--infra-mirror H,..]
                  [--non-interactive] [--totp-secret-out F]
+  nmsctl egress apply|check
   nmsctl admin create --user U [--password-file F] [--totp-secret-out F]
   nmsctl user reset U [--password [--password-file F]] [--totp]
   nmsctl user unlock U
@@ -100,6 +103,15 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return errors.New(usage)
 	}
 	cmd, rest := args[0]+" "+args[1], args[2:]
+	if cmd == "egress apply" || cmd == "egress check" {
+		if d.sys.InContainer() || len(rest) > 0 {
+			return errors.New("usage: nmsctl egress apply|check (on the host, as root)")
+		}
+		if cmd == "egress check" { /* ExecStartPost of docker.service: fails Docker if the rules are bypassed */
+			return install.CheckDockerUsesEgress(ctx, d.sys)
+		}
+		return egressApply(ctx, d)
+	}
 	if !d.sys.InContainer() {
 		err := hostCmd(ctx, cmd, rest, d)
 		if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() > 0 {
@@ -300,6 +312,11 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 	fs.StringVar(&ntp, "infra-ntp", "", "internal NTP servers, comma-separated")
 	fs.StringVar(&dns, "infra-dns", "", "internal DNS servers, comma-separated")
 	fs.StringVar(&mirror, "infra-mirror", "", "internal OS package mirrors, comma-separated")
+	fs.Func("mgmt-subnet", "management subnet the poller may reach (repeatable, at least one)", func(s string) error {
+		o.MgmtSubnets = append(o.MgmtSubnets, s)
+		return nil
+	})
+	fs.StringVar(&o.DevicesSubnet, "devices-subnet", install.DefaultDevicesSubnet, "IPv4 subnet of the poller's devices network")
 	fs.StringVar(&o.AdminUser, "admin-user", install.DefaultAdminUser, "name of the first administrator")
 	fs.StringVar(&o.AdminPasswordFile, "admin-password-file", "", "file with the administrator's password")
 	fs.StringVar(&o.TOTPSecretOut, "totp-secret-out", "", "CI only: write the administrator's TOTP secret to this file")
@@ -323,6 +340,19 @@ func installCmd(ctx context.Context, args []string, d deps) error {
 		o.AdminPassword = pw
 	}
 	return install.Run(ctx, o, d.sys)
+}
+
+/* egressApply re-applies the recorded egress rules (the Docker drop-in runs it before Docker starts). */
+func egressApply(ctx context.Context, d deps) error {
+	e, err := install.LoadEgress(install.DefaultEtc + "/" + install.EgressFile)
+	if err != nil {
+		return err
+	}
+	if err := install.ApplyEgress(ctx, d.sys, e); err != nil {
+		return err
+	}
+	printf(d.out, "egress rules applied: %s -> %v\n", e.DevicesSubnet, e.MgmtSubnets)
+	return nil
 }
 
 func splitList(s string) []string {

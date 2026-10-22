@@ -26,21 +26,27 @@ func (r Role) Valid() bool {
 // Perm is a single permission.
 type Perm string
 
-/* Phase 0 permissions; device permissions arrive in Phase 1. */
+/* Permissions; the device ones are group-scoped. */
 const (
 	PermSelf           Perm = "self"
 	PermUsersManage    Perm = "users.manage"
 	PermGroupsManage   Perm = "groups.manage"
 	PermBindingsManage Perm = "bindings.manage"
 	PermAuditRead      Perm = "audit.read"
+
+	PermDevicesRead       Perm = "devices.read"
+	PermDevicesPoll       Perm = "devices.poll"
+	PermDevicesManage     Perm = "devices.manage"
+	PermDeviceCredentials Perm = "device.credentials" //nolint:gosec // a permission name, not a credential
 )
 
-/* matrix is the Phase 0 role to permission mapping; PermSelf is handled in Can. */
+/* matrix is the role to permission mapping; PermSelf is handled in Can. */
 var matrix = map[Role][]Perm{
-	RoleViewer:   nil,
-	RoleOperator: nil,
-	RoleAdmin:    {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead},
-	RoleAuditor:  {PermAuditRead},
+	RoleViewer:   {PermDevicesRead},
+	RoleOperator: {PermDevicesRead, PermDevicesPoll},
+	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead,
+		PermDevicesRead, PermDevicesPoll, PermDevicesManage, PermDeviceCredentials},
+	RoleAuditor: {PermAuditRead},
 }
 
 // Binding grants Role globally (GroupID nil) or on a group and its descendants.

@@ -715,6 +715,1075 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Devices in the groups where the caller holds devices.read */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Devices ordered by name */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Device"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Add a device to a group the caller manages
+         * @description A group outside the caller's scope answers 404; a used address and SNMP port 409 address_exists.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: components["schemas"]["GroupName"];
+                        address: components["schemas"]["DeviceAddress"];
+                        /** @default 161 */
+                        snmp_port?: number;
+                        /** Format: int64 */
+                        group_id: number;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One device; a device outside the caller's groups answers 404 */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Device */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DeviceDetail"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Delete a device and its credentials */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Change device fields; absent fields are unchanged
+         * @description A null interval falls back to the group's. Moving needs devices.manage on the target group (else 404).
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: components["schemas"]["GroupName"];
+                        address?: components["schemas"]["DeviceAddress"];
+                        snmp_port?: number;
+                        /** Format: int64 */
+                        group_id?: number;
+                        interval_avail_s?: components["schemas"]["Interval"];
+                        interval_metrics_s?: components["schemas"]["Interval"];
+                        interval_inventory_s?: components["schemas"]["Interval"];
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/devices/{id}/profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Which read credentials are set; their content is never returned */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Profiles ordered by kind */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Profile"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/profiles/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set a read credential sealed in the browser to the read-domain key
+         * @description The API stores the ciphertext without opening it. A key_version other
+         *     than the current read-domain key answers 400 stale_key. snmp2c and
+         *     telnet_read mark the device insecure_protocols.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    kind: components["parameters"]["ProfileKind"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SealedCredential"];
+                };
+            };
+            responses: {
+                /** @description Stored */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        /** Remove a read credential */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    kind: components["parameters"]["ProfileKind"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Queue an immediate full poll of the device */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/interfaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Interfaces by if_index, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryInterface"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/arp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * ARP entries by address, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryARPEntry"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/mac": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Forwarding database by VLAN and MAC, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryMACEntry"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/vlans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * VLANs by id, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryVLAN"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/lldp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * LLDP neighbors by local port, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryLLDPNeighbor"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/entities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Physical components (ENTITY-MIB) by index, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryEntity"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Routing table by destination, as last seen by the poller
+         * @description Strings come from the device; render them as text only. A device outside the caller's groups answers 404.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: components["parameters"]["Limit"];
+                    offset?: components["parameters"]["Offset"];
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One page of rows */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["InventoryRoute"][];
+                            /** @description Offset of the next page; null on the last page */
+                            next_offset: number | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/metrics/if": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rate series of one interface, oldest first
+         * @description The source (raw, 5-minute or hourly aggregates) follows the range width
+         *     and age; step regroups the points and is raised to the source
+         *     resolution. More than 5000 points (raw points counted at the 10 s poll
+         *     floor) answers 400 too_many_points; a range longer than 730 days 400 bad_request.
+         */
+        get: {
+            parameters: {
+                query: {
+                    if_index: number;
+                    from: string;
+                    /** @description Exclusive; must be after from */
+                    to: string;
+                    /** @description Bucket width in seconds; absent keeps the source resolution */
+                    step?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Points */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Bucket width actually used in seconds; 0 for raw points */
+                            step_s: number;
+                            points: components["schemas"]["IfPoint"][];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/discovery/scans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Subnet scans of the groups the caller manages */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Scans ordered by id */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Scan"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Schedule a subnet scan (ICMP + SNMP GET with the scan's own profile)
+         * @description A prefix wider than /16 (more than 65 536 addresses) answers 400 cidr_too_wide.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example 192.0.2.0/24 */
+                        cidr: string;
+                        /** Format: int64 */
+                        group_id: number;
+                        interval_s?: components["schemas"]["ScanInterval"];
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/discovery/scans/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change scan fields; absent fields are unchanged */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        cidr?: string;
+                        /** Format: int64 */
+                        group_id?: number;
+                        enabled?: boolean;
+                        interval_s?: components["schemas"]["ScanInterval"];
+                    };
+                };
+            };
+            responses: {
+                /** @description Updated */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/discovery/scans/{id}/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set the one SNMP credential the scan probes with
+         * @description Setting one kind removes the other. key_version as for device profiles. An enabled scan is queued for a run.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "snmp2c" | "snmp3";
+                        ciphertext: components["schemas"]["Ciphertext"];
+                        key_version: components["schemas"]["KeyVersion"];
+                    };
+                };
+            };
+            responses: {
+                /** @description Stored */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/discovery/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Finds of scans in the groups the caller manages, newest first */
+        get: {
+            parameters: {
+                query?: {
+                    status?: "pending" | "accepted" | "ignored";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Discovered devices */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Discovered"][];
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/discovery/inbox/{id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn a pending find into a device; answers the new device id
+         * @description An item already handled answers 409 not_pending.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: components["schemas"]["GroupName"];
+                        /** Format: int64 */
+                        group_id: number;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/discovery/inbox/{id}/ignore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hide a pending find */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ignored */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -744,10 +1813,182 @@ export interface components {
         };
         /** @description No control characters, no leading or trailing spaces */
         GroupName: string;
+        Device: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            address: string;
+            /** Format: int64 */
+            group_id: number;
+            driver: string;
+            /** @description Reported by the device; render as text only */
+            model: string;
+            /** @description Reported by the device; render as text only */
+            firmware: string;
+            /** @description An SNMPv2c or telnet credential is set */
+            insecure_protocols: boolean;
+            /** @enum {string} */
+            state: "up" | "partial" | "down" | "unknown";
+            /** Format: date-time */
+            state_since: string | null;
+        };
+        DeviceDetail: components["schemas"]["Device"] & {
+            snmp_port: number;
+            /** @description null inherits from the group */
+            interval_avail_s: number | null;
+            interval_metrics_s: number | null;
+            interval_inventory_s: number | null;
+        };
+        /**
+         * @description IPv4 or IPv6 unicast host address; loopback, multicast, broadcast and unspecified are refused
+         * @example 192.0.2.10
+         */
+        DeviceAddress: string;
+        /** @description Seconds; null falls back to the group's interval */
+        Interval: number | null;
+        /**
+         * @description Seconds between scans
+         * @default 86400
+         */
+        ScanInterval: number;
+        Profile: {
+            /** @enum {string} */
+            kind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
+            /** @enum {string} */
+            status: "pending" | "ok" | "invalid" | "weak" | "mismatch";
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description Sealed box to the read-domain key, at most 8240 bytes decoded; never opened by the API */
+        Ciphertext: string;
+        /** @description key_version of the read domain in keys.json */
+        KeyVersion: number;
+        SealedCredential: {
+            ciphertext: components["schemas"]["Ciphertext"];
+            key_version: components["schemas"]["KeyVersion"];
+        };
+        Scan: {
+            /** Format: int64 */
+            id: number;
+            cidr: string;
+            /** Format: int64 */
+            group_id: number;
+            enabled: boolean;
+            interval_s: number;
+            /** Format: date-time */
+            last_run_at: string | null;
+        };
+        Discovered: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            scan_id: number;
+            /**
+             * Format: int64
+             * @description Group of the scan that found it
+             */
+            group_id: number;
+            address: string;
+            /** @description Reported by the device; render as text only */
+            sys_object_id: string;
+            /** @description Reported by the device; render as text only */
+            sys_descr: string;
+            /** @description Reported by the device; render as text only */
+            sys_name: string;
+            /** Format: date-time */
+            found_at: string;
+            /** @enum {string} */
+            status: "pending" | "accepted" | "ignored";
+        };
+        InventoryInterface: {
+            if_index: number;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** @description Reported by the device; render as text only */
+            alias: string;
+            /** Format: int64 */
+            speed_bps: number;
+            oper_up: boolean;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryARPEntry: {
+            ip: string;
+            /** @example 00:11:22:33:44:55 */
+            mac: string;
+            if_index: number;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryMACEntry: {
+            mac: string;
+            /** @description 0 when unknown */
+            vlan: number;
+            if_index: number;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryVLAN: {
+            vlan_id: number;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryLLDPNeighbor: {
+            local_if_index: number;
+            /** @description Reported by the neighbor; render as text only */
+            chassis_id: string;
+            /** @description Reported by the neighbor; render as text only */
+            port_id: string;
+            /** @description Reported by the neighbor; render as text only */
+            sys_name: string;
+            mgmt_addr: string | null;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryEntity: {
+            ent_index: number;
+            class: string;
+            /** @description Reported by the device; render as text only */
+            name: string;
+            /** @description Reported by the device; render as text only */
+            model: string;
+            /** @description Reported by the device; render as text only */
+            serial: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        InventoryRoute: {
+            /** @example 10.0.0.0/8 */
+            dest: string;
+            next_hop: string | null;
+            if_index: number;
+            proto: string;
+            /** Format: date-time */
+            seen_at: string;
+        };
+        IfPoint: {
+            /** Format: date-time */
+            ts: string;
+            in_bps: number;
+            /** @description Peak inside the bucket */
+            in_bps_max: number;
+            out_bps: number;
+            out_bps_max: number;
+            /** @description null when the device did not report it */
+            in_err_ps: number | null;
+            out_err_ps: number | null;
+            in_disc_ps: number | null;
+            out_disc_ps: number | null;
+            oper_up: boolean;
+            /** Format: int64 */
+            speed_bps: number;
+        };
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -778,6 +2019,9 @@ export interface components {
     };
     parameters: {
         Id: number;
+        ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
+        Limit: number;
+        Offset: number;
         CSRF: string;
     };
     requestBodies: {

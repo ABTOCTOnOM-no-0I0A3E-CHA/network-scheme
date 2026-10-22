@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -32,11 +33,14 @@ const (
 	DefaultAdminUser    = "admin"
 )
 
-/* systemdDir receives the audit anchor units. */
+/* systemdDir receives the systemd units. */
 const systemdDir = "/etc/systemd/system"
 
 /* anchorUnits are copied from deploy/systemd; the timer is enabled. */
 var anchorUnits = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"}
+
+/* readPubFile is the public read-domain key for the poller, relative to Paths.Etc. */
+const readPubFile = "config/domain_read.pub"
 
 /* composeUpTimeout bounds "docker compose up --wait" in seconds. */
 const composeUpTimeout = "600"
@@ -47,7 +51,9 @@ type Options struct {
 	WebCertFile, WebKeyFile string /* empty → self-signed by the internal CA */
 	InfraNTP, InfraDNS      []string
 	InfraMirror             []string
-	AdminUser               string /* DefaultAdminUser when empty */
+	MgmtSubnets             []string /* management subnets the devices network may reach; at least one */
+	DevicesSubnet           string   /* DefaultDevicesSubnet when empty */
+	AdminUser               string   /* DefaultAdminUser when empty */
 	AdminPasswordFile       string
 	AdminPassword           secret.Secret /* set by the caller after an interactive prompt; else read from AdminPasswordFile */
 	TOTPSecretOut           string        /* CI only: file that receives the admin's TOTP secret */
@@ -75,13 +81,15 @@ type prepared struct {
 	user     string
 	password secret.Secret
 	web      SecretsInput
+	egress   Egress
 }
 
 /*
 Run installs on this host: preflight → validation of every input → secrets →
-keys.json for the gateway → rendered compose project → docker compose up and
-wait for healthy → first admin with TOTP (in the tools container) → hourly
-audit anchor timer → marker Etc/installed → key and certificate fingerprints.
+keys.json for the gateway → rendered compose project → egress rules of the
+devices network, checked to be on Docker's forwarding path → docker compose up and wait for healthy → first admin with
+TOTP (in the tools container) → systemd units (Docker drop-in that applies
+the egress rules before Docker starts, hourly audit anchor timer) → marker Etc/installed → key and certificate fingerprints.
 Invalid input fails before anything is written; an existing installation
 fails with ErrAlreadyInstalled and nothing is touched.
 */
@@ -111,9 +119,10 @@ func Run(ctx context.Context, o Options, sys System) error {
 func prepareInstall(o Options) (prepared, error) {
 	ps := o.paths()
 	o.PublicHost = strings.ToLower(o.PublicHost)
+	devices := cmp.Or(o.DevicesSubnet, DefaultDevicesSubnet)
 	files, err := Render(RenderInput{
 		PublicHost: o.PublicHost, ImageTag: o.ImageTag,
-		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, Paths: ps,
+		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, Paths: ps, DevicesSubnet: devices,
 	})
 	if err != nil {
 		return prepared{}, fmt.Errorf("install: %w", err)
@@ -123,8 +132,15 @@ func prepareInstall(o Options) (prepared, error) {
 		return prepared{}, err
 	}
 	files["config/infra.yaml"] = infra
+	eg := Egress{DevicesSubnet: netip.MustParsePrefix(devices)} /* validated by Render */
+	if eg.MgmtSubnets, err = ParseMgmtSubnets(o.MgmtSubnets); err != nil {
+		return prepared{}, fmt.Errorf("install: %w", err)
+	}
+	if files[EgressFile], err = egressYAML(eg); err != nil {
+		return prepared{}, err
+	}
 
-	p := prepared{files: files, web: SecretsInput{PublicHost: o.PublicHost}}
+	p := prepared{files: files, web: SecretsInput{PublicHost: o.PublicHost}, egress: eg}
 	if p.user, err = auth.NormalizeUsername(cmp.Or(o.AdminUser, DefaultAdminUser)); err != nil {
 		return prepared{}, fmt.Errorf("install: admin user: %w", err)
 	}
@@ -192,10 +208,12 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	if err := WriteSecrets(secretsDir, web); err != nil {
 		return err
 	}
-	fps, err := writeKeysJSON(secretsDir, filepath.Join(vr, "gateway"))
+	fps, readPub, err := writeKeysJSON(secretsDir, filepath.Join(vr, "gateway"))
 	if err != nil {
 		return err
 	}
+	/* The poller checks that its private read key matches this public key. */
+	p.files[readPubFile] = []byte(base64.StdEncoding.EncodeToString(readPub[:]) + "\n")
 	if err := writeRendered(etc, p.files); err != nil {
 		return err
 	}
@@ -205,6 +223,18 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	}
 	if err := sys.Chown(anchors, ContainerUID, ContainerUID); err != nil {
 		return fmt.Errorf("install: chown %s: %w", anchors, err)
+	}
+
+	/* Before any container exists, so the poller never runs unfiltered. */
+	if err := ApplyEgress(ctx, sys, p.egress); err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	if err := CheckDockerUsesEgress(ctx, sys); err != nil {
+		return err
+	}
+	/* Also before compose up: from now on Docker starts only with the rules (and restarts the stack at boot). */
+	if err := installEgressDropIn(ctx, o, sys); err != nil {
+		return err
 	}
 
 	compose := path.Join(ps.Etc, "compose.yaml")
@@ -218,7 +248,7 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	if err := AdminCreate(ctx, sys, ps.Etc, p.user, p.password, o.TOTPSecretOut, o.Out, o.Out); err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
-	if err := installAnchorTimer(ctx, o, sys); err != nil {
+	if err := installUnits(ctx, o, sys); err != nil {
 		return err
 	}
 	if err := writeExcl(o.markerPath(), nil, 0o644); err != nil {
@@ -260,19 +290,20 @@ func writeRendered(etc string, files map[string][]byte) error {
 
 /*
 writeKeysJSON derives the public domain keys from the private key files and
-writes keys.json for the gateway. It returns the fingerprints by domain.
+writes keys.json for the gateway. It returns the fingerprints by domain and
+the public key of the read domain.
 */
-func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, error) {
+func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, [32]byte, error) {
 	pubs := map[string][32]byte{}
 	fps := map[string]string{}
 	for d, file := range DomainKeyFiles {
 		priv, err := config.ReadKeyFile(filepath.Join(secretsDir, file))
 		if err != nil {
-			return nil, fmt.Errorf("install: %w", err)
+			return nil, [32]byte{}, fmt.Errorf("install: %w", err)
 		}
 		k, err := ecdh.X25519().NewPrivateKey(priv[:])
 		if err != nil {
-			return nil, fmt.Errorf("install: %s: %w", file, err)
+			return nil, [32]byte{}, fmt.Errorf("install: %s: %w", file, err)
 		}
 		var pub [32]byte
 		copy(pub[:], k.PublicKey().Bytes())
@@ -280,12 +311,12 @@ func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, error) {
 	}
 	doc, err := keys.BuildKeysJSON(pubs)
 	if err != nil {
-		return nil, fmt.Errorf("install: %w", err)
+		return nil, [32]byte{}, fmt.Errorf("install: %w", err)
 	}
 	if err := os.MkdirAll(gatewayDir, 0o750); err != nil {
-		return nil, fmt.Errorf("install: %w", err)
+		return nil, [32]byte{}, fmt.Errorf("install: %w", err)
 	}
-	return fps, writeExcl(filepath.Join(gatewayDir, "keys.json"), doc, 0o644)
+	return fps, pubs["read"], writeExcl(filepath.Join(gatewayDir, "keys.json"), doc, 0o644)
 }
 
 /*
@@ -335,24 +366,40 @@ func installHostBinary(o Options, sys System) (err error) {
 	return err
 }
 
-func installAnchorTimer(ctx context.Context, o Options, sys System) error {
+/* writeUnits copies files from deploy/systemd to systemdDir (names relative to both) and reloads systemd. */
+func writeUnits(ctx context.Context, o Options, sys System, names ...string) error {
 	dir := o.hostPath(systemdDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- the standard /etc/systemd/system
-		return fmt.Errorf("install: %w", err)
-	}
-	for _, u := range anchorUnits {
+	for _, u := range names {
 		body, err := deploy.FS.ReadFile("systemd/" + u)
 		if err != nil {
 			return err
 		}
-		if err := writeExcl(filepath.Join(dir, u), body, 0o644); err != nil {
+		p := filepath.Join(dir, filepath.FromSlash(u))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { // #nosec G301 -- standard systemd directories
+			return fmt.Errorf("install: %w", err)
+		}
+		if err := writeExcl(p, body, 0o644); err != nil {
 			return err
 		}
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "--now", "nms-audit-anchor.timer"}} {
-		if err := sys.Run(ctx, Cmd{Name: "systemctl", Args: args, Stdout: o.Out, Stderr: o.Out}); err != nil {
-			return fmt.Errorf("install: systemctl %s: %w", strings.Join(args, " "), err)
-		}
+	if err := sys.Run(ctx, Cmd{Name: "systemctl", Args: []string{"daemon-reload"}, Stdout: o.Out, Stderr: o.Out}); err != nil {
+		return fmt.Errorf("install: systemctl daemon-reload: %w", err)
+	}
+	return nil
+}
+
+/* installEgressDropIn makes every later Docker start apply and check the egress rules first. */
+func installEgressDropIn(ctx context.Context, o Options, sys System) error {
+	return writeUnits(ctx, o, sys, egressDropIn)
+}
+
+func installUnits(ctx context.Context, o Options, sys System) error {
+	if err := writeUnits(ctx, o, sys, anchorUnits...); err != nil {
+		return err
+	}
+	enable := Cmd{Name: "systemctl", Args: []string{"enable", "--now", "nms-audit-anchor.timer"}, Stdout: o.Out, Stderr: o.Out}
+	if err := sys.Run(ctx, enable); err != nil {
+		return fmt.Errorf("install: systemctl enable nms-audit-anchor.timer: %w", err)
 	}
 	return nil
 }

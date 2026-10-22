@@ -16,7 +16,11 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
+	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/jobs"
+	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/store"
 )
@@ -102,8 +106,8 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" || cfg.PublicOrigin == "" {
-		return errors.New("config: listen_addr, public_origin and data_key_file are required")
+	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" || cfg.PublicOrigin == "" || cfg.ReadKeyVersion == 0 {
+		return errors.New("config: listen_addr, public_origin, data_key_file and read_key_version are required")
 	}
 	key, err := config.ReadKeyFile(cfg.DataKeyFile)
 	if err != nil {
@@ -118,12 +122,16 @@ func serve(ctx context.Context, args []string) error {
 		return err
 	}
 	defer pool.Close()
+	enq, err := jobs.NewEnqueuer(pool)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
-			Cfg: cfg, Clock: time.Now, Logger: log,
+			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: metrics.NewStore(pool), Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,

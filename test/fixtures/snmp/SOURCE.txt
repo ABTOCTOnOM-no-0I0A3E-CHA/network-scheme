@@ -1,0 +1,46 @@
+generic-switch.snmprec
+  Synthetic data written by hand from the public MIB definitions (SNMPv2-MIB
+  system group, IF-MIB ifTable/ifXTable incl. 64-bit HC counters, RFC 1213 /
+  RFC 2863 / RFC 2233 object semantics). Models a 3-port switch.
+  Also contains HOST-RESOURCES-MIB (hrProcessorLoad, hrStorage RAM),
+  ENTITY-MIB entPhysicalTable, ENTITY-SENSOR-MIB entPhySensorTable,
+  BRIDGE-MIB dot1dBasePortIfIndex, Q-BRIDGE-MIB dot1qTpFdbTable and
+  dot1qVlanStaticTable, LLDP-MIB lldpRemTable/lldpRemManAddrTable,
+  IP-MIB ipNetToPhysicalTable and IP-FORWARD-MIB inetCidrRouteTable, with a
+  few deliberately malformed rows (short MAC, wrong address length prefix, empty
+  chassis id, unmapped bridge port, control characters in a name).
+  NOT captured from hardware. sysObjectID uses the documentation enterprise
+  number 32473 (RFC 5612) so that no vendor driver claims it.
+
+generic-router.snmprec
+  Synthetic data written by hand from the public MIB definitions. Models a
+  2-port router exposing only the legacy tables: 32-bit IF-MIB ifTable (no
+  ifXTable), IP-MIB ipNetToMediaTable, BRIDGE-MIB dot1dTpFdbTable and
+  IP-FORWARD-MIB ipCidrRouteTable (one row with a non-contiguous mask).
+  NOT captured from hardware. sysObjectID uses the documentation enterprise
+  number 32473 (RFC 5612); addresses are documentation ranges (RFC 5737).
+
+eltex-mes.snmprec
+  Synthetic data written by hand, modelling an Eltex MES switch as described in
+  "MES Ethernet switches monitoring and configuration via SNMP", firmware 6.6.2
+  (Eltex), sections 4.1 "System resources" (rlCpuUtilDuringLastMinute) and
+  4.2 "System parameters" (rlPhdUnitEnvParamTable power supply states, rlEnv
+  temperature readings), plus the standard system group and IF-MIB counters.
+  sysObjectID 1.3.6.1.4.1.35265.1.65535 is a placeholder under elHardware
+  (ELTEX-SMI-ACTUAL); no real MES model OID is documented or implied. sysDescr
+  follows the LLDP example in the MES23xx/33xx/35xx/5324 user manual 4.0.22.
+  One temperature row (500) is deliberately out of range.
+  NOT captured from hardware; values not verified on a real device.
+
+eltex-esr.snmprec
+  Synthetic data written by hand, modelling an Eltex ESR router as described in
+  ESR-series Documentation 1.23, "Мониторинг системных параметров"
+  (docs.eltex-co.ru pageId=485130258): sysDescr format, CISCO-PROCESS-MIB
+  cpmCPUTotal1min per core (one out-of-range core), CISCO-MEMORY-POOL-MIB
+  ciscoMemoryPoolValid/Used/Free (one invalid pool), rlPhdUnitEnvParamTable
+  temperature value/status
+  pairs (one sensor not ok), plus IF-MIB counters and IP-FORWARD-MIB
+  inetCidrRouteTable. sysObjectID 1.3.6.1.4.1.35265.1.65534 is a placeholder
+  under elHardware (ELTEX-SMI-ACTUAL); no real ESR model OID is documented or
+  implied. Addresses are documentation ranges (RFC 5737).
+  NOT captured from hardware; values not verified on a real device.

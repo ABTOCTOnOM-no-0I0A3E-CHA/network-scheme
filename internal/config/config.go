@@ -25,7 +25,12 @@ type DB struct {
 	Name         string `yaml:"name"`
 	User         string `yaml:"user"`
 	PasswordFile string `yaml:"password_file"`
+	/* MaxConns caps the connection pool; 0 selects the service's default. */
+	MaxConns int `yaml:"max_conns"`
 }
+
+/* maxDBConns bounds db.max_conns. */
+const maxDBConns = 1000
 
 // API is the configuration of the api service (api.yaml).
 type API struct {
@@ -34,6 +39,8 @@ type API struct {
 	TrustedProxyCIDRs []netip.Prefix `yaml:"trusted_proxy_cidrs"`
 	DB                DB             `yaml:"db"`
 	DataKeyFile       string         `yaml:"data_key_file"`
+	/* ReadKeyVersion is the key_version of the read domain in keys.json; sealed credentials under any other version are refused. */
+	ReadKeyVersion int `yaml:"read_key_version"`
 }
 
 /*
@@ -58,6 +65,9 @@ func LoadAPI(path string) (API, error) {
 	}
 	if c.DB.Port == 0 {
 		c.DB.Port = defaultDBPort
+	}
+	if c.ReadKeyVersion < 0 {
+		return API{}, fmt.Errorf("config %s: read_key_version must be positive", path)
 	}
 	if err := c.DB.validate(); err != nil {
 		return API{}, fmt.Errorf("config %s: %w", path, err)
@@ -96,6 +106,9 @@ func NormalizeOrigin(raw string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
+// Validate checks that every connection field is set and the port is in range.
+func (d DB) Validate() error { return d.validate() }
+
 func (d DB) validate() error {
 	switch {
 	case d.Host == "":
@@ -108,6 +121,8 @@ func (d DB) validate() error {
 		return errors.New("db.password_file is required")
 	case d.Port < 1 || d.Port > 65535:
 		return fmt.Errorf("db.port %d out of range", d.Port)
+	case d.MaxConns < 0 || d.MaxConns > maxDBConns:
+		return fmt.Errorf("db.max_conns must be 0..%d", maxDBConns)
 	}
 	return nil
 }

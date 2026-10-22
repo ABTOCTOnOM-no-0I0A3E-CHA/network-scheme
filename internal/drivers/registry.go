@@ -1,0 +1,117 @@
+package drivers
+
+import (
+	"slices"
+	"strings"
+	"sync"
+)
+
+/* GenericName is the name of the fallback driver, which matches every device. */
+const GenericName = "generic-snmp"
+
+/* rank fixes the selection order: specific drivers first, the fallback last. */
+var rank = map[string]int{"eltex-esr": 0, "eltex-mes": 1, GenericName: 1 << 30}
+
+const otherRank = 1 << 20
+
+var (
+	regMu      sync.Mutex
+	registered []Driver
+)
+
+/*
+Register adds d to the drivers returned by Default. Driver packages call it
+from init, so a binary gets the drivers it imports. It panics on a nil driver
+or a duplicate name.
+*/
+func Register(d Driver) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	if d == nil {
+		panic("drivers: Register(nil)")
+	}
+	for _, x := range registered {
+		if x.Name() == d.Name() {
+			panic("drivers: duplicate driver " + d.Name())
+		}
+	}
+	registered = append(registered, d)
+}
+
+/* Registry selects a driver for a device. */
+type Registry struct{ drivers []Driver }
+
+/*
+NewRegistry returns a registry that tries ds in the given order. The last
+driver must be the generic-snmp fallback; NewRegistry panics otherwise, so a
+registry can never fail to select a driver.
+*/
+func NewRegistry(ds ...Driver) *Registry {
+	if len(ds) == 0 || ds[len(ds)-1] == nil || ds[len(ds)-1].Name() != GenericName {
+		panic("drivers: the last driver must be " + GenericName + "; import internal/drivers/all")
+	}
+	return &Registry{drivers: slices.Clone(ds)}
+}
+
+/*
+Default returns a registry of every registered driver ordered eltex-esr,
+eltex-mes, other drivers by name, then generic-snmp. It panics when
+generic-snmp is not registered: binaries must import internal/drivers/all.
+*/
+func Default() *Registry {
+	regMu.Lock()
+	ds := slices.Clone(registered)
+	regMu.Unlock()
+	r := func(d Driver) int {
+		if v, ok := rank[d.Name()]; ok {
+			return v
+		}
+		return otherRank
+	}
+	slices.SortStableFunc(ds, func(a, b Driver) int {
+		if ra, rb := r(a), r(b); ra != rb {
+			return ra - rb
+		}
+		return strings.Compare(a.Name(), b.Name())
+	})
+	return NewRegistry(ds...)
+}
+
+/* Select returns the first driver that matches; the generic fallback when none does. Never nil. */
+func (r *Registry) Select(sysObjectID, sysDescr string) Driver {
+	for _, d := range r.drivers {
+		if d.Match(sysObjectID, sysDescr) {
+			return d
+		}
+	}
+	return r.drivers[len(r.drivers)-1]
+}
+
+/* ByName returns the driver called name, or nil when the registry has none. */
+func (r *Registry) ByName(name string) Driver {
+	for _, d := range r.drivers {
+		if d.Name() == name {
+			return d
+		}
+	}
+	return nil
+}
+
+/*
+Unverified returns, sorted, the names of registered drivers that report
+Verified() == false: drivers written from vendor documentation whose OIDs,
+prompts and commands have not yet been checked on real devices. Drivers
+without a Verified method (generic-snmp, standard MIBs only) are not listed.
+*/
+func Unverified() []string {
+	regMu.Lock()
+	defer regMu.Unlock()
+	var out []string
+	for _, d := range registered {
+		if v, ok := d.(interface{ Verified() bool }); ok && !v.Verified() {
+			out = append(out, d.Name())
+		}
+	}
+	slices.Sort(out)
+	return out
+}

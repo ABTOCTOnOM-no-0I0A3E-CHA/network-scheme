@@ -54,3 +54,13 @@ func TestSecretNeverPrints(t *testing.T) {
 		t.Fatalf("String = %q", got)
 	}
 }
+
+func TestWipeClearsBytes(t *testing.T) {
+	s := secret.New("hunter2-very-secret")
+	alias := s /* copies share the bytes */
+	s.Wipe()
+	if strings.Trim(alias.Reveal(), "\x00") != "" || len(alias.Reveal()) != len("hunter2-very-secret") {
+		t.Fatalf("after Wipe: %q", alias.Reveal())
+	}
+	secret.Secret{}.Wipe() /* no-op on the zero value */
+}

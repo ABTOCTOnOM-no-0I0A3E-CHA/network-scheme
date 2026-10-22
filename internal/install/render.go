@@ -13,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/beekamai/network-scheme/deploy"
+	"github.com/beekamai/network-scheme/internal/keys"
 )
 
 /*
@@ -25,8 +26,10 @@ const DefaultDBImage = "timescale/timescaledb:2.30.2-pg17@sha256:b346edcdb51a1fd
 const (
 	DefaultHTTPSPort  = 443
 	DefaultCoreSubnet = "172.30.0.0/24"
-	DefaultEtc        = "/etc/nms"
-	DefaultVar        = "/var/lib/nms"
+	/* DefaultDevicesSubnet is the poller's network towards the devices (egress-filtered, not internal). */
+	DefaultDevicesSubnet = "172.30.1.0/24"
+	DefaultEtc           = "/etc/nms"
+	DefaultVar           = "/var/lib/nms"
 )
 
 /* initDBScript is shipped as-is next to compose.yaml and mounted into postgres. */
@@ -48,16 +51,19 @@ type RenderInput struct {
 	DBImage      string /* full database image reference; DefaultDBImage */
 	CoreSubnet   string /* IPv4 subnet of the internal core network */
 	GatewayIP    string /* static gateway address in CoreSubnet; second host address by default */
-	Paths        Paths
+	/* DevicesSubnet is the IPv4 subnet of the devices network; must not overlap CoreSubnet. */
+	DevicesSubnet string
+	Paths         Paths
 }
 
 /* view is what the templates see: validated, defaulted, derived values. */
 type view struct {
 	RenderInput
-	Authority     string /* host[:port] of the public origin */
-	CoreIPRange   string /* upper half of CoreSubnet: dynamic addresses never collide with GatewayIP */
-	DBName        string
-	APIListenPort int
+	Authority      string /* host[:port] of the public origin */
+	CoreIPRange    string /* upper half of CoreSubnet: dynamic addresses never collide with GatewayIP */
+	DBName         string
+	APIListenPort  int
+	ReadKeyVersion int /* key_version of the read domain in keys.json written by the install */
 }
 
 var (
@@ -72,14 +78,15 @@ var templates = template.Must(template.New("").Option("missingkey=error").ParseF
 
 /* outputs maps rendered file names (relative to Paths.Etc) to templates. */
 var outputs = map[string]string{
-	"compose.yaml":    "compose.yaml.tmpl",
-	"Caddyfile":       "Caddyfile.tmpl",
-	"config/api.yaml": "api.yaml.tmpl",
+	"compose.yaml":       "compose.yaml.tmpl",
+	"Caddyfile":          "Caddyfile.tmpl",
+	"config/api.yaml":    "api.yaml.tmpl",
+	"config/poller.yaml": "poller.yaml.tmpl",
 }
 
 /*
 Render validates in and renders the deployment files, keyed by path relative
-to Paths.Etc: "compose.yaml", "Caddyfile", "config/api.yaml" and the postgres
+to Paths.Etc: "compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml" and the postgres
 init script "postgres/initdb/10-roles.sh" (to be written with mode 0755).
 Every value reaching a template is validated against a strict pattern, so
 input cannot inject YAML keys or Caddy directives. Output is deterministic.
@@ -115,6 +122,9 @@ func prepare(in RenderInput) (view, error) {
 	if in.CoreSubnet == "" {
 		in.CoreSubnet = DefaultCoreSubnet
 	}
+	if in.DevicesSubnet == "" {
+		in.DevicesSubnet = DefaultDevicesSubnet
+	}
 	if in.Paths.Etc == "" {
 		in.Paths.Etc = DefaultEtc
 	}
@@ -146,13 +156,18 @@ func prepare(in RenderInput) (view, error) {
 		}
 	}
 
-	subnet, err := netip.ParsePrefix(in.CoreSubnet)
-	if err != nil || !subnet.Addr().Is4() || subnet != subnet.Masked() {
-		return view{}, fmt.Errorf("core subnet %q must be an IPv4 network address with prefix", in.CoreSubnet)
+	subnet, err := parseSubnet("core", in.CoreSubnet)
+	if err != nil {
+		return view{}, err
 	}
-	if subnet.Bits() < 16 || subnet.Bits() > 28 {
-		return view{}, fmt.Errorf("core subnet %s: prefix must be /16../28", subnet)
+	devs, err := parseSubnet("devices", in.DevicesSubnet)
+	if err != nil {
+		return view{}, err
 	}
+	if devs.Overlaps(subnet) {
+		return view{}, fmt.Errorf("devices subnet %s overlaps the core subnet %s", devs, subnet)
+	}
+	in.CoreSubnet, in.DevicesSubnet = subnet.String(), devs.String()
 	ipRange := netip.PrefixFrom(upperHalf(subnet), subnet.Bits()+1)
 	if in.GatewayIP == "" {
 		in.GatewayIP = subnet.Addr().Next().Next().String()
@@ -171,7 +186,20 @@ func prepare(in RenderInput) (view, error) {
 	if in.HTTPSPort != DefaultHTTPSPort {
 		authority += ":" + strconv.Itoa(in.HTTPSPort)
 	}
-	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080}, nil
+	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080,
+		ReadKeyVersion: keys.InitialKeyVersion}, nil
+}
+
+/* parseSubnet accepts an IPv4 network address with a /16../28 prefix. */
+func parseSubnet(name, s string) (netip.Prefix, error) {
+	p, err := netip.ParsePrefix(s)
+	if err != nil || !p.Addr().Is4() || p != p.Masked() {
+		return netip.Prefix{}, fmt.Errorf("%s subnet %q must be an IPv4 network address with prefix", name, s)
+	}
+	if p.Bits() < 16 || p.Bits() > 28 {
+		return netip.Prefix{}, fmt.Errorf("%s subnet %s: prefix must be /16../28", name, p)
+	}
+	return p, nil
 }
 
 /* upperHalf returns the first address of the upper half of p: the first host bit set. */

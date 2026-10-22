@@ -33,7 +33,9 @@ type fakeSys struct {
 	chowns  map[string][2]int /* path -> uid, gid */
 	runErr  error
 	inCtner bool
-	exe     string /* the running nmsctl; default: the test binary */
+	exe     string                    /* the running nmsctl; default: the test binary */
+	run     func(c install.Cmd) error /* optional: result of iptables commands (default runErr) */
+	onRun   func(c install.Cmd)       /* optional: observes every command before it is recorded */
 }
 
 func newFakeSys() *fakeSys {
@@ -53,6 +55,9 @@ func (f *fakeSys) Chown(path string, uid, gid int) error {
 }
 
 func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
+	if f.onRun != nil {
+		f.onRun(c)
+	}
 	f.cmds = append(f.cmds, c)
 	in := ""
 	if c.Stdin != nil {
@@ -60,6 +65,9 @@ func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
 		in = string(b)
 	}
 	f.stdins = append(f.stdins, in)
+	if f.run != nil && c.Name == "iptables" {
+		return f.run(c)
+	}
 	if slices.Contains(c.Args, "admin") && c.Stdout != nil {
 		_, _ = io.WriteString(c.Stdout, "QR...\n"+install.TOTPSecretLinePrefix+"JBSWY3DPEHPK3PXP\n")
 	}
@@ -97,6 +105,10 @@ func TestPreflightErrors(t *testing.T) {
 		{"userland-proxy true", "linux", "24.0.7", `{"userland-proxy": true}`, false, install.ErrUserlandProxy},
 		{"daemon.json invalid", "linux", "24.0.7", `{`, false, install.ErrUserlandProxy},
 		{"already installed", "linux", "24.0.7", goodDaemonJSON, true, install.ErrAlreadyInstalled},
+		{"iptables explicitly on", "linux", "29.1.3", `{"userland-proxy": false, "iptables": true, "firewall-backend": "iptables"}`, false, nil},
+		{"iptables off", "linux", "29.1.3", `{"userland-proxy": false, "iptables": false}`, false, install.ErrDockerFirewall},
+		{"iptables not a bool", "linux", "29.1.3", `{"userland-proxy": false, "iptables": "false"}`, false, install.ErrDockerFirewall},
+		{"nftables backend", "linux", "29.1.3", `{"userland-proxy": false, "firewall-backend": "nftables"}`, false, install.ErrDockerFirewall},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -116,6 +128,9 @@ func TestPreflightErrors(t *testing.T) {
 			if errors.Is(err, install.ErrUserlandProxy) && !strings.Contains(err.Error(), `"userland-proxy": false`) {
 				t.Fatalf("error lacks the JSON fragment to paste: %v", err)
 			}
+			if errors.Is(err, install.ErrDockerFirewall) && !strings.Contains(err.Error(), `"iptables"`) {
+				t.Fatalf("error lacks the JSON fragment to set: %v", err)
+			}
 		})
 	}
 }
@@ -123,7 +138,7 @@ func TestPreflightErrors(t *testing.T) {
 /* secretNames is the exact set WriteSecrets must create. */
 var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
-	"db_api_password", "db_cli_password", "db_migrator_password", "db_postgres_password",
+	"db_api_password", "db_cli_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
 	"executor_sealing_key", "web.crt", "web.key",
 }
@@ -137,12 +152,13 @@ var wantOwner = map[string]struct {
 	"db_migrator_password": {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_api_password":      {install.ContainerUID, install.PostgresUID, 0o440},
 	"db_cli_password":      {install.ContainerUID, install.PostgresUID, 0o440},
+	"db_poller_password":   {install.ContainerUID, install.PostgresUID, 0o440},
 	"api_data_key":         {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"ca.crt":               {0, 0, 0o400},
 	"ca.key":               {0, 0, 0o400},
-	"domain_read.key":      {0, 0, 0o400},
+	"domain_read.key":      {install.ContainerUID, install.ContainerUID, 0o400},
 	"domain_write.key":     {0, 0, 0o400},
 	"domain_backup.key":    {0, 0, 0o400},
 	"executor_sealing_key": {0, 0, 0o400},
@@ -217,7 +233,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 
 	/* Contents. */
-	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password"} {
+	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password"} {
 		raw := readFile(t, filepath.Join(dir, n))
 		b, err := base64.RawURLEncoding.DecodeString(string(raw))
 		if err != nil || len(b) != 32 {
@@ -372,6 +388,7 @@ func installOptions(t *testing.T) (install.Options, string, *bytes.Buffer) {
 		PublicHost:        "nms.example.org",
 		InfraNTP:          []string{"10.0.0.1"},
 		InfraDNS:          []string{"10.0.0.2", "dns.corp.example"},
+		MgmtSubnets:       []string{"10.0.0.0/8"},
 		AdminUser:         "admin",
 		AdminPasswordFile: pwFile,
 		TOTPSecretOut:     filepath.Join(t.TempDir(), "totp"),
@@ -393,7 +410,8 @@ func TestRunInstalls(t *testing.T) {
 	}
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
-		"compose.yaml", "Caddyfile", "config/api.yaml", "config/infra.yaml", "postgres/initdb/10-roles.sh", "installed",
+		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/infra.yaml", "config/egress.yaml",
+		"config/domain_read.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
@@ -421,16 +439,30 @@ func TestRunInstalls(t *testing.T) {
 	if len(kj.Domains) != 3 || !strings.Contains(out.String(), kj.Domains["read"].Fingerprint) {
 		t.Fatalf("keys.json %+v / fingerprint not printed:\n%s", kj, out)
 	}
+	/* The poller's public read key is the one keys.json publishes. */
+	if got := strings.TrimSpace(string(readFile(t, filepath.Join(etc, "config", "domain_read.pub")))); got != kj.Domains["read"].PublicKey {
+		t.Errorf("domain_read.pub = %q, keys.json read key = %q", got, kj.Domains["read"].PublicKey)
+	}
+	eg, err := install.LoadEgress(filepath.Join(etc, "config", "egress.yaml"))
+	if err != nil || eg.DevicesSubnet.String() != install.DefaultDevicesSubnet || len(eg.MgmtSubnets) != 1 || eg.MgmtSubnets[0].String() != "10.0.0.0/8" {
+		t.Errorf("egress.yaml = %+v, %v", eg, err)
+	}
 	if !strings.Contains(out.String(), "SHA-256") {
 		t.Errorf("web certificate fingerprint not printed:\n%s", out)
 	}
 
-	/* Commands: compose up, admin create through the tools container, timer. */
+	/* Commands: egress rules before any container, compose up, admin create in the tools container, units. */
 	var lines []string
 	for _, c := range sys.cmds {
 		lines = append(lines, cmdline(c))
 	}
 	want := []string{
+		"iptables -w -n -L DOCKER-USER",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -j DROP",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -d 10.0.0.0/8 -j RETURN",
+		"iptables -w -C DOCKER-USER -s 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
+		"iptables -w -C FORWARD -j DOCKER-USER",
+		"systemctl daemon-reload",
 		"docker compose -f /etc/nms/compose.yaml up -d --wait --wait-timeout 600",
 		"docker compose -f /etc/nms/compose.yaml --profile tools run --rm --no-deps -T nmsctl admin create --user admin --password-file -",
 		"systemctl daemon-reload",
@@ -439,13 +471,19 @@ func TestRunInstalls(t *testing.T) {
 	if !slices.Equal(lines, want) {
 		t.Fatalf("commands:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
-	if sys.stdins[1] != adminPassword+"\n" {
-		t.Fatalf("admin create stdin = %q", sys.stdins[1])
+	if sys.stdins[7] != adminPassword+"\n" {
+		t.Fatalf("admin create stdin = %q", sys.stdins[7])
 	}
 	for _, u := range []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"} {
 		if _, err := os.Stat(filepath.Join(root, "etc", "systemd", "system", u)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
+	}
+	/* Docker starts only after the egress rules are applied; a failing apply keeps it down. */
+	dropIn := string(readFile(t, filepath.Join(root, "etc", "systemd", "system", "docker.service.d", "nms-egress.conf")))
+	if !strings.Contains(dropIn, "[Service]\nExecStartPre=/usr/local/bin/nmsctl egress apply\nExecStartPost=/usr/local/bin/nmsctl egress check\n") ||
+		strings.Contains(dropIn, "=-") {
+		t.Errorf("docker drop-in:\n%s", dropIn)
 	}
 	if got := strings.TrimSpace(string(readFile(t, o.TOTPSecretOut))); got != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("totp secret out = %q", got)
@@ -473,6 +511,51 @@ func TestRunInstalls(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(dst)); len(entries) != 1 {
 		t.Errorf("leftover temp files: %v", entries)
+	}
+}
+
+func TestEgressDropInBeforeContainers(t *testing.T) {
+	o, root, out := installOptions(t)
+	dropIn := filepath.Join(root, "etc", "systemd", "system", "docker.service.d", "nms-egress.conf")
+	sys := newFakeSys()
+	reloaded, checked := false, false
+	sys.onRun = func(c install.Cmd) {
+		if c.Name == "systemctl" && cmdline(c) == "systemctl daemon-reload" {
+			_, err := os.Stat(dropIn)
+			reloaded = reloaded || err == nil
+		}
+		if c.Name == "docker" && !checked {
+			checked = true
+			if !reloaded {
+				t.Errorf("first docker command %q ran before the drop-in was written and systemd reloaded", cmdline(c))
+			}
+		}
+	}
+	if err := install.Run(context.Background(), o, sys); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	if !checked {
+		t.Fatal("no docker command ran")
+	}
+}
+
+func TestRunFailsWhenDockerBypassesDockerUser(t *testing.T) {
+	o, _, out := installOptions(t)
+	sys := newFakeSys()
+	sys.run = func(c install.Cmd) error {
+		if cmdline(c) == "iptables -w -C FORWARD -j DOCKER-USER" {
+			return errors.New("iptables: Bad rule")
+		}
+		return nil
+	}
+	err := install.Run(context.Background(), o, sys)
+	if !errors.Is(err, install.ErrEgressBypassed) {
+		t.Fatalf("Run = %v, want ErrEgressBypassed\n%s", err, out)
+	}
+	for _, c := range sys.cmds {
+		if c.Name == "docker" {
+			t.Fatalf("containers started without effective egress rules: %s", cmdline(c))
+		}
 	}
 }
 
@@ -532,6 +615,9 @@ func TestRunRejectsBadInputBeforeWriting(t *testing.T) {
 		"missing image tag": func(o *install.Options) { o.ImageTag = "" },
 		"totp out exists":   func(o *install.Options) { writeFile(t, o.TOTPSecretOut, "old") },
 		"totp out no dir":   func(o *install.Options) { o.TOTPSecretOut = filepath.Join(t.TempDir(), "missing", "totp") },
+		"no mgmt subnet":    func(o *install.Options) { o.MgmtSubnets = nil },
+		"reserved mgmt":     func(o *install.Options) { o.MgmtSubnets = []string{"10.0.0.0/8", "127.0.0.0/8"} },
+		"bad devices":       func(o *install.Options) { o.DevicesSubnet = "172.30.0.0/24" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

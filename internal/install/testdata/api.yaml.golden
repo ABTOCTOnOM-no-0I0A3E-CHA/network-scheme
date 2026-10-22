@@ -10,3 +10,4 @@ db:
   user: "nms_api"
   password_file: "/run/secrets/db_api_password"
 data_key_file: "/run/secrets/api_data_key"
+read_key_version: 1

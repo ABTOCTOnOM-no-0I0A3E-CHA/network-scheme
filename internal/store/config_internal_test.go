@@ -30,3 +30,22 @@ func TestPoolConfigTreatsValuesVerbatim(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolConfigMaxConns(t *testing.T) {
+	db := config.DB{Host: "db", Port: 5432, Name: "nms", User: "u"}
+	def, err := poolConfig(db, secret.New("pw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.MaxConns = 12
+	set, err := poolConfig(db, secret.New("pw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.MaxConns != 12 {
+		t.Errorf("max_conns 12: pool MaxConns = %d", set.MaxConns)
+	}
+	if def.MaxConns < 4 { /* pgx default: max(4, NumCPU) */
+		t.Errorf("max_conns unset: pool MaxConns = %d, want the pgx default", def.MaxConns)
+	}
+}

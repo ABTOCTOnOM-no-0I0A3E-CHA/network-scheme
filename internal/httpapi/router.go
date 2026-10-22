@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,9 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
+	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -24,6 +28,10 @@ type Deps struct {
 	Users         *auth.UserStore
 	RBAC          *rbac.Store
 	Pool          *pgxpool.Pool /* for handlers that open their own transactions */
+	Devices       *devices.Store
+	Inventory     *inventory.Store /* inventory rows and availability state (read only) */
+	Metrics       *metrics.Store   /* interface rate series (read only) */
+	Jobs          Enqueuer         /* background jobs, enqueued in the transaction of the request */
 	Cfg           config.API
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
@@ -33,12 +41,14 @@ type Deps struct {
 /*
 Policy is the access rule of a route. A non-public route needs a live
 session and Perm (rbac.PermSelf for the user's own account); StepUp
-additionally needs a step-up TOTP within the last 5 minutes.
+additionally needs a step-up TOTP within the last 5 minutes. Scoped admits
+on Perm held in any binding and leaves the object check to the handler.
 */
 type Policy struct {
 	Public bool
 	Perm   rbac.Perm
 	StepUp bool
+	Scoped bool
 }
 
 // RouteSpec is one registered route and its policy (the authorization matrix input).
@@ -66,6 +76,10 @@ type server struct {
 	users     *auth.UserStore
 	rbac      *rbac.Store
 	pool      *pgxpool.Pool
+	devices   *devices.Store
+	inventory *inventory.Store
+	metrics   *metrics.Store
+	jobs      Enqueuer
 	now       func() time.Time
 	cfg       config.API
 	log       *slog.Logger
@@ -77,7 +91,7 @@ type server struct {
 
 func newServer(d Deps) *server {
 	s := &server{
-		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, now: d.Clock, cfg: d.Cfg, log: d.Logger,
+		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
 	}
 	/* Compare against the canonical form browsers send; LoadAPI already did this, direct callers may not have. */
@@ -135,16 +149,48 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPatch, "/api/groups/{id}", groups, s.updateGroup)
 	s.route(r, http.MethodDelete, "/api/groups/{id}", groupsStepUp, s.deleteGroup)
 	s.route(r, http.MethodGet, "/api/audit", Policy{Perm: rbac.PermAuditRead}, s.listAudit)
+
+	/* Device permissions are group-scoped: lists filter by group, foreign objects answer 404. */
+	read := Policy{Perm: rbac.PermDevicesRead, Scoped: true}
+	poll := Policy{Perm: rbac.PermDevicesPoll, Scoped: true}
+	manage := Policy{Perm: rbac.PermDevicesManage, Scoped: true}
+	manageStepUp := Policy{Perm: rbac.PermDevicesManage, StepUp: true, Scoped: true}
+	creds := Policy{Perm: rbac.PermDeviceCredentials, StepUp: true, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices", read, s.listDevices)
+	s.route(r, http.MethodPost, "/api/devices", manage, s.createDevice)
+	s.route(r, http.MethodGet, "/api/devices/{id}", read, s.getDevice)
+	s.route(r, http.MethodPatch, "/api/devices/{id}", manage, s.updateDevice)
+	s.route(r, http.MethodDelete, "/api/devices/{id}", manageStepUp, s.deleteDevice)
+	s.route(r, http.MethodGet, "/api/devices/{id}/profiles", read, s.listProfiles)
+	s.route(r, http.MethodPut, "/api/devices/{id}/profiles/{kind}", creds, s.putProfile)
+	s.route(r, http.MethodDelete, "/api/devices/{id}/profiles/{kind}", creds, s.deleteProfile)
+	s.route(r, http.MethodPost, "/api/devices/{id}/poll", poll, s.pollNow)
+	s.route(r, http.MethodGet, "/api/devices/{id}/interfaces", read, inventoryList(s, (*inventory.Store).Interfaces))
+	s.route(r, http.MethodGet, "/api/devices/{id}/arp", read, inventoryList(s, (*inventory.Store).ARP))
+	s.route(r, http.MethodGet, "/api/devices/{id}/mac", read, inventoryList(s, (*inventory.Store).MAC))
+	s.route(r, http.MethodGet, "/api/devices/{id}/vlans", read, inventoryList(s, (*inventory.Store).VLANs))
+	s.route(r, http.MethodGet, "/api/devices/{id}/lldp", read, inventoryList(s, (*inventory.Store).LLDP))
+	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
+	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
+	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
+	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
+	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
+	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)
+	s.route(r, http.MethodPut, "/api/discovery/scans/{id}/profile", creds, s.putScanProfile)
+	s.route(r, http.MethodGet, "/api/discovery/inbox", manage, s.listInbox)
+	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/accept", manage, s.acceptDiscovered)
+	s.route(r, http.MethodPost, "/api/discovery/inbox/{id}/ignore", manage, s.ignoreDiscovered)
 	return r
 }
 
 /*
 route is the only way to register an endpoint: it binds h to its policy so
 that Routes can enumerate every route. A policy that grants nothing explicit
-(non-public without Perm) or mixes public with a permission panics at start.
+(non-public without Perm), mixes public with a permission, or marks a
+route Scoped without a real permission panics at start.
 */
 func (s *server) route(r chi.Router, method, pattern string, p Policy, h http.HandlerFunc) {
-	if p.Public == (p.Perm != "") || (p.Public && p.StepUp) {
+	if p.Public == (p.Perm != "") || (p.Public && p.StepUp) || (p.Scoped && (p.Public || p.Perm == "" || p.Perm == rbac.PermSelf)) {
 		panic(fmt.Sprintf("httpapi: invalid policy %+v for %s %s", p, method, pattern))
 	}
 	r.Method(method, pattern, &policyHandler{s: s, p: p, h: h})
@@ -177,10 +223,16 @@ func (ph *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ph.s.fail(w, r, err)
 			return
 		}
-		if !subj.Can(ph.p.Perm, nil, nil) {
+		admitted := subj.Can(ph.p.Perm, nil, nil)
+		if ph.p.Scoped {
+			admitted = subj.HoldsAnywhere(ph.p.Perm)
+		}
+		if !admitted {
 			writeError(w, errForbidden)
 			return
 		}
+		/* Object checks of Scoped handlers reuse the subject instead of loading it again. */
+		r = r.WithContext(context.WithValue(r.Context(), keySubject, subj))
 	}
 	if ph.p.StepUp && !sc.sess.StepUpValid {
 		writeError(w, errStepUpRequired)

@@ -36,6 +36,9 @@ func poolConfig(c config.DB, pw secret.Secret) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database config: %w", err)
 	}
+	if c.MaxConns > 0 {
+		cfg.MaxConns = int32(c.MaxConns) // #nosec G115 -- range checked by config validation
+	}
 	cc := cfg.ConnConfig
 	cc.Host, cc.Port = c.Host, uint16(c.Port) // #nosec G115 -- range checked by config validation
 	cc.Database, cc.User, cc.Password = c.Name, c.User, pw.Reveal()
@@ -82,8 +85,9 @@ func provider(db *sql.DB) (*goose.Provider, error) {
 }
 
 /*
-Migrate applies all pending embedded migrations. The connecting role must be
-the schema owner (nms_migrator); concurrent runs are serialised by an advisory lock.
+Migrate applies all pending embedded migrations, then River's job queue
+migrations in the jobs schema. The connecting role must be the schema owner
+(nms_migrator); concurrent runs are serialised by advisory locks.
 */
 func Migrate(ctx context.Context, c config.DB, pw secret.Secret) error {
 	cfg, err := poolConfig(c, pw)
@@ -98,6 +102,9 @@ func Migrate(ctx context.Context, c config.DB, pw secret.Secret) error {
 	}
 	if _, err := p.Up(ctx); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
+	}
+	if err := migrateJobs(ctx, cfg); err != nil {
+		return fmt.Errorf("apply job queue migrations: %w", err)
 	}
 	return nil
 }

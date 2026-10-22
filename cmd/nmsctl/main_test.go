@@ -29,6 +29,7 @@ type fakeSys struct {
 	inContainer bool
 	cmds        []install.Cmd
 	stdins      []string
+	err         error /* result of every command */
 }
 
 func (*fakeSys) GOOS() string                         { return "linux" }
@@ -43,7 +44,7 @@ func (f *fakeSys) Run(_ context.Context, c install.Cmd) error {
 		_, _ = b.ReadFrom(c.Stdin)
 	}
 	f.stdins = append(f.stdins, b.String())
-	return nil
+	return f.err
 }
 
 var testKey = func() *[32]byte {
@@ -463,5 +464,43 @@ func TestHostRunsDBCommandsInToolsContainer(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"install", "--public-host", "x"}, deps{out: &out, errw: &out, sys: &fakeSys{inContainer: true}}); code != 1 {
 		t.Fatal("install ran inside the container")
+	}
+}
+
+func TestEgressCheck(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code int
+	}{{nil, 0}, {errors.New("exit status 1"), 1}} {
+		sys := &fakeSys{err: c.err}
+		var out bytes.Buffer
+		code := run(context.Background(), []string{"egress", "check"}, deps{out: &out, errw: &out, sys: sys})
+		if code != c.code || len(sys.cmds) != 1 || sys.cmds[0].Name+" "+strings.Join(sys.cmds[0].Args, " ") != "iptables -w -C FORWARD -j DOCKER-USER" {
+			t.Fatalf("err %v: exit %d, commands %v\n%s", c.err, code, sys.cmds, out.String())
+		}
+		if c.err != nil && !strings.Contains(out.String(), "DOCKER-USER") {
+			t.Fatalf("failure not explained: %s", out.String())
+		}
+	}
+	sys := &fakeSys{inContainer: true}
+	var out bytes.Buffer
+	if code := run(context.Background(), []string{"egress", "check"}, deps{out: &out, errw: &out, sys: sys}); code != 1 || len(sys.cmds) != 0 {
+		t.Fatalf("egress check in container: exit %d, commands %v", code, sys.cmds)
+	}
+}
+
+func TestEgressApplyOnlyOnHost(t *testing.T) {
+	for _, c := range []struct {
+		inContainer bool
+		args        []string
+	}{
+		{true, []string{"egress", "apply"}},
+		{false, []string{"egress", "apply", "--extra"}},
+	} {
+		sys := &fakeSys{inContainer: c.inContainer}
+		var out bytes.Buffer
+		if code := run(context.Background(), c.args, deps{out: &out, errw: &out, sys: sys}); code != 1 || len(sys.cmds) != 0 {
+			t.Fatalf("%v in container=%v: exit %d, commands %v", c.args, c.inContainer, code, sys.cmds)
+		}
 	}
 }

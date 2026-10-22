@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	dockercontainer "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -32,7 +34,7 @@ const Image = "timescale/timescaledb:2.30.2-pg17@sha256:b346edcdb51a1fd6020e3965
 
 const dbName = "nms"
 
-var roles = []string{"nms_migrator", "nms_api", "nms_cli", "postgres"}
+var roles = []string{"nms_migrator", "nms_api", "nms_cli", "nms_poller", "postgres"}
 
 // Env is a running, migrated test database.
 type Env struct {
@@ -41,13 +43,21 @@ type Env struct {
 	passwords map[string]string
 }
 
-// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli or postgres.
+// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli, nms_poller or postgres.
 func (e *Env) Pool(role string) *pgxpool.Pool {
 	p, ok := e.pools[role]
 	if !ok {
 		panic("testdb: unknown role " + role)
 	}
 	return p
+}
+
+// Config returns the connection settings and password of role, to open a pool with other settings.
+func (e *Env) Config(role string) (config.DB, secret.Secret) {
+	if _, ok := e.passwords[role]; !ok {
+		panic("testdb: unknown role " + role)
+	}
+	return e.cfg(role), secret.New(e.passwords[role])
 }
 
 // Connect opens one connection as role to database db and closes it (to check CONNECT privileges).
@@ -144,17 +154,14 @@ func start() (*Env, error) {
 		return nil, err
 	}
 	passwords := map[string]string{}
-	files := []testcontainers.ContainerFile{{
-		HostFilePath:      filepath.Join(root, "deploy", "postgres", "initdb", "10-roles.sh"),
-		ContainerFilePath: "/docker-entrypoint-initdb.d/10-roles.sh",
-		FileMode:          0o755,
-	}}
+	var files []testcontainers.ContainerFile
 	/* Mirror production: every password is a file under /run/secrets. */
 	for role, secretName := range map[string]string{
 		"postgres":     "postgres_password",
 		"nms_migrator": "db_migrator_password",
 		"nms_api":      "db_api_password",
 		"nms_cli":      "db_cli_password",
+		"nms_poller":   "db_poller_password",
 	} {
 		pw, err := randomPassword()
 		if err != nil {
@@ -172,11 +179,23 @@ func start() (*Env, error) {
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        Image,
 			ExposedPorts: []string{"5432/tcp"},
+			/* As in the deployment: no TimescaleDB telemetry. */
+			Cmd: []string{"postgres", "-c", "timescaledb.telemetry_level=off"},
 			Env: map[string]string{ // #nosec G101 -- path of a secret file, not a secret
 				"POSTGRES_DB":            dbName,
 				"POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_password",
 			},
 			Files: files,
+			/*
+				Mirror production: compose bind-mounts deploy/postgres/initdb over the
+				directory, so the image's own init scripts never run.
+			*/
+			HostConfigModifier: func(hc *dockercontainer.HostConfig) {
+				hc.Mounts = append(hc.Mounts, mount.Mount{
+					Type: mount.TypeBind, Source: filepath.Join(root, "deploy", "postgres", "initdb"),
+					Target: "/docker-entrypoint-initdb.d", ReadOnly: true,
+				})
+			},
 			/* The entrypoint restarts the server after init scripts: wait for the second start. */
 			WaitingFor: wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).WithStartupTimeout(2 * time.Minute),

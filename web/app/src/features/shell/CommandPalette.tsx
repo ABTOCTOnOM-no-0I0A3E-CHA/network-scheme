@@ -39,7 +39,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         e.preventDefault();
         onOpenChange(false);
       }}
-      onClose={() => onOpenChange(false)}
+      onClose={() => {
+        /* A close event queued before a quick reopen must not close the reopened dialog. */
+        if (!ref.current?.open) onOpenChange(false);
+      }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onOpenChange(false);
       }}

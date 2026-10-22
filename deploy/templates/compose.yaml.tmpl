@@ -6,6 +6,8 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     image: "{{.DBImage}}"
+    # No telemetry: the image would otherwise phone home (blocked anyway: core is internal).
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
     restart: unless-stopped
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     cpus: "2.0"
@@ -13,7 +15,7 @@ services:
     environment:
       POSTGRES_DB: "{{.DBName}}"
       POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
-    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password]
+    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - "{{.Paths.Etc}}/postgres/initdb:/docker-entrypoint-initdb.d:ro"
@@ -72,6 +74,39 @@ services:
       retries: 5
       start_period: 10s
 
+  poller:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.APIImage}}:{{.ImageTag}}"
+    entrypoint: ["/poller"]
+    command: ["run"]
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cpus: "1.0"
+    mem_limit: 512m
+    # Unprivileged ICMP echo (no CAP_NET_RAW) for every group of the container.
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    secrets: [db_poller_password, domain_read_key]
+    volumes:
+      - "{{.Paths.Etc}}/config/poller.yaml:/etc/nms/poller.yaml:ro"
+      - "{{.Paths.Etc}}/config/domain_read.pub:/etc/nms/domain_read.pub:ro"
+    networks:
+      core: {}
+      devices: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/poller", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   gateway:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -126,6 +161,13 @@ networks:
       config:
         - subnet: "{{.CoreSubnet}}"
           ip_range: "{{.CoreIPRange}}"
+  # Towards the devices: routed, but DOCKER-USER lets it reach only the management subnets.
+  devices:
+    # IPv4 only: the egress rules are iptables (IPv4) rules.
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: "{{.DevicesSubnet}}"
 
 volumes:
   pgdata: {}
@@ -140,6 +182,10 @@ secrets:
     file: "{{.Paths.Etc}}/secrets/db_api_password"
   db_cli_password:
     file: "{{.Paths.Etc}}/secrets/db_cli_password"
+  db_poller_password:
+    file: "{{.Paths.Etc}}/secrets/db_poller_password"
+  domain_read_key:
+    file: "{{.Paths.Etc}}/secrets/domain_read.key"
   api_data_key:
     file: "{{.Paths.Etc}}/secrets/api_data_key"
   web_crt:

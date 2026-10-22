@@ -1,0 +1,8 @@
+package good
+
+import "github.com/gosnmp/gosnmp"
+
+/* Fixture for scripts/check-no-snmp-set.sh: reads pass. */
+func read(g *gosnmp.GoSNMP) {
+	_, _ = g.Get([]string{".1.3.6.1.2.1.1.5.0"})
+}
