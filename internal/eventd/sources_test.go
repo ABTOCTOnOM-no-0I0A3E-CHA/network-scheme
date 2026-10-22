@@ -132,7 +132,7 @@ func TestSourcesWipeReplacedAndRemovedSecrets(t *testing.T) {
 	if !da.wiped || !da.community.IsZero() {
 		t.Error("replaced device kept its secret")
 	}
-	if !db.wiped || db.v3 != nil || keep.sp.AuthenticationPassphrase != "" || keep.sp.PrivacyPassphrase != "" || keep.g.TrapSecurityParametersTable != nil {
+	if !db.wiped || db.v3 != nil || keep.fullSP.AuthenticationPassphrase != "" || keep.fullSP.PrivacyPassphrase != "" || keep.full != nil {
 		t.Error("removed device kept its USM secrets")
 	}
 	if d, rel, ok := s.acquire(netip.MustParseAddr("127.0.0.2")); !ok || d == da || !d.matchCommunity("another-community-0123") || d.matchCommunity(goodCommunity) {
@@ -143,4 +143,40 @@ func TestSourcesWipeReplacedAndRemovedSecrets(t *testing.T) {
 	if _, _, ok := s.acquire(netip.MustParseAddr("127.0.0.3")); ok {
 		t.Error("removed device still resolves")
 	}
+}
+
+/* A ciphertext older than one this process accepted is refused (api could restore an old row). */
+func TestSourcesRefuseRollbackOfCiphertext(t *testing.T) {
+	h := newHarness(t)
+	a := h.device("127.0.0.2")
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: a}
+	seal := func(community string, age time.Duration) []byte {
+		return credstest.Seal(h.pub, owner, "snmp2c", map[string]string{"community": community}, time.Now().Add(-age))
+	}
+	s := h.sources()
+	check := func(step, want string) {
+		t.Helper()
+		h.reload(s)
+		d, rel, ok := s.acquire(netip.MustParseAddr("127.0.0.2"))
+		if !ok {
+			t.Fatalf("%s: device missing", step)
+		}
+		defer rel()
+		if want == "" {
+			if !d.community.IsZero() {
+				t.Errorf("%s: a credential is in force", step)
+			}
+		} else if !d.matchCommunity(want) {
+			t.Errorf("%s: %q is not in force", step, want)
+		}
+	}
+	h.rawProfile(a, "snmp2c", seal("community-v2-0123456", time.Hour), "pending")
+	check("first", "community-v2-0123456")
+	h.rawProfile(a, "snmp2c", seal("community-v1-0123456", 2*time.Hour), "ok") /* older, status reset to ok */
+	check("rolled back", "")
+	if s.rollbacks.Load() != 1 {
+		t.Errorf("rollbacks = %d", s.rollbacks.Load())
+	}
+	h.rawProfile(a, "snmp2c", seal("community-v3-0123456", time.Minute), "pending")
+	check("newer again", "community-v3-0123456")
 }

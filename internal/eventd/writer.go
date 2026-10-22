@@ -1,10 +1,13 @@
 package eventd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -39,6 +42,8 @@ type writer struct {
 	log  *slog.Logger
 	size int
 	wait time.Duration
+	/* retryBase is the first retry delay; zero selects the default (tests). */
+	retryBase time.Duration
 }
 
 /* run writes until the queue is closed and empty, or ctx ends (the rest is then dropped and counted). */
@@ -77,18 +82,20 @@ func (w *writer) table(ctx context.Context, name string, cols []string, rows [][
 	if len(rows) == 0 {
 		return
 	}
-	backoff := backoffStart
+	backoff, unknown := cmp.Or(w.retryBase, backoffStart), 0
 	for {
 		err := w.copyRows(ctx, name, cols, rows)
-		switch {
+		switch c := classify(err); {
 		case err == nil:
 			return
 		case ctx.Err() != nil:
 			w.st.dropped.Add(uint64(len(rows)))
 			return
-		case !retryable(err):
+		case c == errData, c == errUnknown && unknown >= maxUnknownTries:
 			w.rowByRow(ctx, name, cols, rows)
 			return
+		case c == errUnknown:
+			unknown++
 		}
 		w.log.Warn("event write failed, retrying", slog.String("table", name), slog.Int("rows", len(rows)),
 			slog.String("err", err.Error()), slog.Duration("in", backoff))
@@ -123,7 +130,7 @@ func (w *writer) rowByRow(ctx context.Context, name string, cols []string, rows 
 			if err == nil {
 				break
 			}
-			if ctx.Err() != nil || !retryable(err) {
+			if ctx.Err() != nil || classify(err) != errTransient {
 				bad++
 				break
 			}
@@ -140,17 +147,46 @@ func (w *writer) rowByRow(ctx context.Context, name string, cols []string, rows 
 	}
 }
 
+type errClass int
+
+const (
+	errTransient errClass = iota /* the same statement may succeed later */
+	errData                      /* the server refused the data */
+	errUnknown                   /* a client-side error of no known kind */
+)
+
+/* maxUnknownTries bounds the retries of an error that is neither a server verdict nor a connectivity problem. */
+const maxUnknownTries = 5
+
 /*
-retryable reports whether the same statement may succeed later: any failure that
-is not a verdict of the server on the data (network, timeout, closed pool), and
-the server states "not now" (class 08 connection, 53 resources, 57 operator
-intervention, serialization failures).
+classify sorts a failed statement. Transient: connectivity (network, timeouts,
+closed connections) and the server saying "not now" (class 08 connection, 53
+resources, 57 operator intervention, serialization failures); retried for as
+long as it takes. Data: any other verdict of the server; the rows go one by
+one. Unknown: a client-side error that is not recognizably connectivity (for
+example an encoding error, which no retry fixes); retried a few times, then
+the rows go one by one.
 */
-func retryable(err error) bool {
-	var pe *pgconn.PgError
-	if !errors.As(err, &pe) {
-		return true
+func classify(err error) errClass {
+	if err == nil {
+		return errTransient
 	}
-	c := pe.Code
-	return strings.HasPrefix(c, "08") || strings.HasPrefix(c, "53") || strings.HasPrefix(c, "57") || c == "40001" || c == "40P01"
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		c := pe.Code
+		if c == "57014" { /* query_canceled: also how pgx reports a COPY aborted by a client-side encoding error */
+			return errUnknown
+		}
+		if strings.HasPrefix(c, "08") || strings.HasPrefix(c, "53") || strings.HasPrefix(c, "57") || c == "40001" || c == "40P01" {
+			return errTransient
+		}
+		return errData
+	}
+	var ne net.Error
+	var ce *pgconn.ConnectError
+	if errors.As(err, &ne) || errors.As(err, &ce) || pgconn.Timeout(err) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return errTransient
+	}
+	return errUnknown
 }

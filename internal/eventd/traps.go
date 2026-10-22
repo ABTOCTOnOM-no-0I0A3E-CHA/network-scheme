@@ -45,7 +45,8 @@ func snmpVersion(b []byte) (gosnmp.SnmpVersion, bool) {
 authTrap decodes and authenticates a trap datagram from device d (read-locked
 by the caller). It returns the decoded packet only when the packet proves the
 credentials of d: the community of the snmp2c profile for v1/v2c, an authPriv
-message of the USM user of the snmp3 profile for v3. Every failure is
+message of the USM user of the snmp3 profile for v3 (see v3.go for the cost
+model: messages with an engine ID other than the pinned one are budgeted). Every failure is
 auth_failed; nothing of an unauthenticated packet is used.
 */
 func (s *server) authTrap(d *device, data []byte) (*gosnmp.SnmpPacket, bool) {
@@ -55,34 +56,23 @@ func (s *server) authTrap(d *device, data []byte) (*gosnmp.SnmpPacket, bool) {
 	}
 	if ver != gosnmp.Version3 {
 		g := &gosnmp.GoSNMP{Version: ver, Logger: quiet}
-		p, err := g.UnmarshalTrap(data, false)
+		p, err := unmarshal(g, data)
 		if err != nil || !d.matchCommunity(p.Community) {
 			return nil, false
 		}
 		return p, true
 	}
-	v := d.v3
-	if v == nil || !s.authLim.allow(d.id, s.now()) {
+	if d.v3 == nil {
 		return nil, false
 	}
-	v.mu.Lock()
-	p, err := v.g.UnmarshalTrap(data, false)
-	v.mu.Unlock()
-	if err != nil || p.SecurityModel != gosnmp.UserSecurityModel {
-		return nil, false
-	}
-	/*
-		gosnmp authenticates and decrypts according to the flags in the packet,
-		so a message with noAuthNoPriv or authNoPriv would pass: require authPriv.
-	*/
-	if p.MsgFlags&gosnmp.AuthPriv != gosnmp.AuthPriv {
-		return nil, false
-	}
-	usm, ok := p.SecurityParameters.(*gosnmp.UsmSecurityParameters)
-	if !ok || usm.UserName != v.user {
-		return nil, false
-	}
-	return p, true
+	return d.v3.decode(data, func() bool {
+		now := s.now()
+		if s.slowDev.allow(d.id, now) && s.slowAll.allow(0, now) {
+			return true
+		}
+		s.st.slowDropped.Add(1)
+		return false
+	})
 }
 
 /*
@@ -102,9 +92,14 @@ func (s *server) handleTrap(ip netip.Addr, data []byte, reply func([]byte)) {
 		s.st.authFailed.Add(1)
 		return
 	}
+	if pkt.Version == gosnmp.Version3 && pkt.PDUType != gosnmp.SNMPv2Trap {
+		/* v3 INFORM needs the engine discovery exchange, whose replies would reflect traffic: not offered */
+		s.st.v3Inform.Add(1)
+		s.st.malformed.Add(1)
+		return
+	}
 	tr, err := trap.Normalize(pkt)
-	if err != nil || (pkt.Version == gosnmp.Version3 && pkt.PDUType != gosnmp.SNMPv2Trap) {
-		/* v3 INFORM needs the engine discovery exchange, which is not offered: not stored, not acknowledged */
+	if err != nil {
 		s.st.malformed.Add(1)
 		return
 	}

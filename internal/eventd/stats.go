@@ -28,6 +28,9 @@ type stats struct {
 	dropped       atomic.Uint64 /* lost: queue full, refused by the database, refused connections */
 	malformed     atomic.Uint64 /* authenticated source, unparsable content */
 	rejected      atomic.Uint64 /* rows the database refused (also counted in dropped) */
+	slowDropped   atomic.Uint64 /* SNMPv3 messages over the key-derivation budget (also in auth_failed) */
+	v3Inform      atomic.Uint64 /* authenticated SNMPv3 INFORMs: unsupported (also in malformed) */
+	panics        atomic.Uint64 /* recovered panics while processing one packet (also in malformed) */
 
 	flushed [6]uint64 /* values already written to the database; only the stats loop touches it */
 }

@@ -22,8 +22,10 @@ type limiter struct {
 	m           map[int64]*bucket
 }
 
-func newLimiter(rate, burst int) *limiter {
-	return &limiter{rate: float64(rate), burst: float64(burst), m: map[int64]*bucket{}}
+func newLimiter(rate, burst int) *limiter { return newLimiterF(float64(rate), float64(burst)) }
+
+func newLimiterF(rate, burst float64) *limiter {
+	return &limiter{rate: rate, burst: burst, m: map[int64]*bucket{}}
 }
 
 /* allow takes one token of device id, if there is one. */

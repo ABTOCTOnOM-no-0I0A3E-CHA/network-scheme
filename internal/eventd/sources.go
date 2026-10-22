@@ -3,7 +3,6 @@ package eventd
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
@@ -43,18 +42,6 @@ var (
 )
 
 /*
-v3Auth checks SNMPv3 packets of one device. Its table holds exactly the USM
-user of this device's snmp3 profile: a packet from this source address is
-accepted only for that user, whatever other users exist for other devices.
-*/
-type v3Auth struct {
-	mu   sync.Mutex
-	user string
-	sp   *gosnmp.UsmSecurityParameters
-	g    *gosnmp.GoSNMP
-}
-
-/*
 device is a known event source. Its secrets are valid until wipe; users hold
 mu for reading while they use them. A device is replaced (not edited) when its
 row or ciphertexts change.
@@ -72,14 +59,8 @@ type device struct {
 	v3        *v3Auth       /* nil when there is no usable snmp3 profile */
 }
 
-/* matchCommunity compares in constant time (over digests, so the length does not leak either). */
-func (d *device) matchCommunity(got string) bool {
-	if d.community.IsZero() {
-		return false
-	}
-	a, b := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(d.community.Reveal()))
-	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
-}
+/* matchCommunity compares in constant time, without making a string of the stored community. */
+func (d *device) matchCommunity(got string) bool { return d.community.EqualString(got) }
 
 /* wipe zeroes the secrets once nobody uses them any more. */
 func (d *device) wipe() {
@@ -88,11 +69,8 @@ func (d *device) wipe() {
 	d.wiped = true
 	d.community.Wipe()
 	d.community = secret.Secret{}
-	if v := d.v3; v != nil {
-		v.mu.Lock()
-		v.sp.AuthenticationPassphrase, v.sp.PrivacyPassphrase, v.sp.UserName = "", "", ""
-		v.g.TrapSecurityParametersTable = nil
-		v.mu.Unlock()
+	if d.v3 != nil {
+		d.v3.wipe()
 		d.v3 = nil
 	}
 }
@@ -109,14 +87,14 @@ holds that device's verified read credentials. Only the address identifies a
 source: names or addresses inside a message are never used.
 
 Credential rule: eventd cannot read inventory.profile_seen (it has no rights
-there) and never writes it, so it cannot tell a rolled-back ciphertext from the
-current one by the created_at mark. Open is therefore called with no lower
-bound. This is safe because the api stores one ciphertext per profile and
-cannot create a credential for the read domain (it has no private key, and
-every ciphertext is bound to its owner and kind): the worst a compromised api
-can do is store an older, once legitimate, ciphertext again, which the poller
-marks 'mismatch' on its next poll; eventd drops a profile whose status is
-invalid, weak or mismatch at the next reread (at most 5 minutes).
+there) and never writes it, so it cannot enforce the poller's created_at mark.
+Open is called with no lower bound, and the monotonic mark is kept in memory
+instead (seen): a ciphertext older than the newest one this process accepted
+for the device and kind is refused and counted (the api can UPDATE
+access_profile and restore an old row, whatever its status says). Not
+prevented: a rollback made while eventd is down or restarted (nothing
+persists the mark). A profile whose status is invalid, weak or mismatch is
+ignored at the next reread (at most 5 minutes).
 */
 type sources struct {
 	priv, pub *[32]byte
@@ -125,11 +103,27 @@ type sources struct {
 	log       *slog.Logger
 
 	cur atomic.Pointer[snapshot]
-	mu  sync.Mutex /* one reload at a time */
+	mu  sync.Mutex /* one reload at a time; guards seen */
+
+	/*
+		seen is the newest created_at accepted per device and kind by this
+		process: an older ciphertext (a rollback) is refused. Nothing remembers
+		it across a restart (eventd has no rights on inventory.profile_seen),
+		so a rollback made while eventd is down is not prevented.
+	*/
+	seen      map[seenKey]time.Time
+	rollbacks atomic.Uint64
+}
+
+type seenKey struct {
+	dev  int64
+	kind string
 }
 
 func newSources(priv, pub *[32]byte, reg *drivers.Registry, now func() time.Time, log *slog.Logger) *sources {
-	s := &sources{priv: priv, pub: pub, reg: reg, now: now, log: log}
+	/* gosnmp keeps derived keys, keyed by the plaintext passphrase, in a process-wide map without eviction: never. */
+	gosnmp.PasswordCaching(false)
+	s := &sources{priv: priv, pub: pub, reg: reg, now: now, log: log, seen: map[seenKey]time.Time{}}
 	s.cur.Store(&snapshot{byAddr: map[netip.Addr]*device{}})
 	return s
 }
@@ -237,6 +231,11 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	s.cur.Store(next)
+	for k := range s.seen {
+		if _, ok := byID[k.dev]; !ok {
+			delete(s.seen, k)
+		}
+	}
 	for _, d := range old.all {
 		if !reused[d] {
 			d.wipe()
@@ -278,6 +277,14 @@ func (s *sources) build(r *devRow, fp string) *device {
 			s.log.Warn("credential rejected", slog.Int64("device_id", r.id), slog.String("kind", k), slog.String("err", err.Error()))
 			continue
 		}
+		key := seenKey{r.id, k}
+		if c.CreatedAt.Before(s.seen[key]) {
+			c.Wipe()
+			s.rollbacks.Add(1)
+			s.log.Warn("credential refused: older than the one accepted before", slog.Int64("device_id", r.id), slog.String("kind", k))
+			continue
+		}
+		s.seen[key] = c.CreatedAt
 		switch k {
 		case creds.KindSNMP2c:
 			d.community = c.Community
@@ -289,31 +296,4 @@ func (s *sources) build(r *devRow, fp string) *device {
 		}
 	}
 	return d
-}
-
-func newV3(c creds.Credential) (*v3Auth, error) {
-	ap, ok := authProtos[c.AuthProto]
-	pp, ok2 := privProtos[c.PrivProto]
-	if !ok || !ok2 {
-		return nil, fmt.Errorf("unsupported USM protocol")
-	}
-	sp := &gosnmp.UsmSecurityParameters{
-		UserName:                 c.User,
-		AuthenticationProtocol:   ap,
-		AuthenticationPassphrase: c.AuthKey.Reveal(),
-		PrivacyProtocol:          pp,
-		PrivacyPassphrase:        c.PrivKey.Reveal(),
-	}
-	tbl := gosnmp.NewSnmpV3SecurityParametersTable(quiet)
-	if err := tbl.Add(c.User, sp); err != nil {
-		return nil, fmt.Errorf("usm user: %w", err)
-	}
-	g := &gosnmp.GoSNMP{
-		Version:                     gosnmp.Version3,
-		SecurityModel:               gosnmp.UserSecurityModel,
-		MsgFlags:                    gosnmp.AuthPriv,
-		TrapSecurityParametersTable: tbl,
-		Logger:                      quiet,
-	}
-	return &v3Auth{user: c.User, sp: sp, g: g}, nil
 }

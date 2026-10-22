@@ -3,14 +3,19 @@ package eventd
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,6 +169,8 @@ func TestNoOutgoingConnectionsInCode(t *testing.T) {
 		"net":        {"Dial": true, "DialTimeout": true, "DialTCP": true, "DialUDP": true, "DialIP": true, "DialUnix": true, "Dialer": true},
 		"crypto/tls": {"Dial": true, "DialWithDialer": true, "Dialer": true},
 	}
+	/* datagrams are written only as the INFORM acknowledgement: exactly one call site */
+	writes := 0
 	bannedImports := []string{"net/http", "net/rpc", "net/smtp", "os/exec", "net/url"}
 	var files []string
 	for _, dir := range []string{".", filepath.Join("..", "..", "cmd", "eventd")} {
@@ -214,7 +221,118 @@ func TestNoOutgoingConnectionsInCode(t *testing.T) {
 			if strings.HasPrefix(sel.Sel.Name, "Dial") {
 				t.Errorf("%s calls %s", f, sel.Sel.Name)
 			}
+			if strings.HasPrefix(sel.Sel.Name, "WriteTo") || strings.HasPrefix(sel.Sel.Name, "WriteMsg") {
+				writes++
+				if filepath.Base(f) != "server.go" || sel.Sel.Name != "WriteToUDPAddrPort" {
+					t.Errorf("%s: unexpected datagram write %s", f, sel.Sel.Name)
+				}
+			}
 			return true
 		})
 	}
+	if writes != 1 {
+		t.Errorf("%d datagram write call sites, want exactly the INFORM reply", writes)
+	}
+}
+
+func TestClassifyErrors(t *testing.T) {
+	for err, want := range map[error]errClass{
+		&pgconn.PgError{Code: "23514"}:         errData,
+		&pgconn.PgError{Code: "22021"}:         errData,
+		&pgconn.PgError{Code: "57P01"}:         errTransient,
+		&pgconn.PgError{Code: "57014"}:         errUnknown,
+		&pgconn.PgError{Code: "53300"}:         errTransient,
+		context.DeadlineExceeded:               errTransient,
+		io.ErrUnexpectedEOF:                    errTransient,
+		&net.OpError{Op: "write", Err: io.EOF}: errTransient,
+		errors.New("cannot encode chan int"):   errUnknown,
+	} {
+		if got := classify(err); got != want {
+			t.Errorf("%v: class %d, want %d", err, got, want)
+		}
+	}
+}
+
+/* A deterministic client-side error does not hold the batch forever: retried a few times, then row by row. */
+func TestDeterministicClientErrorFallsBackToRows(t *testing.T) {
+	h := newHarness(t)
+	st := &stats{}
+	w := &writer{pool: h.pool, st: st, log: slog.New(slog.NewTextHandler(io.Discard, nil)), size: 10, wait: time.Second, retryBase: time.Millisecond}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.table(context.Background(), "syslog", syslogCols, [][]any{
+			{time.Now(), int64(1), int16(1), int16(1), "h", "a", make(chan int), int32(1)},
+			{time.Now(), int64(1), int16(1), int16(1), "h", "a", "fine", int32(1)},
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the batch is retried forever")
+	}
+	if n := h.count(`SELECT count(*) FROM events.syslog`); n != 1 || st.rejected.Load() != 1 {
+		t.Errorf("%d rows stored, %d rejected, want 1 and 1", n, st.rejected.Load())
+	}
+}
+
+/* A failed enqueue must not start the 30 s throttle; a successful one does; old entries are pruned. */
+func TestPollTriggerThrottlesOnlyAfterSuccess(t *testing.T) {
+	h := newHarness(t)
+	clk := &clock{t: time.Now()}
+	enq := &flakyEnq{failFirst: true, called: make(chan struct{}, 10)}
+	p := newPollTrigger(enq, clk.now)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.run(ctx, h.pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	wait := func() {
+		t.Helper()
+		select {
+		case <-enq.called:
+		case <-time.After(5 * time.Second):
+			t.Fatal("enqueue not called")
+		}
+	}
+	p.request(7)
+	wait() /* fails */
+	eventually(t, 5*time.Second, "request settled", func() bool { p.mu.Lock(); defer p.mu.Unlock(); return !p.pending[7] })
+	p.request(7)
+	wait() /* not throttled by the failure; succeeds */
+	eventually(t, 5*time.Second, "request settled", func() bool { p.mu.Lock(); defer p.mu.Unlock(); return !p.pending[7] && !p.last[7].IsZero() })
+	p.request(7)
+	select {
+	case <-enq.called:
+		t.Error("second request inside 30 s was queued")
+	case <-time.After(300 * time.Millisecond):
+	}
+	clk.add(31 * time.Second)
+	p.request(7)
+	wait()
+	eventually(t, 5*time.Second, "settled", func() bool { p.mu.Lock(); defer p.mu.Unlock(); return !p.pending[7] })
+	clk.add(31 * time.Second)
+	p.done(8, false) /* any completion prunes */
+	p.mu.Lock()
+	n := len(p.last)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d stale throttle entries", n)
+	}
+}
+
+type flakyEnq struct {
+	mu        sync.Mutex
+	failFirst bool
+	called    chan struct{}
+}
+
+func (f *flakyEnq) EnqueuePollNow(context.Context, pgx.Tx, int64) error {
+	f.mu.Lock()
+	fail := f.failFirst
+	f.failFirst = false
+	f.mu.Unlock()
+	f.called <- struct{}{}
+	if fail {
+		return errors.New("boom")
+	}
+	return nil
 }

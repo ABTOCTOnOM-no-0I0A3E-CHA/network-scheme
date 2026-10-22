@@ -50,12 +50,14 @@ const (
 	settleFor     = 300 * time.Millisecond /* coalesces a burst of notifications */
 	relistenAfter = 2 * time.Second
 	pollGap       = 30 * time.Second /* least time between two poll_now requests of a device */
+	callTimeout   = 10 * time.Second /* one database round trip of a background loop */
 	drainTimeout  = 10 * time.Second /* shutdown: how long the writer may take for what is queued */
 	udpQueue      = 1024
 	udpReadBuf    = 8 << 20
 	maxTrapPacket = 65535
-	authRate      = 50 /* SNMPv3 verifications per second per device: a flood of bad packets must not eat the CPU */
-	authBurst     = 100
+	slowDevRate   = 0.1 /* one SNMPv3 key derivation per 10 s per device ... */
+	slowAllRate   = 5   /* ... and 5 per second in total: ~6 ms of CPU each */
+	slowAllBurst  = 5
 )
 
 /* Notification channels. */
@@ -103,7 +105,8 @@ type server struct {
 	src     *sources
 	q       *queue
 	lim     *limiter
-	authLim *limiter
+	slowDev *limiter /* SNMPv3 messages with an unpinned engine, per device */
+	slowAll *limiter /* the same, in total */
 	storm   *storm
 	st      stats
 	polls   *pollTrigger
@@ -196,12 +199,27 @@ func newServer(cfg config.EventD, deps Deps) *server {
 	s.src = newSources(deps.Priv, deps.Pub, reg, s.now, s.log)
 	s.q = newQueue(cfg.QueueSize)
 	s.lim = newLimiter(cfg.RatePerSource, cfg.RateBurst)
-	s.authLim = newLimiter(authRate, authBurst)
+	s.slowDev, s.slowAll = newLimiterF(slowDevRate, 1), newLimiterF(slowAllRate, slowAllBurst)
 	s.storm = newStorm(s.emit)
 	s.polls = newPollTrigger(enq, s.now)
 	s.conns = &conns{max: cfg.MaxTCPConns, per: map[netip.Addr]int{}}
 	s.rules.Store(&ruleSet{m: map[string]trap.Rule{}})
 	return s
+}
+
+/*
+safely runs the processing of one packet. A panic on hostile input is counted
+(as malformed) and logged without the packet; the worker lives on.
+*/
+func (s *server) safely(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.st.panics.Add(1)
+			s.st.malformed.Add(1)
+			s.log.Error("panic while processing a packet", slog.String("panic", fmt.Sprintf("%T", r)))
+		}
+	}()
+	fn()
 }
 
 /* emit queues a storm row; a full queue loses it (its count goes to dropped). */
@@ -321,7 +339,7 @@ func (s *server) pumpUDP(rx *sync.WaitGroup, c *net.UDPConn, size int, handle fu
 	for range max(2, runtime.GOMAXPROCS(0)) {
 		ww.Go(func() {
 			for p := range ch {
-				handle(p.ip, p.from, p.data)
+				s.safely(func() { handle(p.ip, p.from, p.data) })
 			}
 		})
 	}
@@ -372,15 +390,22 @@ func (s *server) statsLoop(ctx context.Context, every time.Duration) {
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var lastDropped, lastMalformed, lastFailed uint64
+	var lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks uint64
 	for {
-		if err := s.st.flush(ctx, s.pool, s.instance, s.q.depth()); err != nil && ctx.Err() == nil {
+		fctx, cancel := context.WithTimeout(ctx, callTimeout)
+		err := s.st.flush(fctx, s.pool, s.instance, s.q.depth())
+		cancel()
+		if err != nil && ctx.Err() == nil {
 			s.log.Warn("stats write failed", slog.String("err", err.Error()))
 		}
-		if d, m, f := s.st.dropped.Load(), s.st.malformed.Load(), s.st.authFailed.Load(); d != lastDropped || m != lastMalformed || f != lastFailed {
+		d, m, f := s.st.dropped.Load(), s.st.malformed.Load(), s.st.authFailed.Load()
+		sl, in, pa, rb := s.st.slowDropped.Load(), s.st.v3Inform.Load(), s.st.panics.Load(), s.src.rollbacks.Load()
+		if d != lastDropped || m != lastMalformed || f != lastFailed || sl != lastSlow || in != lastInform || pa != lastPanics || rb != lastRollbacks {
 			s.log.Warn("events refused", slog.Uint64("dropped", d-lastDropped), slog.Uint64("malformed", m-lastMalformed),
-				slog.Uint64("auth_failed", f-lastFailed), slog.Int("queue", s.q.depth()))
-			lastDropped, lastMalformed, lastFailed = d, m, f
+				slog.Uint64("auth_failed", f-lastFailed), slog.Uint64("v3_budget_exceeded", sl-lastSlow),
+				slog.Uint64("v3_inform_unsupported", in-lastInform), slog.Uint64("panics", pa-lastPanics),
+				slog.Uint64("credential_rollbacks", rb-lastRollbacks), slog.Int("queue", s.q.depth()))
+			lastDropped, lastMalformed, lastFailed, lastSlow, lastInform, lastPanics, lastRollbacks = d, m, f, sl, in, pa, rb
 		}
 		select {
 		case <-ctx.Done():
@@ -392,6 +417,8 @@ func (s *server) statsLoop(ctx context.Context, every time.Duration) {
 
 /* loadRules rereads the operator trap rules. */
 func (s *server) loadRules(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	rows, err := s.pool.Query(ctx, `SELECT trap_oid, name, severity FROM events.trap_rule`)
 	if err != nil {
 		return fmt.Errorf("eventd: load trap rules: %w", err)
@@ -430,7 +457,9 @@ func (s *server) listenDB(ctx context.Context) {
 }
 
 func (s *server) listenOnce(ctx context.Context) error {
-	c, err := s.pool.Acquire(ctx)
+	actx, cancel := context.WithTimeout(ctx, callTimeout)
+	c, err := s.pool.Acquire(actx)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -441,7 +470,10 @@ func (s *server) listenOnce(ctx context.Context) error {
 		_ = conn.Close(cctx)
 	}()
 	for _, ch := range []string{chanDevices, chanRules} {
-		if _, err := conn.Exec(ctx, `LISTEN `+ch); err != nil {
+		lctx, cancel := context.WithTimeout(ctx, callTimeout)
+		_, err := conn.Exec(lctx, `LISTEN `+ch)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -486,13 +518,16 @@ func (s *server) listenOnce(ctx context.Context) error {
 
 func (s *server) reloadAll(ctx context.Context, devs, rules bool) error {
 	if devs {
-		if err := s.src.reload(ctx, s.pool); err != nil {
+		rctx, cancel := context.WithTimeout(ctx, 3*callTimeout)
+		err := s.src.reload(rctx, s.pool)
+		cancel()
+		if err != nil {
 			return err
 		}
 		ids := s.src.ids()
 		keep := func(id int64) bool { _, ok := ids[id]; return ok }
 		s.lim.prune(keep)
-		s.authLim.prune(keep)
+		s.slowDev.prune(keep)
 	}
 	if rules {
 		return s.loadRules(ctx)
@@ -510,31 +545,51 @@ func (s *sources) ids() map[int64]struct{} {
 	return m
 }
 
-/* pollTrigger asks for an immediate poll of a device whose trap changes its state, at most once per pollGap. */
+/*
+pollTrigger asks for an immediate poll of a device whose trap changes its
+state, at most once per pollGap. A request counts as made only when it was
+queued; while one is in flight, further ones for the device are dropped.
+*/
 type pollTrigger struct {
-	enq  PollEnqueuer
-	now  func() time.Time
-	mu   sync.Mutex
-	last map[int64]time.Time
-	ch   chan int64
+	enq     PollEnqueuer
+	now     func() time.Time
+	mu      sync.Mutex
+	last    map[int64]time.Time /* when the last request was queued */
+	pending map[int64]bool
+	ch      chan int64
 }
 
 func newPollTrigger(enq PollEnqueuer, now func() time.Time) *pollTrigger {
-	return &pollTrigger{enq: enq, now: now, last: map[int64]time.Time{}, ch: make(chan int64, 256)}
+	return &pollTrigger{enq: enq, now: now, last: map[int64]time.Time{}, pending: map[int64]bool{}, ch: make(chan int64, 256)}
 }
 
 func (p *pollTrigger) request(id int64) {
 	now := p.now()
 	p.mu.Lock()
-	if t, ok := p.last[id]; ok && now.Sub(t) < pollGap {
-		p.mu.Unlock()
+	defer p.mu.Unlock()
+	if t, ok := p.last[id]; (ok && now.Sub(t) < pollGap) || p.pending[id] {
 		return
 	}
-	p.last[id] = now
-	p.mu.Unlock()
 	select {
 	case p.ch <- id:
+		p.pending[id] = true
 	default: /* a burst of state traps from many devices: the regular polls follow anyway */
+	}
+}
+
+/* done records the outcome of a request and forgets the entries that no longer throttle. */
+func (p *pollTrigger) done(id int64, ok bool) {
+	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pending, id)
+	if ok {
+		p.last[id] = now
+	}
+	for k, t := range p.last {
+		if now.Sub(t) >= pollGap {
+			delete(p.last, k)
+		}
 	}
 }
 
@@ -544,7 +599,9 @@ func (p *pollTrigger) run(ctx context.Context, pool *pgxpool.Pool, log *slog.Log
 		case <-ctx.Done():
 			return
 		case id := <-p.ch:
-			if err := p.enqueue(ctx, pool, id); err != nil && ctx.Err() == nil {
+			err := p.enqueue(ctx, pool, id)
+			p.done(id, err == nil)
+			if err != nil && ctx.Err() == nil {
 				log.Warn("poll request failed", slog.Int64("device_id", id), slog.String("err", err.Error()))
 			}
 		}
@@ -552,6 +609,8 @@ func (p *pollTrigger) run(ctx context.Context, pool *pgxpool.Pool, log *slog.Log
 }
 
 func (p *pollTrigger) enqueue(ctx context.Context, pool *pgxpool.Pool, id int64) error {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err

@@ -1,4 +1,4 @@
-// Command eventd receives syslog and SNMP traps from known devices and stores them (it never writes to devices).
+// Command eventd receives syslog and SNMP traps from known devices and stores them (read-only towards devices).
 package main
 
 import (

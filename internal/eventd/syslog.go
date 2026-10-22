@@ -212,7 +212,9 @@ func (s *server) stream(c net.Conn, ip netip.Addr, cfg *tls.Config, done <-chan 
 		}
 		s.st.received.Add(1)
 		/* The device may have been removed meanwhile: every message is looked up again. */
-		if !s.handleSyslog(ip, frame) {
+		known := true
+		s.safely(func() { known = s.handleSyslog(ip, frame) })
+		if !known {
 			return
 		}
 	}
