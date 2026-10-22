@@ -10,6 +10,7 @@ import { StateBadge } from "@/features/common/StateBadge";
 import { ApiError } from "@/features/common/stepup";
 import { cn } from "@/lib/utils";
 import { AddDeviceDialog } from "./AddDeviceDialog";
+import { safeText } from "@/lib/text";
 import { filterDevices, useDevices, useGroups, type Device } from "./api";
 
 const ROW_HEIGHT = 44;
@@ -23,6 +24,8 @@ const STATES: Device["state"][] = ["up", "partial", "down", "unknown"];
 type Props = {
   /** Whether the add button is offered (a UI hint; the API decides). */
   canAdd: boolean;
+  /** Whether group names can be fetched (global admin); otherwise "#<id>" is shown and the group filter is hidden. */
+  canListGroups?: boolean;
   search: string;
   onSearchChange: (search: string) => void;
   /** Opens the device card; names are plain text when absent. */
@@ -30,7 +33,7 @@ type Props = {
 };
 
 /** Device inventory: filters, virtualized table and the add-device dialog. All device fields are rendered as text. */
-export function DeviceList({ canAdd, search, onSearchChange, onOpen }: Props) {
+export function DeviceList({ canAdd, canListGroups = false, search, onSearchChange, onOpen }: Props) {
   const { t } = useTranslation();
   const [groupId, setGroupId] = useState<number | undefined>();
   const [state, setState] = useState<Device["state"] | undefined>();
@@ -38,7 +41,7 @@ export function DeviceList({ canAdd, search, onSearchChange, onOpen }: Props) {
   const all = useDevices();
   const filtered = useMemo(() => filterDevices(all.data ?? NO_DEVICES, { groupId, state, search }), [all.data, groupId, state, search]);
   const devices = { isPending: all.isPending, error: all.error, data: all.data && filtered };
-  const groups = useGroups();
+  const groups = useGroups(canListGroups);
   const groupNames = useMemo(() => new Map(groups.data?.map((g) => [g.id, g.name])), [groups.data]);
 
   const columns = useMemo(() => {
@@ -60,14 +63,14 @@ export function DeviceList({ canAdd, search, onSearchChange, onOpen }: Props) {
         header: () => t("devices.col.group"),
         cell: (c) => <span className="truncate">{groupNames.get(c.getValue()) ?? `#${c.getValue()}`}</span>,
       }),
-      h.accessor("model", { id: "model", header: () => t("devices.col.model"), cell: (c) => <span className="truncate">{c.getValue()}</span> }),
-      h.accessor("firmware", { id: "firmware", header: () => t("devices.col.firmware"), cell: (c) => <span className="truncate">{c.getValue()}</span> }),
+      h.accessor("model", { id: "model", header: () => t("devices.col.model"), cell: (c) => <span className="truncate">{safeText(c.getValue())}</span> }),
+      h.accessor("firmware", { id: "firmware", header: () => t("devices.col.firmware"), cell: (c) => <span className="truncate">{safeText(c.getValue())}</span> }),
       h.accessor("driver", {
         id: "driver",
         header: () => t("devices.col.driver"),
         cell: (c) => (
           <span className="flex flex-wrap items-center gap-1">
-            <span className="truncate">{c.getValue()}</span>
+            <span className="truncate">{safeText(c.getValue())}</span>
             {c.getValue().startsWith("eltex") && (
               <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-950 dark:text-amber-300">{t("devices.unverified")}</span>
             )}

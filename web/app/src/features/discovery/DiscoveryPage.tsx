@@ -18,12 +18,14 @@ const failText = (t: (k: string) => string, err: unknown) => t(err instanceof Ap
 type Props = {
   /** Whether the caller manages devices (a UI hint; the API decides). Without it nothing is requested or offered. */
   canManage: boolean;
+  /** Whether group names can be fetched (global admin); otherwise "#<id>" is shown. */
+  canListGroups?: boolean;
   /** Called with the id of a device created from an accepted find. */
   onOpenDevice: (id: number) => void;
 };
 
 /** Subnet scans (CIDR, group, interval, enabled, own credential) and the inbox of finds. Device-reported strings are shown as text. */
-export function DiscoveryPage({ canManage, onOpenDevice }: Props) {
+export function DiscoveryPage({ canManage, canListGroups = false, onOpenDevice }: Props) {
   const { t } = useTranslation();
   if (!canManage) {
     return (
@@ -33,14 +35,14 @@ export function DiscoveryPage({ canManage, onOpenDevice }: Props) {
       </section>
     );
   }
-  return <Discovery onOpenDevice={onOpenDevice} />;
+  return <Discovery canListGroups={canListGroups} onOpenDevice={onOpenDevice} />;
 }
 
-function Discovery({ onOpenDevice }: Pick<Props, "onOpenDevice">) {
+function Discovery({ canListGroups, onOpenDevice }: Pick<Props, "canListGroups" | "onOpenDevice">) {
   const { t, i18n } = useTranslation();
   const scans = useScans();
   const inbox = useInbox();
-  const groups = useGroups();
+  const groups = useGroups(canListGroups);
   const update = useUpdateScan();
   const ignore = useIgnoreDiscovered();
   const [credScan, setCredScan] = useState<number | undefined>();

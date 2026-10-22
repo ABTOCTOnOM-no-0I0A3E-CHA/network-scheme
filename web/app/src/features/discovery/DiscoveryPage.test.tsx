@@ -77,7 +77,7 @@ function setup(onOpenDevice = vi.fn(), canManage = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <DiscoveryPage canManage={canManage} onOpenDevice={onOpenDevice} />
+      <DiscoveryPage canManage={canManage} canListGroups onOpenDevice={onOpenDevice} />
     </QueryClientProvider>,
   );
   return onOpenDevice;
@@ -136,6 +136,9 @@ describe("scan form", () => {
     expect(posted[0]).toEqual({ cidr: "192.0.2.0/24", group_id: 1, interval_s: 7200 });
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).queryByRole("option", { name: ru.profile.title.ssh_read })).not.toBeInTheDocument();
+    /* a scan has no credential status to show: neither "not set" nor a made-up state */
+    expect(within(dialog).getByText(ru.profile.status.scanUnknown)).toBeInTheDocument();
+    expect(within(dialog).queryByText(ru.profile.status.none)).not.toBeInTheDocument();
     await userEvent.type(within(dialog).getByLabelText(ru.profile.community), "scan-community-0123456789");
     await userEvent.click(within(dialog).getByRole("button", { name: ru.profile.save }));
     await waitFor(() => expect(profileBody).toBeDefined());

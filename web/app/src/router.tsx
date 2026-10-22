@@ -1,4 +1,5 @@
 import { createRouter, type RouterHistory } from "@tanstack/react-router";
+import { stepUpStore } from "@/features/common/stepup";
 import { setUnauthorizedHandler } from "@/lib/api";
 import { queryClient } from "@/lib/query";
 import { rootRoute } from "@/routes/__root";
@@ -14,6 +15,8 @@ const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren([...
 export function buildRouter(history?: RouterHistory) {
   const r = createRouter({ routeTree, history });
   setUnauthorizedHandler(() => {
+    /* a pending step-up prompt must not outlive the session (it would replay the request under the next login) */
+    stepUpStore.settle(false);
     queryClient.clear();
     void r.navigate({ to: "/login" });
   });

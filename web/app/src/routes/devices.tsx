@@ -1,5 +1,5 @@
 import { createRoute, useNavigate } from "@tanstack/react-router";
-import { canManageDevices } from "@/features/auth/permissions";
+import { canListGroups, canManageDevices } from "@/features/auth/permissions";
 import { useSession } from "@/features/auth/useSession";
 import { DeviceList } from "@/features/devices/DeviceList";
 import { shellRoute } from "./index";
@@ -11,6 +11,7 @@ function DevicesPage() {
   return (
     <DeviceList
       canAdd={canManageDevices(session)}
+      canListGroups={canListGroups(session)}
       search={q ?? ""}
       onOpen={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}
       onSearchChange={(next) => void navigate({ to: "/devices", search: { q: next || undefined }, replace: true })}

@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { useDevices } from "@/features/devices/api";
+import { safeText } from "@/lib/text";
 
 const MAX_RESULTS = 20;
 
@@ -23,8 +24,8 @@ function DeviceResults({ query, onDone }: { query: string; onDone: () => void })
             void navigate({ to: "/devices/$id", params: { id: String(d.id) } });
           }}
         >
-          <span className="truncate">{d.name}</span>
-          <span className="ml-auto font-mono text-xs text-muted-foreground">{d.address}</span>
+          <span className="truncate">{safeText(d.name)}</span>
+          <span className="ml-auto font-mono text-xs text-muted-foreground">{safeText(d.address)}</span>
         </CommandItem>
       ))}
     </CommandGroup>

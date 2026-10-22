@@ -10,6 +10,8 @@ import { stepUpStore } from "./stepup";
 /** Host of the step-up prompt; mount once inside the authenticated shell. */
 export function StepUpDialog() {
   const open = useSyncExternalStore(stepUpStore.subscribe, stepUpStore.isOpen);
+  /* the host going away (logout, session loss) must not leave the prompt pending for the next mount */
+  useEffect(() => () => stepUpStore.settle(false), []);
   return (
     <Dialog.Root open={open} onOpenChange={(o) => !o && stepUpStore.settle(false)}>
       <Dialog.Portal>

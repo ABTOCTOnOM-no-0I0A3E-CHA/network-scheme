@@ -24,6 +24,8 @@ type Props = {
   /** UI hints; the API decides. */
   canPoll: boolean;
   canManage: boolean;
+  /** Whether group names can be fetched (global admin). */
+  canListGroups?: boolean;
 };
 
 /** Device card: summary header with poll-now, edit form and inventory tabs. Every device-reported string is rendered as text. */
@@ -32,7 +34,7 @@ export function DeviceCard(props: Props) {
   return <DeviceCardBody key={props.id} {...props} />;
 }
 
-function DeviceCardBody({ id, canPoll, canManage }: Props) {
+function DeviceCardBody({ id, canPoll, canManage, canListGroups = false }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>("interfaces");
@@ -57,7 +59,7 @@ function DeviceCardBody({ id, canPoll, canManage }: Props) {
 
   return (
     <section className="grid gap-4">
-      <Header device={device.data} canPoll={canPoll} canManage={canManage} />
+      <Header device={device.data} canPoll={canPoll} canManage={canManage} canListGroups={canListGroups} />
       <div role="tablist" aria-label={t("card.tabs")} className="flex flex-wrap gap-1 border-b">
         {TABS.map((k) => (
           <button
@@ -93,10 +95,10 @@ function DeviceCardBody({ id, canPoll, canManage }: Props) {
   );
 }
 
-function Header({ device, canPoll, canManage }: { device: DeviceDetail; canPoll: boolean; canManage: boolean }) {
+function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceDetail; canPoll: boolean; canManage: boolean; canListGroups: boolean }) {
   const { t } = useTranslation();
   const poll = usePollDevice();
-  const groups = useGroups(canManage);
+  const groups = useGroups(canListGroups);
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | undefined>();
   const groupName = groups.data?.find((g) => g.id === device.group_id)?.name ?? `#${device.group_id}`;

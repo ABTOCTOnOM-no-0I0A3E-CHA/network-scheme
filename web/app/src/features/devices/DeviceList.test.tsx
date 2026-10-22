@@ -8,7 +8,7 @@ import { setupServer } from "msw/node";
 import { x25519 } from "@noble/curves/ed25519.js";
 import "@/i18n";
 import ru from "@/i18n/ru.json";
-import { canManageDevices } from "@/features/auth/permissions";
+import { canListGroups, canManageDevices } from "@/features/auth/permissions";
 import { fingerprint } from "@/lib/keys";
 import { toBase64 } from "@/lib/seal";
 import { DeviceList } from "./DeviceList";
@@ -58,16 +58,16 @@ afterEach(() => {
 });
 afterAll(() => server.close());
 
-function Harness({ canAdd, initial = "" }: { canAdd: boolean; initial?: string }) {
+function Harness({ canAdd, initial = "", canListGroups = true }: { canAdd: boolean; initial?: string; canListGroups?: boolean }) {
   const [search, setSearch] = useState(initial);
-  return <DeviceList canAdd={canAdd} search={search} onSearchChange={setSearch} />;
+  return <DeviceList canAdd={canAdd} canListGroups={canListGroups} search={search} onSearchChange={setSearch} />;
 }
 
-function setup(canAdd: boolean, initial?: string) {
+function setup(canAdd: boolean, initial?: string, canListGroups = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <Harness canAdd={canAdd} initial={initial} />
+      <Harness canAdd={canAdd} initial={initial} canListGroups={canListGroups} />
     </QueryClientProvider>,
   );
 }
@@ -117,13 +117,28 @@ describe("DeviceList", () => {
     expect(screen.queryByText("beta")).not.toBeInTheDocument();
   });
 
-  it("hides the group filter when groups are forbidden", async () => {
-    groupsStatus = 403;
+  it("does not request groups and hides the group filter without the groups right", async () => {
+    let requested = 0;
+    server.use(
+      http.get("*/api/groups", () => {
+        requested++;
+        return err(403, "forbidden");
+      }),
+    );
     devices = [device(1)];
-    setup(false);
+    setup(false, undefined, false);
     await screen.findByText("sw-0001");
     await screen.findByText("#1");
     expect(screen.queryByLabelText(ru.devices.filter.group)).not.toBeInTheDocument();
+    expect(requested).toBe(0);
+  });
+
+  it("neutralises control and bidi characters in model, firmware and driver", async () => {
+    devices = [device(1, { model: "m‮odel", firmware: "fw", driver: "d⁦rv" })];
+    setup(false);
+    expect(await screen.findByText("m�odel")).toBeInTheDocument();
+    expect(screen.getByText("f�w")).toBeInTheDocument();
+    expect(screen.getByText("d�rv")).toBeInTheDocument();
   });
 
   it("offers the add button only to those who may add", async () => {
@@ -180,6 +195,16 @@ describe("DeviceList", () => {
     expect(screen.getByLabelText(ru.profile.community)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: ru.devices.addDialog.later }));
     await waitFor(() => expect(screen.queryByText(ru.devices.addDialog.credTitle)).not.toBeInTheDocument());
+  });
+});
+
+describe("canListGroups", () => {
+  it("is true only for a global admin binding", () => {
+    const s = (role: string, group_id: number | null) => ({ id: 1, username: "u", roles: [{ role, group_id }] });
+    expect(canListGroups(s("admin", null))).toBe(true);
+    expect(canListGroups(s("admin", 3))).toBe(false);
+    for (const r of ["viewer", "operator", "auditor"]) expect(canListGroups(s(r, null))).toBe(false);
+    expect(canListGroups(null)).toBe(false);
   });
 });
 

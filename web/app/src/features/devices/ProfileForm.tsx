@@ -158,7 +158,7 @@ export function ProfileForm({ owner, kind, profile, onSaved }: Props) {
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-sm font-medium">{t(`profile.title.${kind}`)}</h3>
         <p className="text-xs text-muted-foreground">
-          {profile ? `${t(`profile.status.${profile.status}`)}, ${t("profile.updated", { date: new Date(profile.updated_at).toLocaleString(i18n.language) })}` : t("profile.status.none")}
+          {owner.startsWith("scan:") && !profile ? t("profile.status.scanUnknown") : profile ? `${t(`profile.status.${profile.status}`)}, ${t("profile.updated", { date: new Date(profile.updated_at).toLocaleString(i18n.language) })}` : t("profile.status.none")}
         </p>
       </div>
       {kind === "snmp2c" && secretInput("community", t("profile.community"))}
