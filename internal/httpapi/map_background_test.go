@@ -157,7 +157,7 @@ func TestBackgroundUploadAndServe(t *testing.T) {
 			}
 			for k, want := range map[string]string{
 				"Content-Type":            tc.mime,
-				"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+				"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox",
 				"X-Content-Type-Options":  "nosniff",
 				"Content-Disposition":     `inline; filename="map.` + tc.ext + `"`,
 				"Cache-Control":           "private, max-age=3600",
@@ -217,7 +217,7 @@ func TestBackgroundSVGIsSanitized(t *testing.T) {
 	}
 	g := f.do(admin.authed(req{method: "GET", path: fmt.Sprintf("%s/%d", bgPath, got.ID)}))
 	if g.Header.Get("Content-Type") != "image/svg+xml" || g.Header.Get("Content-Disposition") != `inline; filename="map.svg"` ||
-		g.Header.Get("Content-Security-Policy") != "default-src 'none'; style-src 'unsafe-inline'; sandbox" {
+		g.Header.Get("Content-Security-Policy") != "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox" {
 		t.Errorf("headers = %v", g.Header)
 	}
 	body := string(readBody(t, g))
@@ -353,4 +353,20 @@ func TestBackgroundUploadNeedsCSRF(t *testing.T) {
 	r := admin.authed(req{method: "POST", path: bgPath, raw: raw, ctype: ctype})
 	r.csrf = ""
 	wantError(t, f.do(r), http.StatusForbidden, "csrf")
+}
+
+func TestBackgroundCap(t *testing.T) {
+	f := newFixture(t, nil)
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	f.exec(`DELETE FROM core.map_background`)
+	t.Cleanup(func() { f.exec(`DELETE FROM core.map_background`) })
+	f.exec(`INSERT INTO core.map_background (mime, bytes, width, height, sha256, uploaded_by)
+		SELECT 'image/png', '\x00', 1, 1, decode(repeat('00', 32), 'hex'), 1 FROM generate_series(1, 199)`)
+	if resp := f.upload(admin, "a.png", pngBytes()); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("200th background = %d", resp.StatusCode)
+	}
+	wantError(t, f.upload(admin, "a.png", pngBytes()), http.StatusConflict, "too_many_backgrounds")
+	if n := f.backgroundRows(); n != 200 {
+		t.Errorf("rows = %d", n)
+	}
 }

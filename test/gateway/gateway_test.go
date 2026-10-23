@@ -382,7 +382,7 @@ func TestErrorResponsesKeepPanelHeaders(t *testing.T) {
 	})
 }
 
-const imageCSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+const imageCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 
 /*
 Map background images keep their own sandboxing CSP, chosen by the gateway:
@@ -416,15 +416,17 @@ func TestBackgroundImageHeaders(t *testing.T) {
 
 /* Only the background upload may carry more than 1 MiB: up to 21 MiB (20 MiB image plus multipart framing). */
 func TestUploadBodyLimit(t *testing.T) {
+	/* A rejected body is left unread: never reuse that connection for the next request. */
+	closing := map[string]string{"Content-Type": "multipart/form-data; boundary=x", "Connection": "close"}
 	s := gateway(t)
 	post := func(path string, n int) int {
-		resp, _ := s.do(t, http.MethodPost, path, strings.NewReader(strings.Repeat("a", n)), map[string]string{"Content-Type": "multipart/form-data; boundary=x"})
+		resp, _ := s.do(t, http.MethodPost, path, strings.NewReader(strings.Repeat("a", n)), closing)
 		return resp.StatusCode
 	}
 	if c := post("/api/map/backgrounds", 21<<20); c == http.StatusRequestEntityTooLarge {
 		t.Errorf("21 MiB upload rejected by the gateway (%d)", c)
 	}
-	resp, _ := s.do(t, http.MethodPost, "/api/map/backgrounds", strings.NewReader(strings.Repeat("a", 21<<20+1)), map[string]string{"Content-Type": "multipart/form-data; boundary=x"})
+	resp, _ := s.do(t, http.MethodPost, "/api/map/backgrounds", strings.NewReader(strings.Repeat("a", 21<<20+1)), closing)
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("21 MiB + 1 upload = %d, want 413", resp.StatusCode)
 	}
@@ -434,4 +436,19 @@ func TestUploadBodyLimit(t *testing.T) {
 			t.Errorf("2 MiB body to %s = %d, want 413", p, c)
 		}
 	}
+}
+
+/*
+Caddy matches paths case-insensitively while the api router does not: a differently cased path reaches the
+api as a 404 JSON error and still gets the image CSP from the gateway (the safe side), never the panel CSP
+with an upstream-chosen body type for an image path.
+*/
+func TestBackgroundPathCaseInsensitive(t *testing.T) {
+	s := gateway(t)
+	resp, _ := s.get(t, "/API/map/Backgrounds/1", nil)
+	only(t, resp.Header, "Content-Security-Policy", imageCSP)
+	only(t, resp.Header, "X-Content-Type-Options", "nosniff")
+	resp, _ = s.get(t, "/API/map/views", nil)
+	only(t, resp.Header, "Content-Security-Policy", panelHeaders["Content-Security-Policy"])
+	only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
 }

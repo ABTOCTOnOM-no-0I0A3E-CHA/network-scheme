@@ -43,6 +43,7 @@ const KNOWN = new Set([
   "area_other_view",
   "unsupported_media",
   "invalid_image",
+  "too_many_backgrounds",
   "too_many_triggers",
   "too_many_templates",
   "too_many_filters",

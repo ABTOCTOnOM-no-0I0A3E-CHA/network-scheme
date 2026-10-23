@@ -94,6 +94,7 @@ type server struct {
 	authRL    *httprate.RateLimiter
 	loginSem  chan struct{}
 	loginWait time.Duration
+	uploadSem chan struct{} /* one background upload is processed at a time */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -106,7 +107,7 @@ type server struct {
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
-		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
+		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), loginWait: loginQueueWait,
 		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {

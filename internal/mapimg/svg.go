@@ -21,6 +21,8 @@ const (
 	maxDepth    = 64        /* element nesting, dropped subtrees included */
 	maxElements = 100_000   /* start tags in the input, dropped ones included */
 	maxAttrs    = 200       /* attributes on one element, namespace declarations included */
+	maxNodes    = 200_000   /* kept elements plus kept text nodes */
+	maxKept     = 1_000_000 /* kept attributes in the whole document */
 	maxAttrLen  = 4 << 20   /* one attribute value */
 	maxText     = 1 << 20   /* all character data kept */
 	maxUses     = 10_000    /* <use> elements kept */
@@ -80,7 +82,7 @@ type node struct {
 	name     string /* "" for a text node */
 	attrs    []kv
 	children []*node
-	text     string
+	text     []byte
 	dead     bool
 	href     string /* #fragment of a kept <use> */
 }
@@ -112,6 +114,8 @@ func SanitizeSVG(in []byte) (out []byte, width, height int, err error) {
 		sawProc   bool
 		rootDone  bool
 		embedded  int
+		nodes     int
+		kept      int
 	)
 	for {
 		tok, err := d.Token()
@@ -154,6 +158,9 @@ func SanitizeSVG(in []byte) (out []byte, width, height int, err error) {
 				skip = 1
 				continue
 			}
+			if nodes++; nodes > maxNodes {
+				return nil, 0, 0, invalid("too many nodes")
+			}
 			attrs, ok, err := cleanAttrs(t.Name.Local, t.Attr, &embedded)
 			if err != nil {
 				return nil, 0, 0, err
@@ -161,6 +168,9 @@ func SanitizeSVG(in []byte) (out []byte, width, height int, err error) {
 			if !ok {
 				skip = 1
 				continue
+			}
+			if kept += len(attrs); kept > maxKept {
+				return nil, 0, 0, invalid("too many attributes in the document")
 			}
 			n := &node{name: t.Name.Local, attrs: attrs}
 			if n.name == "use" {
@@ -200,7 +210,14 @@ func SanitizeSVG(in []byte) (out []byte, width, height int, err error) {
 			if textBytes += len(t); textBytes > maxText {
 				return nil, 0, 0, invalid("too much text")
 			}
-			cur.children = append(cur.children, &node{text: string(t)})
+			if last := len(cur.children) - 1; last >= 0 && cur.children[last].name == "" {
+				cur.children[last].text = append(cur.children[last].text, t...) /* comments split text: merge */
+				continue
+			}
+			if nodes++; nodes > maxNodes {
+				return nil, 0, 0, invalid("too many nodes")
+			}
+			cur.children = append(cur.children, &node{text: append([]byte(nil), t...)})
 		}
 	}
 	if root == nil {
@@ -267,7 +284,7 @@ func cleanAttrs(el string, in []xml.Attr, embedded *int) (out []kv, ok bool, err
 		case presentation[name] || geometry[name]:
 			v, good = cleanValue(a.Value)
 		}
-		if good {
+		if good && v != "" {
 			seen[name] = true
 			out = append(out, kv{name, v})
 		}
@@ -322,7 +339,7 @@ func cleanHref(el, v string, embedded *int) (string, bool, error) {
 /* cleanStyle keeps the declarations whose property is a presentation property and whose value is safe. */
 func cleanStyle(s string) (string, bool) {
 	var out []string
-	for _, decl := range strings.Split(s, ";") {
+	for _, decl := range splitDecls(s) {
 		k, v, found := strings.Cut(decl, ":")
 		k = strings.ToLower(strings.TrimSpace(k))
 		if !found || !presentation[k] {
@@ -333,6 +350,27 @@ func cleanStyle(s string) (string, bool) {
 		}
 	}
 	return strings.Join(out, ";"), len(out) > 0
+}
+
+/* splitDecls splits a style attribute at the semicolons outside quotes. */
+func splitDecls(s string) []string {
+	var out []string
+	var quote byte
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ';':
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
 }
 
 func safeRune(r rune) bool {
@@ -558,7 +596,7 @@ func writeNode(b *bytes.Buffer, n *node, root bool) {
 		return
 	}
 	if n.name == "" {
-		_ = xml.EscapeText(b, []byte(n.text))
+		_ = xml.EscapeText(b, n.text)
 		return
 	}
 	b.WriteByte('<')

@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/beekamai/network-scheme/internal/mapimg"
 )
@@ -360,4 +363,93 @@ func FuzzSanitizeSVG(f *testing.F) {
 			t.Fatalf("not idempotent (err %v)\ninput: %q\n1: %s\n2: %s", err, in, out, again)
 		}
 	})
+}
+
+func TestSVGStyleQuotesAndEmptyAttrs(t *testing.T) {
+	out, _, _ := sanitize(t, hdr+`<rect width="1" height="1" fill="" class="" style="font-family:'a;b';fill:red"/><text style="font-family:'Open Sans'">x</text></svg>`)
+	if strings.Contains(out, "a;b") || strings.Contains(out, `fill=""`) || strings.Contains(out, `class=`) || !strings.Contains(out, `style="fill:red"`) ||
+		!strings.Contains(out, `font-family:'Open Sans'`) {
+		t.Errorf("output: %s", out)
+	}
+}
+
+func TestSVGMergesSplitText(t *testing.T) {
+	out, _, _ := sanitize(t, hdr+`<text>a<!--x-->b<![CDATA[c]]>d</text></svg>`)
+	if !strings.Contains(out, "<text>abcd</text>") {
+		t.Errorf("output: %s", out)
+	}
+}
+
+/* heapPeak samples HeapInuse while f runs and returns the growth over the starting level in MiB. */
+func heapPeak(f func()) uint64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	base := m.HeapInuse
+	var peak atomic.Uint64
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var s runtime.MemStats
+			runtime.ReadMemStats(&s)
+			if s.HeapInuse > peak.Load() {
+				peak.Store(s.HeapInuse)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+		}
+	}()
+	f()
+	close(stop)
+	<-done
+	if p := peak.Load(); p > base {
+		return (p - base) >> 20
+	}
+	return 0
+}
+
+/* Hostile 19 MiB documents must be rejected or processed within a bounded heap (the api container has 512 MiB). */
+func TestSVGMemoryBounded(t *testing.T) {
+	names := []string{"x", "y", "width", "height", "cx", "cy", "r", "rx", "ry", "x1", "y1", "x2", "y2", "fx", "fy", "fr", "points", "d", "dx", "dy",
+		"rotate", "offset", "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin",
+		"stroke-miterlimit", "opacity", "color", "display", "visibility", "overflow", "font-size", "font-style", "font-weight", "text-anchor",
+		"letter-spacing", "word-spacing", "stop-color", "stop-opacity", "class", "textLength", "pathLength", "gradientUnits"}
+	attrHeavy := func(val string) []byte {
+		var a strings.Builder
+		for _, n := range names {
+			a.WriteString(" " + n + `="` + val + `"`)
+		}
+		el := "<g" + a.String() + "/>"
+		var b strings.Builder
+		b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">`)
+		for b.Len() < 19<<20 {
+			b.WriteString(el)
+		}
+		b.WriteString("</svg>")
+		return []byte(b.String())
+	}
+	var tb strings.Builder
+	tb.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>`)
+	for i := 0; i < 1<<20-10; i++ {
+		tb.WriteString("a<!---->")
+	}
+	tb.WriteString("</text></svg>")
+
+	for name, in := range map[string][]byte{"empty-attrs": attrHeavy(""), "set-attrs": attrHeavy("1"), "split-text": []byte(tb.String())} {
+		t.Run(name, func(t *testing.T) {
+			var err error
+			grow := heapPeak(func() { _, _, _, err = mapimg.SanitizeSVG(in) })
+			t.Logf("input %d MiB, heap growth %d MiB, err %v", len(in)>>20, grow, err)
+			if grow > 200 {
+				t.Errorf("heap grew by %d MiB", grow)
+			}
+		})
+	}
+	if _, _, _, err := mapimg.SanitizeSVG(attrHeavy("1")); !errors.Is(err, mapimg.ErrInvalid) {
+		t.Errorf("document with millions of attributes accepted: %v", err)
+	}
 }

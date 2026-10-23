@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -137,8 +138,9 @@ func bgFKError(err error) error {
 }
 
 var (
-	errMapBackground = errors.New("httpapi: map background not found")
-	errMapInvalid    = errors.New("httpapi: invalid map object")
+	errMapBackground  = errors.New("httpapi: map background not found")
+	errCapBackgrounds = errors.New("httpapi: too many map backgrounds")
+	errMapInvalid     = errors.New("httpapi: invalid map object")
 )
 
 func (s *server) createView(w http.ResponseWriter, r *http.Request) {
@@ -561,8 +563,14 @@ const uploadPath = "/api/map/backgrounds"
 /* maxUploadName is the longest accepted file name of the uploaded part (it is not stored). */
 const maxUploadName = 200
 
+/* maxBackgrounds caps the stored backgrounds (rows are immutable, each up to 20 MiB). */
+const maxBackgrounds = 200
+
+/* uploadWait is how long an upload waits for the one processing slot before answering 429. */
+const uploadWait = 10 * time.Second
+
 /* backgroundCSP confines a served image: no loading, no scripts, a unique origin. */
-const backgroundCSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+const backgroundCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 
 type backgroundResponse struct {
 	ID     int64  `json:"id"`
@@ -633,6 +641,16 @@ taken from the content, rasters are checked by header, SVG is rewritten through
 an allowlist and the sanitized document is what gets stored and served.
 */
 func (s *server) uploadBackground(w http.ResponseWriter, r *http.Request) {
+	/* One upload at a time: a 20 MiB body plus its sanitizing tree must not pile up in a small container. */
+	select {
+	case s.uploadSem <- struct{}{}:
+		defer func() { <-s.uploadSem }()
+	case <-time.After(uploadWait):
+		writeError(w, errRateLimited)
+		return
+	case <-r.Context().Done():
+		return
+	}
 	data, ok := readUpload(w, r)
 	if !ok {
 		return
@@ -655,6 +673,16 @@ func (s *server) uploadBackground(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "map.background.upload", ObjectType: "map_background",
 		Details: map[string]any{"mime": out.Mime, "size": out.Size, "sha256": out.SHA256, "width": out.Width, "height": out.Height}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext('core.map_background.cap'))`); err != nil {
+			return err
+		}
+		var n int
+		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.map_background`).Scan(&n); err != nil {
+			return err
+		}
+		if n >= maxBackgrounds {
+			return errCapBackgrounds
+		}
 		if err := tx.QueryRow(r.Context(), `INSERT INTO core.map_background (mime, bytes, width, height, sha256, uploaded_by)
 			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 			res.Mime, res.Data, res.Width, res.Height, sum[:], sc.sess.UserID).Scan(&out.ID); err != nil {

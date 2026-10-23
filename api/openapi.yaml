@@ -1836,7 +1836,8 @@ paths:
         multipart/form-data with exactly one part named `file` (file name up to 200 characters). The type is taken
         from the content only: PNG, JPEG, WebP (header checked, at most 16384 x 16384 pixels) or SVG (rewritten through
         an allowlist of elements and attributes; what is stored and served is the sanitized document). At most 20 MiB;
-        this is the only route whose request body may exceed 1 MiB. Immutable once stored.
+        this is the only route whose request body may exceed 1 MiB. Immutable once stored; at most 200 backgrounds
+        (409 too_many_backgrounds). Uploads are processed one at a time; a second one waits up to 10 s, then 429.
       x-permission: map.manage
       parameters: [{ $ref: "#/components/parameters/CSRF" }]
       requestBody:
@@ -1866,14 +1867,16 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /api/map/backgrounds/{id}:
     get:
       summary: Download a map background
       description: |
         Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
-        carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
+        carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox`,
         `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
         and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
       x-permission: devices.read
@@ -2490,6 +2493,7 @@ components:
                 - area_other_view
                 - unsupported_media
                 - invalid_image
+                - too_many_backgrounds
                 - too_many_triggers
                 - too_many_templates
                 - too_many_filters

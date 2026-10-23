@@ -57,6 +57,8 @@ services:
     user: "65532:65532"
     cpus: "1.0"
     mem_limit: 512m
+    environment:
+      GOMEMLIMIT: 400MiB # soft heap limit below mem_limit: the collector works harder instead of the kernel killing the api
     secrets: [db_api_password, api_data_key]
     volumes:
       - "/etc/nms/config/api.yaml:/etc/nms/api.yaml:ro"

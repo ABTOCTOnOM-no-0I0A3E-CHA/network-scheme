@@ -3496,7 +3496,8 @@ export interface paths {
          * @description multipart/form-data with exactly one part named `file` (file name up to 200 characters). The type is taken
          *     from the content only: PNG, JPEG, WebP (header checked, at most 16384 x 16384 pixels) or SVG (rewritten through
          *     an allowlist of elements and attributes; what is stored and served is the sanitized document). At most 20 MiB;
-         *     this is the only route whose request body may exceed 1 MiB. Immutable once stored.
+         *     this is the only route whose request body may exceed 1 MiB. Immutable once stored; at most 200 backgrounds
+         *     (409 too_many_backgrounds). Uploads are processed one at a time; a second one waits up to 10 s, then 429.
          */
         post: {
             parameters: {
@@ -3539,8 +3540,10 @@ export interface paths {
                 400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
                 413: components["responses"]["Error"];
                 415: components["responses"]["Error"];
+                429: components["responses"]["Error"];
             };
         };
         delete?: never;
@@ -3559,7 +3562,7 @@ export interface paths {
         /**
          * Download a map background
          * @description Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
-         *     carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
+         *     carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox`,
          *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
          *     and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
          */
@@ -4140,7 +4143,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
