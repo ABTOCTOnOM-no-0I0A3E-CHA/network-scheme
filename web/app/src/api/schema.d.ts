@@ -3492,8 +3492,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Upload a map background (not implemented yet)
-         * @description Registered so that the authorization matrix is complete; answers 501 not_implemented until the upload pipeline lands.
+         * Upload a map background
+         * @description multipart/form-data with exactly one part named `file` (file name up to 200 characters). The type is taken
+         *     from the content only: PNG, JPEG, WebP (header checked, at most 16384 x 16384 pixels) or SVG (rewritten through
+         *     an allowlist of elements and attributes; what is stored and served is the sanitized document). At most 20 MiB;
+         *     this is the only route whose request body may exceed 1 MiB. Immutable once stored.
          */
         post: {
             parameters: {
@@ -3504,11 +3507,40 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file: string;
+                    };
+                };
+            };
             responses: {
+                /** @description Stored */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            id: number;
+                            /** @enum {string} */
+                            mime: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+                            width: number;
+                            height: number;
+                            /** @description Stored bytes (the sanitized document for SVG) */
+                            size: number;
+                            /** @description Hex digest of the stored bytes (the ETag) */
+                            sha256: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
-                501: components["responses"]["Error"];
+                413: components["responses"]["Error"];
+                415: components["responses"]["Error"];
             };
         };
         delete?: never;
@@ -3525,8 +3557,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download a map background (not implemented yet)
-         * @description Answers 501 not_implemented until the upload pipeline lands.
+         * Download a map background
+         * @description Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
+         *     carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
+         *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
+         *     and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
          */
         get: {
             parameters: {
@@ -3539,9 +3574,28 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
+                /** @description The image */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                        "image/webp": string;
+                        "image/svg+xml": string;
+                    };
+                };
+                /** @description Not modified */
+                304: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
-                501: components["responses"]["Error"];
+                404: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -4086,7 +4140,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "not_implemented" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

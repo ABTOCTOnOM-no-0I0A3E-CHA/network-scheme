@@ -63,7 +63,9 @@ var (
 	errAreaCycle        = apiError{http.StatusConflict, "area_cycle", "Родитель области образует цикл"}
 	errAreaTooDeep      = apiError{http.StatusConflict, "area_too_deep", "Вложенность областей больше 8 уровней"}
 	errAreaOtherView    = apiError{http.StatusConflict, "area_other_view", "Родитель области должен быть в том же виде"}
-	errNotImplemented   = apiError{http.StatusNotImplemented, "not_implemented", "Пока не реализовано"}
+	errNotMultipart     = apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "Ожидается Content-Type: multipart/form-data"}
+	errUnsupportedImage = apiError{http.StatusUnsupportedMediaType, "unsupported_media", "Подложка должна быть PNG, JPEG, WebP или SVG"}
+	errInvalidImage     = apiError{http.StatusBadRequest, "invalid_image", "Файл подложки повреждён или не допускается (не больше 16384 пикселей по каждой стороне)"}
 	errLocked           = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited      = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errInternal         = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}

@@ -381,3 +381,57 @@ func TestErrorResponsesKeepPanelHeaders(t *testing.T) {
 		only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
 	})
 }
+
+const imageCSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+
+/*
+Map background images keep their own sandboxing CSP, chosen by the gateway:
+neither the panel CSP nor whatever a compromised api sends. Everything else
+about the panel headers stays, and the body is not forced to JSON.
+*/
+func TestBackgroundImageHeaders(t *testing.T) {
+	s := gateway(t)
+	resp, _ := s.get(t, "/api/map/backgrounds/1", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the upstream", resp.StatusCode)
+	}
+	only(t, resp.Header, "Content-Security-Policy", imageCSP)
+	only(t, resp.Header, "X-Content-Type-Options", "nosniff")
+	only(t, resp.Header, "Content-Type", "text/html") /* the api's type passes; the CSP sandbox is what confines it */
+	only(t, resp.Header, "Cross-Origin-Resource-Policy", "same-origin")
+	if v := resp.Header.Values("Set-Cookie"); len(v) != 0 {
+		t.Errorf("Set-Cookie = %q", v)
+	}
+	if v := resp.Header.Values("Service-Worker-Allowed"); len(v) != 0 {
+		t.Errorf("Service-Worker-Allowed = %q", v)
+	}
+
+	/* neighbouring paths keep the panel CSP and forced JSON */
+	for _, p := range []string{"/api/map/backgrounds", "/api/map/views", "/api/map/backgroundsx/1"} {
+		resp, _ := s.get(t, p, nil)
+		only(t, resp.Header, "Content-Security-Policy", panelHeaders["Content-Security-Policy"])
+		only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
+	}
+}
+
+/* Only the background upload may carry more than 1 MiB: up to 21 MiB (20 MiB image plus multipart framing). */
+func TestUploadBodyLimit(t *testing.T) {
+	s := gateway(t)
+	post := func(path string, n int) int {
+		resp, _ := s.do(t, http.MethodPost, path, strings.NewReader(strings.Repeat("a", n)), map[string]string{"Content-Type": "multipart/form-data; boundary=x"})
+		return resp.StatusCode
+	}
+	if c := post("/api/map/backgrounds", 21<<20); c == http.StatusRequestEntityTooLarge {
+		t.Errorf("21 MiB upload rejected by the gateway (%d)", c)
+	}
+	resp, _ := s.do(t, http.MethodPost, "/api/map/backgrounds", strings.NewReader(strings.Repeat("a", 21<<20+1)), map[string]string{"Content-Type": "multipart/form-data; boundary=x"})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("21 MiB + 1 upload = %d, want 413", resp.StatusCode)
+	}
+	only(t, resp.Header, "Content-Security-Policy", panelHeaders["Content-Security-Policy"])
+	for _, p := range []string{"/api/users", "/api/map/views", "/api/map/backgrounds/1", "/api/map/backgrounds/"} {
+		if c := post(p, 2<<20); c != http.StatusRequestEntityTooLarge {
+			t.Errorf("2 MiB body to %s = %d, want 413", p, c)
+		}
+	}
+}

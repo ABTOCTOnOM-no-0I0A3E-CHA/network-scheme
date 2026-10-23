@@ -2,9 +2,13 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/beekamai/network-scheme/internal/audit"
+	"github.com/beekamai/network-scheme/internal/mapimg"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -550,7 +555,163 @@ func (s *server) putPositions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-/* backgroundsNotImplemented answers the background routes until the upload pipeline lands. */
-func (s *server) backgroundsNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, errNotImplemented)
+/* uploadPath is the one route whose body may exceed 1 MiB (see limitBody and the gateway). */
+const uploadPath = "/api/map/backgrounds"
+
+/* maxUploadName is the longest accepted file name of the uploaded part (it is not stored). */
+const maxUploadName = 200
+
+/* backgroundCSP confines a served image: no loading, no scripts, a unique origin. */
+const backgroundCSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+
+type backgroundResponse struct {
+	ID     int64  `json:"id"`
+	Mime   string `json:"mime"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Size   int    `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+/* tooLarge reports a body cut off by http.MaxBytesReader. */
+func tooLarge(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe)
+}
+
+/*
+readUpload takes the single file part of a multipart/form-data body: exactly
+one part, named "file", with a file name of up to 200 characters, at most
+mapimg.MaxBytes long. It answers the error itself and reports false on failure.
+*/
+func readUpload(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
+		writeError(w, errNotMultipart)
+		return nil, false
+	}
+	fail := func(err error) ([]byte, bool) {
+		if tooLarge(err) {
+			writeError(w, errTooLarge)
+		} else {
+			writeError(w, errBadRequest)
+		}
+		return nil, false
+	}
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return fail(err)
+	}
+	part, err := mr.NextPart()
+	if err != nil {
+		return fail(err)
+	}
+	if name := part.FileName(); part.FormName() != "file" || name == "" || utf8.RuneCountInString(name) > maxUploadName ||
+		!utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+		writeError(w, errBadRequest)
+		return nil, false
+	}
+	data, err := io.ReadAll(io.LimitReader(part, mapimg.MaxBytes+1))
+	if err != nil {
+		return fail(err)
+	}
+	if len(data) > mapimg.MaxBytes {
+		writeError(w, errTooLarge)
+		return nil, false
+	}
+	if _, err := mr.NextPart(); err != io.EOF { /* a second part, whatever it is, or a broken body */
+		if err == nil {
+			err = errors.New("more than one part")
+		}
+		return fail(err)
+	}
+	return data, true
+}
+
+/*
+uploadBackground stores a map background (PNG, JPEG, WebP or SVG). The type is
+taken from the content, rasters are checked by header, SVG is rewritten through
+an allowlist and the sanitized document is what gets stored and served.
+*/
+func (s *server) uploadBackground(w http.ResponseWriter, r *http.Request) {
+	data, ok := readUpload(w, r)
+	if !ok {
+		return
+	}
+	res, err := mapimg.Process(data)
+	switch {
+	case errors.Is(err, mapimg.ErrUnsupported), errors.Is(err, mapimg.ErrNotSVG):
+		writeError(w, errUnsupportedImage)
+		return
+	case errors.Is(err, mapimg.ErrTooLarge):
+		writeError(w, errTooLarge)
+		return
+	case err != nil:
+		writeError(w, errInvalidImage)
+		return
+	}
+	sum := sha256.Sum256(res.Data)
+	sc, _ := sessionFrom(r.Context())
+	out := backgroundResponse{Mime: res.Mime, Width: res.Width, Height: res.Height, Size: len(res.Data), SHA256: hex.EncodeToString(sum[:])}
+	ev := audit.Event{Action: "map.background.upload", ObjectType: "map_background",
+		Details: map[string]any{"mime": out.Mime, "size": out.Size, "sha256": out.SHA256, "width": out.Width, "height": out.Height}}
+	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		if err := tx.QueryRow(r.Context(), `INSERT INTO core.map_background (mime, bytes, width, height, sha256, uploaded_by)
+			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+			res.Mime, res.Data, res.Width, res.Height, sum[:], sc.sess.UserID).Scan(&out.ID); err != nil {
+			return err
+		}
+		ev.ObjectID = strconv.FormatInt(out.ID, 10)
+		return nil
+	}) {
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+/* etagMatches reports whether an If-None-Match header lists etag (weak comparison) or "*". */
+func etagMatches(header, etag string) bool {
+	for _, c := range strings.Split(header, ",") {
+		c = strings.TrimPrefix(strings.TrimSpace(c), "W/")
+		if c == "*" || c == etag {
+			return true
+		}
+	}
+	return false
+}
+
+/*
+getBackground serves a stored background. The image never runs anything: the
+stored type is the response type, a sandboxing CSP and nosniff accompany it, and
+the content is the sanitized document written at upload time. The row is
+immutable, so the sha256 is a stable ETag.
+*/
+func (s *server) getBackground(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var mimeType string
+	var data, sum []byte
+	if err := s.pool.QueryRow(r.Context(), `SELECT mime, bytes, sha256 FROM core.map_background WHERE id = $1`, id).
+		Scan(&mimeType, &data, &sum); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = errMapNotFound
+		}
+		s.fail(w, r, err)
+		return
+	}
+	etag := `"` + hex.EncodeToString(sum) + `"`
+	h := w.Header()
+	h.Set("Content-Type", mimeType)
+	h.Set("Content-Security-Policy", backgroundCSP)
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", `inline; filename="map.`+mapimg.Ext(mimeType)+`"`)
+	h.Set("Cache-Control", "private, max-age=3600")
+	h.Set("ETag", etag)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	h.Set("Content-Length", strconv.Itoa(len(data)))
+	_, _ = w.Write(data)
 }

@@ -171,9 +171,10 @@ func (m *matrixEnv) mapRequest(key string) (req, bool) {
 		return req{method: "PUT", path: fmt.Sprintf("/api/map/views/%d/positions", m.newView()),
 			body: map[string]any{"items": []map[string]any{{"device_id": m.newDevice(g), "x": 1, "y": 2, "pinned": true}}}}, true
 	case "POST /api/map/backgrounds":
-		return req{method: "POST", path: "/api/map/backgrounds", body: map[string]any{}}, true
+		raw, ctype := multipartFile("map.png", pngBytes())
+		return req{method: "POST", path: "/api/map/backgrounds", raw: raw, ctype: ctype}, true
 	case "GET /api/map/backgrounds/{id}":
-		return req{method: "GET", path: "/api/map/backgrounds/1"}, true
+		return req{method: "GET", path: fmt.Sprintf("/api/map/backgrounds/%d", m.newBackground("image/png", pngBytes(), 1, 1))}, true
 	}
 	return req{}, false
 }

@@ -10,9 +10,20 @@
 }
 
 # Panel headers: imported by the site and by handle_errors, so error responses carry them too.
+# The argument only keeps the matcher names unique per import. Map background images (GET /api/map/backgrounds/<id>) get a sandboxing CSP of their own instead of the
+# panel one, set here so that a compromised api cannot choose it.
 (panel_headers) {
-	header {
+	@panel_csp_{args[0]} not path /api/map/backgrounds/*
+	header @panel_csp_{args[0]} {
 		Content-Security-Policy "default-src 'self'; script-src https://nms.example.org/assets/; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+		defer
+	}
+	@image_csp_{args[0]} path /api/map/backgrounds/*
+	header @image_csp_{args[0]} {
+		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+		defer
+	}
+	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
@@ -29,10 +40,16 @@
 		protocols tls1.3
 	}
 
-	import panel_headers
+	import panel_headers site
 
-	request_body {
+	# 1 MiB everywhere except the background upload (20 MiB image plus multipart framing, as in the api).
+	@small_body not path /api/map/backgrounds
+	request_body @small_body {
 		max_size 1MiB
+	}
+	@upload path /api/map/backgrounds
+	request_body @upload {
+		max_size 21MiB
 	}
 
 	root * /srv/app
@@ -55,6 +72,16 @@
 		# WebSocket feed: reverse_proxy upgrades the connection itself and keeps it open (no stream
 		# timeout); no body headers are forced on the 101 response. Origin and cookies pass through.
 		handle /api/ws {
+			reverse_proxy api:8080 {
+				header_up X-Forwarded-For {remote_host}
+				header_down -Service-Worker-Allowed
+				header_down -Content-Security-Policy
+				header_down -Set-Cookie
+			}
+		}
+
+		# Images are served with the api's own Content-Type (never forced to JSON) and the gateway's CSP.
+		handle /api/map/backgrounds/* {
 			reverse_proxy api:8080 {
 				header_up X-Forwarded-For {remote_host}
 				header_down -Service-Worker-Allowed
@@ -93,7 +120,7 @@
 	# request_body) bypass the normal response path; give them the same headers and,
 	# under /api/*, the forced JSON shape.
 	handle_errors {
-		import panel_headers
+		import panel_headers errors
 		@api path /api/*
 		handle @api {
 			header Content-Type "application/json; charset=utf-8"

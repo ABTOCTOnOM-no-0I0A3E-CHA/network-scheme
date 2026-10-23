@@ -1831,25 +1831,66 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/map/backgrounds:
     post:
-      summary: Upload a map background (not implemented yet)
-      description: Registered so that the authorization matrix is complete; answers 501 not_implemented until the upload pipeline lands.
+      summary: Upload a map background
+      description: |
+        multipart/form-data with exactly one part named `file` (file name up to 200 characters). The type is taken
+        from the content only: PNG, JPEG, WebP (header checked, at most 16384 x 16384 pixels) or SVG (rewritten through
+        an allowlist of elements and attributes; what is stored and served is the sanitized document). At most 20 MiB;
+        this is the only route whose request body may exceed 1 MiB. Immutable once stored.
       x-permission: map.manage
       parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
       responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, mime, width, height, size, sha256]
+                properties:
+                  id: { type: integer, format: int64 }
+                  mime: { type: string, enum: [image/png, image/jpeg, image/webp, image/svg+xml] }
+                  width: { type: integer, minimum: 1, maximum: 16384 }
+                  height: { type: integer, minimum: 1, maximum: 16384 }
+                  size: { type: integer, description: "Stored bytes (the sanitized document for SVG)" }
+                  sha256: { type: string, description: "Hex digest of the stored bytes (the ETag)" }
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
-        "501": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
   /api/map/backgrounds/{id}:
     get:
-      summary: Download a map background (not implemented yet)
-      description: Answers 501 not_implemented until the upload pipeline lands.
+      summary: Download a map background
+      description: |
+        Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
+        carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
+        `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
+        and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
       x-permission: devices.read
       x-scoped: true
       parameters: [{ $ref: "#/components/parameters/Id" }]
       responses:
+        "200":
+          description: The image
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/svg+xml: { schema: { type: string, format: binary } }
+        "304": { description: Not modified }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
-        "501": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -2447,7 +2488,8 @@ components:
                 - area_cycle
                 - area_too_deep
                 - area_other_view
-                - not_implemented
+                - unsupported_media
+                - invalid_image
                 - too_many_triggers
                 - too_many_templates
                 - too_many_filters

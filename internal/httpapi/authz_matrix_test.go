@@ -111,8 +111,8 @@ var matrix = map[string]map[string]int{
 	"PATCH /api/map/views/{id}/areas/{area_id}":               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
 	"DELETE /api/map/views/{id}/areas/{area_id}":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
 	"PUT /api/map/views/{id}/positions":                       {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
-	"POST /api/map/backgrounds":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 501, "adminA": 403},
-	"GET /api/map/backgrounds/{id}":                           {"anon": 401, "viewer": 501, "viewerA": 501, "operator": 501, "operatorA": 501, "auditor": 403, "admin": 501, "adminA": 501},
+	"POST /api/map/backgrounds":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"GET /api/map/backgrounds/{id}":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 }
 
 /*
@@ -170,7 +170,7 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/topology/changes":                               {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/map/views":                                      {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/map/views/{id}/areas":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
-	"GET /api/map/backgrounds/{id}":                           {"viewerA": 501, "operatorA": 501, "adminA": 501},
+	"GET /api/map/backgrounds/{id}":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
