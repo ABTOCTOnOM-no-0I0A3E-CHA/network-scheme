@@ -1,4 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { TFunction } from "i18next";
 import type { components } from "@/api/schema";
 import { unwrap, withStepUp } from "@/features/common/stepup";
 import { api } from "@/lib/api";
@@ -11,6 +12,20 @@ export type EventSeverity = S["EventSeverity"];
 
 /* the typed header is required by the schema; the api middleware overwrites it with the real token */
 const CSRF = { header: { "X-CSRF-Token": "" } };
+
+/* names of the triggers of the seeded default templates (migration 00015), translated by their stable key */
+const SEEDED_NAMES: Record<string, string> = {
+  "Device is unavailable": "deviceUnavailable",
+  "Device is partially available": "devicePartial",
+  "Interface is down": "interfaceDown",
+};
+
+/** The problem's title for display: system kinds and the seeded default triggers are translated, any other name is shown as stored. */
+export function problemTitle(t: TFunction, p: Pick<ProblemSummary, "name" | "system_kind">): string {
+  if (p.system_kind) return t(`problems.systemKind.${p.system_kind}`, { defaultValue: p.name });
+  const key = SEEDED_NAMES[p.name];
+  return key ? t(`problems.seeded.${key}`) : p.name;
+}
 
 export const SEVERITIES: EventSeverity[] = ["info", "warning", "average", "high", "disaster"];
 

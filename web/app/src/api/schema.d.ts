@@ -2314,8 +2314,12 @@ export interface paths {
          * @description Exactly one of driver and group_id. A driver template needs a global
          *     binding (a scoped caller gets 403); a group in the caller's scope is
          *     required for a group template (else 404). Intervals override the
-         *     group's for the devices the template covers. A duplicate name answers
-         *     409 template_exists. Audited; the trigger engine reloads at once.
+         *     group's for the devices the template covers. A duplicate name for the
+         *     same binding (driver or group) answers 409 template_exists; the same
+         *     name may be used for another binding. A driver or group already at 50
+         *     templates (for a group: the templates along its ancestor chain count
+         *     together) answers 409 too_many_templates. Audited; the trigger engine
+         *     reloads at once.
          */
         post: {
             parameters: {
@@ -2475,8 +2479,11 @@ export interface paths {
          * Add a trigger to a template
          * @description The kind is a closed set and params are validated per kind (see the
          *     TriggerParams schema); invalid ones answer 400 invalid_trigger. Params
-         *     are stored re-encoded from the parsed value. Audited; the engine
-         *     reloads at once.
+         *     are stored re-encoded from the parsed value. A template already at 100
+         *     triggers answers 409 too_many_triggers; a syslog trigger that would
+         *     make more than 256 distinct (severity_min, contains) filters (contains
+         *     compared case-insensitively, per-device overrides included) answers
+         *     409 too_many_filters. Audited; the engine reloads at once.
          */
         post: {
             parameters: {
@@ -2508,6 +2515,7 @@ export interface paths {
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
             };
         };
         delete?: never;
@@ -2560,7 +2568,7 @@ export interface paths {
         head?: never;
         /**
          * Change a trigger; the kind is fixed
-         * @description params are validated against the stored kind. Audited.
+         * @description params are validated against the stored kind. A change that would exceed the limit of 256 distinct syslog filters answers 409 too_many_filters. Audited.
          */
         patch: {
             parameters: {
@@ -2597,6 +2605,7 @@ export interface paths {
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
             };
         };
         trace?: never;
@@ -2658,7 +2667,11 @@ export interface paths {
          *     is required. params lay keys over the trigger's (null removes an
          *     optional key); the merged result must be a valid condition, else 400
          *     invalid_trigger. Only keys that differ from the trigger are stored.
-         *     Audited; the engine reloads at once.
+         *     A caller whose scope does not cover the trigger's template gets 404
+         *     (not invalid_trigger) for params that do not validate, so the kind
+         *     stays hidden. An override of a syslog trigger that would make more
+         *     than 256 distinct filters answers 409 too_many_filters. Audited; the
+         *     engine reloads at once.
          */
         put: {
             parameters: {
@@ -2696,6 +2709,7 @@ export interface paths {
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
             };
         };
         post?: never;
@@ -2776,8 +2790,9 @@ export interface paths {
          * @description Problems of the group's devices (subgroups included) open suppressed
          *     while it lasts. The group must be in the caller's scope (else 404). The
          *     window may have started already but must end in the future, after it
-         *     starts, and last at most 7 days, else 400 invalid_window. Audited; the
-         *     engine reloads at once.
+         *     starts, and last at most 7 days, else 400 invalid_window. A group with
+         *     100 windows that have not ended answers 409 too_many_windows. Audited;
+         *     the engine reloads at once.
          */
         post: {
             parameters: {
@@ -2807,6 +2822,7 @@ export interface paths {
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
             };
         };
         delete?: never;
@@ -2869,8 +2885,6 @@ export interface components {
              * @description null for a system problem
              */
             trigger_id: number | null;
-            /** @description Set for engine-raised problems, e.g. poller_unavailable */
-            system_kind: string | null;
             /** @description recovered, removed or null while open */
             resolve_reason: string | null;
             /** @description Last observed value; comes from devices, render as text only */
@@ -3022,6 +3036,8 @@ export interface components {
             state: "problem" | "acknowledged" | "resolved";
             suppressed: boolean;
             name: string;
+            /** @description Set for engine-raised problems, e.g. poller_unavailable; the UI translates their title by it */
+            system_kind: string | null;
             object: string;
             /** Format: date-time */
             opened_at: string;
@@ -3280,7 +3296,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

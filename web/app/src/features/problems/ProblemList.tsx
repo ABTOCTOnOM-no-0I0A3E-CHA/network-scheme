@@ -7,7 +7,7 @@ import { useDevices } from "@/features/devices/api";
 import { SeverityBadge } from "@/features/events/EventFeed";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
-import { SEVERITIES, useAckProblem, useProblem, useProblems, validateComment, type EventSeverity, type Problem, type ProblemFilter } from "./api";
+import { SEVERITIES, problemTitle, useAckProblem, useProblem, useProblems, validateComment, type EventSeverity, type Problem, type ProblemFilter } from "./api";
 
 const SELECT_CLASS = "h-9 rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 const STATES = ["problem", "acknowledged", "resolved"] as const;
@@ -187,7 +187,7 @@ export function ProblemList({ deviceId, canAck }: Props) {
           </thead>
           <tbody>
             {items.map((p) => {
-              const name = safeText(p.name) + (p.object ? ` (${safeText(p.object)})` : "");
+              const name = safeText(problemTitle(t, p)) + (p.object ? ` (${safeText(p.object)})` : "");
               const expanded = open.has(p.id);
               return (
                 <tr key={p.id} className="border-t align-top" data-problem-id={p.id}>

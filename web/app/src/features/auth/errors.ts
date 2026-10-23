@@ -37,6 +37,7 @@ const KNOWN = new Set([
   "too_many_triggers",
   "too_many_templates",
   "too_many_filters",
+  "too_many_windows",
   "internal",
 ]);
 

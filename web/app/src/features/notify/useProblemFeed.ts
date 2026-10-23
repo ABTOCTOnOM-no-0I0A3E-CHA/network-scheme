@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import alertUrl from "@/assets/alert.wav";
 import { meQuery } from "@/features/auth/useSession";
-import { problemKeys, type ProblemSummary } from "@/features/problems/api";
+import { problemKeys, type EventSeverity, type ProblemSummary } from "@/features/problems/api";
 import { loadSettings, parseMessage, ProblemSocket, saveSettings, shouldNotify, type NotifySettings } from "./feed";
 
 const MAX_ITEMS = 20;
@@ -16,6 +16,10 @@ export function playAlert(): void {
   } catch {
     /* no audio support */
   }
+}
+
+function sendSubscribe(socket: ProblemSocket, severityMin: EventSeverity): void {
+  socket.send(JSON.stringify({ type: "subscribe", severity_min: severityMin }));
 }
 
 export type FeedItem = { key: number; problem: ProblemSummary };
@@ -34,6 +38,7 @@ export function useProblemFeed({ enabled, play = playAlert }: Options) {
   const settingsRef = useRef(settings);
   const playRef = useRef(play);
   const seq = useRef(0);
+  const socketRef = useRef<ProblemSocket | undefined>(undefined);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -44,6 +49,7 @@ export function useProblemFeed({ enabled, play = playAlert }: Options) {
     if (!enabled) return;
     const socket = new ProblemSocket({
       onOpen: (reconnect) => {
+        sendSubscribe(socket, settingsRef.current.severityMin);
         if (reconnect) void qc.invalidateQueries({ queryKey: problemKeys.all });
       },
       onClose: (code) => {
@@ -61,9 +67,18 @@ export function useProblemFeed({ enabled, play = playAlert }: Options) {
         if (s.sound) playRef.current();
       },
     });
+    socketRef.current = socket;
     socket.start();
-    return () => socket.stop();
+    return () => {
+      socketRef.current = undefined;
+      socket.stop();
+    };
   }, [enabled, qc]);
+
+  /* the server filters by severity before queueing; tell it again when the preference changes */
+  useEffect(() => {
+    if (socketRef.current) sendSubscribe(socketRef.current, settings.severityMin);
+  }, [settings.severityMin]);
 
   const setSettings = useCallback((patch: Partial<NotifySettings>) => {
     setSettingsState((s) => {

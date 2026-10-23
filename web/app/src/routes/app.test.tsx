@@ -305,6 +305,22 @@ describe("shell", () => {
     expect(within(screen.getByRole("navigation", { name: ru.nav.label })).getByText(ru.nav.health)).toBeInTheDocument();
   });
 
+  it("templates and maintenance are in the menu for admins only", async () => {
+    const nav = () => within(screen.getByRole("navigation", { name: ru.nav.label }));
+    roles = [{ role: "viewer", group_id: null }];
+    renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    expect(nav().queryByText(ru.nav.templates)).not.toBeInTheDocument();
+    expect(nav().queryByText(ru.nav.maintenance)).not.toBeInTheDocument();
+    cleanup();
+    roles = [{ role: "admin", group_id: 1 }];
+    queryClient.clear();
+    renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    expect(await nav().findByText(ru.nav.templates)).toBeInTheDocument();
+    expect(nav().getByText(ru.nav.maintenance)).toBeInTheDocument();
+  });
+
   it("logout returns to /login", async () => {
     const user = userEvent.setup();
     const router = renderApp("/");

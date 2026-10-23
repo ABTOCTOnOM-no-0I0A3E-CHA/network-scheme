@@ -12,6 +12,9 @@ import { NotificationCenter } from "./NotificationCenter";
 
 class FakeWS {
   static all: FakeWS[] = [];
+  static OPEN = 1;
+  readyState = 1;
+  sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onclose: ((e: { code: number }) => void) | null = null;
@@ -26,7 +29,12 @@ class FakeWS {
   open() {
     this.onopen?.();
   }
-  send(data: unknown) {
+  /* client to server */
+  send(data: string) {
+    this.sent.push(data);
+  }
+  /* server to client */
+  push(data: unknown) {
     this.onmessage?.({ data });
   }
   drop(code = 1006) {
@@ -43,6 +51,7 @@ const summary = (over: Partial<ProblemSummary> = {}): ProblemSummary => ({
   state: "problem",
   suppressed: false,
   name: "Link down",
+  system_kind: null,
   object: "",
   opened_at: "2026-10-22T10:00:00Z",
   acknowledged_at: null,
@@ -179,9 +188,9 @@ describe("NotificationCenter", () => {
     const inv = vi.spyOn(qc, "invalidateQueries");
     const ws = await socket();
     expect(screen.queryByTestId("notify-badge")).not.toBeInTheDocument();
-    act(() => ws.send(msg("opened")));
-    act(() => ws.send(msg("opened", { id: 2 })));
-    act(() => ws.send(msg("resolved", { id: 3 })));
+    act(() => ws.push(msg("opened")));
+    act(() => ws.push(msg("opened", { id: 2 })));
+    act(() => ws.push(msg("resolved", { id: 3 })));
     expect(screen.getByTestId("notify-badge")).toHaveTextContent("2");
     expect(inv).toHaveBeenCalledWith({ queryKey: ["problems"] });
 
@@ -190,24 +199,34 @@ describe("NotificationCenter", () => {
     expect(await screen.findAllByText("Link down")).toHaveLength(2);
   });
 
+  it("tells the server the severity preference on open and when it changes", async () => {
+    setup();
+    const ws = await socket();
+    expect(ws.sent.map((d) => JSON.parse(d))).toEqual([{ type: "subscribe", severity_min: "average" }]);
+    await userEvent.click(screen.getByRole("button", { name: /Уведомления/ }));
+    const panel = await screen.findByRole("group", { name: ru.notify.settings });
+    await userEvent.selectOptions(within(panel).getByLabelText(ru.notify.severityMin), "disaster");
+    expect(JSON.parse(ws.sent.at(-1) as string)).toEqual({ type: "subscribe", severity_min: "disaster" });
+  });
+
   it("plays the sound only when enabled and for problems at or above the chosen severity", async () => {
     const { play } = setup();
     const ws = await socket();
-    act(() => ws.send(msg("opened")));
+    act(() => ws.push(msg("opened")));
     expect(play).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole("button", { name: /Уведомления/ }));
     const panel = await screen.findByRole("group", { name: ru.notify.settings });
     await userEvent.click(within(panel).getByLabelText(ru.notify.sound));
-    act(() => ws.send(msg("opened", { id: 2 })));
+    act(() => ws.push(msg("opened", { id: 2 })));
     expect(play).toHaveBeenCalledTimes(1);
-    act(() => ws.send(msg("opened", { id: 3, severity: "warning" })));
-    act(() => ws.send(msg("opened", { id: 4, suppressed: true })));
-    act(() => ws.send(msg("resolved", { id: 1 })));
+    act(() => ws.push(msg("opened", { id: 3, severity: "warning" })));
+    act(() => ws.push(msg("opened", { id: 4, suppressed: true })));
+    act(() => ws.push(msg("resolved", { id: 1 })));
     expect(play).toHaveBeenCalledTimes(1);
 
     await userEvent.selectOptions(within(panel).getByLabelText(ru.notify.severityMin), "warning");
-    act(() => ws.send(msg("opened", { id: 5, severity: "warning" })));
+    act(() => ws.push(msg("opened", { id: 5, severity: "warning" })));
     expect(play).toHaveBeenCalledTimes(2);
   });
 

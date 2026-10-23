@@ -5,9 +5,10 @@ import { expect, test } from "./guard";
 
 /*
  * Containers the CI job attaches to the devices network (see .github/workflows/ci.yml):
- *  - NMS_E2E_EVENT_PROBE: the device. It answers SNMPv2c (community COMMUNITY, served by an snmpsim data file) and sends
- *    the trap named in the control file CONTROL (linkDown, linkUp or none) for ifIndex 2 every few seconds, all from its
- *    own address. Its data file has ifIndex 2 up, so the polls the traps cause agree with linkUp and never reopen a closed problem.
+ *  - NMS_E2E_EVENT_PROBE: the device. It answers SNMPv2c and sends the trap named in the control file CONTROL (linkDown,
+ *    linkUp or none) for ifIndex 2 every few seconds, all from its own address. Two snmpsim data files by community:
+ *    COMMUNITY has ifIndex 2 down (the polls after linkDown agree and cannot close the problem before the ack), COMMUNITY_UP
+ *    has it up (the test switches the device's profile to it before linkUp, so polls never reopen the closed problem).
  *  - NMS_E2E_PROBE_DEAD: an address of the devices subnet nothing listens on: the parent whose outage suppresses the device.
  * The test drives the device by writing the control file (test/e2e/.auth, mounted into the sender) and watches the problems
  * through the API and the UI, including the notification center (a WebSocket through the gateway).
@@ -15,12 +16,13 @@ import { expect, test } from "./guard";
 const PROBE = process.env.NMS_E2E_EVENT_PROBE ?? "";
 const DEAD = process.env.NMS_E2E_PROBE_DEAD ?? "";
 const COMMUNITY = "e2e-events-community-01";
+const COMMUNITY_UP = "e2e-events-community-02";
 const CONTROL = ".auth/trap-control";
 const GROUP = "problems-e2e";
 const CHILD = "prob-child";
 const PARENT = "prob-parent";
 
-type Problem = { id: number; device_id: number | null; state: string; suppressed: boolean; object: string; resolve_reason: string | null };
+type Problem = { id: number; device_id: number | null; state: string; suppressed: boolean; object: string; resolve_reason: string | null; last_value: string | null };
 
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 
@@ -63,9 +65,12 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
   const child = await addDevice(CHILD, PROBE);
   const parent = await addDevice(PARENT, DEAD);
   const read = (await (await api.get("/keys.json")).json()).domains.read as { public_key: string; key_version: number };
-  const ciphertext = await seal(read.public_key, `device:${child}`, "snmp2c", { community: COMMUNITY });
-  res = await api.put(`/api/devices/${child}/profiles/snmp2c`, { headers: await csrf(), data: { ciphertext, key_version: read.key_version } });
-  expect(res.status()).toBe(204);
+  const setCommunity = async (community: string) => {
+    const ciphertext = await seal(read.public_key, `device:${child}`, "snmp2c", { community });
+    const put = await api.put(`/api/devices/${child}/profiles/snmp2c`, { headers: await csrf(), data: { ciphertext, key_version: read.key_version } });
+    expect(put.status()).toBe(204);
+  };
+  await setCommunity(COMMUNITY); /* ifIndex 2 is down for the device until the test switches it */
   /* The parent has nothing to answer: its poll finds it down, and its availability problem opens after the trigger's duration. */
   for (const id of [child, parent]) expect((await api.post(`/api/devices/${id}/poll`, { headers: await csrf() })).status()).toBe(202);
   /* The default templates are bound to the driver, which the first inventory poll sets. */
@@ -87,14 +92,15 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
   expect(ws.url()).toContain("/api/ws");
   /* ids of the problems announced through the socket */
   const announced = new Set<number>();
-  ws.on("framereceived", (f) => {
+  const onFrame = (f: { payload: string | Buffer }) => {
     try {
       const m = JSON.parse(String(f.payload)) as { problem?: { id: number } };
       if (m.problem) announced.add(m.problem.id);
     } catch {
       /* not a problem frame */
     }
-  });
+  };
+  ws.on("framereceived", onFrame);
   const table = page.getByRole("table", { name: "Проблемы" });
   await expect(table).toBeVisible();
   const bell = page.getByRole("button", { name: /^Уведомления:/ });
@@ -132,12 +138,21 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
   expect(acked.state).toBe("acknowledged");
   expect(acked.acks.map((a) => a.comment)).toEqual([comment]);
 
-  /* linkUp resolves it. */
+  /* The port comes up: the device now answers with ifIndex 2 up (a new step-up rotates the session, so the socket is reopened), then linkUp resolves it. */
+  await stepUp(page);
+  await setCommunity(COMMUNITY_UP);
+  const reopened = page.waitForEvent("websocket", { timeout: 15_000 });
+  await page.reload();
+  (await reopened).on("framereceived", onFrame);
+  await expect(row).toBeVisible();
   sendTrap("linkUp");
   await expect
     .poll(async () => (await problems(`device_id=${child}&state=resolved`)).find((p) => p.id === problem.id)?.resolve_reason, { timeout: 45_000, intervals: [1_000], message: "linkUp" })
     .toBe("recovered");
   sendTrap("");
+  /* closed by the trap itself, not by a poll that saw the port up */
+  const closed = (await problems(`device_id=${child}&state=resolved`)).find((p) => p.id === problem.id);
+  expect(closed?.last_value ?? "").toContain("linkUp");
   await expect(row).toContainText("Закрыта");
 
   /* The parent is down: once its problem is open, a new problem of the child opens suppressed. */

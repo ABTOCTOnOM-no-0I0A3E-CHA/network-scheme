@@ -7,7 +7,8 @@ import { setupServer } from "msw/node";
 import "@/i18n";
 import ru from "@/i18n/ru.json";
 import { ProblemList } from "./ProblemList";
-import { validateComment, type Problem } from "./api";
+import i18n from "@/i18n";
+import { problemTitle, validateComment, type Problem } from "./api";
 
 const HOSTILE = "<script>alert(1)</script>\u0007‮evil";
 
@@ -63,6 +64,16 @@ function wrap(ui: React.ReactNode) {
   return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
 }
 const last = () => queries[queries.length - 1];
+
+describe("problemTitle", () => {
+  const t = i18n.t.bind(i18n);
+  it("translates system kinds and seeded trigger names, keeps other names as stored", () => {
+    expect(problemTitle(t, { name: "Poller is unavailable", system_kind: "poller_unavailable" })).toBe(ru.problems.systemKind.poller_unavailable);
+    expect(problemTitle(t, { name: "New kind", system_kind: "future_kind" })).toBe("New kind");
+    expect(problemTitle(t, { name: "Device is unavailable", system_kind: null })).toBe(ru.problems.seeded.deviceUnavailable);
+    expect(problemTitle(t, { name: "Custom trigger", system_kind: null })).toBe("Custom trigger");
+  });
+});
 
 describe("validateComment", () => {
   it("mirrors the server rule", () => {

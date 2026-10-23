@@ -9,7 +9,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { canReadSystem } from "@/features/auth/permissions";
+import { canManageMaintenance, canManageTriggers, canReadSystem } from "@/features/auth/permissions";
 import { useSession } from "@/features/auth/useSession";
 import { NAV } from "./nav";
 
@@ -18,6 +18,13 @@ export function Sidebar() {
   const { t } = useTranslation();
   const { data: session } = useSession();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  /* UI hints only: the API decides; sections the user cannot use are not offered */
+  const visible = (key: string) => {
+    if (key === "health") return canReadSystem(session);
+    if (key === "templates") return canManageTriggers(session);
+    if (key === "maintenance") return canManageMaintenance(session);
+    return true;
+  };
 
   return (
     <SidebarRoot>
@@ -26,7 +33,7 @@ export function Sidebar() {
         <SidebarGroup>
           <nav aria-label={t("nav.label")}>
             <SidebarMenu>
-              {NAV.filter(({ key }) => key !== "health" || canReadSystem(session)).map(({ key, path, icon: Icon }) => (
+              {NAV.filter(({ key }) => visible(key)).map(({ key, path, icon: Icon }) => (
                 <SidebarMenuItem key={key}>
                   <SidebarMenuButton asChild isActive={pathname === path}>
                     <Link to={path as "/"}>

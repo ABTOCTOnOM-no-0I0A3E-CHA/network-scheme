@@ -94,6 +94,11 @@ export class ProblemSocket {
     private readonly rnd: () => number = Math.random,
   ) {}
 
+  /** Sends a text frame if the socket is open (the severity preference goes to the server this way). */
+  send(data: string): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(data);
+  }
+
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;

@@ -6,7 +6,7 @@ import { canListGroups, canReceiveProblems } from "@/features/auth/permissions";
 import { useSession } from "@/features/auth/useSession";
 import { useGroups } from "@/features/devices/api";
 import { SeverityBadge } from "@/features/events/EventFeed";
-import { SEVERITIES, type EventSeverity } from "@/features/problems/api";
+import { SEVERITIES, problemTitle, type EventSeverity } from "@/features/problems/api";
 import { safeText } from "@/lib/text";
 import { useProblemFeed } from "./useProblemFeed";
 
@@ -52,8 +52,8 @@ export function NotificationCenter({ onOpenProblems, play }: Props) {
                 <li key={key} className="grid gap-0.5 text-sm">
                   <div className="flex items-center gap-2">
                     <SeverityBadge severity={p.severity} />
-                    <span className="min-w-0 truncate" title={safeText(p.name)}>
-                      {safeText(p.name)}
+                    <span className="min-w-0 truncate" title={safeText(problemTitle(t, p))}>
+                      {safeText(problemTitle(t, p))}
                     </span>
                   </div>
                   <div className="truncate text-xs text-muted-foreground" title={safeText(p.device_name)}>

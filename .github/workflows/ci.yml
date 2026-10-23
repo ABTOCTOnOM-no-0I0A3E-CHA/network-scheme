@@ -251,16 +251,21 @@ jobs:
           echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
           echo "NMS_E2E_EVENT_NETNS=172.31.250.2" >> "$GITHUB_ENV"
           # The device of problems.spec.ts: answers SNMPv2c like EVSRC, but its trap is chosen by the test through a control file
-          # (linkDown or linkUp for ifIndex 2). Its data file is the generic switch with ifIndex 2 up, so the polls the traps cause agree
-          # with linkUp and never reopen a problem the test closed. The test writes the control file in test/e2e/.auth, mounted read-only here.
+          # (linkDown or linkUp for ifIndex 2). It serves two data files by community: COMMUNITY has ifIndex 2 down, so the polls the
+          # linkDown trap causes agree with it and cannot close the problem before the test has acknowledged it; COMMUNITY_UP has
+          # ifIndex 2 up, which the test switches to (by replacing the device's profile) before linkUp, so the polls then agree with
+          # linkUp and never reopen the closed problem. The test writes the control file in test/e2e/.auth, mounted read-only here.
           # NMS_E2E_PROBE_DEAD is an address in the devices subnet nothing listens on:
           # the parent of the suppression check, which the poller finds down.
           EVPROB=nms-e2e-evprob
           mkdir -p test/e2e/.auth
-          sed 's/^1.3.6.1.2.1.2.2.1.8.2|2|2$/1.3.6.1.2.1.2.2.1.8.2|2|1/' test/fixtures/snmp/generic-switch.snmprec > /tmp/nms-e2e-probe.snmprec
-          grep -qx '1.3.6.1.2.1.2.2.1.8.2|2|1' /tmp/nms-e2e-probe.snmprec
+          COMMUNITY_UP=e2e-events-community-02
+          grep -qx '1.3.6.1.2.1.2.2.1.8.2|2|2' test/fixtures/snmp/generic-switch.snmprec
+          sed 's/^1.3.6.1.2.1.2.2.1.8.2|2|2$/1.3.6.1.2.1.2.2.1.8.2|2|1/' test/fixtures/snmp/generic-switch.snmprec > /tmp/nms-e2e-probe-up.snmprec
+          grep -qx '1.3.6.1.2.1.2.2.1.8.2|2|1' /tmp/nms-e2e-probe-up.snmprec
           docker run -d --name "$EVPROB" --network nms_devices \
-            -v "/tmp/nms-e2e-probe.snmprec:/data/$COMMUNITY.snmprec:ro" \
+            -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
+            -v "/tmp/nms-e2e-probe-up.snmprec:/data/$COMMUNITY_UP.snmprec:ro" \
             -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" -v "$PWD/test/e2e/.auth:/ctl:ro" nms-snmpsim:ci \
             sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
               --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
