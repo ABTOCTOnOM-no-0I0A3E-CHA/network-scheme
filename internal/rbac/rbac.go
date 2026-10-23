@@ -45,6 +45,9 @@ const (
 	PermProblemsAck       Perm = "problems.ack"
 	PermTriggersManage    Perm = "triggers.manage"
 	PermMaintenanceManage Perm = "maintenance.manage"
+
+	/* Map views, areas, backgrounds, manual links and pinned positions; global only (not group-scoped). */
+	PermMapManage Perm = "map.manage"
 )
 
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
@@ -53,7 +56,7 @@ var matrix = map[Role][]Perm{
 	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermSystemRead, PermProblemsAck},
 	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
 		PermDevicesRead, PermDevicesPoll, PermDevicesManage, PermDeviceCredentials,
-		PermProblemsAck, PermTriggersManage, PermMaintenanceManage},
+		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage},
 	RoleAuditor: {PermAuditRead},
 }
 

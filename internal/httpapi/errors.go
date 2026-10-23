@@ -56,6 +56,14 @@ var (
 	errInvalidWindow    = apiError{http.StatusBadRequest, "invalid_window", "Недопустимое окно обслуживания: не более 7 суток, конец в будущем и позже начала"}
 	errParentCycle      = apiError{http.StatusConflict, "parent_cycle", "Родитель образует цикл"}
 	errParentTooDeep    = apiError{http.StatusConflict, "parent_too_deep", "Цепочка родителей длиннее 16 устройств"}
+	errLinkExists       = apiError{http.StatusConflict, "link_exists", "Такая связь уже есть"}
+	errTooManyLinks     = apiError{http.StatusConflict, "too_many_links", "Между двумя устройствами не может быть больше 64 связей"}
+	errTooManyViews     = apiError{http.StatusConflict, "too_many_views", "Видов карты не может быть больше 100"}
+	errTooManyAreas     = apiError{http.StatusConflict, "too_many_areas", "В виде не может быть больше 2000 областей"}
+	errAreaCycle        = apiError{http.StatusConflict, "area_cycle", "Родитель области образует цикл"}
+	errAreaTooDeep      = apiError{http.StatusConflict, "area_too_deep", "Вложенность областей больше 8 уровней"}
+	errAreaOtherView    = apiError{http.StatusConflict, "area_other_view", "Родитель области должен быть в том же виде"}
+	errNotImplemented   = apiError{http.StatusNotImplemented, "not_implemented", "Пока не реализовано"}
 	errLocked           = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited      = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errInternal         = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
@@ -123,6 +131,16 @@ var knownErrors = []struct {
 	{errMaintenanceNotFound, errNotFound},
 	{devices.ErrParentCycle, errParentCycle},
 	{devices.ErrParentDepth, errParentTooDeep},
+	{errLinkDup, errLinkExists},
+	{errCapLinks, errTooManyLinks},
+	{errCapViews, errTooManyViews},
+	{errCapAreas, errTooManyAreas},
+	{errAreaLoop, errAreaCycle},
+	{errAreaDepth, errAreaTooDeep},
+	{errAreaView, errAreaOtherView},
+	{errMapNotFound, errNotFound},
+	{errMapBackground, errBadRequest},
+	{errMapInvalid, errBadRequest},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

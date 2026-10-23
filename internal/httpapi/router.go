@@ -237,6 +237,25 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/maintenance", maint, s.listMaintenance)
 	s.route(r, http.MethodPost, "/api/maintenance", maint, s.createMaintenance)
 	s.route(r, http.MethodDelete, "/api/maintenance/{id}", maint, s.deleteMaintenance)
+
+	/* Topology and map: viewing follows device visibility; views, areas, manual links and pinned positions are global map.manage. */
+	mapManage := Policy{Perm: rbac.PermMapManage}
+	s.route(r, http.MethodGet, "/api/topology", read, s.getTopology)
+	s.route(r, http.MethodGet, "/api/topology/changes", read, s.listTopologyChanges)
+	s.route(r, http.MethodPost, "/api/links", mapManage, s.createLink)
+	s.route(r, http.MethodDelete, "/api/links/{id}", mapManage, s.deleteLink)
+	s.route(r, http.MethodGet, "/api/map/views", read, s.listViews)
+	s.route(r, http.MethodPost, "/api/map/views", mapManage, s.createView)
+	s.route(r, http.MethodPatch, "/api/map/views/{id}", mapManage, s.updateView)
+	s.route(r, http.MethodDelete, "/api/map/views/{id}", mapManage, s.deleteView)
+	s.route(r, http.MethodGet, "/api/map/views/{id}/areas", read, s.listAreas)
+	s.route(r, http.MethodPost, "/api/map/views/{id}/areas", mapManage, s.createArea)
+	s.route(r, http.MethodPatch, "/api/map/views/{id}/areas/{area_id}", mapManage, s.updateArea)
+	s.route(r, http.MethodDelete, "/api/map/views/{id}/areas/{area_id}", mapManage, s.deleteArea)
+	s.route(r, http.MethodPut, "/api/map/views/{id}/positions", mapManage, s.putPositions)
+	/* Background upload and download arrive with the upload pipeline (stubs until then). */
+	s.route(r, http.MethodPost, "/api/map/backgrounds", mapManage, s.backgroundsNotImplemented)
+	s.route(r, http.MethodGet, "/api/map/backgrounds/{id}", read, s.backgroundsNotImplemented)
 	return r
 }
 

@@ -152,7 +152,10 @@ the NMS scale (0-1 disaster, 2 high, 3 average, 4 warning, 5-7 info); a trap
 without a severity ranks as info. Rows of devices outside the caller's groups
 and of deleted devices drop out in the join. Storm rows (events folded above the
 rate limit: one per device, folded kind and minute) come as kind "storm" with a
-count and never match a text query. $1 all, $2 group ids, $3 kind,
+count and never match a text query. Link changes come as kind "topology" (label:
+appeared or disappeared; body: "A port <-> B port"; device: end A; severity info or
+warning), visible only if both ends are visible to the caller (a change whose
+device was deleted since: to global scope only), and never match a text query. $1 all, $2 group ids, $3 kind,
 $4 device (0: any), $5 from, $6 to, $7 query, $8 min rank, $9 cursor given,
 $10-$13 cursor ($10 also bounds ts inside each branch so the planner can exclude chunks), $14 limit.
 */
@@ -184,10 +187,26 @@ WITH ev AS (
   FROM events.storm m
   WHERE $3::text IN ('', 'storm') AND $7::text = '' AND m.ts >= $5 AND m.ts < $6 AND ($4::bigint = 0 OR m.device_id = $4)
     AND (NOT $9::bool OR m.ts <= $10)
+  UNION ALL
+  SELECT c.at, 'topology', c.a_device_id, c.change,
+         concat_ws(' ', coalesce(da.name, '#' || c.a_device_id),
+                   (SELECT coalesce(nullif(i.name, ''), nullif(i.alias, '')) FROM inventory.interface i WHERE i.device_id = c.a_device_id AND i.if_index = c.a_if_index),
+                   chr(8596), coalesce(db.name, '#' || c.b_device_id),
+                   (SELECT coalesce(nullif(i.name, ''), nullif(i.alias, '')) FROM inventory.interface i WHERE i.device_id = c.b_device_id AND i.if_index = c.b_if_index)),
+         true, NULL, false, NULL,
+         CASE c.change WHEN 'disappeared' THEN 'warning' ELSE 'info' END,
+         md5(c.id::text)
+  FROM core.link_change c
+  LEFT JOIN core.device da ON da.id = c.a_device_id
+  LEFT JOIN core.device db ON db.id = c.b_device_id
+  WHERE $3::text IN ('', 'topology') AND $7::text = '' AND c.at >= $5 AND c.at < $6
+    AND ($4::bigint = 0 OR c.a_device_id = $4 OR c.b_device_id = $4)
+    AND (NOT $9::bool OR c.at <= $10)
+    AND ($1::bool OR (da.group_id = ANY($2) AND db.group_id = ANY($2)))
 )
-SELECT ev.ts, ev.kind, ev.device_id, d.name, ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.omitted, ev.cnt, ev.dig
-FROM ev JOIN core.device d ON d.id = ev.device_id
-WHERE ($1::bool OR d.group_id = ANY($2))
+SELECT ev.ts, ev.kind, ev.device_id, coalesce(d.name, ''), ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.omitted, ev.cnt, ev.dig
+FROM ev LEFT JOIN core.device d ON d.id = ev.device_id
+WHERE (ev.kind = 'topology' OR (d.id IS NOT NULL AND ($1::bool OR d.group_id = ANY($2))))
   AND CASE ev.severity WHEN 'disaster' THEN 4 WHEN 'high' THEN 3 WHEN 'average' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= $8::int
   AND (NOT $9::bool OR (ev.ts, ev.device_id, ev.kind, ev.dig) < ($10, $11, $12, $13))
 ORDER BY ev.ts DESC, ev.device_id DESC, ev.kind DESC, ev.dig DESC
@@ -226,9 +245,9 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	var cur eventCursor
 	if curS != "" {
-		okC = okC && decodeCursor(curS, &cur) && (cur.Kind == "syslog" || cur.Kind == "trap" || cur.Kind == "storm") && hex32.MatchString(cur.Dig)
+		okC = okC && decodeCursor(curS, &cur) && (cur.Kind == "syslog" || cur.Kind == "trap" || cur.Kind == "storm" || cur.Kind == "topology") && hex32.MatchString(cur.Dig)
 	}
-	if !okK || !okQ || !okS || !okC || !okL || !okW || (kind != "" && kind != "syslog" && kind != "trap" && kind != "storm") ||
+	if !okK || !okQ || !okS || !okC || !okL || !okW || (kind != "" && kind != "syslog" && kind != "trap" && kind != "storm" && kind != "topology") ||
 		utf8.RuneCountInString(qtext) > maxEventQuery || strings.ContainsFunc(qtext, func(r rune) bool { return unicode.IsControl(r) }) {
 		writeError(w, errBadRequest)
 		return
@@ -268,7 +287,7 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 		switch e.Kind {
 		case "syslog":
 			e.App = &label
-		case "trap":
+		case "trap", "topology":
 			e.Name = &label
 		}
 		e.Varbinds = vb
