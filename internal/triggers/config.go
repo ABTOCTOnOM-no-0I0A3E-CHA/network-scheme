@@ -193,7 +193,7 @@ func loadConfig(ctx context.Context, pool *pgxpool.Pool, now time.Time, log *slo
 	bad := map[int64]bool{}
 	for id, dev := range c.devices {
 		var tpls []int64
-		tpls = append(tpls, byDriver[driverOf[id]]...)
+		tpls = append(tpls, byDriver[effectiveDriver(driverOf[id])]...)
 		for g, hops := dev.groupID, 0; g != 0 && hops < 64; g, hops = c.groupParent[g], hops+1 {
 			tpls = append(tpls, byGroup[g]...)
 		}
@@ -363,4 +363,20 @@ func (c *config) windowStarts(now time.Time) map[int64]time.Time {
 		}
 	}
 	return out
+}
+
+/*
+fallbackDriver is the driver a device that was never identified (driver "auto",
+e.g. unreachable since it was added) is monitored with: drivers.GenericName, the
+registry's mandatory fallback. Without it a new device that never answers has
+no driver templates and so no availability problem. The name is repeated here
+because this package must not import the drivers (TestFallbackDriverName pins it).
+*/
+const fallbackDriver = "generic-snmp"
+
+func effectiveDriver(driver string) string {
+	if driver == "" || driver == "auto" {
+		return fallbackDriver
+	}
+	return driver
 }
