@@ -322,4 +322,17 @@ describe("DeviceCard", () => {
     await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
     await waitFor(() => expect(patched).toEqual({ parent_id: null }));
   });
+
+  it("does not clear the parent when the device list failed to load", async () => {
+    deviceFn = () => HttpResponse.json(detail({ parent_id: 3 }));
+    server.use(http.get("*/api/devices", () => HttpResponse.json({ error: { code: "internal" } }, { status: 500 })));
+    setup(false, true);
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    const form = screen.getByRole("form", { name: ru.card.edit.title });
+    const name = within(form).getByLabelText(ru.devices.addDialog.name);
+    await userEvent.clear(name);
+    await userEvent.type(name, "renamed");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(patched).toEqual({ name: "renamed" }));
+  });
 });

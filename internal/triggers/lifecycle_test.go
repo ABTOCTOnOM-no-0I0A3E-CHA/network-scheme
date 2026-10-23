@@ -370,7 +370,11 @@ func TestReloadRunsARoundAtOnce(t *testing.T) {
 	waitFor(1)
 	h.eng.Reload()
 	waitFor(2)
+	second := time.Now()
 	h.eng.Reload()
 	h.eng.Reload() /* collapses */
 	waitFor(3)
+	if gap := time.Since(second); gap < 900*time.Millisecond {
+		t.Errorf("forced rounds %v apart, want at most one per second", gap)
+	}
 }

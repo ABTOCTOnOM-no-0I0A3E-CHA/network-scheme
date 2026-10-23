@@ -93,6 +93,7 @@ describe("shouldNotify", () => {
 
 describe("settings storage", () => {
   it("falls back to the defaults for garbage and keeps only valid fields", () => {
+    expect(DEFAULT_SETTINGS.severityMin).toBe("average");
     expect(loadSettings()).toEqual(DEFAULT_SETTINGS);
     localStorage.setItem(SETTINGS_KEY, "{bad");
     expect(loadSettings()).toEqual(DEFAULT_SETTINGS);

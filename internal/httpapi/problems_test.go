@@ -813,3 +813,81 @@ func (m *matrixEnv) monitoringRequest(key string) (req, bool) {
 	}
 	return req{}, false
 }
+
+func TestTriggerAndTemplateCaps(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	post := func(path string, body any) *http.Response {
+		return f.do(admin.authed(req{method: "POST", path: path, body: body}))
+	}
+
+	/* 100 triggers per template. */
+	tpl := f.newTemplate(g)
+	f.root(`INSERT INTO core.trigger (template_id, kind, params, duration_s, severity, name)
+		SELECT $1, 'availability', '{"states":["down"]}', 60, 'high', 't' || i FROM generate_series(1, 100) i`, tpl)
+	trig := map[string]any{"name": "one more", "kind": "availability", "params": map[string]any{"states": []string{"down"}}, "duration_s": 60, "severity": "high"}
+	wantError(t, post(fmt.Sprintf("/api/templates/%d/triggers", tpl), trig), http.StatusConflict, "too_many_triggers")
+	wantStatus(t, post(fmt.Sprintf("/api/templates/%d/triggers", f.newTemplate(g)), trig), http.StatusCreated)
+
+	/* 50 templates per group and per driver. */
+	full := f.newGroup()
+	f.root(`INSERT INTO core.monitoring_template (name, group_id) SELECT 'g' || i, $1 FROM generate_series(1, 50) i`, full)
+	wantError(t, post("/api/templates", map[string]any{"name": uniqueName("t"), "group_id": full}), http.StatusConflict, "too_many_templates")
+	drv := "cap-" + strings.ReplaceAll(strings.ToLower(uniqueName("d")), "_", "-")
+	f.root(`INSERT INTO core.monitoring_template (name, driver) SELECT 'd' || i, $1 FROM generate_series(1, 50) i`, drv)
+	wantError(t, post("/api/templates", map[string]any{"name": uniqueName("t"), "driver": drv}), http.StatusConflict, "too_many_templates")
+
+	/* 256 distinct syslog filters globally; an existing filter can be reused, a new one is refused (and rolled back). */
+	f.root(`DELETE FROM core.trigger WHERE kind = 'syslog'`)
+	st := f.newTemplate(g)
+	for _, part := range []struct{ from, to int }{{1, 100}, {101, 200}, {201, 256}} {
+		f.root(`INSERT INTO core.trigger (template_id, kind, params, duration_s, severity, name)
+			SELECT $1, 'syslog', jsonb_build_object('severity_min', 3, 'contains', 'm' || i), 0, 'high', 's' || i FROM generate_series($2::int, $3::int) i`, f.newTemplate(g), part.from, part.to)
+	}
+	path := fmt.Sprintf("/api/templates/%d/triggers", st)
+	syslog := func(contains string) map[string]any {
+		return map[string]any{"name": uniqueName("s"), "kind": "syslog", "params": map[string]any{"severity_min": 3, "contains": contains}, "duration_s": 0, "severity": "high"}
+	}
+	wantStatus(t, post(path, syslog("M5")), http.StatusCreated) /* same filter, case-insensitively */
+	wantError(t, post(path, syslog("brand new")), http.StatusConflict, "too_many_filters")
+	if n := f.rootInt(`SELECT count(*) FROM core.trigger WHERE kind = 'syslog'`); n != 257 {
+		t.Errorf("syslog triggers after the refused one = %d, want 257", n)
+	}
+	other := f.rootInt(`SELECT id FROM core.trigger WHERE kind = 'syslog' ORDER BY id DESC LIMIT 1`) /* the case-variant duplicate of an existing filter: moving it to a new filter makes 257 */
+	otherTpl := f.rootInt(`SELECT template_id FROM core.trigger WHERE id = $1`, other)
+	patch := f.do(admin.authed(req{method: "PATCH", path: fmt.Sprintf("/api/templates/%d/triggers/%d", otherTpl, other), body: map[string]any{"params": map[string]any{"severity_min": 3, "contains": "elsewhere"}}}))
+	wantError(t, patch, http.StatusConflict, "too_many_filters")
+	f.root(`DELETE FROM core.trigger WHERE kind = 'syslog'`)
+}
+
+func TestTemplateNamesRejectFormatCharacters(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	wantError(t, f.do(admin.authed(req{method: "POST", path: "/api/templates", body: map[string]any{"name": "evil\u202etpl", "group_id": g}})), http.StatusBadRequest, "bad_request")
+	tpl := f.newTemplate(g)
+	wantError(t, f.do(admin.authed(req{method: "POST", path: fmt.Sprintf("/api/templates/%d/triggers", tpl), body: map[string]any{
+		"name": "evil\u200btrigger", "kind": "availability", "params": map[string]any{"states": []string{"down"}}, "duration_s": 0, "severity": "high"}})), http.StatusBadRequest, "bad_request")
+}
+
+func TestOverrideOfForeignTemplateHidesTheKind(t *testing.T) {
+	f := newFixture(t, nil)
+	gA := f.newGroup()
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	adminA := f.login(false, rbac.Binding{Role: rbac.RoleAdmin, GroupID: &gA})
+	dev := f.newDevice(gA)
+	drv := "ovr-" + strings.ReplaceAll(strings.ToLower(uniqueName("d")), "_", "-")
+	f.root(`UPDATE core.device SET driver = $2 WHERE id = $1`, dev, drv)
+	tpl := f.rootInt(`INSERT INTO core.monitoring_template (name, driver) VALUES ($1, $2) RETURNING id`, uniqueName("tpl"), drv)
+	metric := f.rootInt(`INSERT INTO core.trigger (template_id, kind, params, duration_s, severity, name)
+		VALUES ($1, 'metric_threshold', '{"metric":"cpu","op":"gt","value":80}', 0, 'warning', 'cpu') RETURNING id`, tpl)
+	put := func(s *subject, body any) *http.Response {
+		return f.do(s.authed(req{method: "PUT", path: fmt.Sprintf("/api/devices/%d/trigger-overrides/%d", dev, metric), body: body}))
+	}
+	bad := map[string]any{"params": map[string]any{"metric": "cpu", "if_index": 3}}
+	/* The caller cannot see the driver template: a valid override works, an invalid one must not reveal the kind (404, not invalid_trigger). */
+	wantStatus(t, put(adminA, map[string]any{"enabled": false}), http.StatusNoContent)
+	wantError(t, put(adminA, bad), http.StatusNotFound, "not_found")
+	wantError(t, put(admin, bad), http.StatusBadRequest, "invalid_trigger")
+}

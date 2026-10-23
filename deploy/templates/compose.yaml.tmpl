@@ -85,9 +85,6 @@ services:
     user: "65532:65532"
     cpus: "1.0"
     mem_limit: 512m
-    # Soft heap target below mem_limit, so the collector works harder before the kernel OOM-kills.
-    environment:
-      GOMEMLIMIT: 400MiB
     # Unprivileged ICMP echo (no CAP_NET_RAW) for every group of the container.
     sysctls:
       net.ipv4.ping_group_range: "0 2147483647"
@@ -121,6 +118,9 @@ services:
     user: "65532:65532"
     cpus: "1.0"
     mem_limit: 512m
+    # Soft heap target below mem_limit, so the collector works harder before the kernel OOM-kills.
+    environment:
+      GOMEMLIMIT: 400MiB
     # Unprivileged container ports, so no capability is needed; with the userland proxy off the
     # source address of every packet is the device's own (the identity of an event).
     # On devices (not only core) because core is internal: Docker publishes ports only through a

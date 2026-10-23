@@ -7,7 +7,7 @@ import { expect, test } from "./guard";
  * Containers the CI job attaches to the devices network (see .github/workflows/ci.yml):
  *  - NMS_E2E_EVENT_PROBE: the device. It answers SNMPv2c (community COMMUNITY, served by an snmpsim data file) and sends
  *    the trap named in the control file CONTROL (linkDown, linkUp or none) for ifIndex 2 every few seconds, all from its
- *    own address. The fixture has ifIndex 2 down, so the polls the traps cause agree with the traps.
+ *    own address. Its data file has ifIndex 2 up, so the polls the traps cause agree with linkUp and never reopen a closed problem.
  *  - NMS_E2E_PROBE_DEAD: an address of the devices subnet nothing listens on: the parent whose outage suppresses the device.
  * The test drives the device by writing the control file (test/e2e/.auth, mounted into the sender) and watches the problems
  * through the API and the UI, including the notification center (a WebSocket through the gateway).
@@ -80,23 +80,38 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
     .toEqual({ state: "up", driver: true });
 
   /* The panel is open (and its socket connected) before anything happens, so the notification is not missed. */
+  await page.addInitScript(() => localStorage.setItem("nms.notify.v1", JSON.stringify({ sound: false, severityMin: "average", groups: [] })));
   const socket = page.waitForEvent("websocket", { timeout: 15_000 });
   await page.goto("/problems");
-  expect((await socket).url()).toContain("/api/ws");
+  const ws = await socket;
+  expect(ws.url()).toContain("/api/ws");
+  /* ids of the problems announced through the socket */
+  const announced = new Set<number>();
+  ws.on("framereceived", (f) => {
+    try {
+      const m = JSON.parse(String(f.payload)) as { problem?: { id: number } };
+      if (m.problem) announced.add(m.problem.id);
+    } catch {
+      /* not a problem frame */
+    }
+  });
   const table = page.getByRole("table", { name: "Проблемы" });
   await expect(table).toBeVisible();
   const bell = page.getByRole("button", { name: /^Уведомления:/ });
   const badge = page.getByTestId("notify-badge");
 
   /* linkDown: the default "interface down" trigger opens a problem for the port, in the list and in the notification center. */
+  const sentAt = Date.now();
   sendTrap("linkDown");
   let first: Problem | undefined;
   await expect
     .poll(async () => (first = (await problems(`device_id=${child}`)).find((p) => p.state === "problem")), { timeout: 45_000, intervals: [1_000], message: "problem of the trap" })
     .toBeDefined();
   const problem = first!;
+  console.log(`linkDown trap -> problem in the API after ${Date.now() - sentAt} ms`);
+  sendTrap(""); /* one trap is enough; no further polls are caused */
   expect(problem.suppressed).toBe(false);
-  expect(problem.object).toContain("2");
+  expect(problem.object).toBe("if:2");
   const row = page.locator(`tr[data-problem-id="${problem.id}"]`);
   await expect(row).toBeVisible();
   await expect(row).toContainText(CHILD);
@@ -136,6 +151,8 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
   await page.keyboard.press("Escape");
   await expect(badge).toHaveCount(0);
 
+  /* Nothing of the port is open now (the polls agree with linkUp), so what appears next is a NEW problem, opened suppressed. */
+  expect((await problems(`device_id=${child}`)).filter((p) => p.state !== "resolved")).toEqual([]);
   sendTrap("linkDown");
   let second: Problem | undefined;
   await expect
@@ -145,11 +162,14 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
       message: "suppressed problem of the child",
     })
     .toBeDefined();
+  sendTrap("");
   expect(second!.suppressed).toBe(true);
+  expect(second!.object).toBe("if:2");
   /* The engine publishes right after it stores a problem; a suppressed one is never announced. */
   await page.waitForTimeout(3_000);
   await expect(badge).toHaveCount(0);
-  sendTrap("");
+  expect(announced.has(second!.id), "suppressed problem announced through the socket").toBe(false);
+  expect(announced.has(problem.id), "the first problem was announced").toBe(true);
   await page.reload();
   await page.getByLabel("Подавленные").selectOption("true");
   const suppressedRow = page.locator(`tr[data-problem-id="${second!.id}"]`);

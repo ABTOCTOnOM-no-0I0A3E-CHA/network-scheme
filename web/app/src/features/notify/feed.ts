@@ -29,7 +29,7 @@ export function parseMessage(data: unknown): ProblemMessage | null {
 
 /** Notification preferences; only booleans, a severity and group ids are persisted. */
 export type NotifySettings = { sound: boolean; severityMin: EventSeverity; groups: number[] };
-export const DEFAULT_SETTINGS: NotifySettings = { sound: false, severityMin: "high", groups: [] };
+export const DEFAULT_SETTINGS: NotifySettings = { sound: false, severityMin: "average", groups: [] };
 export const SETTINGS_KEY = "nms.notify.v1";
 
 /** Reads the preferences, falling back to the defaults for missing, unreadable or malformed data. */

@@ -54,7 +54,7 @@ const (
 	callTimeout   = 10 * time.Second /* one database round trip of a background loop */
 	drainTimeout  = 10 * time.Second /* shutdown: how long the writer may take for what is queued */
 	udpQueue      = 1024
-	udpHandBytes  = 16 << 20 /* bytes of datagrams handed to the workers of one socket and not yet processed */
+	udpHandBytes  = 16 << 20 /* bytes of datagrams handed to the workers of one socket and not yet processed; worst case 2 sockets x 16 MiB + 64 MiB queue stays below the 400 MiB GOMEMLIMIT */
 	udpReadBuf    = 8 << 20
 	maxTrapPacket = 65535
 	slowDevRate   = 0.1 /* one SNMPv3 key derivation per 10 s per device (burst 3, so a genuine first trap has a chance against a slow spoofer) ... */

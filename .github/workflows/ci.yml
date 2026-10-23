@@ -251,13 +251,16 @@ jobs:
           echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
           echo "NMS_E2E_EVENT_NETNS=172.31.250.2" >> "$GITHUB_ENV"
           # The device of problems.spec.ts: answers SNMPv2c like EVSRC, but its trap is chosen by the test through a control file
-          # (linkDown or linkUp for ifIndex 2, which the fixture has down, so its polls agree with the trap). The test writes the file
-          # in test/e2e/.auth, mounted read-only here. NMS_E2E_PROBE_DEAD is an address in the devices subnet nothing listens on:
+          # (linkDown or linkUp for ifIndex 2). Its data file is the generic switch with ifIndex 2 up, so the polls the traps cause agree
+          # with linkUp and never reopen a problem the test closed. The test writes the control file in test/e2e/.auth, mounted read-only here.
+          # NMS_E2E_PROBE_DEAD is an address in the devices subnet nothing listens on:
           # the parent of the suppression check, which the poller finds down.
           EVPROB=nms-e2e-evprob
           mkdir -p test/e2e/.auth
+          sed 's/^1.3.6.1.2.1.2.2.1.8.2|2|2$/1.3.6.1.2.1.2.2.1.8.2|2|1/' test/fixtures/snmp/generic-switch.snmprec > /tmp/nms-e2e-probe.snmprec
+          grep -qx '1.3.6.1.2.1.2.2.1.8.2|2|1' /tmp/nms-e2e-probe.snmprec
           docker run -d --name "$EVPROB" --network nms_devices \
-            -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
+            -v "/tmp/nms-e2e-probe.snmprec:/data/$COMMUNITY.snmprec:ro" \
             -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" -v "$PWD/test/e2e/.auth:/ctl:ro" nms-snmpsim:ci \
             sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
               --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \

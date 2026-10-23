@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -44,6 +47,11 @@ func (s *server) configChanged() {
 	if s.onConfig != nil {
 		s.onConfig()
 	}
+}
+
+/* validTriggerName is validGroupName that also rejects format characters (bidi controls), like the UI. */
+func validTriggerName(n string) bool {
+	return validGroupName(n) && !strings.ContainsFunc(n, func(r rune) bool { return unicode.Is(unicode.Cf, r) })
 }
 
 /* pathInt64 parses a named URL parameter as a positive integer; anything else answers 404. */
@@ -142,7 +150,7 @@ func (s *server) createTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var iv [3]*int
-	valid := validGroupName(in.Name) && (in.Driver == nil) != (in.GroupID == nil) &&
+	valid := validTriggerName(in.Name) && (in.Driver == nil) != (in.GroupID == nil) &&
 		(in.Driver == nil || driverName.MatchString(*in.Driver)) && (in.GroupID == nil || *in.GroupID > 0)
 	for i, raw := range []json.RawMessage{in.IntervalAvailS, in.IntervalMetricsS, in.IntervalInventoryS} {
 		_, v, ok := parseInterval(raw)
@@ -169,6 +177,9 @@ func (s *server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "templates.create", ObjectType: "template",
 		Details: map[string]any{"name": in.Name, "driver": in.Driver, "group_id": in.GroupID, "interval_avail_s": iv[0], "interval_metrics_s": iv[1], "interval_inventory_s": iv[2]}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		if err := capTemplates(r.Context(), tx, in.Driver, in.GroupID); err != nil {
+			return err
+		}
 		err := tx.QueryRow(r.Context(), `INSERT INTO core.monitoring_template (name, driver, group_id, interval_avail_s, interval_metrics_s, interval_inventory_s)
 			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, in.Name, in.Driver, in.GroupID, iv[0], iv[1], iv[2]).Scan(&id)
 		if err != nil {
@@ -210,7 +221,7 @@ func (s *server) updateTemplate(w http.ResponseWriter, r *http.Request) {
 	details := map[string]any{}
 	valid := true
 	if in.Name != nil {
-		valid = valid && validGroupName(*in.Name)
+		valid = valid && validTriggerName(*in.Name)
 		details["name"] = *in.Name
 	}
 	var set [3]bool
@@ -366,7 +377,7 @@ func (s *server) createTrigger(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if !validGroupName(in.Name) {
+	if !validTriggerName(in.Name) {
 		writeError(w, errBadRequest)
 		return
 	}
@@ -380,6 +391,9 @@ func (s *server) createTrigger(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "triggers.create", ObjectType: "trigger",
 		Details: map[string]any{"template_id": tid, "kind": in.Kind, "params": params, "duration_s": in.DurationS, "severity": in.Severity, "enabled": enabled, "name": in.Name}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		if err := capTriggers(r.Context(), tx, tid); err != nil {
+			return err
+		}
 		err := tx.QueryRow(r.Context(), `INSERT INTO core.trigger (template_id, kind, params, duration_s, severity, enabled, name)
 			VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7) RETURNING id`, tid, in.Kind, string(params), in.DurationS, in.Severity, enabled, in.Name).Scan(&id)
 		if pe := pgErrOf(err); pe != nil && pe.Code == "23503" {
@@ -387,6 +401,11 @@ func (s *server) createTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			return err
+		}
+		if in.Kind == string(triggers.KindSyslog) {
+			if err := capSyslogFilters(r.Context(), tx); err != nil {
+				return err
+			}
 		}
 		ev.ObjectID = strconv.FormatInt(id, 10)
 		return nil
@@ -427,7 +446,7 @@ func (s *server) updateTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	details := map[string]any{"template_id": tid}
 	if in.Name != nil {
-		if !validGroupName(*in.Name) {
+		if !validTriggerName(*in.Name) {
 			writeError(w, errBadRequest)
 			return
 		}
@@ -478,7 +497,10 @@ func (s *server) updateTrigger(w http.ResponseWriter, r *http.Request) {
 			params = coalesce($2::jsonb, params), duration_s = coalesce($3, duration_s), severity = coalesce($4, severity),
 			enabled = coalesce($5, enabled), name = coalesce($6, name) WHERE id = $1`,
 			id, params, in.DurationS, in.Severity, in.Enabled, in.Name)
-		return err
+		if err != nil || kind != string(triggers.KindSyslog) || !setParams {
+			return err
+		}
+		return capSyslogFilters(r.Context(), tx)
 	}) {
 		return
 	}
@@ -558,7 +580,7 @@ func (s *server) listOverrides(w http.ResponseWriter, r *http.Request) {
 
 /* applicableTriggerSQL reads a trigger that applies to the device: its template is bound to the device's driver or to the device's group or an ancestor. */
 const applicableTriggerSQL = `
-SELECT t.kind, t.params FROM core.trigger t
+SELECT t.kind, t.params, t.template_id FROM core.trigger t
 JOIN core.monitoring_template m ON m.id = t.template_id
 JOIN core.device d ON d.id = $2
 WHERE t.id = $1 AND (m.driver = d.driver OR m.group_id IN (
@@ -605,7 +627,8 @@ func (s *server) putOverride(w http.ResponseWriter, r *http.Request) {
 	}
 	var kind string
 	var base json.RawMessage
-	err := s.pool.QueryRow(r.Context(), applicableTriggerSQL, trigID, devID).Scan(&kind, &base)
+	var tplID int64
+	err := s.pool.QueryRow(r.Context(), applicableTriggerSQL, trigID, devID).Scan(&kind, &base, &tplID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, errNotFound)
 		return
@@ -619,6 +642,15 @@ func (s *server) putOverride(w http.ResponseWriter, r *http.Request) {
 	if hasParams {
 		o, err := canonicalOverlay(kind, base, in.Params)
 		if err != nil {
+			/* A template outside the caller's scope may be overridden for the caller's own device, but its kind and params stay hidden: no validation answer, only 404. */
+			sc, serr := s.scope(r, rbac.PermTriggersManage)
+			if serr == nil {
+				_, serr = s.template(r, sc, tplID)
+			}
+			if serr != nil {
+				writeError(w, errNotFound)
+				return
+			}
 			writeError(w, errInvalidTrigger)
 			return
 		}
@@ -709,4 +741,75 @@ func (s *server) deleteOverride(w http.ResponseWriter, r *http.Request) {
 	}
 	s.configChanged()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+const (
+	maxTriggersPerTemplate  = 100
+	maxTemplatesPerBinding  = 50
+	maxDistinctSyslogFilter = 256
+)
+
+var (
+	errCapTriggers  = errors.New("httpapi: too many triggers in a template")
+	errCapTemplates = errors.New("httpapi: too many templates")
+	errCapFilters   = errors.New("httpapi: too many distinct syslog filters")
+)
+
+/* capTemplates limits the templates of one group (or one driver); the group row (or an advisory lock for a driver) serializes concurrent creates. */
+func capTemplates(ctx context.Context, tx pgx.Tx, driver *string, group *int64) error {
+	var n int
+	if group != nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM core.device_group WHERE id = $1 FOR UPDATE`, *group); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM core.monitoring_template WHERE group_id = $1`, *group).Scan(&n); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('template-driver:' || $1::text))`, *driver); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM core.monitoring_template WHERE driver = $1`, *driver).Scan(&n); err != nil {
+			return err
+		}
+	}
+	if n >= maxTemplatesPerBinding {
+		return errCapTemplates
+	}
+	return nil
+}
+
+/* capTriggers limits the triggers of a template; the template row is locked so concurrent creates count each other. */
+func capTriggers(ctx context.Context, tx pgx.Tx, template int64) error {
+	var n int
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM core.monitoring_template WHERE id = $1 FOR UPDATE`, template); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM core.trigger WHERE template_id = $1`, template).Scan(&n); err != nil {
+		return err
+	}
+	if n >= maxTriggersPerTemplate {
+		return errCapTriggers
+	}
+	return nil
+}
+
+/*
+capSyslogFilters runs after a syslog trigger was written: the engine reads the
+syslog stream once per distinct (severity_min, contains) filter, so their
+number is bounded globally. An advisory lock serializes writers; returning an
+error rolls the write back.
+*/
+func capSyslogFilters(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('syslog-filters'))`); err != nil {
+		return err
+	}
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT DISTINCT params->>'severity_min', lower(coalesce(params->>'contains', '')) FROM core.trigger WHERE kind = 'syslog') f`).Scan(&n); err != nil {
+		return err
+	}
+	if n > maxDistinctSyslogFilter {
+		return errCapFilters
+	}
+	return nil
 }

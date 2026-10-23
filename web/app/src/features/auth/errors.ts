@@ -34,6 +34,9 @@ const KNOWN = new Set([
   "invalid_window",
   "parent_cycle",
   "parent_too_deep",
+  "too_many_triggers",
+  "too_many_templates",
+  "too_many_filters",
   "internal",
 ]);
 

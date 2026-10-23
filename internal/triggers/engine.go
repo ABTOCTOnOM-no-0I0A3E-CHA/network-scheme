@@ -190,6 +190,7 @@ func (e *Engine) loop(ctx context.Context, lock *pgxpool.Conn) {
 	t := time.NewTicker(tickInterval)
 	defer t.Stop()
 	forceSlow := false
+	var lastForced time.Time
 	for n := 0; ; n++ {
 		if n%lockPing == lockPing-1 {
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -226,6 +227,15 @@ func (e *Engine) loop(ctx context.Context, lock *pgxpool.Conn) {
 		case <-t.C:
 		case <-e.reload:
 			forceSlow = true
+			/* at most one forced round per second, however often configuration changes */
+			if wait := time.Second - time.Since(lastForced); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+			}
+			lastForced = time.Now()
 		}
 	}
 }
