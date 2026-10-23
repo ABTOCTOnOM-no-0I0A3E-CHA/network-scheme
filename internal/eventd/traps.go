@@ -168,7 +168,7 @@ func encodeVarbinds(vbs []trap.Varbind) (out []byte, dropped int) {
 		buf.Write(item)
 	}
 	buf.WriteByte(']')
-	return buf.Bytes(), dropped
+	return bytes.Clone(buf.Bytes()), dropped /* the buffer capacity is up to ~1.9x its length; the queue budget counts length */
 }
 
 /* marshalVarbind is json.Marshal without HTML escaping (<, >, & stay one byte instead of six). */

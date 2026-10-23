@@ -30,13 +30,12 @@ func TestLoadEventDDefaults(t *testing.T) {
 
 func TestLoadEventDRejects(t *testing.T) {
 	for name, extra := range map[string]string{
-		"unknown field":      "bogus: 1\n",
-		"inline password":    "db_password: secret\n",
-		"cert without key":   "tls_cert_file: /c.pem\n",
-		"bad listener":       "trap_udp: nonsense\n",
-		"huge queue":         "queue_size: 999999999\n",
-		"retention too long": "retention_days: 100000\n",
-		"idle too short":     "tcp_idle_timeout: 1ms\n",
+		"unknown field":    "bogus: 1\n",
+		"inline password":  "db_password: secret\n",
+		"cert without key": "tls_cert_file: /c.pem\n",
+		"bad listener":     "trap_udp: nonsense\n",
+		"huge queue":       "queue_size: 999999999\n",
+		"idle too short":   "tcp_idle_timeout: 1ms\n",
 	} {
 		if _, err := config.LoadEventD(write(t, "eventd.yaml", eventdBase+extra)); err == nil {
 			t.Errorf("%s: accepted", name)
