@@ -94,28 +94,61 @@ func TestChassisLearnedFromConfirmedRows(t *testing.T) {
 	}
 }
 
-/* A one-sided address claim is 0.5 until the neighbour's own MAC table learns the reporter on the port it names. */
-func TestAddressClaimCorroboratedByNeighbourTable(t *testing.T) {
-	h := newHarness(t)
-	a, aIP := h.dev("a")
-	b, bIP := h.dev("b")
-	o, _ := h.dev("o")
-	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "b", bIP)
-	/* a third device knows a's MAC; b's table has it on g3 */
-	h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES ($1, $2::inet, '02:aa:00:00:00:0a', 1, now())`, o, aIP)
+/* corrobSetup: a (port 1) is cabled to b (port 3); o reports both ARP entries, and the two MAC tables learn each other. */
+func corrobSetup(h *harness) (a, b, o int64, bIP string) {
+	var aIP string
+	a, aIP = h.dev("a")
+	b, bIP = h.dev("b")
+	o, _ = h.dev("o")
+	h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES
+		($1, $2::inet, '02:aa:00:00:00:0a', 1, now()), ($1, $3::inet, '02:aa:00:00:00:0b', 1, now())`, o, aIP, bIP)
 	h.exec(`INSERT INTO inventory.mac_entry (device_id, mac, vlan, if_index, seen_at) VALUES ($1, '02:aa:00:00:00:0a', 1, 3, now())`, b)
+	h.exec(`INSERT INTO inventory.mac_entry (device_id, mac, vlan, if_index, seen_at) VALUES ($1, '02:aa:00:00:00:0b', 1, 1, now())`, a)
+	return
+}
+
+/* A one-sided address claim is 0.5 until both devices' own MAC tables confirm the cable. */
+func TestAddressClaimCorroboratedByBothTables(t *testing.T) {
+	h := newHarness(t)
+	a, b, _, bIP := corrobSetup(h)
+	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "b", bIP)
 	h.build()
 	if l := h.one(a, b); l.conf != 80 {
 		t.Errorf("corroborated %+v", l)
 	}
-	/* an impostor on a:2 announcing b's address while b does not see a there stays at 0.5 */
-	h.nb(a, 2, "02:00:00:00:66:66", "g4", "x", bIP)
+	/* an impostor on a:2 names the same b port: a:2 is not where b's MAC is learned, and the claim on b:g3 is now contested */
+	h.nb(a, 2, "02:00:00:00:66:66", "g3", "x", bIP)
 	h.build()
 	for _, l := range h.between(a, b) {
-		if ai, _ := l.ports(a); ai == 2 && l.conf > 50 {
-			t.Errorf("impostor %+v", l)
+		if l.conf > 50 {
+			t.Errorf("contested claim above 0.5: %+v", l)
 		}
 	}
+	/* the impostor gone: the genuine row is trusted again */
+	h.dropNb(a)
+	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "b", bIP)
+	h.build()
+	for _, l := range h.between(a, b) {
+		if l.ai == 1 && l.conf != 80 {
+			t.Errorf("genuine alone %+v", l)
+		}
+	}
+}
+
+/* Multi-hop: b's table learns a on its uplink port, and a's port 2 also learns another known device behind it: a claim naming that uplink gets nothing. */
+func TestSharedSegmentDoesNotCorroborate(t *testing.T) {
+	h := newHarness(t)
+	a, b, o, bIP := corrobSetup(h)
+	d, dIP := h.dev("d")
+	h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES ($1, $2::inet, '02:aa:00:00:00:0d', 1, now())`, o, dIP)
+	h.exec(`INSERT INTO inventory.mac_entry (device_id, mac, vlan, if_index, seen_at) VALUES ($1, '02:aa:00:00:00:0d', 1, 1, now())`, a)
+	/* a's port 1 now learns b and d: a shared segment */
+	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "b", bIP)
+	h.build()
+	if l := h.one(a, b); l.conf != 50 {
+		t.Errorf("shared segment %+v", l)
+	}
+	_ = d
 }
 
 /* An impostor announcing another device's address with b's chassis cannot poison or teach chassis ids. */
@@ -528,5 +561,56 @@ func TestNullPortRowsAreReconciled(t *testing.T) {
 	}
 	if ap, di := h.changes(a, b); ap != 0 || di != 0 {
 		t.Errorf("changes %d %d", ap, di)
+	}
+}
+
+/* Two mutual pairs announcing one chassis make it contested: it matches nobody. */
+func TestContestedChassisMatchesNobody(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	c, cIP := h.dev("c")
+	d, dIP := h.dev("d")
+	z, _ := h.dev("z")
+	h.nb(a, 1, "02:00:00:00:0b:0b", "g2", "b", bIP)
+	h.nb(b, 2, "02:00:00:00:0a:0a", "g1", "a", aIP)
+	h.nb(c, 1, "02:00:00:00:0b:0b", "g2", "d", dIP)
+	h.nb(d, 2, "02:00:00:00:0c:0c", "g1", "c", cIP)
+	h.nb(z, 1, "02:00:00:00:0b:0b", "g1", "n/a", "")
+	h.build()
+	for _, l := range h.links() {
+		if l.a == z || l.b == z {
+			t.Errorf("contested chassis matched: %+v", l)
+		}
+	}
+	if len(h.links()) != 2 {
+		t.Errorf("links %+v", h.links())
+	}
+	_, _ = b, d
+}
+
+/* A flood on one port does not push out genuine rows on other ports. */
+func TestFloodOnOnePortKeepsOtherPorts(t *testing.T) {
+	h := newHarness(t)
+	g, gIP := h.dev("g")
+	h.exec(`INSERT INTO inventory.interface SELECT $1, i, 'g' || i, '', 1000000000, true, now() FROM generate_series(5, 12) i`, g)
+	h.exec(`INSERT INTO inventory.lldp_neighbor (device_id, local_if_index, chassis_id, port_id, sys_name, mgmt_addr, seen_at)
+		SELECT $1, 1, 'c' || i, 'p' || i, 'n/a', NULL, now() FROM generate_series(1, 500) i`, g)
+	var peers []int64
+	for p := 2; p <= 10; p++ {
+		x, xIP := h.dev("peer")
+		peers = append(peers, x)
+		h.nb(g, p, "02:00:00:00:00:"+string(rune('a'+p)), "g1", "peer", xIP)
+		h.nb(x, 1, "02:00:00:00:ff:"+string(rune('a'+p)), "g"+string(rune('0'+p%10)), "g", gIP)
+	}
+	h.build()
+	for _, x := range peers {
+		if len(h.between(g, x)) != 1 {
+			t.Fatalf("link to %d lost: %+v", x, h.links())
+		}
+	}
+	/* the flooded port is not used for MAC inference either */
+	if len(h.links()) != len(peers) {
+		t.Errorf("links %+v", h.links())
 	}
 }

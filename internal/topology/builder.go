@@ -50,6 +50,9 @@ const fenceKey = lockKey + 1
 /* hardRowCap bounds the LLDP rows used per reporting device; a device is also limited to its interface count. */
 const hardRowCap = 4096
 
+/* maxPortRows is the most neighbours one port can report (a few, for a hub or a media converter chain). */
+const maxPortRows = 4
+
 const warnEvery = 10 * time.Minute
 
 // Config wires the builder to its dependencies.
@@ -66,8 +69,9 @@ type Builder struct {
 	log    *slog.Logger
 	reload chan struct{}
 
-	markers  map[int64]time.Time /* per missing link: newest inventory time already counted as a miss (see apply) */
-	lastWarn time.Time
+	markers   map[int64]time.Time /* per missing link: newest inventory time already counted as a miss (see apply) */
+	lastWarn  time.Time
+	lastSpoof time.Time
 }
 
 // New returns a builder over c.
@@ -203,6 +207,10 @@ func (b *Builder) Build(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if in.spoofs > 0 && b.clock.Now().Sub(b.lastSpoof) > warnEvery {
+		b.lastSpoof = b.clock.Now()
+		b.log.Warn("topology: several devices claim the same neighbour port, none is trusted", "claims", in.spoofs)
+	}
 	var res Result
 	markers := maps.Clone(b.markers)
 	err = pgx.BeginFunc(ctx, b.pool, func(tx pgx.Tx) error {
@@ -247,6 +255,7 @@ type inputs struct {
 	lldpPort map[ifKey]bool      /* ports with any LLDP row (raw local index) */
 	stations map[ifKey][]int64   /* port -> owners (known devices) of the MACs learned there */
 	live     map[int64]bool      /* device is up or partial under a fresh poller heartbeat */
+	spoofs   int                 /* one-sided claims on a target port that several rows name */
 	invAt    map[int64]time.Time /* newest seen_at of the device's interface and LLDP rows: when it was last polled */
 }
 
@@ -355,14 +364,35 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 		delete(in.portIf, k)
 	}
 
+	/* A port with more than maxPortRows neighbours is a hub or a flood: none of its rows is believed, and MAC inference skips it. */
+	var capped int
+	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index FROM inventory.lldp_neighbor GROUP BY device_id, local_if_index HAVING count(*) > $1`, maxPortRows)
+	if err != nil {
+		return nil, fmt.Errorf("lldp ports: %w", err)
+	}
+	for rows.Next() {
+		var k ifKey
+		if err := rows.Scan(&k.dev, &k.ifx); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		in.lldpPort[k] = true
+		capped++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	/* Per reporter the quietest ports come first, so a flood on one port cannot push out genuine rows on others. */
 	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at FROM (
-			SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY local_if_index, chassis_id, port_id) AS rn FROM inventory.lldp_neighbor) t
-		WHERE rn <= $1 ORDER BY device_id, local_if_index, chassis_id, port_id`, hardRowCap)
+			SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY pc, local_if_index, chassis_id, port_id) AS rn FROM (
+				SELECT *, count(*) OVER (PARTITION BY device_id, local_if_index) AS pc FROM inventory.lldp_neighbor) c
+			WHERE pc <= $2) t
+		WHERE rn <= $1 ORDER BY device_id, pc, local_if_index, chassis_id, port_id`, hardRowCap, maxPortRows)
 	if err != nil {
 		return nil, fmt.Errorf("lldp: %w", err)
 	}
 	perDev := map[int64]int{}
-	var capped int
 	for rows.Next() {
 		var r lldpRow
 		var mgmt *string
@@ -374,12 +404,12 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 		if seen.After(in.invAt[r.dev]) {
 			in.invAt[r.dev] = seen
 		}
+		in.lldpPort[ifKey{r.dev, r.rawIf}] = true
 		/* A reporter is believed on at most as many neighbours as it has interfaces (and hardRowCap). */
 		if perDev[r.dev]++; perDev[r.dev] > ifCount[r.dev] {
 			capped++
 			continue
 		}
-		in.lldpPort[ifKey{r.dev, r.rawIf}] = true
 		if len(r.chassis) > maxText || len(r.portID) > maxText || len(r.sysName) > maxText {
 			continue
 		}
@@ -401,9 +431,9 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 			capped++
 		}
 	}
-	if capped > 0 && time.Since(b.lastWarn) > warnEvery {
-		b.lastWarn = time.Now()
-		b.log.Warn("topology: LLDP rows beyond a device's interface count or the hard cap were ignored", "ignored_rows_or_devices", capped, "hard_cap", hardRowCap)
+	if capped > 0 && b.clock.Now().Sub(b.lastWarn) > warnEvery {
+		b.lastWarn = b.clock.Now()
+		b.log.Warn("topology: LLDP rows were ignored (flooded port, beyond a device's interface count, or the hard cap)", "ignored", capped, "hard_cap", hardRowCap)
 	}
 
 	/*

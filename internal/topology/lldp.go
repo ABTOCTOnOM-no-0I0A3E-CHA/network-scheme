@@ -257,17 +257,38 @@ func pairing(ctx context.Context, cs []cand) (partner []int, strong, dropped []b
 	return partner, strong, dropped, nil
 }
 
-/* corroborated: the neighbour's own MAC table learns the reporter's MAC on the port the row names, which the reporter does not control. */
-func corroborated(in *inputs, c cand) bool {
-	if c.method != byAddr || c.remote == 0 {
-		return false
+/* sole returns the one device all owners agree on. */
+func sole(owners []int64) (int64, bool) {
+	if len(owners) == 0 {
+		return 0, false
 	}
-	for _, o := range in.stations[ifKey{c.target, c.remote}] {
-		if o == c.row.dev {
-			return true
+	for _, o := range owners[1:] {
+		if o != owners[0] {
+			return 0, false
 		}
 	}
-	return false
+	return owners[0], true
+}
+
+/*
+corroborated: data the reporter A does not control confirm a one-sided address
+claim about B. B's own MAC table must learn A (and only A among known devices)
+on the B port the row names, and A's own table must learn B (and only B) on the
+A port the row arrived on. MAC learning moves a MAC to one port per VLAN, so an
+impostor on another A port cannot satisfy the second condition, and a shared
+segment or uplink (more than one known device behind the port) corroborates
+nothing.
+*/
+func corroborated(in *inputs, c cand) bool {
+	if c.method != byAddr || c.remote == 0 || c.row.ifx == 0 {
+		return false
+	}
+	o, ok := sole(in.stations[ifKey{c.target, c.remote}])
+	if !ok || o != c.row.dev {
+		return false
+	}
+	o, ok = sole(in.stations[ifKey{c.row.dev, c.row.ifx}])
+	return ok && o == c.target
 }
 
 /*
@@ -298,6 +319,13 @@ func derive(ctx context.Context, in *inputs) ([]link, error) {
 		}
 		if !changed {
 			break
+		}
+	}
+	/* A target port named by several one-sided rows is contested: none of them is corroborated (the genuine one included, until the claims stop). */
+	claims := map[ifKey]int{}
+	for i, c := range cs {
+		if !dropped[i] && partner[i] < 0 && c.remote != 0 {
+			claims[ifKey{c.target, c.remote}]++
 		}
 	}
 	best := map[linkKey]link{}
@@ -334,7 +362,11 @@ func derive(ctx context.Context, in *inputs) ([]link, error) {
 		}
 		var conf int32 = confWeak
 		if corroborated(in, c) {
-			conf = confAddr
+			if claims[ifKey{c.target, c.remote}] == 1 {
+				conf = confAddr
+			} else {
+				in.spoofs++
+			}
 		}
 		put(canon(c.row.dev, c.row.ifx, c.target, c.remote, sourceLLDP, conf))
 	}

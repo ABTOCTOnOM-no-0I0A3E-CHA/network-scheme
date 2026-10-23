@@ -8,18 +8,18 @@ import (
 	"github.com/beekamai/network-scheme/internal/topology"
 )
 
-/* One device reporting 200 000 neighbours that all name b: the build stays bounded, keeps at most 64 links for the pair, and stops on cancel. */
+/* One device reporting 220 000 neighbours that all name b: the build stays bounded, keeps at most 64 links for the pair, and stops on cancel. */
 func TestHostileInventoryIsBounded(t *testing.T) {
 	h := newHarness(t)
 	x, _ := h.dev("x")
 	b, _ := h.dev("b")
 	h.exec(`INSERT INTO inventory.interface SELECT $1, i, 'g' || i, '', 1000000000, true, now() FROM generate_series(5, 5000) i`, x)
 	h.exec(`INSERT INTO inventory.lldp_neighbor (device_id, local_if_index, chassis_id, port_id, sys_name, mgmt_addr, seen_at)
-		SELECT $1, 1 + i % 5000, 'c' || i, 'p' || i, 'b', NULL, now() FROM generate_series(1, 200000) i`, x)
+		SELECT $1, CASE WHEN i <= 200000 THEN 1 ELSE 1 + i % 5000 END, 'c' || i, 'p' || i, 'b', NULL, now() FROM generate_series(1, 220000) i`, x)
 	start := time.Now()
 	h.build()
 	d := time.Since(start)
-	t.Logf("200000 LLDP rows from one device: build %v", d)
+	t.Logf("220000 LLDP rows from one device (200000 on one port): build %v", d)
 	if n := len(h.between(x, b)); n == 0 || n > 64 {
 		t.Errorf("links %d", n)
 	}
