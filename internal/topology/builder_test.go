@@ -35,7 +35,7 @@ func TestManagementAddressResolution(t *testing.T) {
 	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "whatever-the-box-calls-itself", bIP)
 	h.build()
 	l := h.one(a, b)
-	if ai, bi := l.ports(a); l.conf != 80 || ai != 1 || bi != 3 {
+	if ai, bi := l.ports(a); l.conf != 50 || ai != 1 || bi != 3 {
 		t.Errorf("link %+v", l)
 	}
 	/* an address of no known device matches nothing */
@@ -67,14 +67,15 @@ func TestSysNameOnlyIsWeakAndAmbiguousNamesMatchNothing(t *testing.T) {
 	}
 }
 
-/* Chassis ids are learned only from what other devices report, matched by address. */
-func TestChassisLearnedFromOthers(t *testing.T) {
+/* Chassis ids are learned only from rows the other side confirmed. */
+func TestChassisLearnedFromConfirmedRows(t *testing.T) {
 	h := newHarness(t)
 	a, _ := h.dev("a")
 	b, bIP := h.dev("b")
-	c, _ := h.dev("c")
-	/* c sees b by its address and chassis X */
-	h.nb(c, 1, "02:00:00:00:0b:0b", "g1", "b", bIP)
+	c, cIP := h.dev("c")
+	/* c and b confirm each other; c's row teaches chassis X = b */
+	h.nb(c, 1, "02:00:00:00:0b:0b", "g2", "b", bIP)
+	h.nb(b, 2, "02:00:00:00:0c:0c", "g1", "c", cIP)
 	/* a sees only chassis X, under a name that matches nothing */
 	h.nb(a, 1, "02:00:00:00:0B:0B", "g1", "something", "")
 	h.build()
@@ -82,7 +83,7 @@ func TestChassisLearnedFromOthers(t *testing.T) {
 	if l.conf != 50 {
 		t.Errorf("chassis-only confidence %d", l.conf)
 	}
-	if got := h.one(b, c); got.conf != 80 {
+	if got := h.one(b, c); got.conf != 100 {
 		t.Errorf("c-b %+v", got)
 	}
 	/* an unknown chassis matches nothing */
@@ -90,6 +91,58 @@ func TestChassisLearnedFromOthers(t *testing.T) {
 	h.build()
 	if got := len(h.links()); got != 2 {
 		t.Errorf("links %+v", h.links())
+	}
+}
+
+/* A one-sided address claim is 0.5 until the neighbour's own MAC table learns the reporter on the port it names. */
+func TestAddressClaimCorroboratedByNeighbourTable(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	o, _ := h.dev("o")
+	h.nb(a, 1, "02:00:00:00:00:0b", "g3", "b", bIP)
+	/* a third device knows a's MAC; b's table has it on g3 */
+	h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES ($1, $2::inet, '02:aa:00:00:00:0a', 1, now())`, o, aIP)
+	h.exec(`INSERT INTO inventory.mac_entry (device_id, mac, vlan, if_index, seen_at) VALUES ($1, '02:aa:00:00:00:0a', 1, 3, now())`, b)
+	h.build()
+	if l := h.one(a, b); l.conf != 80 {
+		t.Errorf("corroborated %+v", l)
+	}
+	/* an impostor on a:2 announcing b's address while b does not see a there stays at 0.5 */
+	h.nb(a, 2, "02:00:00:00:66:66", "g4", "x", bIP)
+	h.build()
+	for _, l := range h.between(a, b) {
+		if ai, _ := l.ports(a); ai == 2 && l.conf > 50 {
+			t.Errorf("impostor %+v", l)
+		}
+	}
+}
+
+/* An impostor announcing another device's address with b's chassis cannot poison or teach chassis ids. */
+func TestUnconfirmedRowsDoNotPoisonChassis(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	d, dIP := h.dev("d")
+	z, _ := h.dev("z")
+	/* b and a confirm each other: chassis X belongs to b */
+	h.nb(a, 1, "02:00:00:00:0b:0b", "g2", "b", bIP)
+	h.nb(b, 2, "02:00:00:00:0a:0a", "g1", "a", aIP)
+	/* an impostor on a:3 announces d's address with chassis X */
+	h.nb(a, 3, "02:00:00:00:0b:0b", "g1", "imp", dIP)
+	/* z sees chassis X without an address */
+	h.nb(z, 1, "02:00:00:00:0b:0b", "g1", "n/a", "")
+	h.build()
+	for _, l := range h.links() {
+		if l.a == d || l.b == d {
+			t.Errorf("impostor linked to d: %+v", l)
+		}
+	}
+	if l := h.one(a, b); l.conf != 100 {
+		t.Errorf("genuine link %+v", l)
+	}
+	if l := h.one(z, b); l.conf != 50 {
+		t.Errorf("chassis still resolves to b: %+v", l)
 	}
 }
 
@@ -298,7 +351,7 @@ func TestManualLinkSurvivesAndSuppresses(t *testing.T) {
 	}
 }
 
-/* An automatic link that a person then draws by hand is replaced by the manual one without a disappearance record. */
+/* An automatic link that a person then draws by hand is replaced by the manual one, with a disappearance record. */
 func TestManualSupersedesExistingAutomatic(t *testing.T) {
 	h := newHarness(t)
 	a, aIP := h.dev("a")
@@ -306,14 +359,58 @@ func TestManualSupersedesExistingAutomatic(t *testing.T) {
 	h.nb(a, 1, "02:00:00:00:00:0b", "g2", "b", bIP)
 	h.nb(b, 2, "02:00:00:00:00:0a", "g1", "a", aIP)
 	h.build()
-	h.exec(`DELETE FROM core.link`)
-	h.exec(`INSERT INTO core.link (a_device_id, a_if_index, b_device_id, b_if_index, source, confidence, manual) VALUES ($1, 1, $2, 2, 'manual', 1, true)`, a, b)
+	h.exec(`INSERT INTO core.link (a_device_id, a_if_index, b_device_id, b_if_index, source, confidence, manual) VALUES ($1, 1, $2, NULL, 'manual', 1, true)`, a, b)
 	h.build()
 	if l := h.one(a, b); !l.manual {
 		t.Errorf("%+v", l)
 	}
-	if ap, di := h.changes(a, b); ap != 1 || di != 0 {
+	if ap, di := h.changes(a, b); ap != 1 || di != 1 {
 		t.Errorf("changes %d %d", ap, di)
+	}
+}
+
+/* A manual link with unknown ports is a wildcard only for a pair with one automatic link; parallel cables are not hidden. */
+func TestManualWildcardDoesNotHideParallelLinks(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	h.exec(`INSERT INTO core.link (a_device_id, a_if_index, b_device_id, b_if_index, source, confidence, manual) VALUES ($1, NULL, $2, NULL, 'manual', 1, true)`, a, b)
+	h.nb(a, 1, "02:00:00:00:00:0b", "g1", "b", bIP)
+	h.nb(b, 1, "02:00:00:00:00:0a", "g1", "a", aIP)
+	h.build()
+	if got := len(h.between(a, b)); got != 1 {
+		t.Fatalf("single cable not suppressed: %+v", h.links())
+	}
+	h.nb(a, 2, "02:00:00:00:00:0b", "g2", "b", bIP)
+	h.nb(b, 2, "02:00:00:00:00:0a", "g2", "a", aIP)
+	h.build()
+	if got := len(h.between(a, b)); got != 3 {
+		t.Errorf("parallel cables hidden: %+v", h.links())
+	}
+}
+
+/* Misses count inventory refreshes, not builds. */
+func TestNoMissesWithoutNewInventory(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	h.nb(a, 1, "02:00:00:00:00:0b", "g2", "b", bIP)
+	h.nb(b, 2, "02:00:00:00:00:0a", "g1", "a", aIP)
+	h.build()
+	h.dropNb(a)
+	h.dropNb(b)
+	h.refresh()
+	h.buildStale() /* the one refresh counts once */
+	for i := 0; i < 6; i++ {
+		h.buildStale()
+	}
+	if l := h.one(a, b); l.misses != 1 {
+		t.Fatalf("misses %d after builds without a poll", l.misses)
+	}
+	h.build()
+	h.build()
+	if got := len(h.between(a, b)); got != 0 {
+		t.Errorf("not gone after three refreshed inventories: %+v", h.links())
 	}
 }
 
@@ -347,8 +444,8 @@ func TestMACInference(t *testing.T) {
 		h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES ($1, $2::inet, $3::macaddr, 1, now())`, dev, ip, m)
 	}
 	/* ARP tables of the core and a host teach the device MACs */
-	arp(core, swIP, "02:aa:00:00:00:02")
-	arp(sw, coreIP, "02:aa:00:00:00:01")
+	arp(other, swIP, "02:aa:00:00:00:02")
+	arp(other, coreIP, "02:aa:00:00:00:01")
 	arp(sw, otherIP, "02:aa:00:00:00:03")
 	/* sw: uplink g1 sees the core; hosts on g2 and g3 */
 	mac(sw, 1, "02:aa:00:00:00:01")
@@ -375,6 +472,19 @@ func TestMACInference(t *testing.T) {
 	h.build()
 	if l := h.one(core, sw); l.misses != 1 {
 		t.Errorf("mac link still confirmed on an LLDP port: %+v", l)
+	}
+}
+
+/* A device's own ARP table cannot define the MAC another device is recognised by. */
+func TestMACInferenceIgnoresEndsOwnARP(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	h.exec(`INSERT INTO inventory.arp_entry (device_id, ip, mac, if_index, seen_at) VALUES ($1, $2::inet, '02:dd:00:00:00:01', 1, now()), ($3, $4::inet, '02:dd:00:00:00:02', 1, now())`, a, bIP, b, aIP)
+	h.exec(`INSERT INTO inventory.mac_entry (device_id, mac, vlan, if_index, seen_at) VALUES ($1, '02:dd:00:00:00:01', 1, 1, now()), ($2, '02:dd:00:00:00:02', 1, 1, now())`, a, b)
+	h.build()
+	if got := len(h.links()); got != 0 {
+		t.Errorf("links %+v", h.links())
 	}
 }
 

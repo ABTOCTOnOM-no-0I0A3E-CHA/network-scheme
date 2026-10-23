@@ -1,15 +1,27 @@
 package topology
 
-import "sort"
+import (
+	"context"
+	"sort"
+)
 
-/* Confidence of a link by the strongest evidence behind it (percent; core.link stores it as 0..1). */
+/*
+Confidence of a link by the strongest evidence behind it (percent; core.link
+stores it as 0..1). Only data the reporting device does not control alone can
+lift a one-sided link above 0.5.
+*/
 const (
-	confMutual = 100 /* both sides report each other and their ports agree */
-	confAddr   = 80  /* one side, the neighbour's management address is a known device */
-	confWeak   = 50  /* one side, chassis or sys_name only: a spoofer can say both */
+	confMutual = 100 /* both sides report each other and at least one port name agrees */
+	confAddr   = 80  /* one side by management address, and the neighbour's own MAC table learns the reporter on the port it names */
+	confWeak   = 50  /* one side only, or only chassis / sys_name: a spoofer can say all of that */
 	confMAC    = 40
 	sourceLLDP = "lldp"
 	sourceMAC  = "mac"
+
+	/* confUnproven is a pair that reports each other but gives no port name that agrees: not proof, so below 1.0. */
+	confUnproven = 80
+	/* maxPairLinks bounds the links kept per device pair. */
+	maxPairLinks = 64
 )
 
 type method int
@@ -45,6 +57,14 @@ func canon(x int64, xi int32, y int64, yi int32, source string, conf int32) link
 	return link{a: x, ai: xi, b: y, bi: yi, source: source, conf: conf}
 }
 
+/* stop checks the context every 1024th call, so long loops end soon after the build timeout. */
+func stop(ctx context.Context, i int) error {
+	if i&1023 == 0 {
+		return ctx.Err()
+	}
+	return nil
+}
+
 /* cand is an LLDP row matched to a known device. */
 type cand struct {
 	row    *lldpRow
@@ -59,15 +79,18 @@ rows whose evidence contradicts itself:
 
  1. The neighbour's management address is the address of exactly one device.
  2. The neighbour's chassis id is a chassis learned for exactly one device
-    (chassisOf; learned only from what other devices report, see derive).
+    (chassisOf; learned only from rows the other side confirmed, see derive).
  3. The neighbour's sys_name is the name of exactly one device.
 
 A row where two rules point at different devices is a spoofing signal and is
 dropped. A device never matches itself.
 */
-func matchRows(in *inputs, chassisOf map[string]int64) []cand {
+func matchRows(ctx context.Context, in *inputs, chassisOf map[string]int64) ([]cand, error) {
 	out := make([]cand, 0, len(in.lldp))
 	for i := range in.lldp {
+		if err := stop(ctx, i); err != nil {
+			return nil, err
+		}
 		r := &in.lldp[i]
 		var t1, tn int64
 		if r.mgmt.IsValid() {
@@ -100,7 +123,7 @@ func matchRows(in *inputs, chassisOf map[string]int64) []cand {
 		}
 		out = append(out, cand{row: r, target: t, method: m, remote: in.portIf[textKey{t, r.portID}]})
 	}
-	return out
+	return out, nil
 }
 
 /* learn records that chassis belongs to dev; a chassis claimed for two devices becomes contested (-1) for good. */
@@ -125,18 +148,20 @@ each other if their ports agree:
   - each side's port_id, when it names exactly one interface of the other
     device, must not name a different one than the row on that device reports
     as its local port;
-  - at least one such name must positively agree (strong), or the pair must be
-    the only rows between the two devices in both directions and both rows must
-    be matched by address or chassis (a name alone is not enough).
+  - strong: at least one such name positively agrees. Otherwise (weak) the pair
+    must be the only rows between the two devices in both directions and both
+    rows must be matched by address or chassis (a name alone is not enough).
 
-partner[i] is the confirming row of row i (-1: none). dropped[i] is set for a
-row nobody confirms while the other device does report on the same pair but
-only through other ports: that row contradicts the other device's table and
-is discarded (this is what stops a spoofer on one port from riding on the real
-device's reports on another).
+partner[i] is the confirming row of row i (-1: none); strong[i] tells whether
+the pair has port proof. dropped[i] is set for a row nobody confirms while the
+other device does report on the same pair but only through other ports: that
+row contradicts the other device's table and is discarded (this is what stops
+a spoofer on one port from riding on the real device's reports on another).
+The work is bounded by the per-reporter row cap of load.
 */
-func pairing(cs []cand) (partner []int, dropped []bool) {
+func pairing(ctx context.Context, cs []cand) (partner []int, strong, dropped []bool, err error) {
 	partner = make([]int, len(cs))
+	strong = make([]bool, len(cs))
 	dropped = make([]bool, len(cs))
 	for i := range partner {
 		partner[i] = -1
@@ -168,15 +193,41 @@ func pairing(cs []cand) (partner []int, dropped []bool) {
 		}
 		return true, (x != 0 && x == ifA) || (y != 0 && y == ifB)
 	}
+	n := 0
 	for _, g := range groups {
-		for _, i := range g.lo {
-			for _, j := range g.hi {
-				if partner[j] >= 0 || partner[i] >= 0 {
+		if err := stop(ctx, n); err != nil {
+			return nil, nil, nil, err
+		}
+		n++
+		/* strong pairs are found through indexes on the ports the rows name, not by comparing all rows */
+		hiByIf, hiByRemote := map[int32][]int{}, map[int32][]int{}
+		for _, j := range g.hi {
+			if cs[j].row.ifx != 0 {
+				hiByIf[cs[j].row.ifx] = append(hiByIf[cs[j].row.ifx], j)
+			}
+			if cs[j].remote != 0 {
+				hiByRemote[cs[j].remote] = append(hiByRemote[cs[j].remote], j)
+			}
+		}
+		try := func(i int, js []int) bool {
+			for _, j := range js {
+				if partner[j] >= 0 {
 					continue
 				}
-				if ok, strong := compat(cs[i], cs[j]); ok && strong {
+				if ok, st := compat(cs[i], cs[j]); ok && st {
 					partner[i], partner[j] = j, i
+					strong[i], strong[j] = true, true
+					return true
 				}
+			}
+			return false
+		}
+		for _, i := range g.lo {
+			if cs[i].row.ifx != 0 && try(i, hiByRemote[cs[i].row.ifx]) {
+				continue
+			}
+			if cs[i].remote != 0 {
+				try(i, hiByIf[cs[i].remote])
 			}
 		}
 		if len(g.lo) == 1 && len(g.hi) == 1 {
@@ -203,30 +254,45 @@ func pairing(cs []cand) (partner []int, dropped []bool) {
 		contradicted(g.lo, g.hi)
 		contradicted(g.hi, g.lo)
 	}
-	return partner, dropped
+	return partner, strong, dropped, nil
+}
+
+/* corroborated: the neighbour's own MAC table learns the reporter's MAC on the port the row names, which the reporter does not control. */
+func corroborated(in *inputs, c cand) bool {
+	if c.method != byAddr || c.remote == 0 {
+		return false
+	}
+	for _, o := range in.stations[ifKey{c.target, c.remote}] {
+		if o == c.row.dev {
+			return true
+		}
+	}
+	return false
 }
 
 /*
 derive computes the links the inventory supports. The chassis -> device map is
-learned only from other devices' reports: from rows matched by management
-address, and from rows confirmed by the other side. Matching is repeated while
-that map grows (at most three rounds), because a newly learned chassis can
-match more rows.
+learned only from rows the other side confirmed with port proof (mutual
+pairs): a chassis claimed on an unconfirmed row teaches nothing, so a spoofer
+cannot poison it. Matching is repeated while the map grows (at most three
+rounds), because a newly learned chassis can match more rows.
 */
-func derive(in *inputs) []link {
+func derive(ctx context.Context, in *inputs) ([]link, error) {
 	chassisOf := map[string]int64{}
 	var cs []cand
 	var partner []int
-	var dropped []bool
+	var strong, dropped []bool
 	for round := 0; round < 3; round++ {
-		cs = matchRows(in, chassisOf)
-		partner, dropped = pairing(cs)
+		var err error
+		if cs, err = matchRows(ctx, in, chassisOf); err != nil {
+			return nil, err
+		}
+		if partner, strong, dropped, err = pairing(ctx, cs); err != nil {
+			return nil, err
+		}
 		changed := false
 		for i, c := range cs {
-			if c.method == byAddr && !dropped[i] {
-				changed = learn(chassisOf, c.row.chassis, c.target) || changed
-			}
-			if partner[i] >= 0 {
+			if partner[i] >= 0 && strong[i] && !dropped[i] {
 				changed = learn(chassisOf, c.row.chassis, c.target) || changed
 			}
 		}
@@ -241,6 +307,9 @@ func derive(in *inputs) []link {
 		}
 	}
 	for i, c := range cs {
+		if err := stop(ctx, i); err != nil {
+			return nil, err
+		}
 		if dropped[i] {
 			continue
 		}
@@ -256,11 +325,15 @@ func derive(in *inputs) []link {
 			if bi == 0 {
 				bi = c.remote
 			}
-			put(canon(c.row.dev, ai, c.target, bi, sourceLLDP, confMutual))
+			conf := int32(confUnproven)
+			if strong[i] {
+				conf = confMutual
+			}
+			put(canon(c.row.dev, ai, c.target, bi, sourceLLDP, conf))
 			continue
 		}
 		var conf int32 = confWeak
-		if c.method == byAddr {
+		if corroborated(in, c) {
 			conf = confAddr
 		}
 		put(canon(c.row.dev, c.row.ifx, c.target, c.remote, sourceLLDP, conf))
@@ -272,7 +345,38 @@ func derive(in *inputs) []link {
 	for _, l := range best {
 		out = append(out, l)
 	}
-	out = mergeNull(out)
+	out, err := mergeNull(ctx, out)
+	if err != nil {
+		return nil, err
+	}
+	return capPairs(out), nil
+}
+
+/* capPairs keeps the maxPairLinks strongest links per device pair and sorts the result. */
+func capPairs(ls []link) []link {
+	sort.Slice(ls, func(i, j int) bool {
+		x, y := ls[i], ls[j]
+		if x.a != y.a {
+			return x.a < y.a
+		}
+		if x.b != y.b {
+			return x.b < y.b
+		}
+		if x.conf != y.conf {
+			return x.conf > y.conf
+		}
+		return lessKey(x.key(), y.key())
+	})
+	out := make([]link, 0, len(ls))
+	n := 0
+	for i, l := range ls {
+		if i == 0 || l.a != ls[i-1].a || l.b != ls[i-1].b {
+			n = 0
+		}
+		if n++; n <= maxPairLinks {
+			out = append(out, l)
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return lessKey(out[i].key(), out[j].key()) })
 	return out
 }

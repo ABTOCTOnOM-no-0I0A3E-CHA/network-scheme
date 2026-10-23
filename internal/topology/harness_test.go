@@ -101,7 +101,24 @@ func (h *harness) up(down ...int64) {
 		ON CONFLICT (device_id) DO UPDATE SET state = EXCLUDED.state`, down)
 }
 
+/* refresh stands for a poll of every device that is not down: the inventory carries a newer seen_at. */
+func (h *harness) refresh(down ...int64) {
+	h.t.Helper()
+	h.up(down...)
+	if down == nil {
+		down = []int64{} /* NULL would match nothing */
+	}
+	h.exec(`UPDATE inventory.interface SET seen_at = clock_timestamp() WHERE device_id <> ALL($1)`, down)
+}
+
+/* build polls (refresh) and builds; buildStale builds over the same inventory. */
 func (h *harness) build(down ...int64) topology.Result {
+	h.t.Helper()
+	h.refresh(down...)
+	return h.buildStale(down...)
+}
+
+func (h *harness) buildStale(down ...int64) topology.Result {
 	h.t.Helper()
 	h.up(down...)
 	h.clk.Advance(time.Minute)

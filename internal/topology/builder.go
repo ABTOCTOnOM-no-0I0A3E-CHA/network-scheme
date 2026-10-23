@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"strings"
@@ -43,6 +44,14 @@ const (
 /* lockKey is the advisory lock of the topology builder; it differs from the trigger engine's key. */
 const lockKey int64 = 0x6e6d73746f706f
 
+/* fenceKey is taken (transaction-level, try) by every write transaction: a build that runs outside Run's lock never overlaps another. */
+const fenceKey = lockKey + 1
+
+/* hardRowCap bounds the LLDP rows used per reporting device; a device is also limited to its interface count. */
+const hardRowCap = 4096
+
+const warnEvery = 10 * time.Minute
+
 // Config wires the builder to its dependencies.
 type Config struct {
 	Pool  *pgxpool.Pool
@@ -56,11 +65,14 @@ type Builder struct {
 	clock  Clock
 	log    *slog.Logger
 	reload chan struct{}
+
+	markers  map[int64]time.Time /* per missing link: newest inventory time already counted as a miss (see apply) */
+	lastWarn time.Time
 }
 
 // New returns a builder over c.
 func New(c Config) *Builder {
-	b := &Builder{pool: c.Pool, clock: c.Clock, log: c.Log, reload: make(chan struct{}, 1)}
+	b := &Builder{pool: c.Pool, clock: c.Clock, log: c.Log, reload: make(chan struct{}, 1), markers: map[int64]time.Time{}}
 	if b.clock == nil {
 		b.clock = realClock{}
 	}
@@ -177,17 +189,30 @@ reconciles core.link (and core.link_change) with them in one transaction. It
 takes no lock itself; Run does.
 */
 func (b *Builder) Build(ctx context.Context) (Result, error) {
-	in, err := load(ctx, b.pool)
+	/* One snapshot for all reads: the inventory the links are derived from is consistent. */
+	rtx, err := b.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Result{}, err
 	}
-	want := derive(in)
+	in, err := b.load(ctx, rtx)
+	_ = rtx.Rollback(context.WithoutCancel(ctx))
+	if err != nil {
+		return Result{}, err
+	}
+	want, err := derive(ctx, in)
+	if err != nil {
+		return Result{}, err
+	}
 	var res Result
+	markers := maps.Clone(b.markers)
 	err = pgx.BeginFunc(ctx, b.pool, func(tx pgx.Tx) error {
 		var err error
-		res, err = apply(ctx, tx, in, want, b.clock.Now())
+		res, err = apply(ctx, tx, in, want, b.clock.Now(), markers)
 		return err
 	})
+	if err == nil {
+		b.markers = markers
+	}
 	return res, err
 }
 
@@ -219,9 +244,10 @@ type inputs struct {
 	ifaces   map[ifKey]bool
 	portIf   map[textKey]int32 /* interface name/alias/ifindex text -> ifindex; absent when ambiguous */
 	lldp     []lldpRow
-	lldpPort map[ifKey]bool    /* ports with any LLDP row (raw local index) */
-	stations map[ifKey][]int64 /* port -> owners (known devices) of the MACs learned there */
-	live     map[int64]bool    /* device is up or partial under a fresh poller heartbeat */
+	lldpPort map[ifKey]bool      /* ports with any LLDP row (raw local index) */
+	stations map[ifKey][]int64   /* port -> owners (known devices) of the MACs learned there */
+	live     map[int64]bool      /* device is up or partial under a fresh poller heartbeat */
+	invAt    map[int64]time.Time /* newest seen_at of the device's interface and LLDP rows: when it was last polled */
 }
 
 func normAddr(s string) netip.Addr {
@@ -243,9 +269,14 @@ func normChassis(s string) string {
 
 const maxText = 255 /* longer device-supplied strings are ignored */
 
-func load(ctx context.Context, pool *pgxpool.Pool) (*inputs, error) {
+/* querier is a transaction (or pool) the inventory is read through. */
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 	in := &inputs{devName: map[int64]string{}, byAddr: map[netip.Addr]int64{}, byName: map[string]int64{},
-		ifaces: map[ifKey]bool{}, portIf: map[textKey]int32{}, lldpPort: map[ifKey]bool{}, stations: map[ifKey][]int64{}, live: map[int64]bool{}}
+		ifaces: map[ifKey]bool{}, portIf: map[textKey]int32{}, lldpPort: map[ifKey]bool{}, stations: map[ifKey][]int64{}, live: map[int64]bool{}, invAt: map[int64]time.Time{}}
 	rows, err := pool.Query(ctx, `SELECT id, name, host(address) FROM core.device`)
 	if err != nil {
 		return nil, fmt.Errorf("devices: %w", err)
@@ -281,11 +312,12 @@ func load(ctx context.Context, pool *pgxpool.Pool) (*inputs, error) {
 		}
 	}
 
-	rows, err = pool.Query(ctx, `SELECT device_id, if_index, name, alias FROM inventory.interface`)
+	rows, err = pool.Query(ctx, `SELECT device_id, if_index, name, alias, seen_at FROM inventory.interface`)
 	if err != nil {
 		return nil, fmt.Errorf("interfaces: %w", err)
 	}
 	ambiguous := map[textKey]bool{}
+	ifCount := map[int64]int{}
 	add := func(dev int64, text string, ifx int32) {
 		if text == "" || len(text) > maxText {
 			return
@@ -301,11 +333,16 @@ func load(ctx context.Context, pool *pgxpool.Pool) (*inputs, error) {
 		var dev int64
 		var ifx int32
 		var name, alias string
-		if err := rows.Scan(&dev, &ifx, &name, &alias); err != nil {
+		var seen time.Time
+		if err := rows.Scan(&dev, &ifx, &name, &alias, &seen); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		in.ifaces[ifKey{dev, ifx}] = true
+		ifCount[dev]++
+		if seen.After(in.invAt[dev]) {
+			in.invAt[dev] = seen
+		}
 		add(dev, name, ifx)
 		add(dev, alias, ifx)
 		add(dev, fmt.Sprint(ifx), ifx)
@@ -318,16 +355,29 @@ func load(ctx context.Context, pool *pgxpool.Pool) (*inputs, error) {
 		delete(in.portIf, k)
 	}
 
-	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr) FROM inventory.lldp_neighbor ORDER BY device_id, local_if_index, chassis_id, port_id`)
+	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at FROM (
+			SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY local_if_index, chassis_id, port_id) AS rn FROM inventory.lldp_neighbor) t
+		WHERE rn <= $1 ORDER BY device_id, local_if_index, chassis_id, port_id`, hardRowCap)
 	if err != nil {
 		return nil, fmt.Errorf("lldp: %w", err)
 	}
+	perDev := map[int64]int{}
+	var capped int
 	for rows.Next() {
 		var r lldpRow
 		var mgmt *string
-		if err := rows.Scan(&r.dev, &r.rawIf, &r.chassis, &r.portID, &r.sysName, &mgmt); err != nil {
+		var seen time.Time
+		if err := rows.Scan(&r.dev, &r.rawIf, &r.chassis, &r.portID, &r.sysName, &mgmt, &seen); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if seen.After(in.invAt[r.dev]) {
+			in.invAt[r.dev] = seen
+		}
+		/* A reporter is believed on at most as many neighbours as it has interfaces (and hardRowCap). */
+		if perDev[r.dev]++; perDev[r.dev] > ifCount[r.dev] {
+			capped++
+			continue
 		}
 		in.lldpPort[ifKey{r.dev, r.rawIf}] = true
 		if len(r.chassis) > maxText || len(r.portID) > maxText || len(r.sysName) > maxText {
@@ -346,23 +396,36 @@ func load(ctx context.Context, pool *pgxpool.Pool) (*inputs, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	for _, n := range perDev {
+		if n >= hardRowCap {
+			capped++
+		}
+	}
+	if capped > 0 && time.Since(b.lastWarn) > warnEvery {
+		b.lastWarn = time.Now()
+		b.log.Warn("topology: LLDP rows beyond a device's interface count or the hard cap were ignored", "ignored_rows_or_devices", capped, "hard_cap", hardRowCap)
+	}
 
 	/*
 		Device MACs come from ARP entries whose IP is a device address. A device
 		counts only if its address maps to exactly one MAC, and a MAC only if it
 		maps to exactly one device: a conflict (spoofed ARP, shared address) is
-		not evidence.
+		not evidence. A device's MAC is believed for a station on A or B's ports
+		only if some device other than A and B reports it: neither end can
+		choose the MAC the other is recognised by.
 	*/
 	rows, err = pool.Query(ctx, `
 WITH own AS (
-    SELECT a.mac, d.id AS dev FROM inventory.arp_entry a
-    JOIN core.device d ON d.address = set_masklen(a.ip, masklen(d.address))
-    GROUP BY a.mac, d.id),
+    SELECT DISTINCT a.mac, d.id AS dev, a.device_id AS reporter FROM inventory.arp_entry a
+    JOIN core.device d ON d.address = set_masklen(a.ip, masklen(d.address))),
+pm AS (SELECT DISTINCT mac, dev FROM own),
 good AS (
-    SELECT mac, dev FROM own
-    WHERE dev IN (SELECT dev FROM own GROUP BY dev HAVING count(*) = 1)
-      AND mac IN (SELECT mac FROM own GROUP BY mac HAVING count(*) = 1))
-SELECT DISTINCT m.device_id, m.if_index, g.dev FROM inventory.mac_entry m JOIN good g ON g.mac = m.mac WHERE g.dev <> m.device_id`)
+    SELECT mac, dev FROM pm
+    WHERE dev IN (SELECT dev FROM pm GROUP BY dev HAVING count(*) = 1)
+      AND mac IN (SELECT mac FROM pm GROUP BY mac HAVING count(*) = 1))
+SELECT DISTINCT m.device_id, m.if_index, g.dev FROM inventory.mac_entry m JOIN good g ON g.mac = m.mac
+WHERE g.dev <> m.device_id
+  AND EXISTS (SELECT 1 FROM own o WHERE o.mac = g.mac AND o.dev = g.dev AND o.reporter <> m.device_id AND o.reporter <> g.dev)`)
 	if err != nil {
 		return nil, fmt.Errorf("stations: %w", err)
 	}

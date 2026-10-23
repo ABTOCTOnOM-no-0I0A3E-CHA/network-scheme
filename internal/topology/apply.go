@@ -28,21 +28,37 @@ func specificity(l link) int {
 	return n
 }
 
+type portKey struct {
+	a, b int64
+	p    int32
+}
+
 /*
 mergeNull makes sure one cable is one link. A link with an unknown port that
 can be the same cable as a more specific link between the same devices (a MAC
 inference (A,1,B,NULL) next to LLDP (A,1,B,2)) is folded into it: the specific
-ports win and the stronger evidence (confidence and source) is kept.
+ports win and, when there is exactly one such link, the stronger evidence
+(confidence and source) is kept; with several candidates the link is subsumed
+by them all and simply dropped. Candidates are found through indexes on the
+known port, so the work is linear in the number of links (a link with both
+ports unknown is compared with its pair once).
 */
-func mergeNull(ls []link) []link {
+func mergeNull(ctx context.Context, ls []link) ([]link, error) {
 	byPair := map[[2]int64][]int{}
+	byA, byB := map[portKey][]int{}, map[portKey][]int{} /* fully specific links by either port */
 	for i, l := range ls {
 		k := [2]int64{l.a, l.b}
 		byPair[k] = append(byPair[k], i)
+		if specificity(l) == 2 {
+			byA[portKey{l.a, l.b, l.ai}] = append(byA[portKey{l.a, l.b, l.ai}], i)
+			byB[portKey{l.a, l.b, l.bi}] = append(byB[portKey{l.a, l.b, l.bi}], i)
+		}
 	}
-	order := make([]int, len(ls))
-	for i := range order {
-		order[i] = i
+	order := make([]int, 0, len(ls))
+	for i, l := range ls {
+		if specificity(l) < 2 {
+			order = append(order, i)
+		}
 	}
 	sort.Slice(order, func(x, y int) bool {
 		i, j := order[x], order[y]
@@ -52,12 +68,21 @@ func mergeNull(ls []link) []link {
 		return lessKey(ls[i].key(), ls[j].key())
 	})
 	removed := make([]bool, len(ls))
-	for _, i := range order {
-		if specificity(ls[i]) == 2 {
-			break
+	for n, i := range order {
+		if err := stop(ctx, n); err != nil {
+			return nil, err
+		}
+		var pool []int
+		switch l := ls[i]; {
+		case specificity(l) == 0:
+			pool = byPair[[2]int64{l.a, l.b}]
+		case l.ai != 0:
+			pool = byA[portKey{l.a, l.b, l.ai}]
+		default:
+			pool = byB[portKey{l.a, l.b, l.bi}]
 		}
 		best, cands := -1, 0
-		for _, j := range byPair[[2]int64{ls[i].a, ls[i].b}] {
+		for _, j := range pool {
 			if j == i || removed[j] || specificity(ls[j]) <= specificity(ls[i]) || !sameCable(ls[i], ls[j]) {
 				continue
 			}
@@ -69,19 +94,18 @@ func mergeNull(ls []link) []link {
 		if best < 0 {
 			continue
 		}
-		/* with several candidates the link is subsumed by them all and adds nothing to any one */
 		if cands == 1 && ls[i].conf > ls[best].conf {
 			ls[best].conf, ls[best].source = ls[i].conf, ls[i].source
 		}
 		removed[i] = true
 	}
-	out := ls[:0:0]
+	out := make([]link, 0, len(ls))
 	for i, l := range ls {
 		if !removed[i] {
 			out = append(out, l)
 		}
 	}
-	return out
+	return out, nil
 }
 
 type stored struct {
@@ -113,26 +137,47 @@ func loadLinks(ctx context.Context, tx pgx.Tx) ([]stored, error) {
 apply reconciles core.link with the derived links inside tx. Rules:
 
   - Manual links are never changed or deleted (every write also carries
-    "NOT manual"), and they suppress automatic links between the same devices
-    on ports that can be the same cable; an existing automatic link suppressed
-    this way is removed without a history entry (a person superseded it).
+    "NOT manual"). A manual link suppresses automatic links between the same
+    devices: always when a nonzero port of it equals one of the automatic
+    link's; a manual port that is unknown is a wildcard only when the pair has
+    at most one automatic link (otherwise it would hide parallel cables). A
+    stored automatic link so suppressed disappears with a history entry.
   - A stored automatic link that is derived again is confirmed (misses = 0). If
     only its ports got more or less specific it is updated in place, not
     recreated. A duplicate of a cable that another stored link already covers
     is removed silently.
-  - A link not derived is counted as missed, but only while one of its devices
-    is up under a fresh poller heartbeat (when both are unreachable the
-    absence says nothing). It disappears at the MissLimit-th consecutive miss.
+  - A link not derived is counted as missed only (a) while one of its devices
+    is up under a fresh poller heartbeat, and (b) once per inventory refresh:
+    markers holds, per missing link, the newest inventory time (seen_at of the
+    ends' interface and LLDP rows) already counted, so rebuilding without a
+    new poll adds no miss. It disappears at the MissLimit-th counted miss.
   - New links are inserted. Every appearance and disappearance writes a
     core.link_change row in the same statement.
+
+markers is updated in place; the caller keeps it only if the transaction commits.
 */
-func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Time) (Result, error) {
+func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Time, markers map[int64]time.Time) (Result, error) {
+	var got bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, fenceKey).Scan(&got); err != nil {
+		return Result{}, fmt.Errorf("fence: %w", err)
+	}
+	if !got {
+		return Result{}, fmt.Errorf("another topology build is running")
+	}
 	cur, err := loadLinks(ctx, tx)
 	if err != nil {
 		return Result{}, err
 	}
 	manual := map[[2]int64][]link{}
 	taken := map[linkKey]bool{} /* identities in use (any link) */
+	autoKeys := map[[2]int64]map[linkKey]bool{}
+	note := func(l link) {
+		k := [2]int64{l.a, l.b}
+		if autoKeys[k] == nil {
+			autoKeys[k] = map[linkKey]bool{}
+		}
+		autoKeys[k][l.key()] = true
+	}
 	var autos []stored
 	for _, s := range cur {
 		taken[s.l.key()] = true
@@ -141,11 +186,19 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 			manual[k] = append(manual[k], s.l)
 		} else {
 			autos = append(autos, s)
+			note(s.l)
 		}
 	}
+	for _, w := range want {
+		note(w)
+	}
 	suppressed := func(l link) bool {
-		for _, m := range manual[[2]int64{l.a, l.b}] {
-			if sameCable(l, m) {
+		pair := [2]int64{l.a, l.b}
+		for _, m := range manual[pair] {
+			if !sameCable(l, m) {
+				continue
+			}
+			if (m.ai != 0 && m.ai == l.ai) || (m.bi != 0 && m.bi == l.bi) || len(autoKeys[pair]) <= 1 {
 				return true
 			}
 		}
@@ -172,7 +225,10 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 	var silent, gone, miss []int64
 	var rest []stored
 	kept := 0
-	for _, s := range autos {
+	for n, s := range autos {
+		if err := stop(ctx, n); err != nil {
+			return Result{}, err
+		}
 		if i, ok := wantAt[s.l.key()]; ok && !used[i] {
 			used[i] = true
 			confirm = append(confirm, upd{s.id, live[i]})
@@ -187,9 +243,12 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 		byPair[k] = append(byPair[k], i)
 	}
 	var left []stored
-	for _, s := range rest {
+	for n, s := range rest {
+		if err := stop(ctx, n); err != nil {
+			return Result{}, err
+		}
 		if suppressed(s.l) {
-			silent = append(silent, s.id)
+			gone = append(gone, s.id)
 			continue
 		}
 		best, covered := -1, false
@@ -217,22 +276,32 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 			left = append(left, s)
 		}
 	}
+	next := map[int64]time.Time{}
 	for _, s := range left {
-		if !in.live[s.l.a] && !in.live[s.l.b] {
+		inv := in.invAt[s.l.a]
+		if t := in.invAt[s.l.b]; t.After(inv) {
+			inv = t
+		}
+		m := markers[s.id]
+		if (!in.live[s.l.a] && !in.live[s.l.b]) || inv.IsZero() || !inv.After(m) {
+			if !m.IsZero() {
+				next[s.id] = m
+			}
 			kept++
 			continue
 		}
 		if s.misses+1 >= MissLimit {
 			gone = append(gone, s.id)
-		} else {
-			miss = append(miss, s.id)
-			kept++
+			continue
 		}
+		next[s.id] = inv
+		miss = append(miss, s.id)
+		kept++
 	}
 	var res Result
 	if len(silent) > 0 {
 		if _, err := tx.Exec(ctx, `DELETE FROM core.link WHERE id = ANY($1) AND NOT manual`, silent); err != nil {
-			return res, fmt.Errorf("remove superseded links: %w", err)
+			return res, fmt.Errorf("remove duplicate links: %w", err)
 		}
 	}
 	if len(gone) > 0 {
@@ -250,7 +319,10 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 			return res, fmt.Errorf("count misses: %w", err)
 		}
 	}
-	for _, u := range rekey {
+	for n, u := range rekey {
+		if err := stop(ctx, n); err != nil {
+			return res, err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE core.link SET a_if_index = NULLIF($2, 0), b_if_index = NULLIF($3, 0), source = $4,
 				confidence = $5::int / 100.0, misses = 0, last_confirmed = $6 WHERE id = $1 AND NOT manual`,
 			u.id, u.l.ai, u.l.bi, u.l.source, u.l.conf, now); err != nil {
@@ -276,6 +348,9 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 		}
 	}
 	for start := 0; start < len(add); start += 2000 {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 		end := min(start+2000, len(add))
 		n := end - start
 		a, ai, b, bi, src, conf := make([]int64, n), make([]int32, n), make([]int64, n), make([]int32, n), make([]string, n), make([]int32, n)
@@ -297,5 +372,9 @@ func apply(ctx context.Context, tx pgx.Tx, in *inputs, want []link, now time.Tim
 		res.Appeared += int(tag.RowsAffected())
 	}
 	res.Links = kept + res.Appeared
+	clear(markers)
+	for id, t := range next {
+		markers[id] = t
+	}
 	return res, nil
 }
