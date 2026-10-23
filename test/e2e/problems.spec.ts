@@ -41,7 +41,8 @@ async function seal(readKey: string, owner: string, kind: string, secret: object
 }
 
 /** What the device sends from now on: "linkDown", "linkUp" or nothing. */
-const sendTrap = (name: "linkDown" | "linkUp" | "") => writeFileSync(CONTROL, name);
+/* The community goes with the trap once the device's profile has been switched: eventd checks traps against the profile. */
+const sendTrap = (name: "linkDown" | "linkUp" | "", community = "") => writeFileSync(CONTROL, community ? `${name} ${community}` : name);
 
 test("problems: a trap opens one, an ack and linkUp close it, a down parent suppresses the next", async ({ page }) => {
   test.setTimeout(10 * 60_000);
@@ -145,7 +146,7 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
   await page.reload();
   (await reopened).on("framereceived", onFrame);
   await expect(row).toBeVisible();
-  sendTrap("linkUp");
+  sendTrap("linkUp", COMMUNITY_UP);
   await expect
     .poll(async () => (await problems(`device_id=${child}&state=resolved`)).find((p) => p.id === problem.id)?.resolve_reason, { timeout: 45_000, intervals: [1_000], message: "linkUp" })
     .toBe("recovered");
@@ -168,7 +169,7 @@ test("problems: a trap opens one, an ack and linkUp close it, a down parent supp
 
   /* Nothing of the port is open now (the polls agree with linkUp), so what appears next is a NEW problem, opened suppressed. */
   expect((await problems(`device_id=${child}`)).filter((p) => p.state !== "resolved")).toEqual([]);
-  sendTrap("linkDown");
+  sendTrap("linkDown", COMMUNITY_UP);
   let second: Problem | undefined;
   await expect
     .poll(async () => (second = (await problems(`device_id=${child}&suppressed=true&state=problem`)).find((p) => p.id !== problem.id)), {

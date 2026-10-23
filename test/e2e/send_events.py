@@ -74,13 +74,17 @@ def link_trap(community, request_id, name="linkDown", if_index=1):
 
 
 def read_control(path):
-    """The trap named in the control file (linkDown or linkUp); none when the file is missing, empty or names anything else."""
+    """The trap named in the control file (linkDown or linkUp) and an optional community after it ("linkUp other-community"):
+    the device's profile, which eventd checks traps against, may have been switched to another community.
+    Nothing when the file is missing, empty or names anything else."""
     try:
         with open(path) as f:
-            name = f.read().strip()
+            parts = f.read().split()
     except OSError:
-        return ""
-    return name if name in LINK_TRAPS else ""
+        return "", ""
+    if not parts or parts[0] not in LINK_TRAPS:
+        return "", ""
+    return parts[0], parts[1] if len(parts) > 1 else ""
 
 
 def main():
@@ -100,9 +104,9 @@ def main():
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.sendto(text.encode(), (target, syslog_port))
         if community and control:
-            name = read_control(control)
+            name, override = read_control(control)
             if name:
-                udp.sendto(link_trap(community, n, name, if_index), (target, trap_port))
+                udp.sendto(link_trap(override or community, n, name, if_index), (target, trap_port))
         elif community:
             udp.sendto(link_trap(community, n), (target, trap_port))
         udp.close()
