@@ -668,7 +668,13 @@ func (s *server) putOverride(w http.ResponseWriter, r *http.Request) {
 		if pe := pgErrOf(err); pe != nil && pe.Code == "23503" {
 			return errTemplateNotFound /* the trigger or the device vanished meanwhile */
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if kind == string(triggers.KindSyslog) && overlay != nil {
+			return capSyslogFilters(r.Context(), tx)
+		}
+		return nil
 	}) {
 		return
 	}
@@ -747,22 +753,32 @@ const (
 	maxTriggersPerTemplate  = 100
 	maxTemplatesPerBinding  = 50
 	maxDistinctSyslogFilter = 256
+	maxWindowsPerGroup      = 100
 )
 
 var (
 	errCapTriggers  = errors.New("httpapi: too many triggers in a template")
 	errCapTemplates = errors.New("httpapi: too many templates")
 	errCapFilters   = errors.New("httpapi: too many distinct syslog filters")
+	errCapWindows   = errors.New("httpapi: too many maintenance windows")
 )
 
-/* capTemplates limits the templates of one group (or one driver); the group row (or an advisory lock for a driver) serializes concurrent creates. */
+/*
+capTemplates limits the templates of one driver, or of one group together with
+its ancestors (a device sees every template along its chain); the group row (or
+an advisory lock for a driver) serializes concurrent creates.
+*/
 func capTemplates(ctx context.Context, tx pgx.Tx, driver *string, group *int64) error {
 	var n int
 	if group != nil {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM core.device_group WHERE id = $1 FOR UPDATE`, *group); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM core.monitoring_template WHERE group_id = $1`, *group).Scan(&n); err != nil {
+		if err := tx.QueryRow(ctx, `WITH RECURSIVE anc (id, depth) AS (
+				SELECT $1::bigint, 0
+				UNION ALL
+				SELECT g.parent_id, anc.depth + 1 FROM anc JOIN core.device_group g ON g.id = anc.id WHERE g.parent_id IS NOT NULL AND anc.depth < 64
+			) SELECT count(*) FROM core.monitoring_template WHERE group_id IN (SELECT id FROM anc)`, *group).Scan(&n); err != nil {
 			return err
 		}
 	} else {
@@ -795,9 +811,9 @@ func capTriggers(ctx context.Context, tx pgx.Tx, template int64) error {
 }
 
 /*
-capSyslogFilters runs after a syslog trigger was written: the engine reads the
-syslog stream once per distinct (severity_min, contains) filter, so their
-number is bounded globally. An advisory lock serializes writers; returning an
+capSyslogFilters runs after a syslog trigger or a syslog override was written:
+the engine reads the syslog stream once per distinct (severity_min, contains)
+filter of the override-merged parameters, so their number is bounded globally. An advisory lock serializes writers; returning an
 error rolls the write back.
 */
 func capSyslogFilters(ctx context.Context, tx pgx.Tx) error {
@@ -805,7 +821,13 @@ func capSyslogFilters(ctx context.Context, tx pgx.Tx) error {
 		return err
 	}
 	var n int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT DISTINCT params->>'severity_min', lower(coalesce(params->>'contains', '')) FROM core.trigger WHERE kind = 'syslog') f`).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (
+			SELECT DISTINCT p->>'severity_min', lower(coalesce(p->>'contains', '')) FROM (
+				SELECT params AS p FROM core.trigger WHERE kind = 'syslog'
+				UNION ALL
+				SELECT jsonb_strip_nulls(t.params || o.params) FROM core.trigger_override o
+				JOIN core.trigger t ON t.id = o.trigger_id WHERE t.kind = 'syslog' AND o.params IS NOT NULL
+			) x) f`).Scan(&n); err != nil {
 		return err
 	}
 	if n > maxDistinctSyslogFilter {

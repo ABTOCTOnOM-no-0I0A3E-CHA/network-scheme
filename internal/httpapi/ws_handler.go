@@ -125,6 +125,10 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 	cur.Store(&scope)
 	var minRank atomic.Int32
 	msgs, cancel := s.hub.Subscribe(func(p notify.ProblemSummary) bool {
+		/* The severity preference filters before queueing, so a burst below it cannot fill the buffer and drop the socket. */
+		if wsSeverityRank[p.Severity] < int(minRank.Load()) {
+			return false
+		}
 		g := cur.Load()
 		if p.GroupID == nil {
 			return g.all
@@ -259,9 +263,6 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				closeWith(websocket.StatusTryAgainLater, "too slow")
 				return
-			}
-			if wsSeverityRank[m.Problem.Severity] < int(minRank.Load()) {
-				continue
 			}
 			if send(m) != nil {
 				return

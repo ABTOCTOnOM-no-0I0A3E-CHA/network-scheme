@@ -189,6 +189,7 @@ func (s *server) createDevice(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
+	s.configChanged()
 	writeJSON(w, http.StatusCreated, idResponse{ID: id})
 }
 
@@ -335,8 +336,8 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
-	if setParent {
-		s.configChanged() /* the engine reads parents with its configuration */
+	if setParent || in.GroupID != nil {
+		s.configChanged() /* the engine reads parents and group membership with its configuration */
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -359,6 +360,7 @@ func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
+	s.configChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -309,7 +309,7 @@ func (s *server) ackProblem(w http.ResponseWriter, r *http.Request) {
 		p.State = "acknowledged"
 		if !p.Suppressed {
 			announce = &notify.ProblemSummary{ID: p.ID, DeviceID: p.DeviceID, DeviceName: p.DeviceName, GroupID: p.GroupID, Severity: p.Severity,
-				State: p.State, Suppressed: p.Suppressed, Name: p.Name, Object: p.Object, OpenedAt: p.OpenedAt, AckedAt: p.AckedAt, ResolvedAt: p.ResolvedAt}
+				State: p.State, Suppressed: p.Suppressed, Name: p.Name, SystemKind: p.SystemKind, Object: p.Object, OpenedAt: p.OpenedAt, AckedAt: p.AckedAt, ResolvedAt: p.ResolvedAt}
 		}
 		return nil
 	}) {

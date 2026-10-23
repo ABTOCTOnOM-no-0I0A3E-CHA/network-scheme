@@ -110,6 +110,17 @@ func (s *server) createMaintenance(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "maintenance.create", ObjectType: "maintenance_window",
 		Details: map[string]any{"group_id": in.GroupID, "starts_at": in.StartsAt, "ends_at": in.EndsAt, "comment": in.Comment}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		/* The group row serializes concurrent creates so the cap counts each other. */
+		if _, err := tx.Exec(r.Context(), `SELECT 1 FROM core.device_group WHERE id = $1 FOR UPDATE`, in.GroupID); err != nil {
+			return err
+		}
+		var open int
+		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.maintenance_window WHERE group_id = $1 AND ends_at > now()`, in.GroupID).Scan(&open); err != nil {
+			return err
+		}
+		if open >= maxWindowsPerGroup {
+			return errCapWindows
+		}
 		err := tx.QueryRow(r.Context(), `INSERT INTO core.maintenance_window (group_id, starts_at, ends_at, comment)
 			VALUES ($1, $2, $3, $4) RETURNING id`, in.GroupID, in.StartsAt, in.EndsAt, in.Comment).Scan(&id)
 		if pe := pgErrOf(err); pe != nil && pe.Code == "23503" {

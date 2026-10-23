@@ -98,7 +98,7 @@ REVOKE ALL ON FUNCTION core.guard_identity_id(), core.retire_identity_id() FROM 
 -- subgroups); intervals override the group/default ones for those devices.
 CREATE TABLE core.monitoring_template (
     id                   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name                 text   NOT NULL UNIQUE CHECK (name <> '' AND char_length(name) <= 200),
+    name                 text   NOT NULL CHECK (name <> '' AND char_length(name) <= 200),
     driver               text   NULL CHECK (driver <> '' AND char_length(driver) <= 200),
     group_id             bigint NULL REFERENCES core.device_group (id) ON DELETE CASCADE,
     interval_avail_s     int    NULL CHECK (interval_avail_s > 0),
@@ -107,6 +107,8 @@ CREATE TABLE core.monitoring_template (
     CONSTRAINT monitoring_template_target CHECK (num_nonnulls(driver, group_id) = 1)
 );
 CREATE INDEX monitoring_template_group_id_idx ON core.monitoring_template (group_id);
+-- Names are unique per binding (one driver or one group), not globally.
+CREATE UNIQUE INDEX monitoring_template_name_binding_idx ON core.monitoring_template (name, coalesce(driver, ''), coalesce(group_id, 0));
 
 -- Conditions are a closed set (see internal/triggers); params are validated by
 -- the api and the engine, the table only bounds their shape and size.

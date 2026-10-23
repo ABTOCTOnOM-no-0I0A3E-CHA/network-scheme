@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -161,14 +163,12 @@ func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error
 		if hi == 0 {
 			break
 		}
-		if len(list) > 0 {
-			groups, err := e.trapGroups(ctx, pos, hi, floor, list)
-			if err != nil {
-				return err
-			}
-			for _, g := range groups {
-				e.onTrap(a, g, now)
-			}
+		groups, err := e.trapGroups(ctx, pos, hi, floor, list)
+		if err != nil {
+			return err
+		}
+		for _, g := range groups {
+			e.onTrap(a, g, now)
 		}
 		pos = hi
 		a.wmSeq[streamTrap] = hi
@@ -287,6 +287,9 @@ func (e *Engine) closeByTrap(a *actions, k pkey, ts time.Time, value string) {
 	a.resolve(e, k, reasonRecovered, value, ts)
 }
 
+/* maxSyslogFilters is the engine-side bound of distinct syslog filters read per cycle (the API enforces the same bound on writes). */
+const maxSyslogFilters = 256
+
 /* sysFilter is the bound parameters of one syslog trigger condition; triggers with equal filters share one aggregate. */
 type sysFilter struct {
 	sev      int
@@ -296,7 +299,7 @@ type sysFilter struct {
 func syslogFilter(p *Syslog) sysFilter {
 	f := sysFilter{sev: *p.SeverityMin}
 	if p.Contains != nil {
-		f.contains = *p.Contains
+		f.contains = strings.ToLower(*p.Contains) /* SQL compares with lower() on both sides */
 	}
 	return f
 }
@@ -313,6 +316,13 @@ func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) erro
 	for _, dt := range e.cfg.byKind[KindSyslog] {
 		f := syslogFilter(dt.t.params.(*Syslog))
 		if _, ok := filterIdx[f]; !ok {
+			if len(sevs) >= maxSyslogFilters {
+				if now.Sub(e.lastFilterWarn) >= time.Minute {
+					e.lastFilterWarn = now
+					e.log.Warn("syslog filter cap reached: further distinct filters skipped", slog.Int("cap", maxSyslogFilters))
+				}
+				continue
+			}
 			filterIdx[f] = len(sevs)
 			sevs, subs = append(sevs, int32(f.sev)), append(subs, f.contains) // #nosec G115 -- 0..7
 		}

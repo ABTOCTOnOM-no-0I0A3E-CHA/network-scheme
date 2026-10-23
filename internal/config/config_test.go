@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/beekamai/network-scheme/internal/config"
@@ -45,6 +46,24 @@ read_key_version: 3
 	}
 	if c.PublicOrigin != "https://nms.example.org" || c.DB.User != "nms_api" {
 		t.Errorf("unexpected config: %+v", c)
+	}
+}
+
+/* db.max_conns defaults to max(16, 4 x CPUs) for the api; an explicit value wins. */
+func TestLoadAPIDefaultsMaxConns(t *testing.T) {
+	load := func(db string) int {
+		t.Helper()
+		c, err := config.LoadAPI(write(t, "api.yaml", "db: {host: postgres, name: nms, user: nms_api, password_file: /p"+db+"}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.DB.MaxConns
+	}
+	if got, want := load(""), max(16, 4*runtime.NumCPU()); got != want {
+		t.Errorf("default max_conns = %d, want %d", got, want)
+	}
+	if got := load(", max_conns: 7"); got != 7 {
+		t.Errorf("explicit max_conns = %d, want 7", got)
 	}
 }
 

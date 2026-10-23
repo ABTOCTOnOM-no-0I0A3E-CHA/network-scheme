@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+/* maxEffectiveTriggers bounds the triggers evaluated per device. */
+const maxEffectiveTriggers = 500
 
 /* effTrigger is a trigger as it applies to one device: overrides merged and params re-validated. */
 type effTrigger struct {
@@ -194,12 +198,26 @@ func loadConfig(ctx context.Context, pool *pgxpool.Pool, now time.Time, log *slo
 			tpls = append(tpls, byGroup[g]...)
 		}
 		seenTpl := map[int64]bool{}
+		var rows []*triggerRow
 		for _, tpl := range tpls {
 			if seenTpl[tpl] {
 				continue
 			}
 			seenTpl[tpl] = true
-			for _, row := range byTemplate[tpl] {
+			rows = append(rows, byTemplate[tpl]...)
+		}
+		/* The lowest trigger ids win when a device is over the cap. */
+		sort.Slice(rows, func(i, j int) bool { return rows[i].id < rows[j].id })
+		{
+			capWarned := false
+			for _, row := range rows {
+				if len(c.eff[id]) >= maxEffectiveTriggers {
+					if !capWarned {
+						log.Warn("device trigger cap reached: further triggers skipped", slog.Int64("device", id), slog.Int("cap", maxEffectiveTriggers))
+						capWarned = true
+					}
+					break
+				}
 				ov, hasOv := overrides[id][row.id]
 				enabled := row.enabled
 				if hasOv && ov.enabled != nil {

@@ -311,6 +311,7 @@ func (s *server) updateGroup(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
+	s.configChanged()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -326,5 +327,6 @@ func (s *server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
+	s.configChanged()
 	w.WriteHeader(http.StatusNoContent)
 }

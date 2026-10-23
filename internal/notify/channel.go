@@ -36,6 +36,7 @@ type ProblemSummary struct {
 	State      string     `json:"state"`
 	Suppressed bool       `json:"suppressed"`
 	Name       string     `json:"name"`
+	SystemKind *string    `json:"system_kind"` /* set for engine-raised problems; clients translate the title by it */
 	Object     string     `json:"object"`
 	OpenedAt   time.Time  `json:"opened_at"`
 	AckedAt    *time.Time `json:"acknowledged_at"`

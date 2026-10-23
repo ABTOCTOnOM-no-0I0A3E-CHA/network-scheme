@@ -370,3 +370,23 @@ func TestWSClosesWithFrameOnShutdown(t *testing.T) {
 		t.Fatalf("shutdown closed with %d, want 1001", got)
 	}
 }
+
+func TestWSSeverityPreferenceFiltersBeforeQueueing(t *testing.T) {
+	e := newWSEnv(t, nil)
+	g := e.newGroup()
+	c := e.dial(e.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g}))
+	if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"type":"subscribe","severity_min":"high"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if m := read(t, c); m.Type != "subscribed" {
+		t.Fatalf("reply to subscribe = %+v", m)
+	}
+	/* A burst far beyond the queue, all below the preference, must not get the socket dropped. */
+	for i := int64(0); i < 1000; i++ {
+		e.hub.Publish(problem(i+10, &g, "warning"))
+	}
+	e.hub.Publish(problem(1, &g, "disaster"))
+	if m := read(t, c); m.Problem.ID != 1 {
+		t.Fatalf("got problem %d, want 1 (the socket must survive the burst)", m.Problem.ID)
+	}
+}

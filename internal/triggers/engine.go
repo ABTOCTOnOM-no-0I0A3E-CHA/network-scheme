@@ -81,6 +81,8 @@ type Engine struct {
 	pollNow  func(ctx context.Context, deviceID int64) error
 	log      *slog.Logger
 
+	lastFilterWarn time.Time /* rate limit of the syslog filter cap warning */
+
 	cfg       *config
 	open      map[pkey]*openP
 	meta      map[int64]devMeta

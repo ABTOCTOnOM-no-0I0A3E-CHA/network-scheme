@@ -161,6 +161,10 @@ func (e *Engine) problemName(k pkey) string {
 func (e *Engine) summary(id int64, k pkey, severity, state string, suppressed bool, opened time.Time, acked, resolved *time.Time) notify.ProblemSummary {
 	s := notify.ProblemSummary{ID: id, Severity: severity, State: state, Suppressed: suppressed, Name: e.problemName(k), Object: k.obj,
 		OpenedAt: opened, AckedAt: acked, ResolvedAt: resolved}
+	if k.trig == 0 && k.sys != "" {
+		sk := k.sys
+		s.SystemKind = &sk
+	}
 	if k.dev != 0 {
 		d := k.dev
 		s.DeviceID = &d

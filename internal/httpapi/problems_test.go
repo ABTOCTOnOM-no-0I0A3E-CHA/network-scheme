@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/httpapi"
 	"github.com/beekamai/network-scheme/internal/notify"
 	"github.com/beekamai/network-scheme/internal/rbac"
@@ -393,6 +396,9 @@ func TestTemplatesAndTriggers(t *testing.T) {
 	resp := f.do(admin.authed(req{method: "POST", path: "/api/templates", body: map[string]any{"name": name, "driver": "eltex-mes", "interval_avail_s": 30}}))
 	wantStatus(t, resp, http.StatusCreated)
 	drv := decode[idResp](t, resp).ID
+	wantError(t, f.do(admin.authed(req{method: "POST", path: "/api/templates", body: map[string]any{"name": name, "driver": "eltex-mes"}})), http.StatusConflict, "template_exists")
+	/* Names are unique per binding: the same name for a group (or another driver) is fine. */
+	wantStatus(t, f.do(admin.authed(req{method: "POST", path: "/api/templates", body: map[string]any{"name": name, "group_id": gA}})), http.StatusCreated)
 	wantError(t, f.do(admin.authed(req{method: "POST", path: "/api/templates", body: map[string]any{"name": name, "group_id": gA}})), http.StatusConflict, "template_exists")
 	for name, body := range map[string]map[string]any{
 		"both": {"name": uniqueName("t"), "driver": "x", "group_id": gA}, "neither": {"name": uniqueName("t")},
@@ -508,8 +514,8 @@ func TestTemplatesAndTriggers(t *testing.T) {
 	wantError(t, f.do(adminA.authed(req{method: "DELETE", path: fmt.Sprintf("/api/templates/%d", tB)})), http.StatusNotFound, "not_found")
 
 	/* Every successful change reloaded the engine; refused ones did not. */
-	if got := changed.Load(); got != 7 { /* 2 template creates, rename, trigger create/update/delete, template delete */
-		t.Errorf("config change callbacks = %d, want 7", got)
+	if got := changed.Load(); got != 8 { /* 3 template creates, rename, trigger create/update/delete, template delete */
+		t.Errorf("config change callbacks = %d, want 8", got)
 	}
 	acts := f.auditSince(start)
 	for _, a := range []string{"templates.create", "templates.update", "templates.delete", "triggers.create", "triggers.update", "triggers.delete"} {
@@ -838,27 +844,48 @@ func TestTriggerAndTemplateCaps(t *testing.T) {
 	f.root(`INSERT INTO core.monitoring_template (name, driver) SELECT 'd' || i, $1 FROM generate_series(1, 50) i`, drv)
 	wantError(t, post("/api/templates", map[string]any{"name": uniqueName("t"), "driver": drv}), http.StatusConflict, "too_many_templates")
 
-	/* 256 distinct syslog filters globally; an existing filter can be reused, a new one is refused (and rolled back). */
-	f.root(`DELETE FROM core.trigger WHERE kind = 'syslog'`)
+	/* Templates along the ancestor chain count together: 49 on the parent and 1 on the child are the limit for the child. */
+	parent := f.newGroup()
+	child := f.subgroupOf(parent)
+	f.root(`INSERT INTO core.monitoring_template (name, group_id) SELECT 'p' || i, $1 FROM generate_series(1, 49) i`, parent)
+	wantStatus(t, post("/api/templates", map[string]any{"name": uniqueName("t"), "group_id": child}), http.StatusCreated)
+	wantError(t, post("/api/templates", map[string]any{"name": uniqueName("t"), "group_id": child}), http.StatusConflict, "too_many_templates")
+
+	/* 256 distinct syslog filters globally (case-insensitively, override-merged); an existing filter can be reused, a new one is refused (and rolled back). */
+	base := f.rootInt(`SELECT count(*) FROM (SELECT DISTINCT params->>'severity_min', lower(coalesce(params->>'contains', '')) FROM core.trigger WHERE kind = 'syslog') x`) /* filters of other tests */
 	st := f.newTemplate(g)
-	for _, part := range []struct{ from, to int }{{1, 100}, {101, 200}, {201, 256}} {
+	own := []int64{st}
+	t.Cleanup(func() { f.root(`DELETE FROM core.monitoring_template WHERE id = ANY($1)`, own) }) /* cascades to its triggers and overrides */
+	fill := int(256 - base)
+	for from := 1; from <= fill; from += 100 {
+		tpl := f.newTemplate(g)
+		own = append(own, tpl)
 		f.root(`INSERT INTO core.trigger (template_id, kind, params, duration_s, severity, name)
-			SELECT $1, 'syslog', jsonb_build_object('severity_min', 3, 'contains', 'm' || i), 0, 'high', 's' || i FROM generate_series($2::int, $3::int) i`, f.newTemplate(g), part.from, part.to)
+			SELECT $1, 'syslog', jsonb_build_object('severity_min', 3, 'contains', 'cap' || i), 0, 'high', 's' || i FROM generate_series($2::int, $3::int) i`, tpl, from, min(from+99, fill))
 	}
 	path := fmt.Sprintf("/api/templates/%d/triggers", st)
 	syslog := func(contains string) map[string]any {
 		return map[string]any{"name": uniqueName("s"), "kind": "syslog", "params": map[string]any{"severity_min": 3, "contains": contains}, "duration_s": 0, "severity": "high"}
 	}
-	wantStatus(t, post(path, syslog("M5")), http.StatusCreated) /* same filter, case-insensitively */
+	wantStatus(t, post(path, syslog("CAP5")), http.StatusCreated) /* same filter, case-insensitively */
 	wantError(t, post(path, syslog("brand new")), http.StatusConflict, "too_many_filters")
-	if n := f.rootInt(`SELECT count(*) FROM core.trigger WHERE kind = 'syslog'`); n != 257 {
-		t.Errorf("syslog triggers after the refused one = %d, want 257", n)
+	if n := f.rootInt(`SELECT count(*) FROM core.trigger WHERE template_id = ANY($1)`, own); n != int64(fill)+1 {
+		t.Errorf("own syslog triggers after the refused one = %d, want %d", n, fill+1)
 	}
-	other := f.rootInt(`SELECT id FROM core.trigger WHERE kind = 'syslog' ORDER BY id DESC LIMIT 1`) /* the case-variant duplicate of an existing filter: moving it to a new filter makes 257 */
-	otherTpl := f.rootInt(`SELECT template_id FROM core.trigger WHERE id = $1`, other)
-	patch := f.do(admin.authed(req{method: "PATCH", path: fmt.Sprintf("/api/templates/%d/triggers/%d", otherTpl, other), body: map[string]any{"params": map[string]any{"severity_min": 3, "contains": "elsewhere"}}}))
+	other := f.rootInt(`SELECT id FROM core.trigger WHERE template_id = $1`, st) /* the case-variant duplicate of an existing filter: moving it to a new filter exceeds the cap */
+	patch := f.do(admin.authed(req{method: "PATCH", path: fmt.Sprintf("/api/templates/%d/triggers/%d", st, other), body: map[string]any{"params": map[string]any{"severity_min": 3, "contains": "elsewhere"}}}))
 	wantError(t, patch, http.StatusConflict, "too_many_filters")
-	f.root(`DELETE FROM core.trigger WHERE kind = 'syslog'`)
+
+	/* A per-device override counts too: it cannot introduce a new filter past the cap, but may pick an existing one. */
+	dev := f.newDevice(g)
+	ovr := func(contains string) *http.Response {
+		return f.do(admin.authed(req{method: "PUT", path: fmt.Sprintf("/api/devices/%d/trigger-overrides/%d", dev, other), body: map[string]any{"params": map[string]any{"contains": contains}}}))
+	}
+	wantError(t, ovr("override-new"), http.StatusConflict, "too_many_filters")
+	if n := f.rootInt(`SELECT count(*) FROM core.trigger_override WHERE device_id = $1`, dev); n != 0 {
+		t.Errorf("refused override was stored (%d rows)", n)
+	}
+	wantStatus(t, ovr("cap7"), http.StatusNoContent)
 }
 
 func TestTemplateNamesRejectFormatCharacters(t *testing.T) {
@@ -890,4 +917,55 @@ func TestOverrideOfForeignTemplateHidesTheKind(t *testing.T) {
 	wantStatus(t, put(adminA, map[string]any{"enabled": false}), http.StatusNoContent)
 	wantError(t, put(adminA, bad), http.StatusNotFound, "not_found")
 	wantError(t, put(admin, bad), http.StatusBadRequest, "invalid_trigger")
+}
+
+/* subgroupOf creates a group below parent. */
+func (f *fixture) subgroupOf(parent int64) int64 {
+	f.t.Helper()
+	var id int64
+	f.inTx(func(ctx context.Context, tx pgx.Tx, _ *devices.Store) (err error) {
+		id, err = rbac.NewStore(f.env.Pool("nms_api")).CreateGroup(ctx, tx, &parent, uniqueName("sub"))
+		return err
+	})
+	return id
+}
+
+func TestMaintenanceWindowsPerGroupAreCapped(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	admin := f.login(false, rbac.Binding{Role: rbac.RoleAdmin})
+	f.root(`INSERT INTO core.maintenance_window (group_id, starts_at, ends_at) SELECT $1, now(), now() + interval '1 hour' FROM generate_series(1, 99)`, g)
+	f.root(`INSERT INTO core.maintenance_window (group_id, starts_at, ends_at) VALUES ($1, now() - interval '3 days', now() - interval '2 days')`, g) /* ended windows do not count */
+	now := f.clk.Now()
+	create := func() *http.Response {
+		return f.do(admin.authed(req{method: "POST", path: "/api/maintenance", body: map[string]any{"group_id": g, "starts_at": now.Format(time.RFC3339), "ends_at": now.Add(time.Hour).Format(time.RFC3339)}}))
+	}
+	wantStatus(t, create(), http.StatusCreated)
+	wantError(t, create(), http.StatusConflict, "too_many_windows")
+}
+
+func TestMembershipChangesReloadTheEngine(t *testing.T) {
+	var changed atomic.Int64
+	f := newFixture(t, func(d *httpapi.Deps) { d.ConfigChanged = func() { changed.Add(1) } })
+	admin := f.login(true, rbac.Binding{Role: rbac.RoleAdmin})
+	a, b := f.newGroup(), f.newGroup()
+	dev := f.newDevice(a)
+	step := func(want int64, status int, r req) {
+		t.Helper()
+		wantStatus(t, f.do(admin.authed(r)), status)
+		if got := changed.Load(); got != want {
+			t.Fatalf("%s %s: hook calls = %d, want %d", r.method, r.path, got, want)
+		}
+	}
+	step(1, http.StatusNoContent, req{method: "PATCH", path: fmt.Sprintf("/api/devices/%d", dev), body: map[string]any{"group_id": b}})
+	step(2, http.StatusCreated, req{method: "POST", path: "/api/devices", body: map[string]any{"name": uniqueName("d"), "address": nextAddr().String(), "group_id": a}})
+	step(3, http.StatusNoContent, req{method: "DELETE", path: fmt.Sprintf("/api/devices/%d", dev)})
+	step(4, http.StatusNoContent, req{method: "PATCH", path: fmt.Sprintf("/api/groups/%d", b), body: map[string]any{"parent_id": a}})
+	step(5, http.StatusNoContent, req{method: "PATCH", path: fmt.Sprintf("/api/groups/%d", b), body: map[string]any{"name": uniqueName("renamed")}})
+	step(6, http.StatusNoContent, req{method: "DELETE", path: fmt.Sprintf("/api/groups/%d", b)})
+	/* A refused request leaves the engine alone. */
+	wantError(t, f.do(admin.authed(req{method: "DELETE", path: fmt.Sprintf("/api/groups/%d", a)})), http.StatusConflict, "group_not_empty")
+	if got := changed.Load(); got != 6 {
+		t.Errorf("refused group delete called the hook: %d", got)
+	}
 }

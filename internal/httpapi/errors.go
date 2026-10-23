@@ -50,7 +50,8 @@ var (
 	errTemplateExists   = apiError{http.StatusConflict, "template_exists", "Шаблон с таким именем уже есть"}
 	errInvalidTrigger   = apiError{http.StatusBadRequest, "invalid_trigger", "Недопустимые параметры триггера"}
 	errTooManyTriggers  = apiError{http.StatusConflict, "too_many_triggers", "В шаблоне не может быть больше 100 триггеров"}
-	errTooManyTemplates = apiError{http.StatusConflict, "too_many_templates", "У группы или драйвера не может быть больше 50 шаблонов"}
+	errTooManyTemplates = apiError{http.StatusConflict, "too_many_templates", "У группы (с учётом родительских) или драйвера не может быть больше 50 шаблонов"}
+	errTooManyWindows   = apiError{http.StatusConflict, "too_many_windows", "У группы не может быть больше 100 незавершённых окон обслуживания"}
 	errTooManyFilters   = apiError{http.StatusConflict, "too_many_filters", "Достигнут предел различных фильтров syslog (256)"}
 	errInvalidWindow    = apiError{http.StatusBadRequest, "invalid_window", "Недопустимое окно обслуживания: не более 7 суток, конец в будущем и позже начала"}
 	errParentCycle      = apiError{http.StatusConflict, "parent_cycle", "Родитель образует цикл"}
@@ -118,6 +119,7 @@ var knownErrors = []struct {
 	{errCapTriggers, errTooManyTriggers},
 	{errCapTemplates, errTooManyTemplates},
 	{errCapFilters, errTooManyFilters},
+	{errCapWindows, errTooManyWindows},
 	{errMaintenanceNotFound, errNotFound},
 	{devices.ErrParentCycle, errParentCycle},
 	{devices.ErrParentDepth, errParentTooDeep},
