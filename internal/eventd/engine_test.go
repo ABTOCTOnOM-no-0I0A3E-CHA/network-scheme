@@ -1,18 +1,19 @@
 package eventd
 
 import (
+	"context"
 	"io"
 	"log/slog"
-	"runtime"
-
-	"context"
-	"github.com/beekamai/network-scheme/internal/creds"
-	"github.com/beekamai/network-scheme/internal/secret"
 	"net/netip"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/gosnmp/gosnmp"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/secret"
 )
 
 /* pinnedEngine reads the engine the device's v3 state is pinned to ("" when none). */
@@ -186,5 +187,96 @@ func TestSeedPendingIsParallelAndStopsWithTheContext(t *testing.T) {
 	}
 	if seeded > runtime.GOMAXPROCS(0) {
 		t.Errorf("%d devices seeded after cancellation", seeded)
+	}
+}
+
+/* Startup asks for seeding twice (Run, then the reload after LISTEN): every device is derived exactly once. */
+func TestSeedingDerivesEachDeviceOnce(t *testing.T) {
+	h := newHarness(t)
+	const n = 12
+	for i := range n {
+		ip := "127.0.1." + string(rune('1'+i%9))
+		if i >= 9 {
+			ip = "127.0.2." + string(rune('1'+i-9))
+		}
+		id := h.device(ip)
+		h.v3(id, "nms")
+		h.setEngine(id, engineID(i))
+	}
+	s := h.sources()
+	h.reload(s)
+	ctx := context.Background()
+	s.startSeeding(ctx)
+	s.startSeeding(ctx)
+	s.startSeeding(ctx)
+	s.seedWG.Wait()
+	if got := s.derived.Load(); got != n {
+		t.Fatalf("derivations = %d, want %d", got, n)
+	}
+	for _, d := range s.cur.Load().all {
+		if pinnedEngine(d) != string(d.engine) {
+			t.Fatalf("device %d not seeded", d.id)
+		}
+	}
+}
+
+/* A device notification is applied at once while seeding is still running; seeding never blocks reloadAll. */
+func TestReloadDoesNotWaitForSeeding(t *testing.T) {
+	h := newHarness(t)
+	a := h.device("127.0.0.2")
+	h.v3(a, "nms")
+	h.setEngine(a, engineID(1))
+	srv := newServer(h.cfg, Deps{Pool: h.pool, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Enqueuer: noEnq{}, Priv: h.priv, Pub: h.pub})
+	gate := make(chan struct{})
+	srv.src.seedGate = func() { <-gate }
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- srv.reloadAll(ctx, true, false) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reloadAll waits for the seeding worker")
+	}
+	b := h.device("127.0.0.3") /* appears in the next reload although the first seeding is still blocked */
+	if err := srv.reloadAll(ctx, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, rel, ok := srv.src.acquire(netip.MustParseAddr("127.0.0.3")); !ok {
+		t.Fatalf("device %d not applied while seeding runs", b)
+	} else {
+		rel()
+	}
+	close(gate)
+	srv.src.seedWG.Wait()
+	d, rel, _ := srv.src.acquire(netip.MustParseAddr("127.0.0.2"))
+	rel()
+	if pinnedEngine(d) != engineID(1) {
+		t.Fatal("device not seeded after the gate opened")
+	}
+}
+
+/* A pin set by an authenticated slow-path message while seeding derives keys is never replaced by the seed. */
+func TestSeedNeverReplacesASlowPathPin(t *testing.T) {
+	r := newV3Rig(t)
+	if _, ok := r.srv.authTrap(r.dev, v3Packet(t, "nms", engineID(9), true)); !ok {
+		t.Fatal("genuine trap refused")
+	}
+	if got := pinnedEngine(r.dev); got != engineID(9) {
+		t.Fatalf("pinned %q", got)
+	}
+	r.dev.v3.seedEngine([]byte(engineID(1))) /* early exit: already pinned */
+	sp := &gosnmp.UsmSecurityParameters{
+		UserName: "nms", AuthenticationProtocol: gosnmp.SHA256, PrivacyProtocol: gosnmp.AES,
+		AuthenticationPassphrase: authKey, PrivacyPassphrase: privKey, AuthoritativeEngineID: engineID(1),
+	}
+	if err := sp.InitSecurityKeys(); err != nil {
+		t.Fatal(err)
+	}
+	r.dev.v3.setPin(sp, true) /* the check-then-set race: keys derived before the pin appeared */
+	if got := pinnedEngine(r.dev); got != engineID(9) {
+		t.Fatalf("seed replaced the pin: %q", got)
 	}
 }

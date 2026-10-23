@@ -115,6 +115,13 @@ type sources struct {
 	*/
 	seen      map[seenKey]time.Time
 	rollbacks atomic.Uint64
+
+	seedMu   sync.Mutex /* guards seeding and rerun */
+	seeding  bool
+	rerun    bool
+	seedWG   sync.WaitGroup
+	derived  atomic.Int64 /* key derivations done by seedPending (tests) */
+	seedGate func()       /* tests only: called by a seeding worker before each device */
 }
 
 type seenKey struct {
@@ -250,6 +257,35 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 /*
+startSeeding runs seedPending in the background, one run at a time: a request
+while one runs only marks "run again" (the new run finds what is still unpinned,
+and devices pinned before cost nothing). Never blocks the caller.
+*/
+func (s *sources) startSeeding(ctx context.Context) {
+	s.seedMu.Lock()
+	if s.seeding {
+		s.rerun = true
+		s.seedMu.Unlock()
+		return
+	}
+	s.seeding = true
+	s.seedMu.Unlock()
+	s.seedWG.Go(func() {
+		for {
+			s.seedPending(ctx)
+			s.seedMu.Lock()
+			if !s.rerun || ctx.Err() != nil {
+				s.seeding, s.rerun = false, false
+				s.seedMu.Unlock()
+				return
+			}
+			s.rerun = false
+			s.seedMu.Unlock()
+		}
+	})
+}
+
+/*
 seedPending pins the recorded engine of every v3 device that has none yet,
 deriving the keys on GOMAXPROCS workers (two password hashes, ~12 ms, per
 device). It runs after reload, outside it: listeners are up meanwhile, and a
@@ -260,9 +296,11 @@ stops early when ctx ends. A device wiped or replaced meanwhile is skipped
 func (s *sources) seedPending(ctx context.Context) {
 	var todo []*device
 	for _, d := range s.cur.Load().all {
-		if d.v3 != nil && len(d.engine) > 0 {
+		d.mu.RLock()
+		if !d.wiped && d.v3 != nil && len(d.engine) > 0 {
 			todo = append(todo, d)
 		}
+		d.mu.RUnlock()
 	}
 	if len(todo) == 0 {
 		return
@@ -272,9 +310,12 @@ func (s *sources) seedPending(ctx context.Context) {
 	for range min(runtime.GOMAXPROCS(0), len(todo)) {
 		wg.Go(func() {
 			for d := range next {
+				if s.seedGate != nil {
+					s.seedGate()
+				}
 				d.mu.RLock()
-				if !d.wiped && ctx.Err() == nil {
-					d.v3.seedEngine(d.engine)
+				if !d.wiped && ctx.Err() == nil && d.v3.seedEngine(d.engine) {
+					s.derived.Add(1)
 				}
 				d.mu.RUnlock()
 			}

@@ -199,12 +199,12 @@ engine IDs costs the slow path. The ID is not trusted: a message that carries
 it is verified against these keys like any other, and one that carries another
 engine ID (a replaced device) takes the slow path and re-pins.
 */
-func (v *v3Auth) seedEngine(engine []byte) {
+func (v *v3Auth) seedEngine(engine []byte) (derived bool) {
 	v.mu.Lock()
 	pinned := v.pin != nil
 	v.mu.Unlock()
 	if pinned || len(engine) < minEngineID || len(engine) > maxEngineID {
-		return
+		return false
 	}
 	sp := &gosnmp.UsmSecurityParameters{
 		UserName:                 v.user,
@@ -217,10 +217,11 @@ func (v *v3Auth) seedEngine(engine []byte) {
 	err := sp.InitSecurityKeys()
 	sp.AuthenticationPassphrase, sp.PrivacyPassphrase = "", ""
 	if err == nil {
-		v.setPin(sp)
+		v.setPin(sp, true) /* a pin set meanwhile by an authenticated message is kept */
 	}
 	clear(sp.SecretKey)
 	clear(sp.PrivacyKey)
+	return true
 }
 
 /* usmDecoder returns a decoder whose table holds only sp. */
@@ -300,13 +301,16 @@ func (v *v3Auth) verified(p *gosnmp.SnmpPacket, err error, pinIt bool) (*gosnmp.
 		return nil, false
 	}
 	if pinIt {
-		v.setPin(usm)
+		v.setPin(usm, false)
 	}
 	return p, true
 }
 
-/* setPin keeps the engine and the localized keys the authenticated message was verified with. */
-func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
+/*
+setPin keeps the engine and the localized keys the authenticated message was
+verified with. With ifNone (seeding) an existing pin is left alone.
+*/
+func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters, ifNone bool) {
 	if len(usm.SecretKey) == 0 || len(usm.PrivacyKey) == 0 {
 		return
 	}
@@ -324,6 +328,9 @@ func (v *v3Auth) setPin(usm *gosnmp.UsmSecurityParameters) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if ifNone && v.pin != nil {
+		return
+	}
 	v.clearPin()
 	v.pin = &v3Pin{engine: usm.AuthoritativeEngineID, sp: sp, g: g}
 }
