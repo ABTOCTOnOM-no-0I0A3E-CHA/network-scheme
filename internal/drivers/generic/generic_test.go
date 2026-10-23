@@ -159,12 +159,16 @@ func TestGenericInventoryTables(t *testing.T) {
 		{MAC: "00:aa:bb:cc:dd:01", VLAN: 1, IfIndex: 1},
 		{MAC: "00:aa:bb:cc:dd:02", VLAN: 10, IfIndex: 2},
 		{MAC: "00:aa:bb:cc:dd:03", VLAN: 10, IfIndex: 3},
-		{MAC: "00:aa:bb:cc:dd:04", VLAN: 20, IfIndex: 2},
+		{MAC: "00:aa:bb:cc:dd:04", VLAN: 100, IfIndex: 2}, /* FDB 20 belongs to VLAN 100 */
+		{MAC: "00:aa:bb:cc:dd:06", VLAN: 0, IfIndex: 1},   /* FDB 30 is shared by VLANs 30 and 31 */
 	})
 	eq(t, "vlans", inv.VLANs, []drivers.VLAN{{ID: 1, Name: "default"}, {ID: 10, Name: "users"}, {ID: 20, Name: "servers"}})
 	eq(t, "lldp", inv.LLDP, []drivers.LLDPNeighbor{
-		{LocalIfIndex: 1, ChassisID: "00:aa:bb:cc:dd:01", PortID: "gi0/1", PortDescr: "to sim-sw1", SysName: "sim-core1", MgmtAddr: a("10.0.0.1")},
-		{LocalIfIndex: 2, ChassisID: "core-2", PortID: "00:aa:bb:cc:dd:02", SysName: "sim[31m-sw2"},
+		{LocalIfIndex: 1, LocalPortResolved: true, ChassisID: "00:aa:bb:cc:dd:01", PortID: "gi0/1", PortDescr: "to sim-sw1", SysName: "sim-core1", MgmtAddr: a("10.0.0.1")},
+		/* LLDP port 7 is Gi1/0/2 by lldpLocPortId; the neighbor's second address is IPv4 */
+		{LocalIfIndex: 2, LocalPortResolved: true, ChassisID: "core-2", PortID: "00:aa:bb:cc:dd:02", SysName: "sim[31m-sw2", MgmtAddr: a("10.0.0.2")},
+		/* port 9 has an lldpLocPortId matching no interface and the neighbor only an IPv6 address: kept unresolved, no address */
+		{LocalIfIndex: 9, ChassisID: "00:aa:bb:cc:dd:05", PortID: "ge2", SysName: "sim-edge"},
 	})
 	eq(t, "entities", inv.Entities, []drivers.Entity{
 		{Index: 1, Class: "chassis", Name: "chassis", Descr: "Synthetic switch chassis", Model: "SIM-SW-24", Serial: "SIM0001", FirmwareRev: "boot 1.2", SoftwareRev: "1.0.0"},

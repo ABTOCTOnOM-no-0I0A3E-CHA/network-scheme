@@ -2,6 +2,7 @@ package triggers_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -281,6 +282,21 @@ func TestSyslogBadClockAndLongMessageAreBounded(t *testing.T) {
 	h.advance(6 * time.Second)
 	if len(h.problems(dev)) != 1 {
 		t.Fatalf("future message processed early: %+v", h.problems(dev))
+	}
+}
+
+/* TestSyslogFilterBeyondCapDoesNotAliasFirstFilter: a trigger whose filter was skipped at the cap must stay quiet instead of firing on filter 0's matches. */
+func TestSyslogFilterBeyondCapDoesNotAliasFirstFilter(t *testing.T) {
+	h := newHarness(t)
+	dev := h.newDevice()
+	for i := 0; i <= 256; i++ { /* one more distinct filter than the engine reads (maxSyslogFilters) */
+		h.newTrigger(h.group, "syslog", fmt.Sprintf(`{"severity_min":7,"contains":"key-%03d"}`, i), 0, "info")
+	}
+	h.writeSyslog(dev, h.clk.Now(), 3, "key-000 happened")
+	h.advance(6 * time.Second)
+	got := h.openProblems(dev)
+	if len(got) != 1 {
+		t.Fatalf("problems = %+v, want only the trigger of the matching filter", got)
 	}
 }
 

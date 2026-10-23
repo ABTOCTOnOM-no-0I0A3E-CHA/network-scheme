@@ -41,7 +41,7 @@ type Deps struct {
 	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
 	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
 	Shutdown      <-chan struct{}  /* closed on server shutdown: open WebSockets get a close frame; nil: never */
-	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows or device parents, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
+	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows, device parents, device create/delete (incl. discovery accept), group membership or group update/delete, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
 	ConfigChanged func()
 }
 

@@ -351,6 +351,7 @@ func (s *server) acceptDiscovered(w http.ResponseWriter, r *http.Request) {
 	}) {
 		return
 	}
+	s.configChanged() /* a new device joins group membership and the engine's device set */
 	writeJSON(w, http.StatusCreated, idResponse{ID: devID})
 }
 
