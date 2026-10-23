@@ -8,9 +8,10 @@ import (
 )
 
 type pollerStatus struct {
-	ID               string `json:"id"`
-	Devices          int64  `json:"devices"`
-	DevicesReporting int64  `json:"devices_reporting"` /* devices with a known state: 0 for a silent poller */
+	ID               string     `json:"id"`
+	Devices          int64      `json:"devices"`
+	DevicesReporting int64      `json:"devices_reporting"` /* devices with a known state: 0 for a silent poller */
+	HeartbeatAt      *time.Time `json:"heartbeat_at"`      /* last heartbeat; nil when the poller never wrote one */
 }
 
 type eventdStatus struct {
@@ -41,18 +42,19 @@ type systemStatus struct {
 }
 
 /*
-systemStatus reports the health of the services as the database sees it. The
-api may not read inventory.poller_heartbeat, so a poller shows the devices it
-owns and how many of them report a state (the state view hides the state of
-devices whose poller has been silent for 90 s), not the heartbeat itself.
+systemStatus reports the health of the services as the database sees it. A
+poller shows the devices it owns, how many of them report a state (the state
+view hides the state of devices whose poller has been silent for 90 s) and its
+last heartbeat (the api may read only the poller id and time of that table).
 */
 func (s *server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	out := systemStatus{Now: s.now().UTC()}
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.poller_id, count(*), count(*) FILTER (WHERE v.state <> 'unknown')
+		SELECT d.poller_id, count(*), count(*) FILTER (WHERE v.state <> 'unknown'), h.at
 		FROM core.device d LEFT JOIN inventory.device_state_v v ON v.device_id = d.id
-		GROUP BY d.poller_id ORDER BY d.poller_id`)
+		LEFT JOIN inventory.poller_heartbeat h ON h.poller_id = d.poller_id
+		GROUP BY d.poller_id, h.at ORDER BY d.poller_id`)
 	if err == nil {
 		out.Pollers, err = pgx.CollectRows(rows, pgx.RowToStructByPos[pollerStatus])
 	}

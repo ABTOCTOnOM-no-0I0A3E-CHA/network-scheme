@@ -3,11 +3,14 @@ import { currentStep, expectShell, STEP_FILE, submitCode, submitPassword, totpCo
 import { expect, ORIGIN, test, watch } from "./guard";
 
 /* Sidebar sections that are still placeholders (web/app/src/routes/index.tsx). */
-const SECTIONS = ["Карта", "Проблемы", "Бэкапы", "Изменения", "Аудит", "Настройки"];
+const SECTIONS = ["Карта", "Бэкапы", "Изменения", "Аудит", "Настройки"];
 /* Sections with real screens (see ui.spec.ts, events.spec.ts): visited for the CSP and external request check only. */
 const SCREENS: [string, string][] = [
   ["Устройства", "/devices"],
   ["Обнаружение", "/discovery"],
+  ["Проблемы", "/problems"],
+  ["Шаблоны", "/templates"],
+  ["Обслуживание", "/maintenance"],
   ["Логи", "/logs"],
   ["Состояние системы", "/health"],
 ];

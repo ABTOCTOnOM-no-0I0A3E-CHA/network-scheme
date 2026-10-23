@@ -35,6 +35,16 @@ queue fills up and the receivers count drops, nothing blocks them. When the
 database refuses data (a constraint, an encoding error) the batch falls back to
 single INSERTs so that one bad row never costs the other rows; the refused rows
 are counted.
+
+Ordering invariant (events.syslog.ingest_seq, events.trap.ingest_seq, see
+migration 00016): exactly one writer goroutine exists per eventd and it commits
+its batches one after another, each COPY or INSERT in its own transaction, so
+ingest_seq order is commit order. The trigger engine relies on it: once it has
+read every row up to some sequence number, no row with a smaller number can
+appear later (a rolled-back batch only leaves a gap). Never add a second
+writer, never write ingest_seq explicitly, and never run two eventd instances
+on one database without revisiting the engine's streams. The column lists above
+deliberately do not name ingest_seq.
 */
 type writer struct {
 	pool *pgxpool.Pool

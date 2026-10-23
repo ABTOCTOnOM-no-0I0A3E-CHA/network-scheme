@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -31,6 +32,16 @@ type DB struct {
 
 /* maxDBConns bounds db.max_conns. */
 const maxDBConns = 1000
+
+/*
+The api default for db.max_conns is max(minAPIDBConns, apiDBConnsPerCPU x CPUs).
+The trigger engine runs in the api process and holds one pooled connection for
+its advisory lock for as long as it lives; the rest serves requests.
+*/
+const (
+	minAPIDBConns    = 16
+	apiDBConnsPerCPU = 4
+)
 
 // API is the configuration of the api service (api.yaml).
 type API struct {
@@ -71,6 +82,9 @@ func LoadAPI(path string) (API, error) {
 	}
 	if err := c.DB.validate(); err != nil {
 		return API{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	if c.DB.MaxConns == 0 {
+		c.DB.MaxConns = min(max(minAPIDBConns, apiDBConnsPerCPU*runtime.NumCPU()), maxDBConns)
 	}
 	return c, nil
 }

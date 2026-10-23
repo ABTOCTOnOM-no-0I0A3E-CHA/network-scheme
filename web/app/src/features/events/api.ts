@@ -13,7 +13,7 @@ export type SystemStatus = S["SystemStatus"];
 const CSRF = { header: { "X-CSRF-Token": "" } };
 
 /** Server-side filter of the feed; `from`/`to` are ISO times. */
-export type EventQuery = { kind?: "syslog" | "trap"; deviceId?: number; severityMin?: EventSeverity; from: string; to?: string; q?: string };
+export type EventQuery = { kind?: "syslog" | "trap" | "storm"; deviceId?: number; severityMin?: EventSeverity; from: string; to?: string; q?: string };
 
 export const eventKeys = {
   all: ["events"] as const,

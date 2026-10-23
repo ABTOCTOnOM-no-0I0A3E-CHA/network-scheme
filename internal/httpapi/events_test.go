@@ -24,6 +24,7 @@ type eventItem struct {
 	Text       string         `json:"text"`
 	Identified bool           `json:"identified"`
 	Varbinds   map[string]any `json:"varbinds"`
+	Count      *int64         `json:"count"`
 }
 
 type eventsResp struct {
@@ -412,9 +413,10 @@ func TestSystemStatus(t *testing.T) {
 	wantError(t, f.do(viewer.authed(req{method: "GET", path: "/api/system/status"})), http.StatusForbidden, "forbidden")
 	type status struct {
 		Pollers []struct {
-			ID               string `json:"id"`
-			Devices          int64  `json:"devices"`
-			DevicesReporting int64  `json:"devices_reporting"`
+			ID               string     `json:"id"`
+			Devices          int64      `json:"devices"`
+			DevicesReporting int64      `json:"devices_reporting"`
+			HeartbeatAt      *time.Time `json:"heartbeat_at"`
 		} `json:"pollers"`
 		Eventd []struct {
 			Instance   string `json:"instance"`
@@ -429,7 +431,7 @@ func TestSystemStatus(t *testing.T) {
 	st := decode[status](t, f.do(operator.authed(req{method: "GET", path: "/api/system/status"})))
 	var local bool
 	for _, p := range st.Pollers {
-		if p.ID == "local" && p.Devices >= 1 && p.DevicesReporting >= 1 {
+		if p.ID == "local" && p.Devices >= 1 && p.DevicesReporting >= 1 && p.HeartbeatAt != nil && time.Since(*p.HeartbeatAt).Abs() < time.Minute {
 			local = true
 		}
 	}
@@ -465,4 +467,73 @@ func TestDeviceDetailLastError(t *testing.T) {
 	if got, ok := get(quiet)["last_error"]; !ok || got != "" {
 		t.Errorf("never polled last_error = %#v", got)
 	}
+}
+
+func TestEventsStormRows(t *testing.T) {
+	f := newFixture(t, nil)
+	gA, gB := f.newGroup(), f.newGroup()
+	viewerA := f.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &gA})
+	dA, dB := f.newDevice(gA), f.newDevice(gB)
+	minute := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Minute)
+	for _, row := range []struct {
+		dev   int64
+		kind  string
+		count int
+	}{{dA, "syslog", 500}, {dA, "trap", 7}, {dB, "syslog", 900}} {
+		if _, err := f.env.Pool("postgres").Exec(context.Background(),
+			`INSERT INTO events.storm (ts, device_id, kind, count) VALUES ($1, $2, $3, $4)`, minute, row.dev, row.kind, row.count); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.syslog(dA, minute.Add(10*time.Second), 6, "sw", "plain message")
+
+	all := decode[eventsResp](t, f.getEvents(viewerA, url.Values{}))
+	counts := map[string]int64{}
+	storms := 0
+	for _, e := range all.Items {
+		if e.Kind != "storm" {
+			continue
+		}
+		storms++
+		if e.DeviceID != dA || e.Count == nil || e.Severity != nil || !sameInstant(e.TS, minute) {
+			t.Errorf("bad storm row: %+v", e)
+		}
+		counts[e.Text] = *e.Count
+	}
+	if storms != 2 || counts["syslog"] != 500 || counts["trap"] != 7 || len(all.Items) != 3 {
+		t.Errorf("storms=%d counts=%v items=%d: want 2 storm rows of the visible device, 500 syslog and 7 trap, plus the message", storms, counts, len(all.Items))
+	}
+	only := decode[eventsResp](t, f.getEvents(viewerA, url.Values{"kind": {"storm"}}))
+	if len(only.Items) != 2 {
+		t.Errorf("kind=storm: %d items, want 2", len(only.Items))
+	}
+	if sys := decode[eventsResp](t, f.getEvents(viewerA, url.Values{"kind": {"syslog"}})); len(sys.Items) != 1 {
+		t.Errorf("kind=syslog: %d items, want 1", len(sys.Items))
+	}
+	if q := decode[eventsResp](t, f.getEvents(viewerA, url.Values{"q": {"plain"}})); len(q.Items) != 1 {
+		t.Errorf("text query: %d items, want only the matching message", len(q.Items))
+	}
+	/* Paging walks over storm rows with the same cursor rules. */
+	seen, cursor := 0, ""
+	for range 5 {
+		q := url.Values{"limit": {"1"}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		page := decode[eventsResp](t, f.getEvents(viewerA, q))
+		seen += len(page.Items)
+		if page.NextCursor == nil {
+			break
+		}
+		cursor = *page.NextCursor
+	}
+	if seen != 3 {
+		t.Errorf("paging saw %d items, want 3", seen)
+	}
+	wantError(t, f.getEvents(viewerA, url.Values{"device_id": {fmt.Sprint(dB)}}), http.StatusNotFound, "not_found")
+}
+
+func sameInstant(s string, want time.Time) bool {
+	got, err := time.Parse(time.RFC3339Nano, s)
+	return err == nil && got.Equal(want)
 }

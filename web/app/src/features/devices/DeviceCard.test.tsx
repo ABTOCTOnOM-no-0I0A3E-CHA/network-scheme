@@ -39,6 +39,7 @@ let polled = 0;
 let patched: unknown;
 let metricsQuery: Record<string, string | null> | undefined;
 let eventQuery: URLSearchParams | undefined;
+let problemQuery: URLSearchParams | undefined;
 const seen = "2026-10-02T10:00:00Z";
 const server = setupServer(
   http.get("*/api/devices/7", () => deviceFn()),
@@ -69,6 +70,11 @@ const server = setupServer(
     return HttpResponse.json({ items: [{ ts: seen, kind: "syslog", device_id: 7, device_name: "core-sw", severity: "high", app: "sshd", text: "journal line", identified: true }], next_cursor: null });
   }),
   http.get("*/api/groups", () => err(403, "forbidden")),
+  http.get("*/api/devices", () => HttpResponse.json([{ ...detail({ id: 3, name: "core-parent" }) }, { ...detail() }])),
+  http.get("*/api/problems", ({ request }) => {
+    problemQuery = new URL(request.url).searchParams;
+    return HttpResponse.json({ items: [], next_cursor: null });
+  }),
   http.post("*/api/devices/7/poll", () => {
     polled++;
     return new HttpResponse(null, { status: 202 });
@@ -88,6 +94,7 @@ afterEach(() => {
   patched = undefined;
   metricsQuery = undefined;
   eventQuery = undefined;
+  problemQuery = undefined;
 });
 afterAll(() => server.close());
 
@@ -292,5 +299,40 @@ describe("DeviceCard", () => {
     await userEvent.type(inv, "59");
     await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
     expect(await within(form).findByRole("alert")).toHaveTextContent("от 60 до 86400");
+  });
+
+  it("problems tab lists the problems of this device only", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(false);
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.problems }));
+    expect(await screen.findByText(ru.problems.empty)).toBeInTheDocument();
+    expect(problemQuery?.get("device_id")).toBe("7");
+  });
+
+  it("shows the parent and lets a manager change or clear it", async () => {
+    deviceFn = () => HttpResponse.json(detail({ parent_id: 3 }));
+    setup(false, true);
+    expect(await screen.findByText("core-parent")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    const form = screen.getByRole("form", { name: ru.card.edit.title });
+    const parent = within(form).getByLabelText(ru.card.edit.parent) as HTMLSelectElement;
+    await waitFor(() => expect(parent.value).toBe("3"));
+    expect([...parent.options].map((o) => o.value)).toEqual(["", "3"]);
+    await userEvent.selectOptions(parent, "");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(patched).toEqual({ parent_id: null }));
+  });
+
+  it("does not clear the parent when the device list failed to load", async () => {
+    deviceFn = () => HttpResponse.json(detail({ parent_id: 3 }));
+    server.use(http.get("*/api/devices", () => HttpResponse.json({ error: { code: "internal" } }, { status: 500 })));
+    setup(false, true);
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    const form = screen.getByRole("form", { name: ru.card.edit.title });
+    const name = within(form).getByLabelText(ru.devices.addDialog.name);
+    await userEvent.clear(name);
+    await userEvent.type(name, "renamed");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(patched).toEqual({ name: "renamed" }));
   });
 });

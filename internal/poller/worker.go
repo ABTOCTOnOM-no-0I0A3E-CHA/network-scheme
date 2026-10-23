@@ -43,7 +43,8 @@ type devCache struct {
 	lastSNMP    atomic.Int64 /* unix ns of the last answer on any session to the device; 0: none */
 	drv         drivers.Driver
 	creds       map[string]opened
-	v3Rejected  bool /* an SNMPv3 profile was rejected and SNMPv2c is used instead */
+	v3Rejected  bool   /* an SNMPv3 profile was rejected and SNMPv2c is used instead */
+	engine      string /* SNMPv3 engine ID last recorded in the database for this device */
 	lastCPU     *float64
 }
 
@@ -77,7 +78,7 @@ func (p *Poller) run(ctx context.Context, d device, cache *devCache, c class, lk
 /* refresh applies the scheduler's change flags; the device lock must be held. */
 func (p *Poller) refresh(d device, cache *devCache) {
 	if cache.readdressed.Swap(false) {
-		cache.drv, cache.lastCPU = nil, nil
+		cache.drv, cache.lastCPU, cache.engine = nil, nil, ""
 		cache.lastSNMP.Store(0)
 		p.rates.Forget(d.ID)
 	}
@@ -109,7 +110,41 @@ func (p *Poller) session(ctx context.Context, d device, cache *devCache) (snmp.R
 	if err != nil {
 		return nil, nil, err
 	}
-	return stampReader{r: r, at: &cache.lastSNMP, now: p.now}, closer, nil
+	sr := stampReader{r: r, at: &cache.lastSNMP, now: p.now}
+	if eg, ok := r.(snmp.EngineIDer); ok && c.Kind == creds.KindSNMP3 {
+		sr.learned = new(atomic.Bool)
+		sr.learn = func(ctx context.Context) bool { return p.recordEngine(ctx, d, cache, eg.EngineID()) }
+	}
+	return sr, closer, nil
+}
+
+/*
+recordEngine stores the engine ID an authenticated v3 answer revealed, so that
+eventd can pin it. It writes only when the ID differs from the one recorded last
+(the device lock is held, so the cache needs no further guard) and only for a
+device assigned to this poller. It reports whether there is nothing left to do;
+a failure is logged and retried on the next answer.
+*/
+func (p *Poller) recordEngine(ctx context.Context, d device, cache *devCache, id []byte) bool {
+	if len(id) < minEngineID || len(id) > maxEngineID {
+		return false
+	}
+	if cache.engine == string(id) {
+		return true
+	}
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO core.device_v3_engine (device_id, engine_id, seen_at)
+		SELECT id, $2, now() FROM core.device WHERE id = $1 AND poller_id = $3
+		ON CONFLICT (device_id) DO UPDATE SET engine_id = EXCLUDED.engine_id, seen_at = EXCLUDED.seen_at`,
+		d.ID, id, p.cfg.PollerID)
+	if err != nil {
+		if ctx.Err() == nil {
+			p.log.Warn("recording the SNMPv3 engine ID failed", slog.Int64("device_id", d.ID), slog.String("err", err.Error()))
+		}
+		return false
+	}
+	cache.engine = string(id)
+	return true
 }
 
 /* stampReader records the time of every successful request (and every walked variable). */
@@ -117,14 +152,24 @@ type stampReader struct {
 	r   snmp.Reader
 	at  *atomic.Int64
 	now func() time.Time
+	/* learn, set on SNMPv3 sessions, records the engine ID after an answer; learned says it is done for the session */
+	learn   func(ctx context.Context) bool
+	learned *atomic.Bool
 }
 
 func (s stampReader) stamp() { s.at.Store(s.now().UnixNano()) }
 
+func (s stampReader) answered(ctx context.Context) {
+	s.stamp()
+	if s.learn != nil && !s.learned.Load() && s.learn(ctx) {
+		s.learned.Store(true)
+	}
+}
+
 func (s stampReader) Get(ctx context.Context, oids ...string) ([]snmp.Var, error) {
 	v, err := s.r.Get(ctx, oids...)
 	if err == nil {
-		s.stamp()
+		s.answered(ctx)
 	}
 	return v, err
 }
@@ -132,7 +177,7 @@ func (s stampReader) Get(ctx context.Context, oids ...string) ([]snmp.Var, error
 func (s stampReader) BulkGet(ctx context.Context, oids []string) ([]snmp.Var, error) {
 	v, err := s.r.BulkGet(ctx, oids)
 	if err == nil {
-		s.stamp()
+		s.answered(ctx)
 	}
 	return v, err
 }
@@ -143,7 +188,7 @@ func (s stampReader) Walk(ctx context.Context, root string, fn func(snmp.Var) er
 		return fn(v)
 	})
 	if err == nil {
-		s.stamp() /* an empty subtree is an answer too */
+		s.answered(ctx) /* an empty subtree is an answer too */
 	}
 	return err
 }

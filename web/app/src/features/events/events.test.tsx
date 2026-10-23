@@ -223,6 +223,16 @@ describe("EventFeed", () => {
     expect(screen.queryByText(ru.events.noVarbinds)).not.toBeInTheDocument();
   });
 
+  it("shows a storm row with the folded kind, the repeat count and the minute", async () => {
+    eventsFn = () => HttpResponse.json({ items: [ev(0, { kind: "storm", severity: null, text: "syslog", count: 500, ts: "2026-01-01T10:07:00Z" })], next_cursor: null });
+    wrap(<EventFeed />);
+    await waitFor(() => expect(dataRows()).toHaveLength(1));
+    const row = dataRows()[0];
+    expect(within(row).getByText(ru.events.kind.storm)).toBeInTheDocument();
+    expect(row.textContent).toContain("500");
+    expect(row.textContent).toContain("Свёрнуто событий (Syslog)");
+  });
+
   it("maps API errors to a localized message", async () => {
     eventsFn = () => err(400, "bad_request");
     wrap(<EventFeed />);
@@ -331,9 +341,10 @@ describe("SystemStatus", () => {
       HttpResponse.json({
         now: new Date(now).toISOString(),
         pollers: [
-          { id: "poller-a", devices: 10, devices_reporting: 9 },
-          { id: "poller-b", devices: 5, devices_reporting: 0 },
-          { id: "poller-idle", devices: 0, devices_reporting: 0 },
+          { id: "poller-a", devices: 10, devices_reporting: 9, heartbeat_at: new Date(now - 10_000).toISOString() },
+          { id: "poller-b", devices: 5, devices_reporting: 0, heartbeat_at: null },
+          { id: "poller-idle", devices: 0, devices_reporting: 0, heartbeat_at: null },
+          { id: "poller-stale", devices: 4, devices_reporting: 4, heartbeat_at: new Date(now - 200_000).toISOString() },
         ],
         eventd: [
           { instance: "eventd-fresh", updated_at: new Date(now - 5_000).toISOString(), received: 100, accepted: 90, unknown_source: 3, auth_failed: 2, rate_limited: 1, dropped: 4, queue_depth: 7 },
@@ -348,6 +359,7 @@ describe("SystemStatus", () => {
     expect(within(await rowOf("poller-b")).getByText(ru.system.silent)).toBeInTheDocument();
     expect(await rowOf("poller-a")).toHaveAttribute("data-alert", "false");
     expect(await rowOf("poller-idle")).toHaveAttribute("data-alert", "false");
+    expect(await rowOf("poller-stale")).toHaveAttribute("data-alert", "true"); /* reports devices, but its heartbeat is old */
     expect(await rowOf("eventd-old")).toHaveAttribute("data-alert", "true");
     expect(within(await rowOf("eventd-old")).getByText(ru.system.stale)).toBeInTheDocument();
     expect(await rowOf("eventd-fresh")).toHaveAttribute("data-alert", "false");

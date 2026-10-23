@@ -9,5 +9,7 @@ db:
   name: "nms"
   user: "nms_api"
   password_file: "/run/secrets/db_api_password"
+  # The trigger engine holds one connection for its lock; the rest serves requests.
+  max_conns: 32
 data_key_file: "/run/secrets/api_data_key"
 read_key_version: 1

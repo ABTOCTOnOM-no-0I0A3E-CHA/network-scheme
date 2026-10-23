@@ -129,7 +129,7 @@ export function useGroups(enabled = true) {
 }
 
 export type DeviceCreate = { name: string; address: string; group_id: number; snmp_port?: number };
-export type DevicePatch = Partial<Pick<DeviceDetail, "name" | "address" | "snmp_port" | "group_id" | "interval_avail_s" | "interval_metrics_s" | "interval_inventory_s">>;
+export type DevicePatch = Partial<Pick<DeviceDetail, "name" | "address" | "snmp_port" | "group_id" | "interval_avail_s" | "interval_metrics_s" | "interval_inventory_s" | "parent_id">>;
 
 /** Adds a device; resolves to its id. */
 export function useCreateDevice() {

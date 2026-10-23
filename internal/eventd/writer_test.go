@@ -360,7 +360,10 @@ func TestQueueByteBudgetBoundsMemory(t *testing.T) {
 	var kept [][]byte /* every event owns its bytes, as a decoded trap does */
 	accepted, dropped := 0, 0
 	for range 5_000 { /* 5000 x ~15 KiB = 75 MiB offered to an 8 MiB budget */
-		own := append([]byte(nil), vb...)
+		own, _ := encodeVarbinds(vs) /* the real output: its capacity must not exceed what the budget counts */
+		if cap(own) > len(own)+len(own)/8 {
+			t.Fatalf("varbinds hold %d bytes of buffer for %d of data", cap(own), len(own))
+		}
 		if q.push(event{kind: kindTrap, trapOID: "1.3.6.1.4.1.1", name: "x", varbinds: own}) {
 			accepted++
 			kept = append(kept, own)
@@ -376,7 +379,7 @@ func TestQueueByteBudgetBoundsMemory(t *testing.T) {
 	if dropped == 0 || accepted == 0 || accepted*len(vb) > budget {
 		t.Errorf("accepted %d dropped %d", accepted, dropped)
 	}
-	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 2*budget {
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > budget+budget/2 {
 		t.Errorf("heap grew by %d bytes, budget %d", grown, budget)
 	}
 	runtime.KeepAlive(kept)

@@ -13,6 +13,10 @@ usage: send_events.py TARGET_IP MARKER [COMMUNITY [CAFILE TLS_NAME]]
   CAFILE     when given, one message per round goes over TLS (port 6514), verified against this CA
              for the host name TLS_NAME
 
+With the environment variable TRAP_CONTROL (a file path) the trap is chosen by the file instead: every round sends the
+trap it names (linkDown or linkUp, for ifIndex TRAP_IFINDEX, default 1) or none while the file is missing or empty, so a
+test can open and close a link problem of this source on demand. Without it a linkDown for ifIndex 1 is sent every round.
+
 Ports default to the container ports of eventd (1514 syslog, 1162 traps, 6514 TLS); the environment
 variables SYSLOG_PORT, TRAP_PORT and TLS_PORT replace them, e.g. 514 for the published port.
 """
@@ -55,15 +59,32 @@ def varbind(name, value):
     return tlv(0x30, oid(name) + value)
 
 
-def link_down_trap(community, request_id):
-    """SNMPv2c trap: sysUpTime.0, snmpTrapOID.0 = linkDown, ifIndex.1 = 1."""
+LINK_TRAPS = {"linkDown": "1.3.6.1.6.3.1.1.5.3", "linkUp": "1.3.6.1.6.3.1.1.5.4"}
+
+
+def link_trap(community, request_id, name="linkDown", if_index=1):
+    """SNMPv2c trap: sysUpTime.0, snmpTrapOID.0 = linkDown or linkUp, ifIndex.N = N."""
     vbs = (
         varbind("1.3.6.1.2.1.1.3.0", tlv(0x43, (123456).to_bytes(3, "big")))  # TimeTicks
-        + varbind("1.3.6.1.6.3.1.1.4.1.0", oid("1.3.6.1.6.3.1.1.5.3"))
-        + varbind("1.3.6.1.2.1.2.2.1.1.1", integer(1))
+        + varbind("1.3.6.1.6.3.1.1.4.1.0", oid(LINK_TRAPS[name]))
+        + varbind("1.3.6.1.2.1.2.2.1.1.%d" % if_index, integer(if_index))
     )
     pdu = tlv(0xA7, integer(request_id) + integer(0) + integer(0) + tlv(0x30, vbs))
     return tlv(0x30, integer(1) + tlv(0x04, community.encode()) + pdu)
+
+
+def read_control(path):
+    """The trap named in the control file (linkDown or linkUp) and an optional community after it ("linkUp other-community"):
+    the device's profile, which eventd checks traps against, may have been switched to another community.
+    Nothing when the file is missing, empty or names anything else."""
+    try:
+        with open(path) as f:
+            parts = f.read().split()
+    except OSError:
+        return "", ""
+    if not parts or parts[0] not in LINK_TRAPS:
+        return "", ""
+    return parts[0], parts[1] if len(parts) > 1 else ""
 
 
 def main():
@@ -73,6 +94,8 @@ def main():
     syslog_port = int(os.environ.get("SYSLOG_PORT", "1514"))
     trap_port = int(os.environ.get("TRAP_PORT", "1162"))
     tls_port = int(os.environ.get("TLS_PORT", "6514"))
+    control = os.environ.get("TRAP_CONTROL", "")
+    if_index = int(os.environ.get("TRAP_IFINDEX", "1"))
     ctx = ssl.create_default_context(cafile=cafile) if cafile else None
     n = 0
     while True:
@@ -80,8 +103,12 @@ def main():
         text = "<14>%s e2ehost e2eapp: %s%s" % (time.strftime("%b %e %H:%M:%S"), marker, "udp")
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.sendto(text.encode(), (target, syslog_port))
-        if community:
-            udp.sendto(link_down_trap(community, n), (target, trap_port))
+        if community and control:
+            name, override = read_control(control)
+            if name:
+                udp.sendto(link_trap(override or community, n, name, if_index), (target, trap_port))
+        elif community:
+            udp.sendto(link_trap(community, n), (target, trap_port))
         udp.close()
         try:
             with socket.create_connection((target, syslog_port), timeout=3) as tcp:

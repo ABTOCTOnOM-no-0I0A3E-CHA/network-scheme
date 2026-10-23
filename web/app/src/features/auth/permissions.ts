@@ -30,3 +30,23 @@ export function canManageEvents(session: Session | null | undefined): boolean {
 export function canReadSystem(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => (r.role === "operator" || r.role === "admin") && r.group_id === null);
 }
+
+/** UI hint only: triggers.manage (templates, triggers, overrides) belongs to the admin role, global or on a group. */
+export function canManageTriggers(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin");
+}
+
+/** UI hint only: maintenance.manage belongs to the admin role, global or on a group. */
+export function canManageMaintenance(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin");
+}
+
+/** UI hint only: problems.ack belongs to the operator and admin roles, global or on a group. */
+export function canAckProblems(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
+}
+
+/** UI hint only: the problem feed (/api/ws) needs devices.read, which every role but the auditor has. */
+export function canReceiveProblems(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role !== "auditor");
+}

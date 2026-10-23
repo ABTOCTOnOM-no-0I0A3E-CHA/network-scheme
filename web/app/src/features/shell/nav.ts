@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, DatabaseBackup, FileClock, GitPullRequestArrow, LayoutDashboard, Map, Radar, ScrollText, Server, Settings, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, DatabaseBackup, FileClock, GitPullRequestArrow, LayoutDashboard, ListChecks, Map, Radar, ScrollText, Server, Settings, Wrench, type LucideIcon } from "lucide-react";
 
 export type NavItem = { key: string; path: string; icon: LucideIcon };
 
@@ -9,6 +9,8 @@ export const NAV: NavItem[] = [
   { key: "devices", path: "/devices", icon: Server },
   { key: "discovery", path: "/discovery", icon: Radar },
   { key: "problems", path: "/problems", icon: AlertTriangle },
+  { key: "templates", path: "/templates", icon: ListChecks },
+  { key: "maintenance", path: "/maintenance", icon: Wrench },
   { key: "logs", path: "/logs", icon: ScrollText },
   { key: "backups", path: "/backups", icon: DatabaseBackup },
   { key: "changes", path: "/changes", icon: GitPullRequestArrow },

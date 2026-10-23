@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,7 @@ type device struct {
 	driver string
 	drv    drivers.Driver /* nil when the driver name is unknown or "auto" */
 	fp     string
+	engine []byte /* SNMPv3 engine ID the poller learned; seeded into v3 by seedPending */
 
 	mu        sync.RWMutex
 	wiped     bool
@@ -113,6 +115,13 @@ type sources struct {
 	*/
 	seen      map[seenKey]time.Time
 	rollbacks atomic.Uint64
+
+	seedMu   sync.Mutex /* guards seeding and rerun */
+	seeding  bool
+	rerun    bool
+	seedWG   sync.WaitGroup
+	derived  atomic.Int64 /* key derivations done by seedPending (tests) */
+	seedGate func()       /* tests only: called by a seeding worker before each device */
 }
 
 type seenKey struct {
@@ -152,6 +161,7 @@ type devRow struct {
 	addr    netip.Addr
 	driver  string
 	profile map[string]profileRow
+	engine  []byte /* SNMPv3 engine ID the poller learned; nil when none */
 }
 
 type profileRow struct {
@@ -169,8 +179,9 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := pool.Query(ctx, `
-		SELECT d.id, d.address, d.driver, p.kind, p.ciphertext, p.status
+		SELECT d.id, d.address, d.driver, p.kind, p.ciphertext, p.status, e.engine_id
 		FROM core.device d
+		LEFT JOIN core.device_v3_engine e ON e.device_id = d.id
 		LEFT JOIN core.event_auth_profile_v p ON p.device_id = d.id AND octet_length(p.ciphertext) <= $1
 		ORDER BY d.id`, maxCiphertext)
 	if err != nil {
@@ -184,11 +195,12 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 		driver       string
 		kind, status *string
 		ciphertext   []byte
+		engine       []byte
 	)
-	if _, err := pgx.ForEachRow(rows, []any{&id, &addr, &driver, &kind, &ciphertext, &status}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&id, &addr, &driver, &kind, &ciphertext, &status, &engine}, func() error {
 		r := byID[id]
 		if r == nil {
-			r = &devRow{id: id, addr: addr.Unmap().WithZone(""), driver: driver, profile: map[string]profileRow{}}
+			r = &devRow{id: id, addr: addr.Unmap().WithZone(""), driver: driver, profile: map[string]profileRow{}, engine: append([]byte(nil), engine...)}
 			byID[id] = r
 			order = append(order, r)
 		}
@@ -244,9 +256,87 @@ func (s *sources) reload(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+/*
+startSeeding runs seedPending in the background, one run at a time: a request
+while one runs only marks "run again" (the new run finds what is still unpinned,
+and devices pinned before cost nothing). Never blocks the caller.
+*/
+func (s *sources) startSeeding(ctx context.Context) {
+	s.seedMu.Lock()
+	if s.seeding {
+		s.rerun = true
+		s.seedMu.Unlock()
+		return
+	}
+	s.seeding = true
+	s.seedMu.Unlock()
+	s.seedWG.Go(func() {
+		for {
+			s.seedPending(ctx)
+			s.seedMu.Lock()
+			if !s.rerun || ctx.Err() != nil {
+				s.seeding, s.rerun = false, false
+				s.seedMu.Unlock()
+				return
+			}
+			s.rerun = false
+			s.seedMu.Unlock()
+		}
+	})
+}
+
+/*
+seedPending pins the recorded engine of every v3 device that has none yet,
+deriving the keys on GOMAXPROCS workers (two password hashes, ~12 ms, per
+device). It runs after reload, outside it: listeners are up meanwhile, and a
+device not yet seeded simply takes the slow path (budgeted) for its traps. It
+stops early when ctx ends. A device wiped or replaced meanwhile is skipped
+(d.mu excludes wipe).
+*/
+func (s *sources) seedPending(ctx context.Context) {
+	var todo []*device
+	for _, d := range s.cur.Load().all {
+		d.mu.RLock()
+		if !d.wiped && d.v3 != nil && len(d.engine) > 0 {
+			todo = append(todo, d)
+		}
+		d.mu.RUnlock()
+	}
+	if len(todo) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	next := make(chan *device)
+	for range min(runtime.GOMAXPROCS(0), len(todo)) {
+		wg.Go(func() {
+			for d := range next {
+				if s.seedGate != nil {
+					s.seedGate()
+				}
+				d.mu.RLock()
+				if !d.wiped && ctx.Err() == nil && d.v3.seedEngine(d.engine) {
+					s.derived.Add(1)
+				}
+				d.mu.RUnlock()
+			}
+		})
+	}
+	for _, d := range todo {
+		select {
+		case next <- d:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	close(next)
+	wg.Wait()
+}
+
 func fingerprint(r *devRow) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%d|%s|%s", r.id, r.addr, r.driver)
+	_, _ = fmt.Fprintf(h, "%d|%s|%s|%x", r.id, r.addr, r.driver, r.engine)
 	for _, k := range []string{creds.KindSNMP2c, creds.KindSNMP3} {
 		if p, ok := r.profile[k]; ok {
 			sum := sha256.Sum256(p.ct)
@@ -258,7 +348,7 @@ func fingerprint(r *devRow) string {
 
 /* build verifies the SNMP profiles of one device; a refused profile is logged once and leaves its protocol unusable. */
 func (s *sources) build(r *devRow, fp string) *device {
-	d := &device{id: r.id, addr: r.addr, driver: r.driver, fp: fp}
+	d := &device{id: r.id, addr: r.addr, driver: r.driver, fp: fp, engine: r.engine}
 	if s.reg != nil {
 		d.drv = s.reg.ByName(r.driver)
 	}

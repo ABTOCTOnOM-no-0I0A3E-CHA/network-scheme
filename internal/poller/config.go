@@ -176,3 +176,9 @@ func (c Config) ReadKeys() (priv, pub *[32]byte, err error) {
 	}
 	return priv, pub, nil
 }
+
+/* Bounds of an SNMPv3 engine ID (RFC 3411 SnmpEngineID), as in core.device_v3_engine. */
+const (
+	minEngineID = 5
+	maxEngineID = 32
+)

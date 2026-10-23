@@ -20,6 +20,7 @@ device).
 package eventd
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -53,6 +54,7 @@ const (
 	callTimeout   = 10 * time.Second /* one database round trip of a background loop */
 	drainTimeout  = 10 * time.Second /* shutdown: how long the writer may take for what is queued */
 	udpQueue      = 1024
+	udpHandBytes  = 16 << 20 /* bytes of datagrams handed to the workers of one socket and not yet processed; worst case 2 sockets x 16 MiB + 64 MiB queue stays below the 400 MiB GOMEMLIMIT */
 	udpReadBuf    = 8 << 20
 	maxTrapPacket = 65535
 	slowDevRate   = 0.1 /* one SNMPv3 key derivation per 10 s per device (burst 3, so a genuine first trap has a chance against a slow spoofer) ... */
@@ -147,6 +149,7 @@ func Run(ctx context.Context, cfg config.EventD, deps Deps) error {
 	w := &writer{pool: s.pool, st: &s.st, log: s.log, size: cfg.BatchSize, wait: cfg.BatchInterval}
 	wdone := make(chan struct{})
 	go func() { defer close(wdone); w.run(wctx, s.q) }()
+	s.src.startSeeding(ctx)
 	bg.Go(func() { s.listenDB(ctx) })
 	bg.Go(func() { s.statsLoop(ctx, deps.StatsEvery) })
 	bg.Go(func() { s.stormLoop(ctx) })
@@ -163,6 +166,7 @@ func Run(ctx context.Context, cfg config.EventD, deps Deps) error {
 	}
 	rx.Wait()
 	bg.Wait()
+	s.src.seedWG.Wait()
 	s.storm.flush()
 	s.q.close()
 	select {
@@ -339,11 +343,13 @@ it.
 func (s *server) pumpUDP(rx *sync.WaitGroup, c *net.UDPConn, size int, handle func(ip netip.Addr, from netip.AddrPort, b []byte)) {
 	_ = c.SetReadBuffer(udpReadBuf)
 	ch := make(chan udpPacket, udpQueue)
+	var held atomic.Int64 /* bytes in ch and in the workers hands: bounded by udpHandBytes, not only by the count */
 	var ww sync.WaitGroup
 	for range max(2, runtime.GOMAXPROCS(0)) {
 		ww.Go(func() {
 			for p := range ch {
 				s.safely(func() { handle(p.ip, p.from, p.data) })
+				held.Add(-int64(len(p.data)))
 			}
 		})
 	}
@@ -364,9 +370,15 @@ func (s *server) pumpUDP(rx *sync.WaitGroup, c *net.UDPConn, size int, handle fu
 				s.st.unknownSource.Add(1)
 				continue
 			}
+			if held.Add(int64(n)) > udpHandBytes {
+				held.Add(-int64(n))
+				s.st.dropped.Add(1)
+				continue
+			}
 			select {
-			case ch <- udpPacket{ip: ip, from: from, data: append([]byte(nil), buf[:n]...)}:
+			case ch <- udpPacket{ip: ip, from: from, data: bytes.Clone(buf[:n])}: /* right-sized: only the n bytes read */
 			default:
+				held.Add(-int64(n))
 				s.st.dropped.Add(1)
 			}
 		}
@@ -536,6 +548,7 @@ func (s *server) reloadAll(ctx context.Context, devs, rules bool) error {
 		if err != nil {
 			return err
 		}
+		s.src.startSeeding(ctx)
 		ids := s.src.ids()
 		keep := func(id int64) bool { _, ok := ids[id]; return ok }
 		s.lim.prune(keep)

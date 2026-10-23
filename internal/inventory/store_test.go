@@ -361,8 +361,12 @@ func TestApiCannotWriteInventory(t *testing.T) {
 		_, err = api.Exec(ctx, `DELETE FROM inventory.`+tbl)
 		wantDenied(t, "api DELETE "+tbl, err)
 	}
-	/* The API reads states only through the view; raw status, heartbeats and credential times stay hidden. */
-	for _, tbl := range []string{"device_status", "poller_heartbeat", "profile_seen"} {
+	/*
+		The API reads states through the view; raw status and credential times stay
+		hidden. It may read the heartbeat (poller id and time; the problem engine
+		and the status page need it) but not write it (checked above).
+	*/
+	for _, tbl := range []string{"device_status", "profile_seen"} {
 		_, err := api.Exec(ctx, `SELECT * FROM inventory.`+tbl)
 		wantDenied(t, "api SELECT "+tbl, err)
 	}

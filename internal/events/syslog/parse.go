@@ -82,9 +82,10 @@ func Parse(b []byte, now time.Time) (Message, error) {
 		m.TS = now
 	}
 	m.TS = m.TS.UTC()
-	m.Host = clip(sanitize(m.Host), MaxHost)
-	m.App = clip(sanitize(m.App), MaxApp)
-	m.Text = clip(sanitize(m.Text), MaxMessage)
+	/* Clone: a clean field is a substring of the whole raw message and would keep all of it alive. */
+	m.Host = strings.Clone(clip(sanitize(m.Host), MaxHost))
+	m.App = strings.Clone(clip(sanitize(m.App), MaxApp))
+	m.Text = strings.Clone(clip(sanitize(m.Text), MaxMessage))
 	return m, nil
 }
 
@@ -118,7 +119,7 @@ func parsePRI(s string) (pri int, rest string, ok bool) {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-/* sanitize makes s valid UTF-8 and replaces C0 controls (except \t) and DEL with U+FFFD. */
+/* sanitize makes s valid UTF-8 and replaces what badRune lists (C0 controls except \t, DEL, C1 controls, bidi controls, U+2028/2029) with U+FFFD. */
 func sanitize(s string) string {
 	clean := true
 	for i := 0; i < len(s); i++ {

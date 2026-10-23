@@ -8,7 +8,8 @@ import { ApiError, StepUpCancelled } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
 import type { CredKind } from "@/lib/seal";
 import { cn } from "@/lib/utils";
-import { useDevice, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
+import { ProblemList } from "@/features/problems/ProblemList";
+import { useDevice, useDevices, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
 import { ChartsTab } from "@/features/charts/ChartsTab";
 import { EventFeed } from "@/features/events/EventFeed";
 import { DeviceEditForm } from "./DeviceEditForm";
@@ -16,8 +17,8 @@ import { InventoryTable, Text, type Column } from "./InventoryTable";
 import { ProfileForm } from "./ProfileForm";
 import { useProfiles } from "./profiles";
 
-type TabId = DeviceTable | "graphs" | "profiles" | "journal";
-const TABS: TabId[] = ["interfaces", "graphs", "arp", "mac", "vlans", "lldp", "entities", "routes", "journal", "profiles"];
+type TabId = DeviceTable | "graphs" | "profiles" | "journal" | "problems";
+const TABS: TabId[] = ["interfaces", "graphs", "arp", "mac", "vlans", "lldp", "entities", "routes", "problems", "journal", "profiles"];
 const KINDS: CredKind[] = ["snmp2c", "snmp3", "ssh_read"];
 
 type Props = {
@@ -25,6 +26,8 @@ type Props = {
   /** UI hints; the API decides. */
   canPoll: boolean;
   canManage: boolean;
+  /** problems.ack hint. */
+  canAck?: boolean;
   /** Whether group names can be fetched (global admin). */
   canListGroups?: boolean;
 };
@@ -35,7 +38,7 @@ export function DeviceCard(props: Props) {
   return <DeviceCardBody key={props.id} {...props} />;
 }
 
-function DeviceCardBody({ id, canPoll, canManage, canListGroups = false }: Props) {
+function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>("interfaces");
@@ -84,6 +87,7 @@ function DeviceCardBody({ id, canPoll, canManage, canListGroups = false }: Props
           tab={tab}
           deviceId={device.data.id}
           canManage={canManage}
+          canAck={canAck}
           chartIf={chartIf}
           onChartIf={setChartIf}
           onShowChart={(i) => {
@@ -123,6 +127,7 @@ function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceD
     [t("devices.col.firmware"), device.firmware],
     [t("devices.col.driver"), device.driver],
   ];
+  const parentId = device.parent_id ?? null;
   const intervals: [string, number | null][] = [
     [t("card.edit.intervalAvail"), device.interval_avail_s],
     [t("card.edit.intervalMetrics"), device.interval_metrics_s],
@@ -170,6 +175,14 @@ function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceD
             </dd>
           </div>
         ))}
+        {parentId !== null && (
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">{t("card.edit.parent")}</dt>
+            <dd className="break-words">
+              <ParentName id={parentId} />
+            </dd>
+          </div>
+        )}
         {intervals.map(([k, v]) => (
           <div key={k} className="min-w-0">
             <dt className="text-xs text-muted-foreground">{k}</dt>
@@ -182,16 +195,24 @@ function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceD
   );
 }
 
+/* mounted only for a device that has a parent, so devices without one trigger no extra request */
+function ParentName({ id }: { id: number }) {
+  const devices = useDevices();
+  const name = safeText(devices.data?.find((d) => d.id === id)?.name);
+  return <span title={name}>{name || `#${id}`}</span>;
+}
+
 type TabBodyProps = {
   tab: TabId;
   deviceId: number;
   canManage: boolean;
+  canAck: boolean;
   chartIf: number | undefined;
   onChartIf: (i: number) => void;
   onShowChart: (i: number) => void;
 };
 
-function TabBody({ tab, deviceId, canManage, chartIf, onChartIf, onShowChart }: TabBodyProps) {
+function TabBody({ tab, deviceId, canManage, canAck, chartIf, onChartIf, onShowChart }: TabBodyProps) {
   const { t, i18n } = useTranslation();
   const num = (n: number) => <span className="tabular-nums">{n}</span>;
   const col = <R,>(cid: string, cell: (r: R) => ReactNode): Column<R> => ({ id: cid, header: t(`card.col.${cid}`), cell });
@@ -200,6 +221,8 @@ function TabBody({ tab, deviceId, canManage, chartIf, onChartIf, onShowChart }: 
   switch (tab) {
     case "graphs":
       return <ChartsTab deviceId={deviceId} ifIndex={chartIf} onIfIndex={onChartIf} />;
+    case "problems":
+      return <ProblemList deviceId={deviceId} canAck={canAck} />;
     case "journal":
       return <EventFeed deviceId={deviceId} />;
     case "profiles":

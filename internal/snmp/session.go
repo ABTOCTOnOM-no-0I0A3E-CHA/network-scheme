@@ -315,3 +315,25 @@ func convert(p gosnmp.SnmpPDU) Var {
 	}
 	return v
 }
+
+/*
+EngineIDer is implemented by SNMPv3 readers: EngineID is the authoritative
+engine ID the agent revealed during discovery, or nil for SNMPv2c or before
+the first answered request.
+*/
+type EngineIDer interface {
+	EngineID() []byte
+}
+
+/* EngineID returns a copy of the learned authoritative engine ID of a v3 session. */
+func (s *session) EngineID() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.g.Version != gosnmp.Version3 {
+		return nil
+	}
+	if usm, ok := s.g.SecurityParameters.(*gosnmp.UsmSecurityParameters); ok && usm.AuthoritativeEngineID != "" {
+		return []byte(usm.AuthoritativeEngineID)
+	}
+	return nil
+}

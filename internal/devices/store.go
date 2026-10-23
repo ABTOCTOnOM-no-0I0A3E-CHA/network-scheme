@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,8 @@ var (
 	ErrGroupNotFound = errors.New("devices: group not found")
 	ErrInvalid       = errors.New("devices: invalid value")
 	ErrNotPending    = errors.New("devices: discovered item is not pending")
+	ErrParentCycle   = errors.New("devices: parent would create a cycle")
+	ErrParentDepth   = errors.New("devices: parent chain is too deep")
 )
 
 /* Owner kinds of an access profile. */
@@ -54,6 +57,7 @@ type Device struct {
 	InsecureProtocols bool
 	PollerID          string
 	Intervals         Intervals
+	ParentID          *int64 /* the device whose outage suppresses this one's problems; set by hand */
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -147,13 +151,13 @@ func mapWrite(op string, err error) error {
 
 const deviceCols = `id, name, address, snmp_port, group_id, driver, coalesce(model, ''), coalesce(firmware, ''),
 	coalesce(sys_object_id, ''), insecure_protocols, poller_id,
-	interval_avail_s, interval_metrics_s, interval_inventory_s, created_at, updated_at`
+	interval_avail_s, interval_metrics_s, interval_inventory_s, created_at, updated_at, parent_id`
 
 func scanDevice(r pgx.Row) (Device, error) {
 	var d Device
 	err := r.Scan(&d.ID, &d.Name, &d.Address, &d.SNMPPort, &d.GroupID, &d.Driver, &d.Model, &d.Firmware,
 		&d.SysObjectID, &d.InsecureProtocols, &d.PollerID,
-		&d.Intervals.AvailS, &d.Intervals.MetricsS, &d.Intervals.InventoryS, &d.CreatedAt, &d.UpdatedAt)
+		&d.Intervals.AvailS, &d.Intervals.MetricsS, &d.Intervals.InventoryS, &d.CreatedAt, &d.UpdatedAt, &d.ParentID)
 	return d, err
 }
 
@@ -237,6 +241,34 @@ func (s *Store) Update(ctx context.Context, tx pgx.Tx, id int64, p Patch) error 
 		p.Intervals != nil, iv.AvailS, iv.MetricsS, iv.InventoryS)
 	if err != nil {
 		return mapWrite("update device", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+/*
+SetParent sets (or, with nil, clears) the parent of device id. The database
+refuses cycles (including a device as its own parent) with ErrParentCycle and
+chains deeper than 16 with ErrParentDepth; a missing parent is ErrNotFound.
+*/
+func (s *Store) SetParent(ctx context.Context, tx pgx.Tx, id int64, parent *int64) error {
+	tag, err := tx.Exec(ctx, `UPDATE core.device SET parent_id = $2, updated_at = now() WHERE id = $1`, id, parent)
+	if pe := pgErr(err); pe != nil {
+		switch {
+		case pe.Code == "23514" && pe.ConstraintName == "device_parent_not_self":
+			return ErrParentCycle
+		case pe.Code == "23514" && strings.Contains(pe.Message, "cycle"):
+			return ErrParentCycle
+		case pe.Code == "23514" && strings.Contains(pe.Message, "deeper"):
+			return ErrParentDepth
+		case pe.Code == "23503":
+			return ErrNotFound
+		}
+	}
+	if err != nil {
+		return mapWrite("set device parent", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

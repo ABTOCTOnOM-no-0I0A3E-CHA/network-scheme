@@ -211,3 +211,24 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 		})
 	})
 }
+
+/*
+CheckSession reports whether token still names a live session of an enabled
+user (ErrSessionExpired otherwise). Unlike Authenticate it does not extend
+the idle timeout, so a long-lived connection cannot keep a session alive.
+*/
+func (s *Service) CheckSession(ctx context.Context, token string) error {
+	now := s.now()
+	var ok bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM core.session s JOIN core."user" u ON u.id = s.user_id
+		 WHERE s.id_hash = $1 AND NOT u.disabled AND s.last_seen > $2 AND s.created_at > $3)`,
+		hashToken(token), now.Add(-sessionIdle), now.Add(-sessionAbsolute)).Scan(&ok)
+	if err != nil {
+		return fmt.Errorf("auth: check session: %w", err)
+	}
+	if !ok {
+		return ErrSessionExpired
+	}
+	return nil
+}
