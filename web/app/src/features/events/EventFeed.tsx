@@ -55,8 +55,12 @@ export function VarbindList({ raw, omitted }: { raw: unknown; omitted?: boolean 
 
 function EventRow({ e, expanded, onToggle, showDevice }: { e: NmsEvent; expanded: boolean; onToggle: () => void; showDevice: boolean }) {
   const { t, i18n } = useTranslation();
-  const text = safeText(e.text);
-  const source = safeText(e.kind === "trap" ? e.name : e.app);
+  const storm = e.kind === "storm";
+  /* a storm row folds events above the rate limit: text carries the folded kind, ts the minute */
+  const text = storm
+    ? t("events.storm", { kind: t(`events.kind.${e.text === "trap" ? "trap" : "syslog"}`), count: e.count ?? 0, minute: new Date(e.ts).toLocaleTimeString(i18n.language, { hour: "2-digit", minute: "2-digit" }) })
+    : safeText(e.text);
+  const source = storm ? "" : safeText(e.kind === "trap" ? e.name : e.app);
   return (
     <>
       <div className={cn(GRID, "h-10 text-sm")}>

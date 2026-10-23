@@ -137,6 +137,8 @@ type eventResponse struct {
 	Varbinds   json.RawMessage `json:"varbinds,omitempty"`
 	/* VarbindsOmitted is set when the varbinds exceed the listing limit and were left out. */
 	VarbindsOmitted bool `json:"varbinds_omitted,omitempty"`
+	/* Count is the number of events folded into a storm row (kind "storm": Text is the folded kind, TS the minute). */
+	Count *int64 `json:"count,omitempty"`
 }
 
 type eventsPage struct {
@@ -148,7 +150,9 @@ type eventsPage struct {
 eventsSQL merges syslog and traps of the window. Syslog severity 0..7 maps to
 the NMS scale (0-1 disaster, 2 high, 3 average, 4 warning, 5-7 info); a trap
 without a severity ranks as info. Rows of devices outside the caller's groups
-and of deleted devices drop out in the join. $1 all, $2 group ids, $3 kind,
+and of deleted devices drop out in the join. Storm rows (events folded above the
+rate limit: one per device, folded kind and minute) come as kind "storm" with a
+count and never match a text query. $1 all, $2 group ids, $3 kind,
 $4 device (0: any), $5 from, $6 to, $7 query, $8 min rank, $9 cursor given,
 $10-$13 cursor ($10 also bounds ts inside each branch so the planner can exclude chunks), $14 limit.
 */
@@ -156,7 +160,7 @@ $10-$13 cursor ($10 also bounds ts inside each branch so the planner can exclude
 const eventsSQL = `
 WITH ev AS (
   SELECT s.ts, 'syslog'::text AS kind, s.device_id, s.app AS label, s.msg AS body, true AS identified,
-         NULL::jsonb AS varbinds, false AS omitted,
+         NULL::jsonb AS varbinds, false AS omitted, NULL::bigint AS cnt,
          CASE WHEN s.severity <= 1 THEN 'disaster' WHEN s.severity = 2 THEN 'high'
               WHEN s.severity = 3 THEN 'average' WHEN s.severity = 4 THEN 'warning' ELSE 'info' END AS severity,
          md5(concat_ws(chr(31), s.facility, s.severity, s.host, s.app, s.msg)) AS dig
@@ -167,15 +171,21 @@ WITH ev AS (
   UNION ALL
   SELECT t.ts, 'trap', t.device_id, t.name, t.trap_oid, t.identified,
          CASE WHEN octet_length(t.varbinds::text) <= 16384 THEN t.varbinds END,
-         coalesce(octet_length(t.varbinds::text) > 16384, false),
+         coalesce(octet_length(t.varbinds::text) > 16384, false), NULL::bigint,
          t.severity,
          md5(concat_ws(chr(31), t.version, t.trap_oid, t.name, t.severity, t.identified, t.varbinds::text))
   FROM events.trap t
   WHERE $3::text IN ('', 'trap') AND t.ts >= $5 AND t.ts < $6 AND ($4::bigint = 0 OR t.device_id = $4)
     AND (NOT $9::bool OR t.ts <= $10)
     AND ($7::text = '' OR t.tsv @@ plainto_tsquery('simple', $7))
+  UNION ALL
+  SELECT m.ts, 'storm', m.device_id, m.kind, m.kind, true, NULL, false, m.count::bigint, NULL,
+         md5(concat_ws(chr(31), m.kind, m.count))
+  FROM events.storm m
+  WHERE $3::text IN ('', 'storm') AND $7::text = '' AND m.ts >= $5 AND m.ts < $6 AND ($4::bigint = 0 OR m.device_id = $4)
+    AND (NOT $9::bool OR m.ts <= $10)
 )
-SELECT ev.ts, ev.kind, ev.device_id, d.name, ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.omitted, ev.dig
+SELECT ev.ts, ev.kind, ev.device_id, d.name, ev.severity, ev.label, ev.body, ev.identified, ev.varbinds, ev.omitted, ev.cnt, ev.dig
 FROM ev JOIN core.device d ON d.id = ev.device_id
 WHERE ($1::bool OR d.group_id = ANY($2))
   AND CASE ev.severity WHEN 'disaster' THEN 4 WHEN 'high' THEN 3 WHEN 'average' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= $8::int
@@ -216,9 +226,9 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	var cur eventCursor
 	if curS != "" {
-		okC = okC && decodeCursor(curS, &cur) && (cur.Kind == "syslog" || cur.Kind == "trap") && hex32.MatchString(cur.Dig)
+		okC = okC && decodeCursor(curS, &cur) && (cur.Kind == "syslog" || cur.Kind == "trap" || cur.Kind == "storm") && hex32.MatchString(cur.Dig)
 	}
-	if !okK || !okQ || !okS || !okC || !okL || !okW || (kind != "" && kind != "syslog" && kind != "trap") ||
+	if !okK || !okQ || !okS || !okC || !okL || !okW || (kind != "" && kind != "syslog" && kind != "trap" && kind != "storm") ||
 		utf8.RuneCountInString(qtext) > maxEventQuery || strings.ContainsFunc(qtext, func(r rune) bool { return unicode.IsControl(r) }) {
 		writeError(w, errBadRequest)
 		return
@@ -252,12 +262,13 @@ func (s *server) listEvents(w http.ResponseWriter, r *http.Request) {
 			vb    []byte
 			dig   string
 		)
-		if err := row.Scan(&e.TS, &e.Kind, &e.DeviceID, &e.DeviceName, &e.Severity, &label, &e.Text, &e.Identified, &vb, &e.VarbindsOmitted, &dig); err != nil {
+		if err := row.Scan(&e.TS, &e.Kind, &e.DeviceID, &e.DeviceName, &e.Severity, &label, &e.Text, &e.Identified, &vb, &e.VarbindsOmitted, &e.Count, &dig); err != nil {
 			return e, err
 		}
-		if e.Kind == "syslog" {
+		switch e.Kind {
+		case "syslog":
 			e.App = &label
-		} else {
+		case "trap":
 			e.Name = &label
 		}
 		e.Varbinds = vb

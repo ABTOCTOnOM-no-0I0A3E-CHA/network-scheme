@@ -17,7 +17,7 @@ const SELECT_CLASS = "h-9 rounded-md border border-input bg-transparent px-3 tex
 
 /** Filter controls as typed by the user (`custom*` are datetime-local values). */
 export type FilterState = {
-  kind: "" | "syslog" | "trap";
+  kind: "" | "syslog" | "trap" | "storm";
   deviceId: string;
   severityMin: "" | EventSeverity;
   preset: Preset;
@@ -77,6 +77,7 @@ export function EventFilters({ value, onChange, hideDevice, error }: Props) {
           <option value="">{t("events.filter.allKinds")}</option>
           <option value="syslog">{t("events.kind.syslog")}</option>
           <option value="trap">{t("events.kind.trap")}</option>
+          <option value="storm">{t("events.kind.storm")}</option>
         </select>
         {!hideDevice && (
           <select aria-label={t("events.filter.device")} className={SELECT_CLASS} value={value.deviceId} onChange={(e) => onChange({ deviceId: e.target.value })}>

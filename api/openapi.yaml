@@ -926,7 +926,7 @@ paths:
       parameters:
         - name: kind
           in: query
-          schema: { type: string, enum: [syslog, trap] }
+          schema: { type: string, enum: [syslog, trap, storm] }
         - name: device_id
           in: query
           schema: { type: integer, format: int64, minimum: 1 }
@@ -1725,7 +1725,7 @@ components:
       description: Everything but the ids and the kind comes from the device; render as text only
       properties:
         ts: { type: string, format: date-time }
-        kind: { type: string, enum: [syslog, trap] }
+        kind: { type: string, enum: [syslog, trap, storm], description: "storm: events a source sent above its rate limit, folded per minute" }
         device_id: { type: integer, format: int64 }
         device_name: { type: string }
         severity:
@@ -1734,7 +1734,8 @@ components:
             - { type: "null" }
         name: { type: string, description: Trap name (traps only) }
         app: { type: string, description: Syslog application (syslog only) }
-        text: { type: string, description: "Syslog message, or the trap OID" }
+        text: { type: string, description: "Syslog message, the trap OID, or the folded kind (syslog or trap) of a storm row" }
+        count: { type: integer, format: int64, description: "Storm rows only: number of events folded into the row; ts is the minute" }
         identified: { type: boolean, description: Always true for syslog }
         varbinds: { description: Trap varbinds as received (traps only; omitted over 16 KiB) }
         varbinds_omitted: { type: boolean, description: "True when the varbinds were left out because they exceed 16 KiB" }

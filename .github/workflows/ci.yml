@@ -250,6 +250,25 @@ jobs:
           sudo setsid nohup ip netns exec nms-ev-rogue env SYSLOG_PORT=514 python3 test/e2e/send_events.py 172.31.251.1 e2eneg > /tmp/nms-ev-rogue.log 2>&1 &
           echo "NMS_E2E_EVENT_ROGUE=$ROGUE" >> "$GITHUB_ENV"
           echo "NMS_E2E_EVENT_NETNS=172.31.250.2" >> "$GITHUB_ENV"
+          # The device of problems.spec.ts: answers SNMPv2c like EVSRC, but its trap is chosen by the test through a control file
+          # (linkDown or linkUp for ifIndex 2, which the fixture has down, so its polls agree with the trap). The test writes the file
+          # in test/e2e/.auth, mounted read-only here. NMS_E2E_PROBE_DEAD is an address in the devices subnet nothing listens on:
+          # the parent of the suppression check, which the poller finds down.
+          EVPROB=nms-e2e-evprob
+          mkdir -p test/e2e/.auth
+          docker run -d --name "$EVPROB" --network nms_devices \
+            -v "$PWD/test/fixtures/snmp/generic-switch.snmprec:/data/$COMMUNITY.snmprec:ro" \
+            -v "$PWD/test/e2e/send_events.py:/send_events.py:ro" -v "$PWD/test/e2e/.auth:/ctl:ro" nms-snmpsim:ci \
+            sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
+              --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
+              --agent-udpv4-endpoint=0.0.0.0:161'
+          for _ in $(seq 1 60); do docker logs "$EVPROB" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' && break; sleep 1; done
+          docker logs "$EVPROB" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' || { docker logs "$EVPROB"; exit 1; }
+          PROBE="$(addr "$EVPROB")"
+          [ -n "$PROBE" ] && [ "$PROBE" != "$SRC" ]
+          docker exec -d -e TRAP_CONTROL=/ctl/trap-control -e TRAP_IFINDEX=2 "$EVPROB" python3 /send_events.py "$EVENTD" e2eprob "$COMMUNITY"
+          echo "NMS_E2E_EVENT_PROBE=$PROBE" >> "$GITHUB_ENV"
+          echo "NMS_E2E_PROBE_DEAD=${PROBE%.*}.250" >> "$GITHUB_ENV"
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -257,7 +276,7 @@ jobs:
         run: >-
           docker run --rm --init --ipc=host --network host
           -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM
-          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -w /e2e
+          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -e NMS_E2E_EVENT_PROBE -e NMS_E2E_PROBE_DEAD -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
       - name: The trap, not the API, queued the poll
@@ -333,4 +352,5 @@ jobs:
           sudo docker compose -f "$COMPOSE" logs --no-color --tail 300
           docker logs --tail 100 "$SNMPSIM" || true
           docker logs --tail 100 nms-e2e-evsrc || true
+          docker logs --tail 100 nms-e2e-evprob || true
           cat /tmp/nms-ev-mgmt.log /tmp/nms-ev-rogue.log || true

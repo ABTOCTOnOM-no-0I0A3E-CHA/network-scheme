@@ -1811,7 +1811,7 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    kind?: "syslog" | "trap";
+                    kind?: "syslog" | "trap" | "storm";
                     device_id?: number;
                     severity_min?: components["schemas"]["EventSeverity"];
                     from?: string;
@@ -3036,8 +3036,11 @@ export interface components {
         Event: {
             /** Format: date-time */
             ts: string;
-            /** @enum {string} */
-            kind: "syslog" | "trap";
+            /**
+             * @description storm: events a source sent above its rate limit, folded per minute
+             * @enum {string}
+             */
+            kind: "syslog" | "trap" | "storm";
             /** Format: int64 */
             device_id: number;
             device_name: string;
@@ -3046,8 +3049,13 @@ export interface components {
             name?: string;
             /** @description Syslog application (syslog only) */
             app?: string;
-            /** @description Syslog message, or the trap OID */
+            /** @description Syslog message, the trap OID, or the folded kind (syslog or trap) of a storm row */
             text: string;
+            /**
+             * Format: int64
+             * @description Storm rows only: number of events folded into the row; ts is the minute
+             */
+            count?: number;
             /** @description Always true for syslog */
             identified: boolean;
             /** @description Trap varbinds as received (traps only; omitted over 16 KiB) */

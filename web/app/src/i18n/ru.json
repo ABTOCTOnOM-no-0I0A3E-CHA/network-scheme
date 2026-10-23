@@ -379,11 +379,13 @@
     "unidentified": "неопознан",
     "noVarbinds": "Varbind'ов нет или они слишком велики",
     "truncated": "обрезано",
+    "storm": "Свёрнуто событий ({{kind}}): {{count}} за минуту {{minute}}",
     "varbinds": "Varbind'ы",
     "varbindsOf": "Varbind'ы {{oid}}",
     "kind": {
       "syslog": "Syslog",
-      "trap": "Трап"
+      "trap": "Трап",
+      "storm": "Шторм"
     },
     "severity": {
       "none": "-",

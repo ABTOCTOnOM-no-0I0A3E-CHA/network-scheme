@@ -223,6 +223,16 @@ describe("EventFeed", () => {
     expect(screen.queryByText(ru.events.noVarbinds)).not.toBeInTheDocument();
   });
 
+  it("shows a storm row with the folded kind, the repeat count and the minute", async () => {
+    eventsFn = () => HttpResponse.json({ items: [ev(0, { kind: "storm", severity: null, text: "syslog", count: 500, ts: "2026-01-01T10:07:00Z" })], next_cursor: null });
+    wrap(<EventFeed />);
+    await waitFor(() => expect(dataRows()).toHaveLength(1));
+    const row = dataRows()[0];
+    expect(within(row).getByText(ru.events.kind.storm)).toBeInTheDocument();
+    expect(row.textContent).toContain("500");
+    expect(row.textContent).toContain("Свёрнуто событий (Syslog)");
+  });
+
   it("maps API errors to a localized message", async () => {
     eventsFn = () => err(400, "bad_request");
     wrap(<EventFeed />);
