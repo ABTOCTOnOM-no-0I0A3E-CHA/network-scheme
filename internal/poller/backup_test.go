@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -613,11 +614,121 @@ func TestBackupBurstDoesNotStarvePollsAndKeepsLimits(t *testing.T) {
 	/* The poller keeps the gap itself: more requests for the same device, whatever the api's unique key says, fetch nothing. */
 	before := e.fetchN.Load()
 	for range 5 {
-		if err := e.p.backupGuarded(ctx, ids[0], sourceEvent, nil); err != nil {
+		if err := e.p.backupGuarded(ctx, ids[0], sourceEvent, nil); !errors.Is(err, errBackupSkipped) {
 			t.Fatal(err)
 		}
 	}
 	if e.fetchN.Load() != before {
 		t.Fatalf("%d extra fetches inside the gap", e.fetchN.Load()-before)
+	}
+}
+
+/* A run skipped by the poller-side gap is neither success nor failure: it retries when the gap ends, not after a full interval. */
+func TestBackupSkippedRunRetriesAfterTheGap(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.123:161")
+	t0 := time.Now()
+	var mu sync.Mutex
+	clock := t0
+	e.p.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	advance := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	e.p.sched.mu.Lock()
+	e.p.sched.devs[e.dev].cache.drv = e.drv
+	e.p.sched.mu.Unlock()
+	ctx := context.Background()
+
+	e.cfg.Store(&fetched{err: errors.New("device down")})
+	if err := e.p.backupGuarded(ctx, e.dev, sourceEvent, nil); err == nil || errors.Is(err, errBackupSkipped) {
+		t.Fatalf("failed event backup: %v", err)
+	}
+	advance(2 * time.Minute)
+	n := e.fetchN.Load()
+	err := e.p.backupGuarded(ctx, e.dev, sourceSchedule, nil)
+	if !errors.Is(err, errBackupSkipped) || e.fetchN.Load() != n {
+		t.Fatalf("scheduled run inside the gap: %v, %d extra fetches", err, e.fetchN.Load()-n)
+	}
+	day := 24 * time.Hour
+	if d := e.p.backupRetryDelay(e.dev, err, day); d < 2*time.Minute+50*time.Second || d > 3*time.Minute+10*time.Second {
+		t.Fatalf("retry after a skip = %v, want about 3m (t0+5m)", d)
+	}
+	if d := e.p.backupRetryDelay(e.dev, errors.New("x"), day); d != retryBackupAfter {
+		t.Fatalf("retry after a failure = %v", d)
+	}
+	if d := e.p.backupRetryDelay(e.dev, nil, day); d != day {
+		t.Fatalf("delay after success = %v", d)
+	}
+	advance(3*time.Minute + time.Second)
+	e.cfg.Store(&fetched{text: "hostname ok\n"})
+	if err := e.p.backupGuarded(ctx, e.dev, sourceSchedule, nil); err != nil || e.fetchN.Load() != n+1 {
+		t.Fatalf("run after the gap: %v, fetches %d", err, e.fetchN.Load()-n)
+	}
+}
+
+/* Jobs keep a slot: 200 overdue scheduled backups drain slowly, a manual one still starts at once; with every slot taken a job records "busy". */
+func TestBackupJobsHavePriorityOverTheSchedule(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.124:161")
+	var target atomic.Int64
+	started := make(chan time.Time, 1)
+	e.p.fetchRaw = func(ctx context.Context, d device, _ *devCache, _ drivers.Driver) (string, error) {
+		if d.ID == target.Load() {
+			select {
+			case started <- time.Now():
+			default:
+			}
+			return "hostname manual\n", nil
+		}
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-ctx.Done():
+		}
+		return "hostname s\n", nil
+	}
+	e.p.backupTick = 10 * time.Millisecond
+	var devs []device
+	for i := range 200 {
+		devs = append(devs, device{ID: int64(7_000_000 + i), Driver: "eltex-mes", Backup: 50 * time.Millisecond,
+			Intervals: [numClasses]time.Duration{time.Hour, time.Hour, time.Hour}})
+	}
+	e.p.sched.apply(append(e.p.sched.snapshot(), devs...))
+	e.p.sched.mu.Lock()
+	for _, d := range devs {
+		e.p.sched.devs[d.ID].cache.drv = e.drv
+	}
+	e.p.sched.devs[e.dev].cache.drv = e.drv
+	e.p.sched.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.p.backupLoop(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	time.Sleep(500 * time.Millisecond) /* the schedule is saturating its slots */
+	target.Store(e.dev)
+	begin := time.Now()
+	if err := e.p.backupGuarded(ctx, e.dev, sourceManual, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case at := <-started:
+		if at.Sub(begin) > 3*time.Second {
+			t.Fatalf("manual backup started after %v", at.Sub(begin))
+		}
+	default:
+		t.Fatal("manual backup did not fetch")
+	}
+	cancel()
+	<-done
+	/* Every slot taken: a job gives up after backupSlotWait and records a fixed "busy" text. */
+	ctx2 := context.Background()
+	e.p.backupSlotWait = 50 * time.Millisecond
+	for range backupParallel {
+		e.p.backupSem <- struct{}{}
+	}
+	err := e.p.backupGuarded(ctx2, e.dev, sourceEvent, nil)
+	for range backupParallel {
+		<-e.p.backupSem
+	}
+	if err == nil {
+		t.Fatal("job ran without a slot")
+	}
+	if got := e.str(`SELECT last_error FROM backups.backup_state WHERE device_id = $1`, e.dev); got != errBusy {
+		t.Fatalf("last_error = %q", got)
 	}
 }

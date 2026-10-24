@@ -43,6 +43,7 @@ const (
 	backupTimeout         = 5 * time.Minute  /* identification (SNMP) plus the fetch */
 	backupParallel        = 4                /* scheduled backups running at once */
 	retryBackupAfter      = time.Hour        /* after a failed scheduled backup, or the interval if shorter */
+	backupSlotWait        = 30 * time.Second /* how long a job waits for a fetch slot before it records "busy" */
 	backupStartGap        = 3 * time.Second  /* per backupParallel overdue devices when spreading first runs */
 	backupSpreadMax       = 10 * time.Minute
 	maxConfigBytes        = 4 << 20
@@ -83,7 +84,11 @@ const (
 	errSealFailed    = "encryption of the configuration failed"
 	errStoreFailed   = "storing the configuration failed"
 	errBackupTimeout = "configuration backup timed out"
+	errBusy          = "the poller is busy with other backups; try again later"
 )
+
+/* errBackupSkipped: the poller-side gap skipped the run, nothing was fetched (not a success, not a failure). */
+var errBackupSkipped = errors.New("poller: backup skipped, the device was backed up recently")
 
 /* backupFail is a failed backup with its fixed state text; err is for debugging only and is never logged (it may carry device text). */
 type backupFail struct {
@@ -373,10 +378,7 @@ func (p *Poller) backupLoop(ctx context.Context) {
 		for _, d := range due {
 			wg.Go(func() {
 				err := p.backupGuarded(ctx, d.ID, sourceSchedule, nil)
-				after := d.Backup
-				if err != nil {
-					after = min(d.Backup, retryBackupAfter)
-				}
+				after := p.backupRetryDelay(d.ID, err, d.Backup)
 				mu.Lock()
 				delete(busy, d.ID)
 				if _, ok := slots[d.ID]; ok {
@@ -401,18 +403,63 @@ The gap is enforced here because the api, which enqueues the jobs, is not
 trusted to keep it.
 */
 func (p *Poller) backupGuarded(ctx context.Context, id int64, source string, jobID *int64) error {
+	/*
+		Jobs (event, manual) have priority: scheduled runs may hold at most
+		backupParallel-1 of the slots, so one is always left for a job, and a job
+		waits for it only backupSlotWait before it gives up as busy.
+	*/
+	wait := ctx
+	if source == sourceSchedule {
+		select {
+		case p.schedSem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-p.schedSem }()
+	} else {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithTimeout(ctx, p.backupSlotWait)
+		defer cancel()
+	}
 	select {
 	case p.backupSem <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-wait.Done():
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		p.setBackupError(context.WithoutCancel(ctx), id, errBusy, false)
+		return fail(errBusy, nil)
 	}
 	defer func() { <-p.backupSem }()
 	return p.sched.runNow(ctx, id, func(d device, cache *devCache) error {
 		if p.backupTooSoon(ctx, id) {
-			return nil
+			return errBackupSkipped
 		}
 		return p.backupDevice(ctx, d, cache, source, jobID)
 	})
+}
+
+/*
+backupRetryDelay is how long after a scheduled run of device id the next one
+is due: a full interval only after a real success; the rest of the gap after a
+run the gap skipped (nothing was fetched); an hour (or the interval, if
+shorter) after a failure.
+*/
+func (p *Poller) backupRetryDelay(id int64, err error, every time.Duration) time.Duration {
+	switch {
+	case err == nil:
+		return every
+	case errors.Is(err, errBackupSkipped):
+		p.backupMu.Lock()
+		defer p.backupMu.Unlock()
+		rem := p.backupGap
+		if at, ok := p.backupAt[id]; ok {
+			rem = p.backupGap - p.now().Sub(at)
+		}
+		return min(max(rem, time.Second), every)
+	default:
+		return min(every, retryBackupAfter)
+	}
 }
 
 /* backupTooSoon reports whether device id was attempted (in memory) or backed up successfully (database clock) within backupGap; otherwise it records the attempt. */
@@ -423,11 +470,14 @@ func (p *Poller) backupTooSoon(ctx context.Context, id int64) bool {
 	if at, ok := p.backupAt[id]; ok && now.Sub(at) < p.backupGap {
 		return true
 	}
-	p.backupAt[id] = now
 	var recent bool
 	err := p.pool.QueryRow(ctx, `SELECT last_ok_at > now() - make_interval(secs => $2) FROM backups.backup_state WHERE device_id = $1 AND last_ok_at IS NOT NULL`,
 		id, p.backupGap.Seconds()).Scan(&recent)
-	return err == nil && recent
+	if err == nil && recent {
+		return true
+	}
+	p.backupAt[id] = now /* only a run that goes on to fetch counts as an attempt */
+	return false
 }
 
 func (p *Poller) pruneBackupAttempts(now time.Time) {
@@ -466,6 +516,9 @@ func (w *backupNowWorker) Work(ctx context.Context, job *river.Job[jobs.BackupNo
 	arrived := w.p.now()
 	run := func() error { return w.p.backupGuarded(ctx, id, source, &jid) }
 	err := run()
+	if errors.Is(err, errBackupSkipped) {
+		return nil /* backed up moments ago: nothing to do */
+	}
 	if errors.Is(err, errNotMine) {
 		/* Possibly created a moment ago: reread once before refusing. */
 		wait, rerr := w.p.reloadForJob(ctx, arrived, snoozed(job.Metadata))

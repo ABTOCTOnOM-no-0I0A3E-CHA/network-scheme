@@ -64,34 +64,36 @@ type Deps struct {
 
 // Poller polls the devices of one poller id.
 type Poller struct {
-	cfg         Config
-	pool        *pgxpool.Pool
-	priv        *[32]byte
-	pub         *[32]byte
-	backupPub   *[32]byte
-	backupTick  time.Duration
-	backupGap   time.Duration /* least time between two backups of a device, whoever asks */
-	backupSem   chan struct{} /* backupParallel fetch slots shared by the schedule and backup_now */
-	backupMu    sync.Mutex
-	backupAt    map[int64]time.Time                                                                      /* last backup attempt per device; guarded by backupMu */
-	fetchRaw    func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
-	pinger      Pinger
-	dial        DialFunc
-	reg         *drivers.Registry
-	now         func() time.Time
-	log         *slog.Logger
-	sched       *scheduler
-	rates       *metrics.RateCalc
-	metrics     *metrics.Store
-	inv         *inventory.Store
-	hostKeys    *ssh.HostKeys
-	disc        *discovery
-	discEvery   time.Duration
-	scanRecheck time.Duration
-	scanFloor   time.Duration                                          /* least interval between scheduled runs of a scan, whatever interval_s says */
-	scanGap     time.Duration                                          /* least time between two runs of a scan, however requested */
-	scanPanics  atomic.Int64                                           /* recovered panics of discovery runs */
-	recheck     func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
+	cfg            Config
+	pool           *pgxpool.Pool
+	priv           *[32]byte
+	pub            *[32]byte
+	backupPub      *[32]byte
+	backupTick     time.Duration
+	backupGap      time.Duration /* least time between two backups of a device, whoever asks */
+	backupSlotWait time.Duration
+	schedSem       chan struct{} /* backupParallel-1 slots for scheduled runs: one is always left for jobs */
+	backupSem      chan struct{} /* backupParallel fetch slots shared by the schedule and backup_now */
+	backupMu       sync.Mutex
+	backupAt       map[int64]time.Time                                                                      /* last backup attempt per device; guarded by backupMu */
+	fetchRaw       func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
+	pinger         Pinger
+	dial           DialFunc
+	reg            *drivers.Registry
+	now            func() time.Time
+	log            *slog.Logger
+	sched          *scheduler
+	rates          *metrics.RateCalc
+	metrics        *metrics.Store
+	inv            *inventory.Store
+	hostKeys       *ssh.HostKeys
+	disc           *discovery
+	discEvery      time.Duration
+	scanRecheck    time.Duration
+	scanFloor      time.Duration                                          /* least interval between scheduled runs of a scan, whatever interval_s says */
+	scanGap        time.Duration                                          /* least time between two runs of a scan, however requested */
+	scanPanics     atomic.Int64                                           /* recovered panics of discovery runs */
+	recheck        func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
 
 	jobReload     sync.Mutex   /* single-flight reloadForJob */
 	lastJobReload time.Time    /* guarded by jobReload */
@@ -105,7 +107,7 @@ type Poller struct {
 // New returns a poller for a validated cfg.
 func New(cfg Config, d Deps) *Poller {
 	p := &Poller{
-		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, backupPub: d.BackupPub, backupTick: backupTick, backupGap: jobs.BackupGap, backupSem: make(chan struct{}, backupParallel), backupAt: map[int64]time.Time{}, pinger: d.Pinger, dial: d.DialSNMP,
+		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, backupPub: d.BackupPub, backupTick: backupTick, backupGap: jobs.BackupGap, backupSem: make(chan struct{}, backupParallel), schedSem: make(chan struct{}, backupParallel-1), backupSlotWait: backupSlotWait, backupAt: map[int64]time.Time{}, pinger: d.Pinger, dial: d.DialSNMP,
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
 		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
