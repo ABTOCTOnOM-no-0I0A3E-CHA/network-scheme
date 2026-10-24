@@ -45,21 +45,21 @@ const OPEN: ProblemFilter[] = [
   { state: "acknowledged", suppressed: "false" },
 ];
 
-/* pages through up to 10 pages (1000 problems) of a list */
-function useDrain(q: ReturnType<typeof useProblems>): void {
+/* pages through up to 10 pages (1000 problems) of a list; the mini map keeps to the first page */
+function useDrain(q: ReturnType<typeof useProblems>, enabled: boolean): void {
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = q;
   const pages = q.data?.pages.length ?? 0;
   useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage && pages < MAX_PROBLEM_PAGES) void fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage, pages]);
+    if (enabled && hasNextPage && !isFetchingNextPage && pages < MAX_PROBLEM_PAGES) void fetchNextPage();
+  }, [enabled, hasNextPage, isFetchingNextPage, fetchNextPage, pages]);
 }
 
 /** Worst open-problem severity per device. Refreshes with the problem queries (WebSocket invalidation and the 30 s poll). */
-export function useOpenProblemSeverity() {
+export function useOpenProblemSeverity(drain = true) {
   const a = useProblems(OPEN[0]);
   const b = useProblems(OPEN[1]);
-  useDrain(a);
-  useDrain(b);
+  useDrain(a, drain);
+  useDrain(b, drain);
   const pa = a.data?.pages;
   const pb = b.data?.pages;
   return useMemo(() => severityByDevice([...(pa ?? []), ...(pb ?? [])].flatMap((p) => p.items)), [pa, pb]);

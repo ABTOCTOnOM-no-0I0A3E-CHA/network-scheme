@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -167,8 +169,8 @@ func TestGenericInventoryTables(t *testing.T) {
 		{LocalIfIndex: 1, LocalPortResolved: true, ChassisID: "00:aa:bb:cc:dd:01", PortID: "gi0/1", PortDescr: "to sim-sw1", SysName: "sim-core1", MgmtAddr: a("10.0.0.1")},
 		/* LLDP port 7 is Gi1/0/2 by lldpLocPortId; the neighbor's second address is IPv4 */
 		{LocalIfIndex: 2, LocalPortResolved: true, ChassisID: "core-2", PortID: "00:aa:bb:cc:dd:02", SysName: "sim[31m-sw2", MgmtAddr: a("10.0.0.2")},
-		/* port 9 has an lldpLocPortId matching no interface and the neighbor only an IPv6 address: kept unresolved, no address */
-		{LocalIfIndex: 9, ChassisID: "00:aa:bb:cc:dd:05", PortID: "ge2", SysName: "sim-edge"},
+		/* port 9 has an lldpLocPortId matching no interface and the neighbor only an IPv6 address: kept unresolved, the address is the IPv6 one */
+		{LocalIfIndex: 9, ChassisID: "00:aa:bb:cc:dd:05", PortID: "ge2", SysName: "sim-edge", MgmtAddr: a("2001:db8::5")},
 	})
 	eq(t, "entities", inv.Entities, []drivers.Entity{
 		{Index: 1, Class: "chassis", Name: "chassis", Descr: "Synthetic switch chassis", Model: "SIM-SW-24", Serial: "SIM0001", FirmwareRev: "boot 1.2", SoftwareRev: "1.0.0"},
@@ -418,5 +420,43 @@ func TestCollectNeverMixesCounterFamilies(t *testing.T) {
 	})
 	if s.Incomplete != 1 {
 		t.Fatalf("Incomplete = %d, want 1 (if3 with a single HC octet)", s.Incomplete)
+	}
+}
+
+/* A port name carried by two interfaces resolves to neither: the local port stays the raw port number, unresolved. */
+func TestGenericLLDPAmbiguousLocalPort(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const community = "lldp-ambiguous"
+	data := `1.0.8802.1.1.2.1.3.7.1.2.5|2|5
+1.0.8802.1.1.2.1.3.7.1.3.5|4|Gi1
+1.0.8802.1.1.2.1.4.1.1.4.0.5.1|2|4
+1.0.8802.1.1.2.1.4.1.1.5.0.5.1|4x|00aabbccdd01
+1.0.8802.1.1.2.1.4.1.1.6.0.5.1|2|5
+1.0.8802.1.1.2.1.4.1.1.7.0.5.1|4|Gi9
+1.0.8802.1.1.2.1.4.1.1.9.0.5.1|4|far
+1.3.6.1.2.1.1.2.0|6|1.3.6.1.4.1.32473.1.100
+1.3.6.1.2.1.2.2.1.1.1|2|1
+1.3.6.1.2.1.2.2.1.1.2|2|2
+1.3.6.1.2.1.2.2.1.2.1|4|Gi1
+1.3.6.1.2.1.2.2.1.2.2|4|Gi1
+`
+	path := filepath.Join(dir, community+".snmprec")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr := simtest.Start(t, path)
+	r, c, err := snmp.Dial(context.Background(), addr, simtest.V2Cred(community), snmp.Options{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	inv, err := New().Inventory(ctx(t), r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []drivers.LLDPNeighbor{{LocalIfIndex: 5, ChassisID: "00:aa:bb:cc:dd:01", PortID: "Gi9", SysName: "far"}}
+	if !reflect.DeepEqual(inv.LLDP, want) {
+		t.Fatalf("lldp %+v, want %+v", inv.LLDP, want)
 	}
 }

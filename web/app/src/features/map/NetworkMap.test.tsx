@@ -19,6 +19,7 @@ const topo: Topology = {
 const props = { topology: topo, severity: new Map(), onOpenDevice: vi.fn() };
 
 describe("NetworkMap", () => {
+  /* canvasStub inserts the cytoscape marker <style>, so this only guards the component; the real proof is build.test.ts and the e2e CSP guard. */
   it("never injects a <style> element or markup from device names", async () => {
     const before = document.querySelectorAll("style").length;
     const { container } = render(<NetworkMap {...props} />);

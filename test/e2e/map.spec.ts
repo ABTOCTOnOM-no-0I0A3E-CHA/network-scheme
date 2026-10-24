@@ -167,7 +167,7 @@ test("topology and map end to end", async ({ page }) => {
     const kept = { manual: [linkText("topo-b", "Gi1/0/2", "topo-c", "Gi1/0/2", "manual", 1)], pinned: [true, 123, 456] };
     expect(await survivors()).toEqual(kept);
 
-    /* A device change reloads the builder; waiting one more minute lets a periodic build run after both writes. */
+    /* Waiting 70 s guarantees a periodic build (every 60 s) after both writes; the device change below is just another write. */
     res = await api.patch(`/api/devices/${id("topo-d")}`, { headers: await csrf(), data: { snmp_port: 161 } });
     expect(res.status()).toBe(204);
     await sleep(70_000);
@@ -215,9 +215,11 @@ test("topology and map end to end", async ({ page }) => {
     await expect(box).toBeVisible();
     await expect(mini.locator("[data-testid=map-canvas]")).toBeVisible();
     expect(await box.getAttribute("class")).toContain("hover:scale-[1.04]");
-    expect(await box.evaluate((e) => getComputedStyle(e).transform)).toBe("none");
+    /* Tailwind v4 scales with the CSS `scale` property, not `transform` */
+    const scale = (l: typeof box) => l.evaluate((e) => getComputedStyle(e).scale);
+    expect(await scale(box)).toBe("none");
     await box.hover();
-    await expect.poll(() => box.evaluate((e) => getComputedStyle(e).transform), { timeout: 5_000 }).not.toBe("none");
+    await expect.poll(() => scale(box), { timeout: 5_000 }).toBe("1.04");
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
@@ -226,7 +228,7 @@ test("topology and map end to end", async ({ page }) => {
     expect(await calm.getAttribute("class")).not.toContain("hover:scale");
     await calm.hover();
     await sleep(500);
-    expect(await calm.evaluate((e) => getComputedStyle(e).transform)).toBe("none");
+    expect(await calm.evaluate((e) => getComputedStyle(e).scale)).toBe("none");
     await page.emulateMedia({ reducedMotion: null });
 
     await page.goto("/");

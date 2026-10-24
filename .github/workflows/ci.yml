@@ -284,7 +284,11 @@ jobs:
           # a management subnet). SNMPv2c: the community is the data file name.
           grep -E '^    (fixture|address|community):' test/lab/topology.yaml | paste -d' ' - - - | while read -r _ addr _ fixture _ community; do
             name="nms-e2e-$fixture"
-            docker run -d --name "$name" --network nms_devices --ip "$addr"               -v "$PWD/test/fixtures/snmp/$fixture.snmprec:/data/$community.snmprec:ro" nms-snmpsim:ci               sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder                 --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data                 --agent-udpv4-endpoint=0.0.0.0:161'
+            docker run -d --name "$name" --network nms_devices --ip "$addr" \
+              -v "$PWD/test/fixtures/snmp/$fixture.snmprec:/data/$community.snmprec:ro" nms-snmpsim:ci \
+              sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
+                --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
+                --agent-udpv4-endpoint=0.0.0.0:161'
             for _ in $(seq 1 60); do docker logs "$name" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' && break; sleep 1; done
             docker logs "$name" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' || { docker logs "$name"; exit 1; }
             got="$(docker inspect -f '{{(index .NetworkSettings.Networks "nms_devices").IPAddress}}' "$name")"

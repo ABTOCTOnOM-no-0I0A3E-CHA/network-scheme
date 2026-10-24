@@ -23,7 +23,7 @@ function useReducedMotion(): boolean {
 }
 
 /* bubble effect: the map box grows from its top edge (never towards the header strip with the button) and gains a shadow */
-const BUBBLE = "origin-top transition-[transform,box-shadow] duration-200 ease-out hover:z-10 hover:scale-[1.04] hover:shadow-lg focus-within:z-10 focus-within:scale-[1.04] focus-within:shadow-lg";
+const BUBBLE = "origin-top transition-[scale,box-shadow] duration-200 ease-out hover:z-10 hover:scale-[1.04] hover:shadow-lg focus-within:z-10 focus-within:scale-[1.04] focus-within:shadow-lg";
 
 /**
  * Compact network map for the home page (Phase 3 dashboards embed it as a widget). Self-contained: loads the view (viewId or
@@ -38,7 +38,7 @@ export function MiniMap({ viewId, className = "" }: { viewId?: number; className
   const id = viewId ?? views.data?.[0]?.id;
   const view = views.data?.find((v) => v.id === id);
   const topo = useTopology(id, views.isSuccess);
-  const severity = useOpenProblemSeverity();
+  const severity = useOpenProblemSeverity(false);
   const err = views.error ?? topo.error;
 
   return (

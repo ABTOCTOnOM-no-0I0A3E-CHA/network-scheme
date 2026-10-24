@@ -293,14 +293,14 @@ func (d Driver) lldp(ctx context.Context, r snmp.Reader, inv *drivers.Inventory)
 			return malformed, err
 		}
 	}
-	/* index: lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex, address subtype, length-prefixed address; only IPv4 is taken */
+	/* index: lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex, address subtype, length-prefixed address; IPv4 is taken, IPv6 only when the row has no IPv4 */
 	_, err := drivers.WalkColumn(ctx, r, lldpRemManAddrIfSubtype, d.limit(), func(idx []uint32, _ snmp.Var) {
-		if len(idx) != 9 || idx[3] != 1 {
+		if len(idx) < 5 {
 			return
 		}
 		row := rows[[3]uint32(idx[:3])]
 		ip, rest, ok := inetAddr(idx[3], idx[4:])
-		if row == nil || !ok || len(rest) != 0 || row.mgmt.IsValid() {
+		if row == nil || !ok || len(rest) != 0 || (row.mgmt.IsValid() && (row.mgmt.Is4() || !ip.Is4())) {
 			return
 		}
 		row.mgmt = ip

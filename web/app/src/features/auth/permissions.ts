@@ -36,6 +36,11 @@ export function canManageTriggers(session: Session | null | undefined): boolean 
   return !!session?.roles.some((r) => r.role === "admin");
 }
 
+/** UI hint only: devices.read belongs to every role but the auditor (audit.read only). */
+export function canReadDevices(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role !== "auditor");
+}
+
 /** UI hint only: maintenance.manage belongs to the admin role, global or on a group. */
 export function canManageMaintenance(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "admin");

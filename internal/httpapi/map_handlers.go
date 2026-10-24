@@ -550,6 +550,9 @@ func (s *server) putPositions(w http.ResponseWriter, r *http.Request) {
 			SELECT $1, d, x, y, p FROM unnest($2::bigint[], $3::float8[], $4::float8[], $5::bool[]) AS t (d, x, y, p)
 			ON CONFLICT (view_id, device_id) DO UPDATE SET x = EXCLUDED.x, y = EXCLUDED.y, pinned = EXCLUDED.pinned`,
 			viewID, ids, xs, ys, pins)
+		if pe := pgErrOf(err); pe != nil && pe.Code == "23503" {
+			return errMapNotFound /* a device deleted meanwhile */
+		}
 		return err
 	}) {
 		return

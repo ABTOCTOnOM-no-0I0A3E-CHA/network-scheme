@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"slices"
@@ -457,6 +458,10 @@ func (s *server) createLink(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "links.create", ObjectType: "link",
 		Details: map[string]any{"a_device_id": a, "a_if_index": aIf, "b_device_id": b, "b_if_index": bIf}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		/* concurrent creations for one pair count against the cap one after the other */
+		if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fmt.Sprintf("link-pair:%d:%d", a, b)); err != nil {
+			return err
+		}
 		var n int
 		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.link WHERE a_device_id = $1 AND b_device_id = $2`, a, b).Scan(&n); err != nil {
 			return err
