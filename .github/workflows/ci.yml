@@ -277,13 +277,28 @@ jobs:
           docker exec -d -e TRAP_CONTROL=/ctl/trap-control -e TRAP_IFINDEX=2 "$EVPROB" python3 /send_events.py "$EVENTD" e2eprob "$COMMUNITY"
           echo "NMS_E2E_EVENT_PROBE=$PROBE" >> "$GITHUB_ENV"
           echo "NMS_E2E_PROBE_DEAD=${PROBE%.*}.250" >> "$GITHUB_ENV"
+      - name: Start the topology fixtures on the devices network
+        run: |
+          # One simulator container per test/fixtures/snmp/topology-*.snmprec at the fixed address test/lab/topology.yaml gives it
+          # (the LLDP tables of the fixtures name these addresses as management addresses; they lie in the devices subnet, which is
+          # a management subnet). SNMPv2c: the community is the data file name.
+          grep -E '^    (fixture|address|community):' test/lab/topology.yaml | paste -d' ' - - - | while read -r _ addr _ fixture _ community; do
+            name="nms-e2e-$fixture"
+            docker run -d --name "$name" --network nms_devices --ip "$addr"               -v "$PWD/test/fixtures/snmp/$fixture.snmprec:/data/$community.snmprec:ro" nms-snmpsim:ci               sh -c 'mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder                 --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data                 --agent-udpv4-endpoint=0.0.0.0:161'
+            for _ in $(seq 1 60); do docker logs "$name" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' && break; sleep 1; done
+            docker logs "$name" 2>&1 | grep -q 'Listening at UDP/IPv4 endpoint' || { docker logs "$name"; exit 1; }
+            got="$(docker inspect -f '{{(index .NetworkSettings.Networks "nms_devices").IPAddress}}' "$name")"
+            echo "$fixture at $got"
+            [ "$got" = "$addr" ]
+          done
+          [ "$(docker ps -q --filter name=nms-e2e-topology- | wc -l)" -eq "$(grep -c '^    fixture:' test/lab/topology.yaml)" ]
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
       - name: Playwright
         run: >-
           docker run --rm --init --ipc=host --network host
-          -v "$PWD/test/e2e:/e2e" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_SNMPSIM
+          -v "$PWD/test/e2e:/e2e" -v "$PWD/test/lab:/lab:ro" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_LAB=/lab -e NMS_E2E_SNMPSIM
           -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -e NMS_E2E_EVENT_PROBE -e NMS_E2E_PROBE_DEAD -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
