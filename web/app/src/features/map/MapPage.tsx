@@ -16,13 +16,13 @@ const SELECT_CLASS = "h-9 rounded-md border border-input bg-transparent px-3 tex
 /* the select value for "no view": all visible devices, laid out automatically */
 const NONE = "0";
 
-/** The map screen: view selector, the interactive map and, with map.manage, the editors for views, areas and backgrounds. */
-export function MapPage({ canManage }: { canManage: boolean }) {
+/** The map screen (initialViewId: the view from ?view=): view selector, the interactive map and, with map.manage, the editors for views, areas and backgrounds. */
+export function MapPage({ canManage, initialViewId }: { canManage: boolean; initialViewId?: number }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const views = useViews();
-  const [chosen, setChosen] = useState<number | undefined>();
+  const [chosen, setChosen] = useState<number | undefined>(initialViewId);
   const [adminOpen, setAdminOpen] = useState(false);
   const [tool, setTool] = useState<"select" | "draw">("select");
   const [selectedId, setSelectedId] = useState<number | undefined>();

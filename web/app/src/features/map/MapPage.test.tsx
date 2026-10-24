@@ -81,6 +81,15 @@ describe("MapPage", () => {
     expect(screen.queryByRole("button", { name: "Редактор карты" })).toBeNull();
   });
 
+  it("opens the view from ?view=", async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MapPage canManage={false} initialViewId={2} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(topoQueries[0]?.get("view_id")).toBe("2"));
+  });
+
   it("switches views and can show all devices without a view", async () => {
     renderPage(false);
     const sel = await screen.findByRole("combobox", { name: "Вид карты" });

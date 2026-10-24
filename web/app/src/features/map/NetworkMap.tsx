@@ -33,6 +33,8 @@ type Props = {
   onSaveError?: (err: unknown) => void;
   onOpenDevice: (id: number) => void;
   editor?: AreaEditor;
+  /** Widget mode (mini map): no autolayout button, no wheel zoom (the page keeps scrolling), no hint strip; same data and interactions otherwise. */
+  compact?: boolean;
 };
 
 type Tip = { x: number; y: number; lines: string[] };
@@ -52,7 +54,7 @@ function useDark(): boolean {
  * at low zoom), ELK autolayout in a Web Worker, drag = pin with batched saving. All text comes from safeText'd data and is
  * only ever drawn on the canvas or set as text content.
  */
-export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, onSaveError, onOpenDevice, editor }: Props) {
+export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, onSaveError, onOpenDevice, editor, compact = false }: Props) {
   const { t } = useTranslation();
   const dark = useDark();
   const host = useRef<HTMLDivElement>(null);
@@ -64,6 +66,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
   const [viewport, setViewport] = useState<Viewport>({ zoom: 1, pan: { x: 0, y: 0 } });
   const [layoutError, setLayoutError] = useState(false);
   const large = useRef(topology.nodes.length > LARGE);
+  const compactRef = useRef(compact);
 
   /* client-side state not on the server yet */
   const [posOv, setPosOv] = useState<ReadonlyMap<number, { x: number; y: number }>>(new Map());
@@ -111,6 +114,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
       minZoom: 0.02,
       maxZoom: 4,
       wheelSensitivity: 0.3,
+      userZoomingEnabled: !compactRef.current,
       boxSelectionEnabled: false,
       autounselectify: true,
       hideEdgesOnViewport: large.current,
@@ -251,7 +255,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
   const overlayAreas: OverlayArea[] = useMemo(() => topology.areas.map((a) => ({ id: a.id, name: a.name, x: a.x, y: a.y, w: a.w, h: a.h })), [topology.areas]);
 
   return (
-    <div className="relative h-full min-h-96 w-full overflow-hidden rounded-md border bg-card" data-testid="network-map">
+    <div className={`relative h-full w-full overflow-hidden rounded-md border bg-card ${compact ? "min-h-0" : "min-h-96"}`} data-testid="network-map">
       {backgroundUrl && <img ref={img} src={backgroundUrl} alt="" draggable={false} className="pointer-events-none absolute left-0 top-0 max-w-none select-none" />}
       <div ref={host} className="absolute inset-0" data-testid="map-canvas" />
       {editor && <AreaOverlay areas={overlayAreas} viewport={viewport} tool={editor.tool} selectedId={editor.selectedId} onSelect={editor.onSelect} onDraw={editor.onDraw} onChange={editor.onChange} />}
@@ -265,9 +269,11 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
         <Button size="icon" variant="outline" aria-label={t("map.fit")} onClick={fit}>
           <Maximize />
         </Button>
-        <Button size="icon" variant="outline" aria-label={t("map.layout")} title={t("map.layoutHint")} onClick={() => void applyLayout(undefined, canDrag)}>
-          <Workflow />
-        </Button>
+        {!compact && (
+          <Button size="icon" variant="outline" aria-label={t("map.layout")} title={t("map.layoutHint")} onClick={() => void applyLayout(undefined, canDrag)}>
+            <Workflow />
+          </Button>
+        )}
       </div>
       {tip && tip.lines.length > 0 && (
         <div role="tooltip" className="pointer-events-none absolute z-10 max-w-64 rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{ left: tip.x + 12, top: tip.y + 12 }}>
@@ -278,7 +284,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
           ))}
         </div>
       )}
-      {collapsed && <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-xs text-muted-foreground">{t("map.collapsedHint")}</div>}
+      {collapsed && !compact && <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-xs text-muted-foreground">{t("map.collapsedHint")}</div>}
       {layoutError && (
         <p role="alert" className="absolute bottom-2 right-2 rounded-md bg-background/90 px-2 py-1 text-xs text-destructive">
           {t("map.layoutFailed")}

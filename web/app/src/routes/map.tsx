@@ -6,8 +6,15 @@ import { shellRoute } from "./index";
 
 function Page() {
   const { data: session } = useSession();
-  return <MapPage canManage={canManageMap(session)} />;
+  const { view } = mapRoute.useSearch();
+  return <MapPage canManage={canManageMap(session)} initialViewId={view} />;
 }
 
 /** Network map at /map. */
-export const mapRoute = createRoute({ getParentRoute: () => shellRoute, path: "/map", component: Page });
+export const mapRoute = createRoute({ getParentRoute: () => shellRoute, path: "/map",
+  validateSearch: (s: Record<string, unknown>): { view?: number } => {
+    const v = Number(s.view);
+    return Number.isInteger(v) && v > 0 ? { view: v } : {};
+  },
+  component: Page,
+});
