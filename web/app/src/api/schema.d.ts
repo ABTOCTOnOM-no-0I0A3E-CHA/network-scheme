@@ -4196,6 +4196,478 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The caller's personal dashboards and every shared one
+         * @description At most 100 (50 personal, 50 shared), shared first. editable tells whether the
+         *     caller may change the dashboard: always for a personal one, with dashboards.manage
+         *     for a shared one. default_for_role marks the shared dashboard shown by default to a role.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Dashboards */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Dashboard"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a dashboard
+         * @description A personal dashboard belongs to the caller and is visible to nobody else. A shared one
+         *     (shared true) needs dashboards.manage (else 403); it may be made the default of a role,
+         *     which the former default of that role stops being. default_for_role on a personal
+         *     dashboard answers 400. At most 50 personal dashboards per user and 50 shared ones
+         *     (409 too_many_dashboards). Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        /** @default false */
+                        shared?: boolean;
+                        /** @enum {string|null} */
+                        default_for_role?: "viewer" | "operator" | "admin" | "auditor" | null;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A dashboard with its widgets
+         * @description A personal dashboard of another user answers 404, as a missing one.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The dashboard */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardDetail"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Delete a dashboard with its widgets
+         * @description A shared dashboard needs dashboards.manage (403); a personal one of another user answers 404. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Rename a dashboard or change the role it is the default of
+         * @description Only the given fields change; at least one is required. default_for_role (shared
+         *     dashboards only, else 400) makes it the default of the role, taking that over from
+         *     another dashboard; null makes it no role's default. A shared dashboard needs
+         *     dashboards.manage (403); a personal one of another user answers 404. Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        /** @enum {string|null} */
+                        default_for_role?: "viewer" | "operator" | "admin" | "auditor" | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Changed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/dashboards/{id}/widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the widgets of a dashboard (layout and settings)
+         * @description Replaces the widget set: a widget with the id of a widget of this dashboard is
+         *     updated, one without an id is added, the ones left out are removed (an id of
+         *     another dashboard answers 400). At most 50 widgets on a 12-column grid
+         *     (x + w <= 12, y <= 1000, h <= 48). The type is one of a closed set and config is
+         *     checked against the schema of the type: an unknown type, an unknown field, a wrong
+         *     type or a value out of range answers 400 invalid_widget. Configs are stored
+         *     normalized (see DashboardWidget). A shared dashboard needs dashboards.manage (403);
+         *     a personal one of another user answers 404. Audited. Answers the stored dashboard.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        widgets: {
+                            /** Format: int64 */
+                            id?: number | null;
+                            type: components["schemas"]["WidgetType"];
+                            x: number;
+                            y: number;
+                            w: number;
+                            h: number;
+                            /** @description At most 2048 bytes; schema by type, see DashboardWidget */
+                            config: Record<string, never>;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description The stored dashboard */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardDetail"];
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/device-states": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Visible devices counted by availability state */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            total: number;
+                            up: number;
+                            partial: number;
+                            down: number;
+                            unknown: number;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/top-devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Visible devices ranked by CPU, RAM or uptime
+         * @description cpu and mem rank by the latest sample of the last 15 minutes (value in percent, at the
+         *     sample time); uptime ranks the devices that are up by how long they have been
+         *     continuously available (value in seconds, at the start), longest first.
+         */
+        get: {
+            parameters: {
+                query: {
+                    metric: "cpu" | "mem" | "uptime";
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ranked devices */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                value: number;
+                                /** Format: date-time */
+                                at: string;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/top-interfaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Interfaces of visible devices ranked by load
+         * @description Average rates of the last 10 minutes; util_pct is the busier direction against the
+         *     reported speed. Interfaces without a speed are skipped. The port name is device data:
+         *     render as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ranked interfaces */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                if_index: number;
+                                port_name: string;
+                                in_bps: number;
+                                out_bps: number;
+                                /** Format: int64 */
+                                speed_bps: number;
+                                util_pct: number;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/config-drift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Latest configuration versions of visible devices marked as drift
+         * @description Newest first. Together with GET /api/topology/changes it makes the recent changes widget.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Drift versions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                version_id: number;
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                /** Format: date-time */
+                                taken_at: string;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4796,10 +5268,43 @@ export interface components {
             b_if_index: number | null;
             b_port_name: string;
         };
+        Dashboard: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            shared: boolean;
+            /** @enum {string|null} */
+            default_for_role: "viewer" | "operator" | "admin" | "auditor" | null;
+            editable: boolean;
+        };
+        /** @enum {string} */
+        WidgetType: "device_status" | "problems" | "top_devices" | "log_stream" | "metric_chart" | "top_interfaces" | "recent_changes" | "mini_map";
+        /**
+         * @description config by type (every field optional unless noted; title 0..100 characters, limit 1..N):
+         *     device_status {title}; problems {title, severity_min, limit up to 50};
+         *     top_devices {title, metric (required: cpu, mem, uptime), limit up to 50};
+         *     log_stream {title, kind (syslog, trap), severity_min, limit up to 100};
+         *     metric_chart {title, device_id (required), metric (required: cpu, mem, temp, traffic),
+         *     if_index (required exactly for traffic), range (1h, 6h, 24h, 7d)};
+         *     top_interfaces {title, limit up to 50}; recent_changes {title, limit up to 50}; mini_map {title, view_id}.
+         */
+        DashboardWidget: {
+            /** Format: int64 */
+            id: number;
+            type: components["schemas"]["WidgetType"];
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+            config: Record<string, never>;
+        };
+        DashboardDetail: components["schemas"]["Dashboard"] & {
+            widgets: components["schemas"]["DashboardWidget"][];
+        };
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_dashboards" | "too_many_widgets" | "invalid_widget" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

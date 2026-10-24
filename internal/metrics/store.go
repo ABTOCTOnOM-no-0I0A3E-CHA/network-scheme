@@ -342,3 +342,79 @@ func (s *Store) IfUpSince(ctx context.Context, from, to time.Time) ([]IfFirstUp,
 	}
 	return pairs, nil
 }
+
+// SysLatest is the most recent value of one system metric of a device.
+type SysLatest struct {
+	DeviceID int64
+	TS       time.Time
+	Value    float64
+}
+
+/* Columns TopSys ranks by; the identifier comes from this map only. */
+var sysTopColumns = map[string]string{"cpu": "cpu_pct", "mem": "mem_used_pct"}
+
+/*
+TopSys returns the devices with the highest latest value of metric ("cpu" or
+"mem") among the raw samples newer than since of deviceIDs, highest first,
+at most limit.
+*/
+func (s *Store) TopSys(ctx context.Context, metric string, deviceIDs []int64, since time.Time, limit int) ([]SysLatest, error) {
+	col, ok := sysTopColumns[metric]
+	if !ok {
+		return nil, fmt.Errorf("metrics: unknown system metric %q", metric)
+	}
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+	q := `SELECT device_id, ts, v FROM (
+	        SELECT DISTINCT ON (device_id) device_id, ts, ` + col + `::float8 AS v
+	        FROM metrics.sys_metrics
+	        WHERE ts > $1 AND ` + col + ` IS NOT NULL AND device_id = ANY($2)
+	        ORDER BY device_id, ts DESC) t
+	      ORDER BY v DESC, device_id LIMIT $3`
+	rows, err := s.pool.Query(ctx, q, since, deviceIDs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query top system metrics: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[SysLatest])
+	if err != nil {
+		return nil, fmt.Errorf("query top system metrics: %w", err)
+	}
+	return out, nil
+}
+
+// IfLoad is the average load of one interface over a window.
+type IfLoad struct {
+	DeviceID      int64
+	IfIndex       int
+	InBps, OutBps float64
+	SpeedBps      int64
+	UtilPct       float64 /* the busier direction against the speed */
+}
+
+/*
+TopIfLoad returns the interfaces with the highest average utilization (the
+busier direction against the reported speed) over the raw samples newer than
+since of deviceIDs, busiest first, at most limit. Interfaces without a speed
+are skipped.
+*/
+func (s *Store) TopIfLoad(ctx context.Context, deviceIDs []int64, since time.Time, limit int) ([]IfLoad, error) {
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT device_id, if_index, in_bps, out_bps, speed_bps,
+	        greatest(in_bps, out_bps) * 100 / speed_bps AS util FROM (
+	          SELECT device_id, if_index, avg(in_bps) AS in_bps, avg(out_bps) AS out_bps, max(speed_bps) AS speed_bps
+	          FROM metrics.if_metrics
+	          WHERE ts > $1 AND speed_bps > 0 AND device_id = ANY($2)
+	          GROUP BY device_id, if_index) t
+	      ORDER BY util DESC, device_id, if_index LIMIT $3`, since, deviceIDs, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query top interface load: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[IfLoad])
+	if err != nil {
+		return nil, fmt.Errorf("query top interface load: %w", err)
+	}
+	return out, nil
+}

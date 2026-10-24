@@ -2232,6 +2232,280 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/dashboards:
+    get:
+      summary: The caller's personal dashboards and every shared one
+      description: |
+        At most 100 (50 personal, 50 shared), shared first. editable tells whether the
+        caller may change the dashboard: always for a personal one, with dashboards.manage
+        for a shared one. default_for_role marks the shared dashboard shown by default to a role.
+      x-permission: self
+      responses:
+        "200":
+          description: Dashboards
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dashboard" }
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a dashboard
+      description: |
+        A personal dashboard belongs to the caller and is visible to nobody else. A shared one
+        (shared true) needs dashboards.manage (else 403); it may be made the default of a role,
+        which the former default of that role stops being. default_for_role on a personal
+        dashboard answers 400. At most 50 personal dashboards per user and 50 shared ones
+        (409 too_many_dashboards). Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                shared: { type: boolean, default: false }
+                default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/dashboards/{id}:
+    get:
+      summary: A dashboard with its widgets
+      description: A personal dashboard of another user answers 404, as a missing one.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: The dashboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Rename a dashboard or change the role it is the default of
+      description: |
+        Only the given fields change; at least one is required. default_for_role (shared
+        dashboards only, else 400) makes it the default of the role, taking that over from
+        another dashboard; null makes it no role's default. A shared dashboard needs
+        dashboards.manage (403); a personal one of another user answers 404. Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+      responses:
+        "204": { description: Changed }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a dashboard with its widgets
+      description: A shared dashboard needs dashboards.manage (403); a personal one of another user answers 404. Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/dashboards/{id}/widgets:
+    put:
+      summary: Save the widgets of a dashboard (layout and settings)
+      description: |
+        Replaces the widget set: a widget with the id of a widget of this dashboard is
+        updated, one without an id is added, the ones left out are removed (an id of
+        another dashboard answers 400). At most 50 widgets on a 12-column grid
+        (x + w <= 12, y <= 1000, h <= 48). The type is one of a closed set and config is
+        checked against the schema of the type: an unknown type, an unknown field, a wrong
+        type or a value out of range answers 400 invalid_widget. Configs are stored
+        normalized (see DashboardWidget). A shared dashboard needs dashboards.manage (403);
+        a personal one of another user answers 404. Audited. Answers the stored dashboard.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [widgets]
+              properties:
+                widgets:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [type, x, y, w, h, config]
+                    properties:
+                      id: { type: [integer, "null"], format: int64, minimum: 1 }
+                      type: { $ref: "#/components/schemas/WidgetType" }
+                      x: { type: integer, minimum: 0, maximum: 11 }
+                      y: { type: integer, minimum: 0, maximum: 1000 }
+                      w: { type: integer, minimum: 1, maximum: 12 }
+                      h: { type: integer, minimum: 1, maximum: 48 }
+                      config: { type: object, description: "At most 2048 bytes; schema by type, see DashboardWidget" }
+      responses:
+        "200":
+          description: The stored dashboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardDetail" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/stats/device-states:
+    get:
+      summary: Visible devices counted by availability state
+      x-permission: devices.read
+      x-scoped: true
+      responses:
+        "200":
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, up, partial, down, unknown]
+                properties:
+                  total: { type: integer }
+                  up: { type: integer }
+                  partial: { type: integer }
+                  down: { type: integer }
+                  unknown: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/stats/top-devices:
+    get:
+      summary: Visible devices ranked by CPU, RAM or uptime
+      description: |
+        cpu and mem rank by the latest sample of the last 15 minutes (value in percent, at the
+        sample time); uptime ranks the devices that are up by how long they have been
+        continuously available (value in seconds, at the start), longest first.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema: { type: string, enum: [cpu, mem, uptime] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Ranked devices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [device_id, device_name, value, at]
+                      properties:
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        value: { type: number }
+                        at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/stats/top-interfaces:
+    get:
+      summary: Interfaces of visible devices ranked by load
+      description: |
+        Average rates of the last 10 minutes; util_pct is the busier direction against the
+        reported speed. Interfaces without a speed are skipped. The port name is device data:
+        render as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Ranked interfaces
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [device_id, device_name, if_index, port_name, in_bps, out_bps, speed_bps, util_pct]
+                      properties:
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        if_index: { type: integer }
+                        port_name: { type: string }
+                        in_bps: { type: number }
+                        out_bps: { type: number }
+                        speed_bps: { type: integer, format: int64 }
+                        util_pct: { type: number }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/stats/config-drift:
+    get:
+      summary: Latest configuration versions of visible devices marked as drift
+      description: Newest first. Together with GET /api/topology/changes it makes the recent changes widget.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Drift versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [version_id, device_id, device_name, taken_at]
+                      properties:
+                        version_id: { type: integer, format: int64 }
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        taken_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -2836,6 +3110,46 @@ components:
         b_device_name: { type: string }
         b_if_index: { type: [integer, "null"] }
         b_port_name: { type: string }
+    Dashboard:
+      type: object
+      required: [id, name, shared, default_for_role, editable]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        shared: { type: boolean }
+        default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+        editable: { type: boolean }
+    WidgetType:
+      type: string
+      enum: [device_status, problems, top_devices, log_stream, metric_chart, top_interfaces, recent_changes, mini_map]
+    DashboardWidget:
+      type: object
+      required: [id, type, x, y, w, h, config]
+      description: |
+        config by type (every field optional unless noted; title 0..100 characters, limit 1..N):
+        device_status {title}; problems {title, severity_min, limit up to 50};
+        top_devices {title, metric (required: cpu, mem, uptime), limit up to 50};
+        log_stream {title, kind (syslog, trap), severity_min, limit up to 100};
+        metric_chart {title, device_id (required), metric (required: cpu, mem, temp, traffic),
+        if_index (required exactly for traffic), range (1h, 6h, 24h, 7d)};
+        top_interfaces {title, limit up to 50}; recent_changes {title, limit up to 50}; mini_map {title, view_id}.
+      properties:
+        id: { type: integer, format: int64 }
+        type: { $ref: "#/components/schemas/WidgetType" }
+        x: { type: integer }
+        y: { type: integer }
+        w: { type: integer }
+        h: { type: integer }
+        config: { type: object }
+    DashboardDetail:
+      allOf:
+        - $ref: "#/components/schemas/Dashboard"
+        - type: object
+          required: [widgets]
+          properties:
+            widgets:
+              type: array
+              items: { $ref: "#/components/schemas/DashboardWidget" }
     Error:
       type: object
       required: [error]
@@ -2895,6 +3209,9 @@ components:
                 - too_many_templates
                 - too_many_filters
                 - too_many_windows
+                - too_many_dashboards
+                - too_many_widgets
+                - invalid_widget
                 - too_many_points
                 - locked
                 - rate_limited

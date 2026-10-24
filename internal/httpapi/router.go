@@ -276,6 +276,23 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPost, uploadPath, mapManage, s.uploadBackground)
 	s.route(r, http.MethodGet, "/api/map/backgrounds/{id}", read, s.getBackground)
 	s.route(r, http.MethodDelete, "/api/map/backgrounds/{id}", mapManage, s.deleteBackground)
+
+	/*
+		Dashboards are the caller's own (personal) or shared; the handlers hide
+		other users' personal dashboards (404) and require the global
+		dashboards.manage for changes of shared ones. Widget data comes from the
+		scoped device endpoints and the aggregates below.
+	*/
+	s.route(r, http.MethodGet, "/api/dashboards", self, s.listDashboards)
+	s.route(r, http.MethodPost, "/api/dashboards", self, s.createDashboard)
+	s.route(r, http.MethodGet, "/api/dashboards/{id}", self, s.getDashboard)
+	s.route(r, http.MethodPatch, "/api/dashboards/{id}", self, s.updateDashboard)
+	s.route(r, http.MethodDelete, "/api/dashboards/{id}", self, s.deleteDashboard)
+	s.route(r, http.MethodPut, "/api/dashboards/{id}/widgets", self, s.putWidgets)
+	s.route(r, http.MethodGet, "/api/stats/device-states", read, s.deviceStateCounts)
+	s.route(r, http.MethodGet, "/api/stats/top-devices", read, s.topDevices)
+	s.route(r, http.MethodGet, "/api/stats/top-interfaces", read, s.topInterfaces)
+	s.route(r, http.MethodGet, "/api/stats/config-drift", read, s.configDrift)
 	return r
 }
 

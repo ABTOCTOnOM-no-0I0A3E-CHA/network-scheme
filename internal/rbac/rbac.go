@@ -50,6 +50,9 @@ const (
 
 	/* Map views, areas, backgrounds, manual links and pinned positions; global only (not group-scoped). */
 	PermMapManage Perm = "map.manage"
+
+	/* Shared dashboards and the default dashboard of each role; global only (not group-scoped). */
+	PermDashboardsManage Perm = "dashboards.manage"
 )
 
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
@@ -58,7 +61,7 @@ var matrix = map[Role][]Perm{
 	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermSystemRead, PermProblemsAck},
 	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
 		PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermDevicesManage, PermDeviceCredentials,
-		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage},
+		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage, PermDashboardsManage},
 	RoleAuditor: {PermAuditRead},
 }
 

@@ -125,6 +125,16 @@ var matrix = map[string]map[string]int{
 	"POST /api/map/backgrounds":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
 	"GET /api/map/backgrounds/{id}":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"DELETE /api/map/backgrounds/{id}":                        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/dashboards":                                     {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"POST /api/dashboards":                                    {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"GET /api/dashboards/{id}":                                {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"PATCH /api/dashboards/{id}":                              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"DELETE /api/dashboards/{id}":                             {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"PUT /api/dashboards/{id}/widgets":                        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"GET /api/stats/device-states":                            {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/stats/top-devices":                              {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/stats/top-interfaces":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/stats/config-drift":                             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 }
 
 /*
@@ -193,6 +203,10 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/map/views":                                      {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/map/views/{id}/areas":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/map/backgrounds/{id}":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/stats/device-states":                            {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/stats/top-devices":                              {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/stats/top-interfaces":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/stats/config-drift":                             {"viewerA": 200, "operatorA": 200, "adminA": 200},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -385,6 +399,9 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 		return r
 	}
 	if r, ok := m.mapRequest(key); ok {
+		return r
+	}
+	if r, ok := m.dashboardRequest(key); ok {
 		return r
 	}
 	m.t.Fatalf("no valid request for %s", key)

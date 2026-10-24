@@ -64,6 +64,9 @@ var (
 	errAreaTooDeep        = apiError{http.StatusConflict, "area_too_deep", "Вложенность областей больше 8 уровней"}
 	errAreaOtherView      = apiError{http.StatusConflict, "area_other_view", "Родитель области должен быть в том же виде"}
 	errTooManyBackgrounds = apiError{http.StatusConflict, "too_many_backgrounds", "Подложек не может быть больше 200"}
+	errTooManyDashboards  = apiError{http.StatusConflict, "too_many_dashboards", "Дашбордов не может быть больше 50 (общих — тоже 50)"}
+	errTooManyWidgets     = apiError{http.StatusConflict, "too_many_widgets", "На дашборде не может быть больше 50 виджетов"}
+	errInvalidWidget      = apiError{http.StatusBadRequest, "invalid_widget", "Неизвестный тип виджета или недопустимые настройки"}
 	errNotMultipart       = apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "Ожидается Content-Type: multipart/form-data"}
 	errUnsupportedImage   = apiError{http.StatusUnsupportedMediaType, "unsupported_media", "Подложка должна быть PNG, JPEG, WebP или SVG"}
 	errInvalidImage       = apiError{http.StatusBadRequest, "invalid_image", "Файл подложки повреждён или не допускается (не больше 16384 пикселей по каждой стороне)"}
@@ -147,6 +150,11 @@ var knownErrors = []struct {
 	{errMapBackground, errBadRequest},
 	{errMapInvalid, errBadRequest},
 	{errShowInvalid, apiShowInvalid},
+	{errDashboardNotFound, errNotFound},
+	{errDashboardShared, errForbidden},
+	{errDashboardInvalid, errBadRequest},
+	{errCapDashboards, errTooManyDashboards},
+	{errCapWidgets, errTooManyWidgets},
 	{errShowBusy, apiShowBusy},
 }
 
