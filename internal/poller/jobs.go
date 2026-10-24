@@ -77,12 +77,12 @@ func (p *Poller) reloadForJob(ctx context.Context, arrived time.Time, retry bool
 	return 0, nil
 }
 
-/* snoozed reports whether River has already snoozed the job (metadata maintained by River, not trusted further). */
+/* snoozed reports whether River has already snoozed the job (metadata maintained by River, not trusted further); unreadable metadata counts as snoozed, so a job is never snoozed forever. */
 func snoozed(metadata []byte) bool {
 	var m struct {
 		Snoozes int `json:"snoozes"`
 	}
-	return json.Unmarshal(metadata, &m) == nil && m.Snoozes > 0
+	return json.Unmarshal(metadata, &m) != nil || m.Snoozes > 0
 }
 
 /*
@@ -112,7 +112,7 @@ func (w *pollNowWorker) Work(ctx context.Context, job *river.Job[jobs.PollNowArg
 			return rerr
 		}
 		if wait > 0 {
-			return river.JobSnooze(wait)
+			return river.JobSnooze(wait + time.Second)
 		}
 		err = w.p.sched.runNow(ctx, id, poll)
 	}

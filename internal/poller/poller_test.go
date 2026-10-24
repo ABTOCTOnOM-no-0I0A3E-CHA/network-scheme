@@ -613,8 +613,15 @@ func TestPollNowSnoozesInsteadOfWaiting(t *testing.T) {
 	if err := w.Work(ctx, pollNowJob(1<<42, `{"snoozes":1}`)); !errors.Is(err, errNotMine) {
 		t.Fatalf("bogus retry: err = %v, want a cancel", err)
 	}
-	if n, u := p.jobReloads.Load(), p.unknownJobs.Load(); n != 2 || u != 2 {
-		t.Fatalf("rereads %d (want 2), cancelled unknown %d (want 2: the priming job and this one)", n, u)
+	/* unreadable metadata fails closed: treated as a retry, cancelled instead of snoozed again */
+	for _, md := range []string{"[]", "7", "null1"} {
+		tick(time.Second)
+		if err := w.Work(ctx, pollNowJob(1<<43, md)); !errors.Is(err, errNotMine) {
+			t.Fatalf("metadata %q: err = %v, want a cancel", md, err)
+		}
+	}
+	if n, u := p.jobReloads.Load(), p.unknownJobs.Load(); n != 2 || u != 5 {
+		t.Fatalf("rereads %d (want 2), cancelled unknown %d (want 5: the priming job, the retry and three odd metadata)", n, u)
 	}
 }
 
