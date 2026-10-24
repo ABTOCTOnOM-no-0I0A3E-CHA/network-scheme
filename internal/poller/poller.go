@@ -78,6 +78,8 @@ type Poller struct {
 	backupAt       map[int64]time.Time                                                                      /* last backup attempt per device; guarded by backupMu */
 	fetchRaw       func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
 	showMu         sync.Mutex
+	showEvery      time.Duration                                                                                                 /* least time between show commands per device */
+	showAt         map[int64]time.Time                                                                                           /* last command that reached a device; guarded by showMu */
 	showBusy       map[int64]bool                                                                                                /* devices with a show command waiting or running; guarded by showMu */
 	runShowCmd     func(ctx context.Context, d device, cache *devCache, drv drivers.Driver, cmd ssh.ShowCommand) (string, error) /* sshShow; replaced in tests */
 	pinger         Pinger
@@ -118,7 +120,8 @@ func New(cfg Config, d Deps) *Poller {
 	}
 	p.recheck = p.scanState
 	p.fetchRaw = p.sshFetch
-	p.runShowCmd, p.showBusy = p.sshShow, map[int64]bool{}
+	p.showEvery = showGap
+	p.runShowCmd, p.showBusy, p.showAt = p.sshShow, map[int64]bool{}, map[int64]time.Time{}
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
 	}

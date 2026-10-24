@@ -79,26 +79,27 @@ const (
 )
 
 type server struct {
-	auth      *auth.Service
-	users     *auth.UserStore
-	rbac      *rbac.Store
-	pool      *pgxpool.Pool
-	devices   *devices.Store
-	inventory *inventory.Store
-	metrics   *metrics.Store
-	jobs      Enqueuer
-	now       func() time.Time
-	cfg       config.API
-	log       *slog.Logger
-	generalRL *httprate.RateLimiter
-	authRL    *httprate.RateLimiter
-	loginSem  chan struct{}
-	loginWait time.Duration
-	uploadSem chan struct{} /* one background upload is processed at a time */
-	serveSem  chan struct{} /* at most serveSlots background downloads stream at a time */
-	diffSem   chan struct{} /* at most diffSlots backup diffs are computed at a time */
-	backupRL  userLimiter   /* manual backups per user */
-	showRL    userLimiter   /* show requests per user */
+	auth        *auth.Service
+	users       *auth.UserStore
+	rbac        *rbac.Store
+	pool        *pgxpool.Pool
+	devices     *devices.Store
+	inventory   *inventory.Store
+	metrics     *metrics.Store
+	jobs        Enqueuer
+	now         func() time.Time
+	cfg         config.API
+	log         *slog.Logger
+	generalRL   *httprate.RateLimiter
+	authRL      *httprate.RateLimiter
+	loginSem    chan struct{}
+	loginWait   time.Duration
+	uploadSem   chan struct{} /* one background upload is processed at a time */
+	serveSem    chan struct{} /* at most serveSlots background downloads stream at a time */
+	diffSem     chan struct{} /* at most diffSlots backup diffs are computed at a time */
+	backupRL    userLimiter   /* manual backups per user */
+	showRL      userLimiter   /* show requests per user */
+	showAuditRL userLimiter   /* audit records of refused show requests, one per user a minute */
 
 	hub         *notify.Hub
 	wsConns     wsConns

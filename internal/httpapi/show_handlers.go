@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/beekamai/network-scheme/internal/audit"
+	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/drivers/showspec"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
@@ -26,7 +27,7 @@ is untrusted text and is only ever returned as a JSON string.
 */
 const (
 	showsPerMinute = 10              /* show requests per user */
-	showBusyWindow = 3 * time.Minute /* a queued or running row older than this no longer blocks its device (the poller's job timeout is shorter) */
+	showBusyWindow = 3 * time.Minute /* a queued or running row older than this no longer blocks its device: River queue wait is unbounded, so a stuck row must not block forever; the real guarantee of one command at a time is the poller's in-flight guard and gap */
 	maxShowKeyLog  = 64              /* bytes of a rejected key recorded in the audit details */
 )
 
@@ -90,6 +91,12 @@ func (s *server) startShow(w http.ResponseWriter, r *http.Request) {
 	sc, _ := sessionFrom(r.Context())
 	uid := sc.sess.UserID
 	if !s.showRL.allow(uid, s.now(), showsPerMinute) {
+		/* Audited, but at most once a minute per user: a flood of refused requests must not become a flood of audit records. */
+		if s.showAuditRL.allow(uid, s.now(), 1) {
+			ev := audit.Event{Action: "devices.show", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10), Details: map[string]any{"key": clip(body.Key, maxShowKeyLog)}}
+			s.change(w, r, ev, func(pgx.Tx, *audit.Event) error { return auth.ErrRateLimited })
+			return
+		}
 		writeError(w, errRateLimited)
 		return
 	}

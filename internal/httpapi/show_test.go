@@ -284,6 +284,13 @@ func TestShowRateLimitPerUser(t *testing.T) {
 		}
 	}
 	wantError(t, post(op), http.StatusTooManyRequests, "rate_limited")
+	wantError(t, post(op), http.StatusTooManyRequests, "rate_limited")
+	/* Refusals are audited, coalesced to one record per user a minute. */
+	var n int
+	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT count(*) FROM audit.event WHERE action = 'devices.show'
+		AND convert_from(payload, 'UTF8')::jsonb->>'result' = 'failure' AND convert_from(payload, 'UTF8')::jsonb->'details'->>'error' = 'rate_limited'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("rate limit audit records = %d, %v", n, err)
+	}
 	if r := post(other); r.StatusCode != http.StatusAccepted {
 		t.Fatalf("other user: %d", r.StatusCode)
 	}

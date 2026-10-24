@@ -30,6 +30,7 @@ type showEnv struct {
 func newShowEnv(t *testing.T, addr string, ifaces ...string) *showEnv {
 	t.Helper()
 	e := &showEnv{backupEnv: newBackupEnv(t, addr)}
+	e.p.showEvery = 0 /* tests run many commands back to back; TestShowGap sets it */
 	e.reply = func(cmd ssh.ShowCommand) (string, error) { return "output of " + cmd.String(), nil }
 	e.p.runShowCmd = func(_ context.Context, _ device, _ *devCache, _ drivers.Driver, cmd ssh.ShowCommand) (string, error) {
 		e.mu.Lock()
@@ -387,8 +388,11 @@ func TestShowNowJobs(t *testing.T) {
 	if _, err := e.env.Pool("postgres").Exec(ctx, `INSERT INTO jobs.river_job (kind, queue, args, state, max_attempts) VALUES ('show_now', $1, jsonb_build_object('result_id', $2::bigint), 'available', 1)`, q, forgedRow); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, 20*time.Second, "forged job handled", func() bool { return e.state(forgedRow).status == "failed" })
-	if s := e.state(forgedRow); *s.output != errShowRefused {
+	eventually(t, 20*time.Second, "forged job cancelled", func() bool {
+		return e.count(`SELECT count(*) FROM jobs.river_job WHERE kind = 'show_now' AND state = 'cancelled'`) == 1
+	})
+	/* The row is left alone: the poller that owns the device may be running it. */
+	if s := e.state(forgedRow); s.status != "queued" || s.output != nil {
 		t.Errorf("forged: %+v", s)
 	}
 	if got := e.commands(); len(got) != 1 {
@@ -399,5 +403,69 @@ func TestShowNowJobs(t *testing.T) {
 	})
 	if n := e.count(`SELECT count(*) FROM jobs.river_job WHERE kind = 'show_now' AND state = 'cancelled'`); n != 1 {
 		t.Errorf("%d cancelled show jobs, want the forged one", n)
+	}
+}
+
+/* Sequential rows for one device inside the gap: only the first reaches the device. */
+func TestShowGapBoundsSequentialRows(t *testing.T) {
+	e := newShowEnv(t, "203.0.113.212:161")
+	e.p.showEvery = time.Hour
+	other := e.device(netip.MustParseAddrPort("203.0.113.213:161"))
+	if err := e.p.reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.p.sched.mu.Lock()
+	e.p.sched.devs[other].cache.drv = e.drv
+	e.p.sched.mu.Unlock()
+	var ids []int64
+	for range 8 {
+		ids = append(ids, e.row(e.dev, "version", `{}`))
+	}
+	for _, id := range ids {
+		if err := e.p.runShow(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := e.commands(); len(got) != 1 {
+		t.Fatalf("%d commands reached the device, want 1: %q", len(got), got)
+	}
+	if s := e.state(ids[0]); s.status != "done" {
+		t.Errorf("first: %+v", s)
+	}
+	for _, id := range ids[1:] {
+		if s := e.state(id); s.status != "failed" || *s.output != errShowTooSoon {
+			t.Errorf("row %d: %+v", id, s)
+		}
+	}
+	/* Another device has its own gap. */
+	if err := e.p.runShow(context.Background(), e.row(other, "version", `{}`)); err != nil || len(e.commands()) != 2 {
+		t.Fatalf("other device: %v %q", err, e.commands())
+	}
+	/* After the gap the device is reachable again. */
+	e.p.showEvery = 0
+	id := e.row(e.dev, "version", `{}`)
+	if err := e.p.runShow(context.Background(), id); err != nil || e.state(id).status != "done" {
+		t.Errorf("after the gap: %v %+v", err, e.state(id))
+	}
+}
+
+/* A job whose context ended while it waited for the device lock does not leave its row queued. */
+func TestShowInterruptedRowIsFailed(t *testing.T) {
+	e := newShowEnv(t, "203.0.113.214:161")
+	e.p.sched.mu.Lock()
+	lk := e.p.sched.devs[e.dev].lock
+	e.p.sched.mu.Unlock()
+	if err := lk.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Unlock()
+	id := e.row(e.dev, "version", `{}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := e.p.runShow(ctx, id); err == nil {
+		t.Fatal("expected the cancelled wait to fail")
+	}
+	if s := e.state(id); s.status != "failed" || *s.output != errShowInterrupted || len(e.commands()) != 0 {
+		t.Errorf("row: %+v", s)
 	}
 }

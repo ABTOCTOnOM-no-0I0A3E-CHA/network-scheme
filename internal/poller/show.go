@@ -39,14 +39,18 @@ const (
 	showTimeout    = 90 * time.Second /* connection plus command */
 	showWorkers    = 4                /* show commands running at once on this poller */
 	showCleanEvery = 5 * time.Minute  /* how often expired results are deleted */
+	showGap        = 6 * time.Second  /* least time between two show commands that reach a device, whoever asks */
+	showInterruptT = 5 * time.Second  /* budget for recording an interrupted run */
 )
 
 /* Fixed texts stored in show_result.output of a failed command. */
 const (
-	errShowRefused    = "the command is not available for this device"
-	errShowDeviceBusy = "another command is already running on this device"
-	errShowTooLarge   = "the output exceeds the 4 MiB limit"
-	errShowTimedOut   = "the command timed out"
+	errShowRefused     = "the command is not available for this device"
+	errShowDeviceBusy  = "another command is already running on this device"
+	errShowTooLarge    = "the output exceeds the 4 MiB limit"
+	errShowTimedOut    = "the command timed out"
+	errShowTooSoon     = "too many commands for this device; try again in a few seconds"
+	errShowInterrupted = "the command was interrupted"
 )
 
 /* showFailed is a failed command with its fixed text; err is for debugging only and is never logged or stored. */
@@ -100,6 +104,39 @@ not queued are ignored. errNotMine is returned (row untouched) when the device
 is not assigned to this poller, so the worker can reread the device list.
 */
 func (p *Poller) runShow(ctx context.Context, id int64) error {
+	err := p.runShowRow(ctx, id)
+	if err != nil && !errors.Is(err, errNotMine) {
+		/*
+			Best effort: a run that was interrupted (job context ended while waiting
+			for the device lock, or a failure mid-flight) must not leave its row
+			queued or running until it expires. A restart in the middle of a run
+			still does; the row then expires on its own (TTL).
+		*/
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), showInterruptT)
+		defer cancel()
+		_ = p.finishShow(fctx, id, "failed", errShowInterrupted, false)
+	}
+	return err
+}
+
+/* showTooSoon reports whether a command reached device id less than showGap ago; otherwise it records this one. */
+func (p *Poller) showTooSoon(id int64) bool {
+	now := p.now()
+	p.showMu.Lock()
+	defer p.showMu.Unlock()
+	for dev, at := range p.showAt {
+		if now.Sub(at) >= p.showEvery {
+			delete(p.showAt, dev)
+		}
+	}
+	if _, recent := p.showAt[id]; recent {
+		return true
+	}
+	p.showAt[id] = now
+	return false
+}
+
+func (p *Poller) runShowRow(ctx context.Context, id int64) error {
 	row, found, err := p.loadShow(ctx, id)
 	if err != nil || !found || row.status != "queued" {
 		return err
@@ -117,6 +154,14 @@ func (p *Poller) runShow(ctx context.Context, id int64) error {
 		p.showMu.Unlock()
 	}()
 	return p.sched.runNow(ctx, row.device, func(d device, cache *devCache) error {
+		/*
+			The api is not trusted to pace requests: sequential rows would each cost
+			an SSH login and hold the device lock, starving its polls. A row inside
+			the gap is failed without contact.
+		*/
+		if p.showTooSoon(d.ID) {
+			return p.finishShow(context.WithoutCancel(ctx), id, "failed", errShowTooSoon, false)
+		}
 		if ok, err := p.claimShow(ctx, id); err != nil || !ok {
 			return err
 		}
@@ -288,7 +333,7 @@ func (w *showNowWorker) Work(ctx context.Context, job *river.Job[jobs.ShowNowArg
 	if errors.Is(err, errNotMine) {
 		w.p.unknownJobs.Add(1)
 		w.p.log.Debug("show now for a device not assigned here", slog.Int64("result_id", id))
-		_ = w.p.finishShow(context.WithoutCancel(ctx), id, "failed", errShowRefused, false)
+		/* The row is left alone: the poller that owns the device may be running it. */
 		return river.JobCancel(err)
 	}
 	if err != nil && ctx.Err() != nil {
