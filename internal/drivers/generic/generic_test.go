@@ -148,9 +148,9 @@ func TestGenericInventoryTables(t *testing.T) {
 	assertComplete(t, inv)
 	a := netip.MustParseAddr
 	eq(t, "interfaces", inv.Interfaces, []drivers.Interface{
-		{Index: 1, Name: "Gi1/0/1", Alias: "uplink", SpeedBps: 1e9, OperUp: true, MAC: "00:11:22:33:44:01"},
-		{Index: 2, Name: "Gi1/0/2", Alias: "server", SpeedBps: 1e9, MAC: "00:11:22:33:44:02"},
-		{Index: 3, Name: "Gi1/0/3", SpeedBps: 1e9, MAC: "00:11:22:33:44:03"},
+		{Index: 1, Name: "Gi1/0/1", Alias: "uplink", SpeedBps: 1e9, OperUp: true, MAC: "00:11:22:33:44:01", PortKind: drivers.PortRJ45},
+		{Index: 2, Name: "Gi1/0/2", Alias: "server", SpeedBps: 1e9, MAC: "00:11:22:33:44:02", PortKind: drivers.PortRJ45},
+		{Index: 3, Name: "Gi1/0/3", SpeedBps: 1e9, MAC: "00:11:22:33:44:03", PortKind: drivers.PortRJ45},
 	})
 	eq(t, "arp", inv.ARP, []drivers.ARPEntry{
 		{IP: a("10.0.0.1"), MAC: "00:aa:bb:cc:dd:01", IfIndex: 1},
@@ -197,8 +197,8 @@ func TestGenericInventoryFallbacks(t *testing.T) {
 	assertComplete(t, inv)
 	a := netip.MustParseAddr
 	eq(t, "interfaces", inv.Interfaces, []drivers.Interface{
-		{Index: 1, Name: "eth0", SpeedBps: 1e8, OperUp: true, MAC: "00:aa:bb:cc:ee:10"},
-		{Index: 2, Name: "eth1", SpeedBps: 1e8, MAC: "00:aa:bb:cc:ee:11"},
+		{Index: 1, Name: "eth0", SpeedBps: 1e8, OperUp: true, MAC: "00:aa:bb:cc:ee:10", PortKind: drivers.PortRJ45},
+		{Index: 2, Name: "eth1", SpeedBps: 1e8, MAC: "00:aa:bb:cc:ee:11", PortKind: drivers.PortRJ45},
 	})
 	eq(t, "arp", inv.ARP, []drivers.ARPEntry{
 		{IP: a("192.0.2.10"), MAC: "00:aa:bb:cc:ee:01", IfIndex: 1},

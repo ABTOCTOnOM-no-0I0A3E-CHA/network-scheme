@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/beekamai/network-scheme/internal/drivers/showspec"
 	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
@@ -44,6 +45,28 @@ type Driver interface {
 		traps the driver does not know; standard traps are mapped by trap.Standard.
 	*/
 	MapTrap(t trap.Trap) (trap.Mapped, bool)
+
+	/*
+		FetchConfig reads the running configuration over SSH using only a
+		command from the dialect's allowlist. It returns ErrNotSupported for
+		drivers without a config reader and never returns partial text.
+	*/
+	FetchConfig(ctx context.Context, sh ShowRunner) (string, error)
+	/* NormalizeConfig drops volatile lines (timestamps, uptime) and unifies line ends; idempotent. */
+	NormalizeConfig(cfg string) string
+	/* MaskSecrets replaces secret values with "***"; idempotent. */
+	MaskSecrets(cfg string) string
+	/* ConfigSections splits a masked configuration into named sections (stable keys). */
+	ConfigSections(masked string) []Section
+	/*
+		ConfigNeedsWrite reports that reading the configuration requires an
+		account with write rights; such devices are not backed up before Phase 4.
+	*/
+	ConfigNeedsWrite() bool
+	/* ShowCommands lists the on-demand show commands (never a configuration dump). */
+	ShowCommands() []showspec.Spec
+	/* ShowCommand maps a ShowCommands key and its arguments to the allowlisted command. */
+	ShowCommand(key string, args []string) (ssh.ShowCommand, error)
 }
 
 /* ShowRunner runs an allowlisted show command over SSH; *ssh.Runner implements it. */
@@ -147,7 +170,19 @@ type Interface struct {
 	SpeedBps uint64
 	OperUp   bool
 	MAC      string
+	/* PortKind is the physical port kind; empty is stored as PortOther. */
+	PortKind PortKind
 }
+
+/* PortKind is the physical kind of an interface. */
+type PortKind string
+
+/* Port kinds, as stored in inventory.interface.port_kind. */
+const (
+	PortRJ45  PortKind = "rj45"
+	PortSFP   PortKind = "sfp"
+	PortOther PortKind = "other"
+)
 
 /* ARPEntry is an IP-to-MAC mapping. */
 type ARPEntry struct {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/beekamai/network-scheme/internal/drivers/showspec"
 	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
@@ -179,4 +180,16 @@ func TestBudget(t *testing.T) {
 	if !BudgetFrom(WithBudget(context.Background(), Budget{SkipHeavy: true})).SkipHeavy {
 		t.Fatal("budget lost")
 	}
+}
+
+func (f fakeDriver) FetchConfig(context.Context, ShowRunner) (string, error) {
+	return "", ErrNotSupported
+}
+func (f fakeDriver) NormalizeConfig(s string) string { return s }
+func (f fakeDriver) MaskSecrets(s string) string     { return s }
+func (f fakeDriver) ConfigSections(string) []Section { return nil }
+func (f fakeDriver) ConfigNeedsWrite() bool          { return false }
+func (f fakeDriver) ShowCommands() []showspec.Spec   { return nil }
+func (f fakeDriver) ShowCommand(string, []string) (ssh.ShowCommand, error) {
+	return ssh.ShowCommand{}, ErrUnknownShow
 }

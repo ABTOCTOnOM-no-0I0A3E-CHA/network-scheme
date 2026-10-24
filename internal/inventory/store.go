@@ -58,17 +58,20 @@ may not update a row twice.
 */
 var tables = []table{
 	{drivers.TableInterfaces, `
-		INSERT INTO inventory.interface AS t (device_id, if_index, name, alias, speed_bps, oper_up, seen_at)
-		SELECT $1, i, n, a, s, o, $2 FROM unnest($3::int[], $4::text[], $5::text[], $6::bigint[], $7::bool[]) AS u(i, n, a, s, o)
+		INSERT INTO inventory.interface AS t (device_id, if_index, name, alias, speed_bps, oper_up, seen_at, port_kind)
+		SELECT $1, i, n, a, s, o, $2, k FROM unnest($3::int[], $4::text[], $5::text[], $6::bigint[], $7::bool[], $8::text[]) AS u(i, n, a, s, o, k)
 		ON CONFLICT (device_id, if_index) DO UPDATE SET name = excluded.name, alias = excluded.alias,
-			speed_bps = excluded.speed_bps, oper_up = excluded.oper_up, seen_at = excluded.seen_at`,
+			speed_bps = excluded.speed_bps, oper_up = excluded.oper_up, seen_at = excluded.seen_at,
+			port_kind = excluded.port_kind`,
 		func(inv drivers.Inventory) (int, []any) {
 			rows := dedupe(inv.Interfaces, func(r drivers.Interface) int { return r.Index })
 			idx, name, alias, speed, up := make([]int, len(rows)), make([]string, len(rows)), make([]string, len(rows)), make([]int64, len(rows)), make([]bool, len(rows))
+			kind := make([]string, len(rows))
 			for k, r := range rows {
 				idx[k], name[k], alias[k], speed[k], up[k] = r.Index, r.Name, r.Alias, clampInt64(r.SpeedBps), r.OperUp
+				kind[k] = portKind(r.PortKind)
 			}
-			return len(rows), []any{idx, name, alias, speed, up}
+			return len(rows), []any{idx, name, alias, speed, up, kind}
 		}},
 	{drivers.TableARP, `
 		INSERT INTO inventory.arp_entry AS t (device_id, ip, mac, if_index, seen_at)
@@ -313,4 +316,13 @@ func (s *Store) MarkProfileSeen(ctx context.Context, owner devices.Owner, kind s
 		return mapErr("mark profile seen", err)
 	}
 	return nil
+}
+
+/* portKind maps a driver port kind to a stored value; anything unknown is "other". */
+func portKind(k drivers.PortKind) string {
+	switch k {
+	case drivers.PortRJ45, drivers.PortSFP:
+		return string(k)
+	}
+	return string(drivers.PortOther)
 }

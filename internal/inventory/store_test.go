@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -483,5 +484,36 @@ func TestListPages(t *testing.T) {
 	rt, err := api.Routes(ctx, dev, inventory.Page{Limit: 10})
 	if err != nil || len(rt) != 5 || rt[0].Dest != "10.1.0.0/16" || rt[0].NextHop != nil {
 		t.Errorf("routes = %+v, %v", rt, err)
+	}
+}
+
+func TestApplyStoresPortKind(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	st := inventory.NewStore(env.Pool("nms_poller"))
+	dev := newDevice(t, env, "")
+	inv := drivers.NewInventory()
+	inv.Complete = map[drivers.Table]bool{drivers.TableInterfaces: true}
+	inv.Interfaces = []drivers.Interface{
+		{Index: 1, Name: "gi1", PortKind: drivers.PortRJ45},
+		{Index: 2, Name: "te1", PortKind: drivers.PortSFP},
+		{Index: 3, Name: "vlan1"},
+		{Index: 4, Name: "x", PortKind: "bogus"},
+	}
+	for range 2 { /* the second poll updates existing rows */
+		if err := st.Apply(ctx, dev, inv, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := env.Pool("postgres").Query(ctx, `SELECT port_kind FROM inventory.interface WHERE device_id = $1 ORDER BY if_index`, dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"rj45", "sfp", "other", "other"}; !slices.Equal(got, want) {
+		t.Fatalf("port_kind = %v, want %v", got, want)
 	}
 }

@@ -78,6 +78,7 @@ func (d Driver) interfaces(ctx context.Context, r snmp.Reader, inv *drivers.Inve
 		row := rows[i]
 		inv.Interfaces = append(inv.Interfaces, drivers.Interface{
 			Index: i, Name: row.displayName(), Alias: row.alias, SpeedBps: row.speedBps(), OperUp: row.operUp, MAC: row.mac,
+			PortKind: portKind(row.ifType, row.displayName(), row.speedBps()),
 		})
 	}
 	return bad, err
