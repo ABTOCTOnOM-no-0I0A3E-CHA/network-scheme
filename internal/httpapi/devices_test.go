@@ -31,6 +31,7 @@ type fakeJobs struct {
 	polls []int64
 	scans []int64
 	backs []int64
+	shows [][2]int64 /* device id, result id */
 	fail  bool
 }
 
@@ -41,6 +42,16 @@ func (j *fakeJobs) EnqueueBackupNow(_ context.Context, tx pgx.Tx, id int64, sour
 		return errors.New("fake: enqueue failed")
 	}
 	j.backs = append(j.backs, id)
+	return nil
+}
+
+func (j *fakeJobs) EnqueueShowNow(_ context.Context, tx pgx.Tx, id, resultID int64) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if tx == nil || j.fail {
+		return errors.New("fake: enqueue failed")
+	}
+	j.shows = append(j.shows, [2]int64{id, resultID})
 	return nil
 }
 

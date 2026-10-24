@@ -1358,6 +1358,173 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/show-commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * On-demand show commands of the device's driver
+         * @description Keys and the kinds of their arguments ("interface" or "vlan"), from the
+         *     driver the device was identified with. A device not identified yet, or
+         *     with a driver without show commands, lists none.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Commands */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            commands: {
+                                key: string;
+                                args: ("interface" | "vlan")[];
+                            }[];
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/show": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run an allowlisted show command on the device
+         * @description Queues the command; the result is read from GET /api/show/{id}. key must
+         *     be one of the device's show-commands and args an object with exactly one
+         *     member per argument, named after its kind: "interface" (a name from this
+         *     device's inventory) or "vlan" (an integer 1..4094). Anything else answers
+         *     400 invalid_show (also audited). Audited; limited to 10 requests a minute
+         *     per user (429) and one command at a time per device (409 device_busy).
+         *     The poller checks the row again before it sends anything.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        key: string;
+                        args: {
+                            interface?: string;
+                            vlan?: number;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            id: number;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/show/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Result of a show command
+         * @description Only for the user who ran it or a global admin, and only while the caller
+         *     holds devices.show on the device's group; anything else, and a result
+         *     older than an hour, answers 404. output is text from the device (untrusted:
+         *     render as text only), at most 1 MiB; truncated says it was cut. A failed
+         *     command carries one of a fixed set of texts in output.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Result */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ShowResult"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices/{id}/interfaces": {
         parameters: {
             query?: never;
@@ -3963,6 +4130,25 @@ export interface components {
             sha256: string;
             drift: boolean;
         };
+        ShowResult: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            device_id: number;
+            key: string;
+            args: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "queued" | "running" | "done" | "failed";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            finished_at: string | null;
+            /** @description Untrusted device text; null until finished */
+            output: string | null;
+            truncated: boolean;
+        };
         BackupDiffSide: {
             /** Format: int64 */
             id: number;
@@ -4499,7 +4685,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

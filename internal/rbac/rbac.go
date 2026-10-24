@@ -39,6 +39,7 @@ const (
 	PermDevicesRead       Perm = "devices.read"
 	PermDevicesPoll       Perm = "devices.poll"
 	PermDevicesBackup     Perm = "devices.backup"
+	PermDevicesShow       Perm = "devices.show"
 	PermDevicesManage     Perm = "devices.manage"
 	PermDeviceCredentials Perm = "device.credentials" //nolint:gosec // a permission name, not a credential
 
@@ -54,9 +55,9 @@ const (
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
 var matrix = map[Role][]Perm{
 	RoleViewer:   {PermDevicesRead},
-	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermSystemRead, PermProblemsAck},
+	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermSystemRead, PermProblemsAck},
 	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
-		PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesManage, PermDeviceCredentials,
+		PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermDevicesManage, PermDeviceCredentials,
 		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage},
 	RoleAuditor: {PermAuditRead},
 }

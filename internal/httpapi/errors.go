@@ -146,6 +146,8 @@ var knownErrors = []struct {
 	{errCapBackgrounds, errTooManyBackgrounds},
 	{errMapBackground, errBadRequest},
 	{errMapInvalid, errBadRequest},
+	{errShowInvalid, apiShowInvalid},
+	{errShowBusy, apiShowBusy},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

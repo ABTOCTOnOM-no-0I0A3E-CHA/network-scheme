@@ -34,15 +34,21 @@ func (p *Poller) newRiver(life context.Context) (*river.Client[pgx.Tx], error) {
 	if err != nil {
 		return nil, err
 	}
+	sq, err := jobs.ShowQueue(p.cfg.PollerID)
+	if err != nil {
+		return nil, err
+	}
 	w := river.NewWorkers()
 	river.AddWorker(w, &pollNowWorker{p: p})
 	river.AddWorker(w, &discoveryWorker{p: p, life: life})
 	river.AddWorker(w, &backupNowWorker{p: p})
+	river.AddWorker(w, &showNowWorker{p: p})
 	c, err := river.NewClient(riverpgxv5.New(p.pool), &river.Config{
 		Schema: store.JobsSchema,
 		Queues: map[string]river.QueueConfig{
 			q:  {MaxWorkers: pollNowWorkers},
 			bq: {MaxWorkers: backupParallel}, /* backup_now has its own queue: a burst of them never delays polls */
+			sq: {MaxWorkers: showWorkers},    /* so does show_now: user commands wait for neither polls nor backups */
 		},
 		Workers: w,
 		Logger:  p.log,

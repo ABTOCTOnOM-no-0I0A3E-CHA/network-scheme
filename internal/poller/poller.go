@@ -77,6 +77,9 @@ type Poller struct {
 	backupMu       sync.Mutex
 	backupAt       map[int64]time.Time                                                                      /* last backup attempt per device; guarded by backupMu */
 	fetchRaw       func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
+	showMu         sync.Mutex
+	showBusy       map[int64]bool                                                                                                /* devices with a show command waiting or running; guarded by showMu */
+	runShowCmd     func(ctx context.Context, d device, cache *devCache, drv drivers.Driver, cmd ssh.ShowCommand) (string, error) /* sshShow; replaced in tests */
 	pinger         Pinger
 	dial           DialFunc
 	reg            *drivers.Registry
@@ -115,6 +118,7 @@ func New(cfg Config, d Deps) *Poller {
 	}
 	p.recheck = p.scanState
 	p.fetchRaw = p.sshFetch
+	p.runShowCmd, p.showBusy = p.sshShow, map[int64]bool{}
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
 	}
@@ -166,6 +170,7 @@ func (p *Poller) Run(ctx context.Context) error {
 	wg.Go(func() { p.heartbeat(ctx) })
 	wg.Go(func() { p.listen(ctx) })
 	wg.Go(func() { p.discoverLoop(ctx) })
+	wg.Go(func() { p.cleanShow(ctx) })
 	if p.backupPub != nil {
 		wg.Go(func() { p.backupLoop(ctx) })
 	} else {

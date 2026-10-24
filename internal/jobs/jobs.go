@@ -27,6 +27,7 @@ const (
 	KindPollNow       = "poll_now"
 	KindDiscoveryScan = "discovery_scan"
 	KindBackupNow     = "backup_now"
+	KindShowNow       = "show_now"
 )
 
 /*
@@ -52,6 +53,14 @@ func BackupQueue(pollerID string) (string, error) {
 		return "", fmt.Errorf("jobs: invalid poller id %q", pollerID)
 	}
 	return "backup_" + pollerID, nil
+}
+
+// ShowQueue returns the queue of poller pollerID that carries only show_now jobs: a user's commands never wait behind polls or backups.
+func ShowQueue(pollerID string) (string, error) {
+	if !ValidPollerID(pollerID) {
+		return "", fmt.Errorf("jobs: invalid poller id %q", pollerID)
+	}
+	return "show_" + pollerID, nil
 }
 
 // Queue returns the queue worked by poller pollerID.
@@ -95,6 +104,23 @@ func (BackupNowArgs) Kind() string { return KindBackupNow }
 // InsertOpts implements river.JobArgsWithInsertOpts.
 func (BackupNowArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByPeriod: BackupGap}}
+}
+
+/*
+ShowNowArgs asks the device's poller to run the on-demand show command of row
+ResultID of backups.show_result. The job names the row only: the poller takes
+the command key and arguments from the row and checks them again. Never retried.
+*/
+type ShowNowArgs struct {
+	ResultID int64 `json:"result_id"`
+}
+
+// Kind implements river.JobArgs.
+func (ShowNowArgs) Kind() string { return KindShowNow }
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (ShowNowArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true}}
 }
 
 /*
@@ -143,6 +169,19 @@ func (e *Enqueuer) EnqueuePollNow(ctx context.Context, tx pgx.Tx, deviceID int64
 	}
 	if _, err := e.client.InsertTx(ctx, tx, PollNowArgs{DeviceID: deviceID}, &river.InsertOpts{Queue: q}); err != nil {
 		return fmt.Errorf("jobs: enqueue poll: %w", err)
+	}
+	return nil
+}
+
+// EnqueueShowNow queues the show command of result row resultID on the poller of deviceID.
+func (e *Enqueuer) EnqueueShowNow(ctx context.Context, tx pgx.Tx, deviceID, resultID int64) error {
+	q, err := ownerQueue(ctx, tx, `SELECT poller_id FROM core.device WHERE id = $1`, "device", deviceID)
+	if err != nil {
+		return err
+	}
+	q = "show_" + strings.TrimPrefix(q, "poller_")
+	if _, err := e.client.InsertTx(ctx, tx, ShowNowArgs{ResultID: resultID}, &river.InsertOpts{Queue: q}); err != nil {
+		return fmt.Errorf("jobs: enqueue show_now: %w", err)
 	}
 	return nil
 }

@@ -98,6 +98,7 @@ type server struct {
 	serveSem  chan struct{} /* at most serveSlots background downloads stream at a time */
 	diffSem   chan struct{} /* at most diffSlots backup diffs are computed at a time */
 	backupRL  userLimiter   /* manual backups per user */
+	showRL    userLimiter   /* show requests per user */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -208,6 +209,10 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}", read, s.getBackup)
 	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}/download", read, s.downloadBackup)
 	s.route(r, http.MethodGet, "/api/devices/{id}/backup-state", read, s.backupState)
+	showP := Policy{Perm: rbac.PermDevicesShow, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices/{id}/show-commands", showP, s.listShowCommands)
+	s.route(r, http.MethodPost, "/api/devices/{id}/show", showP, s.startShow)
+	s.route(r, http.MethodGet, "/api/show/{id}", showP, s.getShow)
 	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
 	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
 	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)

@@ -14,6 +14,8 @@ const KNOWN = new Set([
   "method_not_allowed",
   "payload_too_large",
   "too_large",
+  "invalid_show",
+  "device_busy",
   "unsupported_media_type",
   "user_exists",
   "group_exists",

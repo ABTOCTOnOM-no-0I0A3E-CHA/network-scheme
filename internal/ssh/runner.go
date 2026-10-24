@@ -147,6 +147,9 @@ func (c ShowCommand) line() string {
 	return strings.Join(parts, " ")
 }
 
+// String returns the command line the command is sent as.
+func (c ShowCommand) String() string { return c.line() }
+
 /*
 Dialect describes a vendor CLI. ExecPrompt must match the whole last line of
 output (trailing spaces removed); Dial anchors it as ^(?:...)$. PagerOff
