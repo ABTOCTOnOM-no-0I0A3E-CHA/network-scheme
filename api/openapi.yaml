@@ -1019,6 +1019,46 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/metrics/sys:
+    get:
+      summary: CPU, memory and temperature series of the device, oldest first
+      description: |
+        Same sources, step and bounds as /api/devices/{id}/metrics/if (400
+        too_many_points, 400 bad_request). A value the device did not report is null.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Exclusive; must be after from
+          schema: { type: string, format: date-time }
+        - name: step
+          in: query
+          description: Bucket width in seconds; absent keeps the source resolution
+          schema: { type: integer, minimum: 1, maximum: 63072000 }
+      responses:
+        "200":
+          description: Points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [step_s, points]
+                properties:
+                  step_s: { type: integer, description: Bucket width actually used in seconds; 0 for raw points }
+                  points:
+                    type: array
+                    items: { $ref: "#/components/schemas/SysPoint" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/discovery/scans:
     get:
       summary: Subnet scans of the groups the caller manages
@@ -2602,7 +2642,7 @@ components:
         status: { type: string, enum: [pending, accepted, ignored] }
     InventoryInterface:
       type: object
-      required: [if_index, name, alias, speed_bps, oper_up, seen_at]
+      required: [if_index, name, alias, speed_bps, oper_up, seen_at, port_kind]
       properties:
         if_index: { type: integer }
         name: { type: string, description: Reported by the device; render as text only }
@@ -2610,6 +2650,7 @@ components:
         speed_bps: { type: integer, format: int64 }
         oper_up: { type: boolean }
         seen_at: { type: string, format: date-time }
+        port_kind: { type: string, enum: [rj45, sfp, other], description: "Physical port kind derived by the driver from ifType, name and speed" }
     InventoryARPEntry:
       type: object
       required: [ip, mac, if_index, seen_at]
@@ -2677,6 +2718,14 @@ components:
         out_disc_ps: { type: [number, "null"] }
         oper_up: { type: boolean }
         speed_bps: { type: integer, format: int64 }
+    SysPoint:
+      type: object
+      required: [ts, cpu_pct, mem_used_pct, temp_c]
+      properties:
+        ts: { type: string, format: date-time }
+        cpu_pct: { type: [number, "null"], description: Average inside the bucket; null when not reported }
+        mem_used_pct: { type: [number, "null"] }
+        temp_c: { type: [number, "null"] }
     MapAreaKind:
       type: string
       enum: [organization, building, floor, room]

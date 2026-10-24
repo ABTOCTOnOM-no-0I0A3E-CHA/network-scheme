@@ -241,6 +241,46 @@ func (s *Store) QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, 
 	return pts, nil
 }
 
+/* Source tables of QuerySys, tier for tier with ifSources (same resolutions and retention). */
+var sysTables = []string{"metrics.sys_metrics", "metrics.sys_metrics_5m", "metrics.sys_metrics_1h"}
+
+/*
+QuerySys returns the CPU, memory and temperature samples of one device in
+[from, to), oldest first. It reads the same tier and regroups into the same
+buckets as QueryIf for the same arguments (IfStep gives the bucket width);
+the aggregates contribute their averages. PSUOk is not filled.
+*/
+func (s *Store) QuerySys(ctx context.Context, deviceID int64, from, to time.Time, step time.Duration) ([]SysPoint, error) {
+	if !to.After(from) {
+		return nil, errors.New("metrics: empty time range")
+	}
+	i, bucket := s.ifPlan(from, to, step)
+	/* The identifier comes from the sysTables constants only; values are parameters. */
+	q := `SELECT ts, cpu_pct, mem_used_pct, temp_c FROM ` + sysTables[i] + `
+	      WHERE device_id = $1 AND ts >= $2 AND ts < $3 ORDER BY ts`
+	args := []any{deviceID, from, to}
+	if bucket > 0 {
+		q = `SELECT date_bin($4::interval, ts, '2000-01-01 00:00:00+00') AS b, avg(cpu_pct), avg(mem_used_pct), avg(temp_c)
+		     FROM ` + sysTables[i] + `
+		     WHERE device_id = $1 AND ts >= $2 AND ts < $3
+		     GROUP BY b ORDER BY b`
+		args = append(args, bucket)
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query system metrics: %w", err)
+	}
+	pts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SysPoint, error) {
+		p := SysPoint{DeviceID: deviceID}
+		err := row.Scan(&p.TS, &p.CPUPct, &p.MemUsedPct, &p.TempC)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query system metrics: %w", err)
+	}
+	return pts, nil
+}
+
 // SysSince implements MetricStore.
 func (s *Store) SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysPoint, error) {
 	rows, err := s.pool.Query(ctx, `SELECT device_id, ts, cpu_pct, mem_used_pct, temp_c, psu_ok

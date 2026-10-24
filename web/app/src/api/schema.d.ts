@@ -1948,6 +1948,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/metrics/sys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * CPU, memory and temperature series of the device, oldest first
+         * @description Same sources, step and bounds as /api/devices/{id}/metrics/if (400
+         *     too_many_points, 400 bad_request). A value the device did not report is null.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    /** @description Exclusive; must be after from */
+                    to: string;
+                    /** @description Bucket width in seconds; absent keeps the source resolution */
+                    step?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Points */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Bucket width actually used in seconds; 0 for raw points */
+                            step_s: number;
+                            points: components["schemas"]["SysPoint"][];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/discovery/scans": {
         parameters: {
             query?: never;
@@ -4522,6 +4578,11 @@ export interface components {
             oper_up: boolean;
             /** Format: date-time */
             seen_at: string;
+            /**
+             * @description Physical port kind derived by the driver from ifType, name and speed
+             * @enum {string}
+             */
+            port_kind: "rj45" | "sfp" | "other";
         };
         InventoryARPEntry: {
             ip: string;
@@ -4595,6 +4656,14 @@ export interface components {
             oper_up: boolean;
             /** Format: int64 */
             speed_bps: number;
+        };
+        SysPoint: {
+            /** Format: date-time */
+            ts: string;
+            /** @description Average inside the bucket; null when not reported */
+            cpu_pct: number | null;
+            mem_used_pct: number | null;
+            temp_c: number | null;
         };
         /** @enum {string} */
         MapAreaKind: "organization" | "building" | "floor" | "room";

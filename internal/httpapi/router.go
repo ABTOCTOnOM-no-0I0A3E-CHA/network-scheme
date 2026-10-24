@@ -203,6 +203,7 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
 	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
 	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
+	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/sys", read, s.sysMetrics)
 	backupP := Policy{Perm: rbac.PermDevicesBackup, Scoped: true}
 	s.route(r, http.MethodGet, "/api/devices/{id}/backups", read, s.listBackups)
 	s.route(r, http.MethodPost, "/api/devices/{id}/backups", backupP, s.backupNow)

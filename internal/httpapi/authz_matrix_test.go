@@ -67,6 +67,7 @@ var matrix = map[string]map[string]int{
 	"GET /api/devices/{id}/entities":                          {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/routes":                            {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/metrics/if":                        {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/metrics/sys":                       {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/backups":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/backups/diff":                      {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/backups/{vid}":                     {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
@@ -150,6 +151,7 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/devices/{id}/entities":                          {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/routes":                            {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/metrics/if":                        {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/metrics/sys":                       {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/backups":                           {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/backups/diff":                      {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/backups/{vid}":                     {"viewerA": 404, "operatorA": 404, "adminA": 404},
@@ -422,6 +424,10 @@ func (m *matrixEnv) deviceRequest(key string) (req, bool) {
 		to := time.Now().UTC()
 		q := url.Values{"if_index": {"1"}, "from": {to.Add(-time.Hour).Format(time.RFC3339)}, "to": {to.Format(time.RFC3339)}}
 		return req{method: "GET", path: dev("/api/devices/%d/metrics/if") + "?" + q.Encode()}, true
+	case "GET /api/devices/{id}/metrics/sys":
+		to := time.Now().UTC()
+		q := url.Values{"from": {to.Add(-time.Hour).Format(time.RFC3339)}, "to": {to.Format(time.RFC3339)}}
+		return req{method: "GET", path: dev("/api/devices/%d/metrics/sys") + "?" + q.Encode()}, true
 	case "GET /api/discovery/scans":
 		return req{method: "GET", path: "/api/discovery/scans"}, true
 	case "POST /api/discovery/scans":

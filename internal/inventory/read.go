@@ -21,6 +21,8 @@ type Interface struct {
 	SpeedBps int64     `json:"speed_bps"`
 	OperUp   bool      `json:"oper_up"`
 	SeenAt   time.Time `json:"seen_at"`
+	/* PortKind is rj45, sfp or other (physical kind derived by the driver). */
+	PortKind string `json:"port_kind"`
 }
 
 // ARPEntry is a stored IP-to-MAC row.
@@ -95,7 +97,7 @@ func page[T any](ctx context.Context, s *Store, q string, deviceID int64, p Page
 
 // Interfaces lists a device's interfaces by if_index.
 func (s *Store) Interfaces(ctx context.Context, deviceID int64, p Page) ([]Interface, error) {
-	return page[Interface](ctx, s, `SELECT if_index, name, alias, speed_bps, oper_up, seen_at
+	return page[Interface](ctx, s, `SELECT if_index, name, alias, speed_bps, oper_up, seen_at, port_kind
 		FROM inventory.interface WHERE device_id = $1 ORDER BY if_index`, deviceID, p)
 }
 
