@@ -19,7 +19,7 @@ const topo: Topology = {
 const props = { topology: topo, severity: new Map(), onOpenDevice: vi.fn() };
 
 describe("NetworkMap", () => {
-  /* canvasStub inserts the cytoscape marker <style>, so this only guards the component; the real proof is build.test.ts and the e2e CSP guard. */
+  /* canvasStub inserts the cytoscape marker <meta>, so this only guards the component; the real proof is build.test.ts and the e2e CSP guard. */
   it("never injects a <style> element or markup from device names", async () => {
     const before = document.querySelectorAll("style").length;
     const { container } = render(<NetworkMap {...props} />);
@@ -35,6 +35,11 @@ describe("NetworkMap", () => {
     expect(img?.getAttribute("src")).toBe("/api/map/backgrounds/5");
     const host = screen.getByTestId("map-canvas");
     expect(img!.compareDocumentPosition(host) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("places the background at once, not at the first pan", async () => {
+    const { container } = render(<NetworkMap {...props} backgroundUrl="/api/map/backgrounds/5" />);
+    await waitFor(() => expect(container.querySelector("img")?.style.transform).toMatch(/^translate\(.*\) scale\(/));
   });
 
   it("has toolbar buttons with translated names and shows no editor layer by default", async () => {

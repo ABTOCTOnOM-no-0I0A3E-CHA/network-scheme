@@ -53,7 +53,7 @@ export function canAckProblems(session: Session | null | undefined): boolean {
 
 /** UI hint only: the problem feed (/api/ws) needs devices.read, which every role but the auditor has. */
 export function canReceiveProblems(session: Session | null | undefined): boolean {
-  return !!session?.roles.some((r) => r.role !== "auditor");
+  return canReadDevices(session);
 }
 
 /** UI hint only: map.manage (views, areas, backgrounds, pinned positions) is not group-scoped, so only a global admin binding holds it. */

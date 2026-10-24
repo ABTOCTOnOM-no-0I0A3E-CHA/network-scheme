@@ -41,6 +41,10 @@ const server = setupServer(
     await rec(request);
     return new HttpResponse(null, { status: 204 });
   }),
+  http.delete("*/api/map/backgrounds/:id", async ({ request }) => {
+    await rec(request);
+    return new HttpResponse(null, { status: 204 });
+  }),
   http.delete("*/api/map/views/:id", async ({ request }) => {
     await rec(request);
     return new HttpResponse(null, { status: 204 });
@@ -115,6 +119,15 @@ describe("MapPage", () => {
     expect(bodies.some((b) => b.method === "DELETE")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
     await waitFor(() => expect(bodies).toContainEqual({ method: "DELETE", url: "/api/map/views/1", body: "" }));
+  });
+
+  it("deletes the background of the view for everyone after confirmation", async () => {
+    renderPage(true);
+    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Удалить подложку везде" }));
+    expect(bodies.some((b) => b.method === "DELETE")).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
+    await waitFor(() => expect(bodies).toContainEqual({ method: "DELETE", url: "/api/map/backgrounds/5", body: "" }));
   });
 
   it("edits an area through the form", async () => {

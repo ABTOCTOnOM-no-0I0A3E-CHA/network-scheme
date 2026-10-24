@@ -821,7 +821,10 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        /** Delete a device and its credentials */
+        /**
+         * Delete a device and its credentials
+         * @description The disappearance of each of its links is recorded in the link change history first.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -3007,8 +3010,12 @@ export interface paths {
          *     must be visible to the caller (else 404). Ports are optional (unknown);
          *     the ends are stored in canonical order whatever order is sent. Writes a
          *     link change "appeared" (source manual) in the same transaction, is
-         *     audited, and the builder reloads. 409 link_exists for an identical link,
-         *     409 too_many_links at 64 links between the pair.
+         *     audited, and the builder reloads. 409 link_exists for an identical manual
+         *     link, 409 too_many_links at 64 links between the pair. A detected link with
+         *     exactly the same ends (unknown ports match unknown ports only) is not a
+         *     duplicate: that row becomes the manual link (same id, confidence 1) and the
+         *     id is returned with 201; no change is written since it already appeared, and
+         *     the audit record carries converted_from (its former source).
          */
         post: {
             parameters: {
@@ -3176,7 +3183,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a map view with its areas and node positions
-         * @description Audited.
+         * @description Its background is deleted too when no other view uses it. Audited.
          */
         delete: {
             parameters: {
@@ -3207,7 +3214,9 @@ export interface paths {
         head?: never;
         /**
          * Change a map view
-         * @description Only the given fields change; background_id null removes the background. At least one field is required. Audited.
+         * @description Only the given fields change; background_id null removes the background. At least one field is required.
+         *     A background that no other view uses any more is deleted in the same transaction (the audit record
+         *     carries deleted_background_id). Audited.
          */
         patch: {
             parameters: {
@@ -3564,7 +3573,9 @@ export interface paths {
          * @description Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
          *     carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox`,
          *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
-         *     and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
+         *     and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
+         *     pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
+         *     Retry-After. Use it only as an `<img src>`.
          */
         get: {
             parameters: {
@@ -3599,11 +3610,42 @@ export interface paths {
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a map background
+         * @description Views that use it fall back to no background. Unused backgrounds are also deleted automatically when
+         *     the last view using one drops it or is deleted, so this is for backgrounds that were uploaded but
+         *     never assigned. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -4143,7 +4185,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

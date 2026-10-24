@@ -113,6 +113,10 @@ export const usePatchArea = (viewId: number) =>
 export const useDeleteArea = (viewId: number) =>
   useAdminMutation(async (id: number) => unwrap(await api.DELETE("/api/map/views/{id}/areas/{area_id}", { params: { path: { id: viewId, area_id: id }, ...CSRF } })));
 
+/** Deletes a background; the views that use it are left without one. */
+export const useDeleteBackground = () =>
+  useAdminMutation(async (id: number) => unwrap(await api.DELETE("/api/map/backgrounds/{id}", { params: { path: { id }, ...CSRF } })));
+
 /** Uploads an image; resolves to the new background id. */
 export function useUploadBackground() {
   return useMutation({

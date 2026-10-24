@@ -12,6 +12,7 @@ import {
   useCreateArea,
   useCreateView,
   useDeleteArea,
+  useDeleteBackground,
   useDeleteView,
   usePatchArea,
   usePatchView,
@@ -82,6 +83,7 @@ function ViewsEditor({ view, onChosen }: { view: MapView | undefined; onChosen: 
   const patch = usePatchView();
   const del = useDeleteView();
   const upload = useUploadBackground();
+  const delBackground = useDeleteBackground();
   const [name, setName] = useState("");
   const [kind, setKind] = useState<MapView["kind"]>("logical");
 
@@ -125,6 +127,7 @@ function ViewsEditor({ view, onChosen }: { view: MapView | undefined; onChosen: 
                 {t("map.admin.removeBackground")}
               </Button>
             )}
+            {view.background_id !== null && <ConfirmDelete label={t("map.admin.deleteBackground")} onConfirm={() => void run(() => delBackground.mutateAsync(view.background_id!))} />}
             <ConfirmDelete
               label={t("map.admin.deleteView")}
               onConfirm={() =>

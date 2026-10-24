@@ -4,7 +4,7 @@ import { Maximize, Minus, Plus, Workflow } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { AreaOverlay, type OverlayArea, type Rect, type Viewport } from "./AreaOverlay";
-import { buildElkGraph, devicePositions, layoutMoves, runLayout } from "./layout";
+import { buildElkGraph, layoutMoves, placeDevices, runLayout } from "./layout";
 import { PositionSaver, type PositionItem } from "./positions";
 import { buildModel, deviceEid, isCollapsed, OPEN_ZOOM, type Topology } from "./semanticZoom";
 import { buildStylesheet } from "./style";
@@ -13,6 +13,14 @@ import type { EventSeverity } from "@/features/problems/api";
 
 /* above this many devices the renderer drops edges and uses a texture while panning, and edges are straight */
 const LARGE = 1500;
+
+/** Puts the background image where the canvas is panned and zoomed. */
+function placeBackground(cy: Core, img: HTMLImageElement | null) {
+  if (!img) return;
+  const p = cy.pan();
+  img.style.transformOrigin = "0 0";
+  img.style.transform = `translate(${p.x}px, ${p.y}px) scale(${cy.zoom()})`;
+}
 
 export type AreaEditor = {
   tool: "select" | "draw";
@@ -126,11 +134,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
     let raf = 0;
     const onViewport = () => {
       const z = cy.zoom();
-      const p = cy.pan();
-      if (img.current) {
-        img.current.style.transformOrigin = "0 0";
-        img.current.style.transform = `translate(${p.x}px, ${p.y}px) scale(${z})`;
-      }
+      placeBackground(cy, img.current);
       if (live.current.editor && !raf) {
         raf = requestAnimationFrame(() => {
           raf = 0;
@@ -206,13 +210,18 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
     cyRef.current?.style(buildStylesheet({ dark, large: large.current }));
   }, [dark]);
 
+  /* a background that arrives (or changes) after the canvas was panned must follow the current view at once */
+  useEffect(() => {
+    if (cyRef.current) placeBackground(cyRef.current, img.current);
+  }, [backgroundUrl]);
+
   const model = useMemo(() => buildModel(topology, collapsed, severity, { pos: posOv, pinned: pinOv }), [topology, collapsed, severity, posOv, pinOv]);
 
   const applyLayout = useCallback(
     async (scope: ReadonlySet<string> | undefined, persist: boolean) => {
       const topo = live.current.topology;
       try {
-        const laid = devicePositions(await runLayout(buildElkGraph(topo)));
+        const laid = placeDevices(await runLayout(buildElkGraph(topo)), topo);
         const pinned = new Set(topo.nodes.filter((n) => n.pinned).map((n) => deviceEid(n.device_id)));
         for (const id of pinOvRef.current) pinned.add(deviceEid(id));
         const moves = layoutMoves(laid, pinned, scope);
