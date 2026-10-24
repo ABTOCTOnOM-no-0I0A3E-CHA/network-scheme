@@ -129,7 +129,7 @@ CREATE FUNCTION core.dashboard_check_cap() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('core.dashboard.cap:' || coalesce(NEW.owner_id::text, '')));
-    IF (SELECT count(*) FROM core.dashboard WHERE owner_id IS NOT DISTINCT FROM NEW.owner_id) >= 50 THEN
+    IF (SELECT count(*) FROM core.dashboard WHERE owner_id IS NOT DISTINCT FROM NEW.owner_id AND id <> NEW.id) >= 50 THEN
         RAISE EXCEPTION 'too many dashboards' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
@@ -141,7 +141,7 @@ CREATE FUNCTION core.dashboard_widget_check_cap() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('core.dashboard_widget.cap:' || NEW.dashboard_id::text));
-    IF (SELECT count(*) FROM core.dashboard_widget WHERE dashboard_id = NEW.dashboard_id) >= 50 THEN
+    IF (SELECT count(*) FROM core.dashboard_widget WHERE dashboard_id = NEW.dashboard_id AND id <> NEW.id) >= 50 THEN
         RAISE EXCEPTION 'too many widgets' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
@@ -149,9 +149,9 @@ END $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION core.dashboard_check_cap(), core.dashboard_widget_check_cap() FROM PUBLIC;
 
-CREATE TRIGGER dashboard_check_cap BEFORE INSERT ON core.dashboard
+CREATE TRIGGER dashboard_check_cap BEFORE INSERT OR UPDATE OF owner_id, shared ON core.dashboard
     FOR EACH ROW EXECUTE FUNCTION core.dashboard_check_cap();
-CREATE TRIGGER dashboard_widget_check_cap BEFORE INSERT ON core.dashboard_widget
+CREATE TRIGGER dashboard_widget_check_cap BEFORE INSERT OR UPDATE OF dashboard_id ON core.dashboard_widget
     FOR EACH ROW EXECUTE FUNCTION core.dashboard_widget_check_cap();
 
 REVOKE ALL ON ALL TABLES IN SCHEMA backups FROM PUBLIC;
@@ -161,7 +161,8 @@ REVOKE ALL ON core.dashboard, core.dashboard_widget FROM PUBLIC;
 -- config_version: the api reads everything except the ciphertext columns.
 GRANT SELECT (id, device_id, taken_at, source, sha256, size, masked, drift, taken_by_job)
     ON backups.config_version TO nms_api;
-GRANT SELECT ON backups.config_version TO nms_poller;
+GRANT SELECT (id, device_id, taken_at, source, sha256, size, drift, taken_by_job)
+    ON backups.config_version TO nms_poller;
 GRANT INSERT (device_id, source, sha256, size, masked, full_ct, full_dek_ct, drift, taken_by_job)
     ON backups.config_version TO nms_poller;
 GRANT SELECT, INSERT, UPDATE ON backups.backup_state TO nms_poller;

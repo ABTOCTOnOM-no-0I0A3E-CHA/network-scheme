@@ -51,6 +51,18 @@ func TestConfigVersionGrantsAndAppendOnly(t *testing.T) {
 	} {
 		requireDenied(t, "nms_api", sql)
 	}
+	/* The poller inserts ciphertext but cannot read it back. */
+	if _, err := poller.Exec(ctx, `SELECT id, device_id, taken_at, source, sha256, size, drift, taken_by_job FROM backups.config_version`); err != nil {
+		t.Errorf("poller select allowed columns: %v", err)
+	}
+	for _, sql := range []string{
+		`SELECT full_ct FROM backups.config_version`,
+		`SELECT full_dek_ct FROM backups.config_version`,
+		`SELECT masked FROM backups.config_version`,
+		`SELECT * FROM backups.config_version`,
+	} {
+		requireDenied(t, "nms_poller", sql)
+	}
 	/* The poller can neither backdate nor rewrite a version. */
 	_, err := poller.Exec(ctx, `INSERT INTO backups.config_version (device_id, taken_at, source, sha256, size, masked, full_ct, full_dek_ct)
 		VALUES ($1, '2000-01-01', 'manual', $2, 0, '', '\x00', '\x00')`, dev, sum)
@@ -228,6 +240,21 @@ func TestDashboardsRulesAndGrants(t *testing.T) {
 	}
 	_, err = api.Exec(ctx, `INSERT INTO core.dashboard (owner_id, name) VALUES ($1, 'over')`, user)
 	requireCode(t, err, "23514", "51st dashboard")
+	/* Caps cannot be bypassed by moving rows. */
+	var other, extra int64
+	if err := api.QueryRow(ctx, `INSERT INTO core.dashboard (name, shared) VALUES ('spare', true) RETURNING id`).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.QueryRow(ctx, `INSERT INTO core.dashboard_widget (dashboard_id, type, x, y, w, h) VALUES ($1, 't', 0, 0, 1, 1) RETURNING id`, other).Scan(&extra); err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.Exec(ctx, `UPDATE core.dashboard_widget SET dashboard_id = $1 WHERE id = $2`, personal, extra)
+	requireCode(t, err, "23514", "widget move into full dashboard")
+	_, err = api.Exec(ctx, `UPDATE core.dashboard SET owner_id = $1, shared = false WHERE id = $2`, user, other)
+	requireCode(t, err, "23514", "dashboard move into full owner")
+	if _, err := api.Exec(ctx, `UPDATE core.dashboard SET name = 'renamed' WHERE owner_id = $1`, user); err != nil {
+		t.Errorf("rename at cap: %v", err)
+	}
 	/* Deleting a dashboard removes its widgets. */
 	if _, err := api.Exec(ctx, `DELETE FROM core.dashboard WHERE id = $1`, personal); err != nil {
 		t.Fatal(err)
