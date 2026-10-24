@@ -9,6 +9,7 @@ import { safeText } from "@/lib/text";
 import type { Rect } from "./AreaOverlay";
 import type { Topology } from "./semanticZoom";
 import {
+  useBackgrounds,
   useCreateArea,
   useCreateView,
   useDeleteArea,
@@ -149,6 +150,51 @@ function ViewsEditor({ view, onChosen }: { view: MapView | undefined; onChosen: 
   );
 }
 
+/** Stored backgrounds: metadata and use count; only the ones no view uses can be deleted here. */
+function BackgroundsEditor() {
+  const { t, i18n } = useTranslation();
+  const { error, run } = useGuarded();
+  const list = useBackgrounds();
+  const del = useDeleteBackground();
+  const items = list.data ?? [];
+  return (
+    <Section title={t("map.admin.backgrounds")}>
+      {list.isError && (
+        <p role="alert" className="text-sm text-destructive">
+          {errText(t, list.error)}
+        </p>
+      )}
+      {list.isSuccess && items.length === 0 && <p className="text-xs text-muted-foreground">{t("map.admin.backgroundsEmpty")}</p>}
+      <ul className="grid max-h-60 gap-2 overflow-y-auto text-sm" aria-label={t("map.admin.backgrounds")}>
+        {items.map((b) => (
+          <li key={b.id} className="grid gap-1 rounded-md border p-2">
+            <span>
+              {t("map.admin.backgroundInfo", {
+                id: b.id,
+                mime: b.mime,
+                width: b.width,
+                height: b.height,
+                kb: Math.max(1, Math.round(b.size / 1024)).toLocaleString(i18n.language),
+              })}
+            </span>
+            <span className="text-xs text-muted-foreground">{new Date(b.uploaded_at).toLocaleString(i18n.language)}</span>
+            {b.unused ? (
+              <ConfirmDelete label={t("map.admin.deleteUnused", { id: b.id })} onConfirm={() => void run(() => del.mutateAsync(b.id))} />
+            ) : (
+              <span className="text-xs text-muted-foreground">{t("map.admin.backgroundViews", { n: b.views })}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+    </Section>
+  );
+}
+
 const num = (s: string) => (s.trim() === "" ? NaN : Number(s));
 
 function AreaForm({ viewId, area, draft, areas, onDone }: { viewId: number; area?: Area; draft?: Rect; areas: Area[]; onDone: () => void }) {
@@ -251,13 +297,14 @@ type Props = {
   onViewChosen: (id: number | undefined) => void;
 };
 
-/** map.manage tools: views, background upload and area rectangles. */
+/** map.manage tools: views, background upload, the list of backgrounds and area rectangles. */
 export function MapAdmin({ view, areas, tool, setTool, selectedId, setSelectedId, draft, setDraft, onViewChosen }: Props) {
   const { t } = useTranslation();
   const selected = areas.find((a) => a.id === selectedId);
   return (
     <aside className="grid content-start gap-4 overflow-y-auto rounded-md border p-3" aria-label={t("map.admin.title")}>
       <ViewsEditor view={view} onChosen={onViewChosen} />
+      <BackgroundsEditor />
       {view && (
         <Section title={t("map.admin.areas")}>
           <div className="flex gap-2">

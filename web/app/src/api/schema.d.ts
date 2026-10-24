@@ -3960,7 +3960,33 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List map backgrounds
+         * @description Metadata of the stored backgrounds (at most 200, by id) with the number of views using each; `unused`
+         *     marks the ones no view references, which the admin may delete. The image content is never part of the list.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Backgrounds */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MapBackground"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
         put?: never;
         /**
          * Upload a map background
@@ -4037,7 +4063,8 @@ export interface paths {
          *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
          *     and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
          *     pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
-         *     Retry-After. Use it only as an `<img src>`.
+         *     Retry-After. A failure before the first byte answers 404 (the background was deleted meanwhile) or 500;
+         *     one later ends the body short of Content-Length. Use it only as an `<img src>`.
          */
         get: {
             parameters: {
@@ -4579,6 +4606,24 @@ export interface components {
             kind: "logical" | "plan";
             /** Format: int64 */
             background_id: number | null;
+        };
+        MapBackground: {
+            /** Format: int64 */
+            id: number;
+            /** @enum {string} */
+            mime: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+            width: number;
+            height: number;
+            /** @description Stored bytes (the sanitized document for SVG) */
+            size: number;
+            /** @description Hex digest of the stored bytes (the ETag) */
+            sha256: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            /** @description Views that use the background */
+            views: number;
+            /** @description No view uses the background (views = 0) */
+            unused: boolean;
         };
         MapArea: {
             /** Format: int64 */

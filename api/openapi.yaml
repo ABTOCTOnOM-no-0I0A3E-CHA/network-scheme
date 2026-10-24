@@ -2095,6 +2095,22 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /api/map/backgrounds:
+    get:
+      summary: List map backgrounds
+      description: |
+        Metadata of the stored backgrounds (at most 200, by id) with the number of views using each; `unused`
+        marks the ones no view references, which the admin may delete. The image content is never part of the list.
+      x-permission: map.manage
+      responses:
+        "200":
+          description: Backgrounds
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MapBackground" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
     post:
       summary: Upload a map background
       description: |
@@ -2145,7 +2161,8 @@ paths:
         `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
         and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
         pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
-        Retry-After. Use it only as an `<img src>`.
+        Retry-After. A failure before the first byte answers 404 (the background was deleted meanwhile) or 500;
+        one later ends the body short of Content-Length. Use it only as an `<img src>`.
       x-permission: devices.read
       x-scoped: true
       parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -2671,6 +2688,19 @@ components:
         name: { type: string }
         kind: { type: string, enum: [logical, plan] }
         background_id: { type: [integer, "null"], format: int64 }
+    MapBackground:
+      type: object
+      required: [id, mime, width, height, size, sha256, uploaded_at, views, unused]
+      properties:
+        id: { type: integer, format: int64 }
+        mime: { type: string, enum: [image/png, image/jpeg, image/webp, image/svg+xml] }
+        width: { type: integer, minimum: 1, maximum: 16384 }
+        height: { type: integer, minimum: 1, maximum: 16384 }
+        size: { type: integer, description: "Stored bytes (the sanitized document for SVG)" }
+        sha256: { type: string, description: "Hex digest of the stored bytes (the ETag)" }
+        uploaded_at: { type: string, format: date-time }
+        views: { type: integer, minimum: 0, description: "Views that use the background" }
+        unused: { type: boolean, description: "No view uses the background (views = 0)" }
     MapArea:
       type: object
       required: [id, parent_id, kind, name, x, y, w, h]

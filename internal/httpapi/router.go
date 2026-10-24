@@ -271,6 +271,7 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodDelete, "/api/map/views/{id}/areas/{area_id}", mapManage, s.deleteArea)
 	s.route(r, http.MethodPut, "/api/map/views/{id}/positions", mapManage, s.putPositions)
 	/* Backgrounds are admin objects: any devices.read holder may fetch one (they are shown under maps). */
+	s.route(r, http.MethodGet, uploadPath, mapManage, s.listBackgrounds)
 	s.route(r, http.MethodPost, uploadPath, mapManage, s.uploadBackground)
 	s.route(r, http.MethodGet, "/api/map/backgrounds/{id}", read, s.getBackground)
 	s.route(r, http.MethodDelete, "/api/map/backgrounds/{id}", mapManage, s.deleteBackground)

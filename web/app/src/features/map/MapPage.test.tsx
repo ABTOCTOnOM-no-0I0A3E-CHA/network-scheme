@@ -29,6 +29,12 @@ const server = setupServer(
     return HttpResponse.json({ nodes: [node(1, { area_id: 1, x: 0, y: 0 })], links: [], areas: [area(1, { name: "Floor <i>1</i>", device_count: 1 })] });
   }),
   http.get("*/api/problems", () => HttpResponse.json({ items: [], next_cursor: null })),
+  http.get("*/api/map/backgrounds", () =>
+    HttpResponse.json([
+      { id: 5, mime: "image/svg+xml", width: 800, height: 600, size: 4096, sha256: "aa", uploaded_at: "2026-10-01T10:00:00Z", views: 1, unused: false },
+      { id: 8, mime: "image/png", width: 10, height: 10, size: 100, sha256: "bb", uploaded_at: "2026-10-02T10:00:00Z", views: 0, unused: true },
+    ]),
+  ),
   http.post("*/api/map/views", async ({ request }) => {
     await rec(request);
     return HttpResponse.json({ id: 9 }, { status: 201 });
@@ -128,6 +134,19 @@ describe("MapPage", () => {
     expect(bodies.some((b) => b.method === "DELETE")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
     await waitFor(() => expect(bodies).toContainEqual({ method: "DELETE", url: "/api/map/backgrounds/5", body: "" }));
+  });
+
+  it("lists backgrounds and deletes only an unused one, after confirmation", async () => {
+    renderPage(true);
+    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
+    const list = await screen.findByRole("list", { name: "Подложки" });
+    expect(await within(list).findByText("№5 · image/svg+xml · 800×600 · 4 КиБ")).toBeInTheDocument();
+    expect(within(list).getByText("Используется в видах: 1")).toBeInTheDocument();
+    expect(within(list).queryByRole("button", { name: "Удалить неиспользуемую подложку №5" })).toBeNull();
+    await userEvent.click(within(list).getByRole("button", { name: "Удалить неиспользуемую подложку №8" }));
+    expect(bodies.some((b) => b.method === "DELETE")).toBe(false);
+    await userEvent.click(within(list).getByRole("button", { name: "Подтвердить" }));
+    await waitFor(() => expect(bodies).toContainEqual({ method: "DELETE", url: "/api/map/backgrounds/8", body: "" }));
   });
 
   it("edits an area through the form", async () => {
