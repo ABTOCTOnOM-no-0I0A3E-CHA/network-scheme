@@ -96,6 +96,8 @@ type server struct {
 	loginWait time.Duration
 	uploadSem chan struct{} /* one background upload is processed at a time */
 	serveSem  chan struct{} /* at most serveSlots background downloads stream at a time */
+	diffSem   chan struct{} /* at most diffSlots backup diffs are computed at a time */
+	backupRL  userLimiter   /* manual backups per user */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -108,7 +110,7 @@ type server struct {
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
-		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), loginWait: loginQueueWait,
+		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), diffSem: make(chan struct{}, diffSlots), loginWait: loginQueueWait,
 		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {
@@ -199,6 +201,13 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
 	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
 	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
+	backupP := Policy{Perm: rbac.PermDevicesBackup, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups", read, s.listBackups)
+	s.route(r, http.MethodPost, "/api/devices/{id}/backups", backupP, s.backupNow)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/diff", read, s.diffBackups)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}", read, s.getBackup)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}/download", read, s.downloadBackup)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backup-state", read, s.backupState)
 	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
 	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
 	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)

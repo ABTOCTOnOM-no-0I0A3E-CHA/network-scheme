@@ -24,6 +24,7 @@ so a job exists exactly when the change that asked for it commits.
 */
 type Enqueuer interface {
 	EnqueuePollNow(ctx context.Context, tx pgx.Tx, deviceID int64) error
+	EnqueueBackupNow(ctx context.Context, tx pgx.Tx, deviceID int64, source string) error
 	EnqueueDiscovery(ctx context.Context, tx pgx.Tx, scanID int64) error
 }
 

@@ -1063,6 +1063,301 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Configuration versions of the device, newest first
+         * @description Metadata only (the text is fetched per version). sha256 is a 12-character
+         *     prefix of the hash of the normalized configuration. drift marks a change
+         *     made outside a change session of the panel. The cursor is opaque.
+         *     Versions of a deleted device are not listed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of versions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["BackupVersion"][];
+                            /** @description null on the last page */
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Queue a manual configuration backup
+         * @description Audited and limited to 10 a minute per user. The poller keeps its own gap
+         *     of 5 minutes per device: when the last successful backup is younger, the
+         *     job completes without fetching and the answer carries
+         *     note "recent backup exists".
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            note?: "recent backup exists";
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unified diff of the masked texts of two versions of the device
+         * @description a is the earlier text, b the later one; both must belong to the device
+         *     (else 404). Computed on the server. Masked texts over 2 MiB, a diff over
+         *     2 MiB or one with too many changed lines answer 413 too_large. The text
+         *     comes from devices: render it as text only.
+         */
+        get: {
+            parameters: {
+                query: {
+                    a: number;
+                    b: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The diff (empty when the masked texts are equal) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            a: components["schemas"]["BackupDiffSide"];
+                            b: components["schemas"]["BackupDiffSide"];
+                            diff: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                413: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/{vid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The masked text of one configuration version
+         * @description Secrets are masked by the poller before storage; the full text is never served by the api. The text comes from devices - render it as text only.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    vid: components["parameters"]["VersionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The version with its masked text */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupVersion"] & {
+                            text: string;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/{vid}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The masked text of one version as a plain-text attachment
+         * @description File name is "<device name, unsafe characters replaced by _>-<taken_at UTC>.txt".
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    vid: components["parameters"]["VersionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The masked text */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backup-state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * State of the last configuration backup of the device
+         * @description last_error is one of a fixed set of texts (never device output). needs_write:
+         *     the model needs a write account to read its configuration, so it is not
+         *     backed up before phase 4. latest_version carries the drift flag of the
+         *     newest version; all fields are empty for a device never backed up.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Backup state */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: date-time */
+                            last_ok_at: string | null;
+                            last_error: string | null;
+                            needs_write: boolean;
+                            /** @description 12-character prefix */
+                            last_sha256: string | null;
+                            latest_version: components["schemas"]["BackupVersion"] | null;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices/{id}/interfaces": {
         parameters: {
             query?: never;
@@ -3655,6 +3950,25 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        BackupVersion: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            taken_at: string;
+            /** @enum {string} */
+            source: "schedule" | "event" | "manual" | "pre_session";
+            /** @description Bytes of the full configuration */
+            size: number;
+            /** @description 12-character prefix of the hash of the normalized configuration */
+            sha256: string;
+            drift: boolean;
+        };
+        BackupDiffSide: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            taken_at: string;
+        };
         Problem: components["schemas"]["ProblemSummary"] & {
             /**
              * Format: int64
@@ -4185,7 +4499,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -4216,6 +4530,7 @@ export interface components {
     };
     parameters: {
         Id: number;
+        VersionId: number;
         ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
         AreaId: number;
         TriggerId: number;

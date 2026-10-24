@@ -13,6 +13,7 @@ const KNOWN = new Set([
   "not_found",
   "method_not_allowed",
   "payload_too_large",
+  "too_large",
   "unsupported_media_type",
   "user_exists",
   "group_exists",

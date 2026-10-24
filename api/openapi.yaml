@@ -534,6 +534,164 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups:
+    get:
+      summary: Configuration versions of the device, newest first
+      description: |
+        Metadata only (the text is fetched per version). sha256 is a 12-character
+        prefix of the hash of the normalized configuration. drift marks a change
+        made outside a change session of the panel. The cursor is opaque.
+        Versions of a deleted device are not listed.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 4096 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: A page of versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/BackupVersion" }
+                  next_cursor: { type: [string, "null"], description: null on the last page }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Queue a manual configuration backup
+      description: |
+        Audited and limited to 10 a minute per user. The poller keeps its own gap
+        of 5 minutes per device: when the last successful backup is younger, the
+        job completes without fetching and the answer carries
+        note "recent backup exists".
+      x-permission: devices.backup
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note: { type: string, enum: [recent backup exists] }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/diff:
+    get:
+      summary: Unified diff of the masked texts of two versions of the device
+      description: |
+        a is the earlier text, b the later one; both must belong to the device
+        (else 404). Computed on the server. Masked texts over 2 MiB, a diff over
+        2 MiB or one with too many changed lines answer 413 too_large. The text
+        comes from devices: render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: a, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: b, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200":
+          description: The diff (empty when the masked texts are equal)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [a, b, diff]
+                properties:
+                  a: { $ref: "#/components/schemas/BackupDiffSide" }
+                  b: { $ref: "#/components/schemas/BackupDiffSide" }
+                  diff: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/{vid}:
+    get:
+      summary: The masked text of one configuration version
+      description: Secrets are masked by the poller before storage; the full text is never served by the api. The text comes from devices - render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/VersionId" }]
+      responses:
+        "200":
+          description: The version with its masked text
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BackupVersion"
+                  - type: object
+                    required: [text]
+                    properties:
+                      text: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/{vid}/download:
+    get:
+      summary: The masked text of one version as a plain-text attachment
+      description: File name is "<device name, unsafe characters replaced by _>-<taken_at UTC>.txt".
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/VersionId" }]
+      responses:
+        "200":
+          description: The masked text
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backup-state:
+    get:
+      summary: State of the last configuration backup of the device
+      description: |
+        last_error is one of a fixed set of texts (never device output). needs_write:
+        the model needs a write account to read its configuration, so it is not
+        backed up before phase 4. latest_version carries the drift flag of the
+        newest version; all fields are empty for a device never backed up.
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Backup state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [last_ok_at, last_error, needs_write, last_sha256, latest_version]
+                properties:
+                  last_ok_at: { type: [string, "null"], format: date-time }
+                  last_error: { type: [string, "null"] }
+                  needs_write: { type: boolean }
+                  last_sha256: { type: [string, "null"], description: 12-character prefix }
+                  latest_version:
+                    oneOf:
+                      - $ref: "#/components/schemas/BackupVersion"
+                      - type: "null"
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/devices/{id}/interfaces:
     get:
       summary: "Interfaces by if_index, as last seen by the poller"
@@ -1930,6 +2088,11 @@ components:
       in: path
       required: true
       schema: { type: integer, format: int64, minimum: 1 }
+    VersionId:
+      name: vid
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
     ProfileKind:
       name: kind
       in: path
@@ -1990,6 +2153,22 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    BackupVersion:
+      type: object
+      required: [id, taken_at, source, size, sha256, drift]
+      properties:
+        id: { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
+        source: { type: string, enum: [schedule, event, manual, pre_session] }
+        size: { type: integer, description: Bytes of the full configuration }
+        sha256: { type: string, description: 12-character prefix of the hash of the normalized configuration }
+        drift: { type: boolean }
+    BackupDiffSide:
+      type: object
+      required: [id, taken_at]
+      properties:
+        id: { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
     Problem:
       allOf:
         - $ref: "#/components/schemas/ProblemSummary"
@@ -2488,6 +2667,7 @@ components:
                 - not_found
                 - method_not_allowed
                 - payload_too_large
+                - too_large
                 - unsupported_media_type
                 - user_exists
                 - group_exists
