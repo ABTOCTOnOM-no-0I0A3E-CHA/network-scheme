@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/beekamai/network-scheme/internal/creds"
@@ -535,6 +536,10 @@ func TestLoadDevicesClampsIntervals(t *testing.T) {
 	}
 }
 
+func pollNowJob(id int64, metadata string) *river.Job[jobs.PollNowArgs] {
+	return &river.Job[jobs.PollNowArgs]{JobRow: &rivertype.JobRow{Metadata: []byte(metadata)}, Args: jobs.PollNowArgs{DeviceID: id}}
+}
+
 func TestUnknownPollNowJobsReloadOncePerGap(t *testing.T) {
 	h := newHarness(t, "")
 	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
@@ -545,7 +550,7 @@ func TestUnknownPollNowJobsReloadOncePerGap(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
-			err := w.Work(context.Background(), &river.Job[jobs.PollNowArgs]{Args: jobs.PollNowArgs{DeviceID: 1<<40 + int64(i)}})
+			err := w.Work(context.Background(), pollNowJob(1<<40+int64(i), "{}"))
 			if err == nil || !errors.Is(err, errNotMine) {
 				t.Errorf("job %d: err = %v, want a cancel for an unknown device", i, err)
 			}
@@ -558,9 +563,58 @@ func TestUnknownPollNowJobsReloadOncePerGap(t *testing.T) {
 	mu.Lock()
 	clock = clock.Add(jobReloadGap + time.Second)
 	mu.Unlock()
-	_ = w.Work(context.Background(), &river.Job[jobs.PollNowArgs]{Args: jobs.PollNowArgs{DeviceID: 1 << 41}})
+	_ = w.Work(context.Background(), pollNowJob(1<<41, "{}"))
 	if n := p.jobReloads.Load(); n != 2 {
 		t.Fatalf("%d rereads after the gap, want 2", n)
+	}
+}
+
+/* A device created after a reread inside the gap: the job is snoozed (no slot held), then polls it; a bogus id is snoozed, then cancelled. */
+func TestPollNowSnoozesInsteadOfWaiting(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	var mu sync.Mutex
+	clock := time.Now()
+	p.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	tick := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	w := &pollNowWorker{p: p}
+	ctx := context.Background()
+	_ = w.Work(ctx, pollNowJob(1<<40, "{}")) /* first reread */
+	tick(time.Second)
+	id := h.device(netip.MustParseAddrPort("198.51.100.77:161"))
+
+	var snooze *rivertype.JobSnoozeError
+	start := time.Now()
+	if err := w.Work(ctx, pollNowJob(id, "{}")); !errors.As(err, &snooze) {
+		t.Fatalf("first run: err = %v, want a snooze", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("the job waited in the worker")
+	}
+	if p.sched.known(id) {
+		t.Fatal("device known before the reread")
+	}
+	tick(jobReloadGap)
+	if err := w.Work(ctx, pollNowJob(id, `{"snoozes":1}`)); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !p.sched.known(id) {
+		t.Fatal("device not loaded by the retry")
+	}
+	if n := p.jobReloads.Load(); n != 2 {
+		t.Fatalf("%d rereads, want 2", n)
+	}
+
+	/* bogus id: snoozed inside the gap, cancelled on the retry without another reread */
+	tick(time.Second)
+	if err := w.Work(ctx, pollNowJob(1<<42, "{}")); !errors.As(err, &snooze) {
+		t.Fatalf("bogus first run: err = %v, want a snooze", err)
+	}
+	if err := w.Work(ctx, pollNowJob(1<<42, `{"snoozes":1}`)); !errors.Is(err, errNotMine) {
+		t.Fatalf("bogus retry: err = %v, want a cancel", err)
+	}
+	if n, u := p.jobReloads.Load(), p.unknownJobs.Load(); n != 2 || u != 2 {
+		t.Fatalf("rereads %d (want 2), cancelled unknown %d (want 2: the priming job and this one)", n, u)
 	}
 }
 

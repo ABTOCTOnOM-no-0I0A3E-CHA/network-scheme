@@ -86,6 +86,7 @@ type Poller struct {
 	jobReload     sync.Mutex   /* single-flight reloadForJob */
 	lastJobReload time.Time    /* guarded by jobReload */
 	jobReloads    atomic.Int64 /* rereads done for jobs; tests read it */
+	unknownJobs   atomic.Int64 /* poll_now jobs cancelled for a device not assigned here */
 }
 
 // New returns a poller for a validated cfg.
