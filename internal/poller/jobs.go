@@ -47,13 +47,27 @@ func (p *Poller) newRiver(life context.Context) (*river.Client[pgx.Tx], error) {
 /*
 reloadForJob rereads the device list for a job naming an unknown device. The
 api can enqueue such jobs at will, so rereads are single-flight and at most
-one runs per jobReloadGap: a job arriving sooner relies on the last one.
+one runs per jobReloadGap. A job that arrived before the last reread relies on
+it; one that arrived after it waits out the gap and rereads, so a device
+created right after a reread is not refused for its poll_now.
 */
 func (p *Poller) reloadForJob(ctx context.Context) error {
+	arrived := p.now()
 	p.jobReload.Lock()
 	defer p.jobReload.Unlock()
-	if !p.lastJobReload.IsZero() && p.now().Sub(p.lastJobReload) < jobReloadGap {
-		return nil
+	if !p.lastJobReload.IsZero() {
+		if !p.lastJobReload.Before(arrived) {
+			return nil
+		}
+		if wait := jobReloadGap - p.now().Sub(p.lastJobReload); wait > 0 {
+			t := time.NewTimer(wait)
+			defer t.Stop()
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 	}
 	if err := p.reload(ctx); err != nil {
 		return err
