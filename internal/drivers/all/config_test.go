@@ -197,7 +197,7 @@ func TestShowCommandsAllowlistedAndNoConfigDump(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s %s: %v", name, s.Key, err)
 			}
-			if strings.Contains(c.Name, "config") {
+			if c.Name == runCfg || c.LongOutput || strings.Contains(c.Name, "config") {
 				t.Errorf("%s: show command %q exposes configuration", name, c.Name)
 			}
 			ok := false
@@ -214,11 +214,38 @@ func TestShowCommandsAllowlistedAndNoConfigDump(t *testing.T) {
 		if _, err := d.ShowCommand("interface_status", []string{"gi1; reload"}); !errors.Is(err, drivers.ErrUnknownShow) {
 			t.Errorf("%s: injection accepted: %v", name, err)
 		}
+		for _, k := range []string{runCfg, "show startup-config", "show_running-config", ""} {
+			if _, err := d.ShowCommand(k, nil); !errors.Is(err, drivers.ErrUnknownShow) {
+				t.Errorf("%s: key %q resolved: %v", name, k, err)
+			}
+		}
 		if d.ConfigNeedsWrite() {
 			t.Errorf("%s: ConfigNeedsWrite", name)
 		}
 		if v, ok := d.(interface{ Verified() bool }); !ok || v.Verified() {
 			t.Errorf("%s must be unverified", name)
+		}
+	}
+}
+
+func TestESRLongInterfaceName(t *testing.T) {
+	esr, mes := byName(t, "eltex-esr"), byName(t, "eltex-mes")
+	if c, err := esr.ShowCommand("interface_status", []string{"gigabitethernet 1/0/1"}); err != nil || len(c.Args) != 1 {
+		t.Fatalf("esr: %v %v", c, err)
+	}
+	if _, err := mes.ShowCommand("interface_status", []string{"gigabitethernet 1/0/1"}); !errors.Is(err, drivers.ErrUnknownShow) {
+		t.Fatalf("mes: %v", err)
+	}
+}
+
+/* A config line equal to the prompt text aborts instead of truncating; the long read waits for the exact prompt. */
+func TestFetchConfigPromptLookalikeLine(t *testing.T) {
+	env := testdb.New(t)
+	for _, name := range []string{"eltex-mes", "eltex-esr"} {
+		d := byName(t, name)
+		r, _ := dial(t, env, d, map[string]string{runCfg: "hostname sw1\nsw1#\ninterface gi1\n exit"})
+		if got, err := d.FetchConfig(context.Background(), r); !errors.Is(err, drivers.ErrConfigGarbage) || got != "" {
+			t.Errorf("%s: %q %v", name, got, err)
 		}
 	}
 }

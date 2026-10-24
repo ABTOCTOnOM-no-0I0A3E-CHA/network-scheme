@@ -1,15 +1,19 @@
 /*
 Package mask removes secrets from device configuration text. It is shared by
-the read drivers: dialect-independent keyword rules plus a heuristic for
-unknown lines. A masked value becomes "***", the structure of the line is
-kept, and when in doubt the value is masked (over-masking is the safe side).
-Secrets covers Eltex MES (RADLAN) and ESR syntax; both use the same rules.
+the read drivers. Strategy: after a secret keyword every remaining token of
+the line is masked, except a few known qualifiers that precede the value
+("encrypted", "md5", ...) and a small set of structural words that follow it
+("privilege 15", "ro", "auth-port 1812"). A masked value becomes "***" and the
+structure of the line is kept. When in doubt the token is masked: over-masking
+is the safe side. Secrets covers Eltex MES (RADLAN) and ESR syntax.
 */
 package mask
 
 import (
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 /* Mark replaces every masked value. */
@@ -18,34 +22,31 @@ const Mark = "***"
 const maxPasses = 8
 
 var (
-	tokenRe  = regexp.MustCompile(`"[^"]*"|\S+`)
-	hashRe   = regexp.MustCompile(`^\$[0-9][a-z0-9]*\$`)
-	b64Re    = regexp.MustCompile(`^[A-Za-z0-9+/=_.$:-]+$`)
-	hexRe    = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
-	certRe   = regexp.MustCompile(`(?i)^\s*crypto\s+(certificate|key)\s.*\bimport\b`)
-	hintSubs = []string{"password", "secret", "key", "community", "hash", "md5", "sha", "psk", "token"}
+	hashRe = regexp.MustCompile(`^\$[0-9][a-z0-9]*\$`)
+	hexRe  = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
+	certRe = regexp.MustCompile(`(?i)^\s*crypto\s+(certificate|key)\s.*\bimport\b`)
 )
 
-/* keywords whose next value is a secret; suffix forms ("-key", ...) are matched in isKeyword. */
+/* keywordSubstrings: a token containing one of them is a secret keyword (also password-hash, wpa-psk, community-group, ...). */
+var keywordSubstrings = []string{"password", "passwd", "secret", "passphrase", "community", "psk", "token", "cipher", "hash", "key"}
+
 var (
-	keywords = map[string]bool{
-		"password": true, "passwd": true, "secret": true, "key": true, "community": true,
-		"passphrase": true, "psk": true, "key-string": true, "token": true,
-	}
-	keywordSuffixes = []string{"-password", "-passwd", "-secret", "-key", "-community", "-passphrase", "-psk", "-token"}
 	/* keyIDKeywords may be followed by a numeric key id before the secret. */
-	keyIDKeywords = map[string]bool{"authentication-key": true, "message-digest-key": true, "trusted-key": true}
-	/* qualifiers sit between a keyword and its value ("password encrypted <hash>"). */
+	keyIDKeywords = map[string]bool{"authentication-key": true, "message-digest-key": true, "trusted-key": true, "key-id": true}
+	/* contextKeywords are secret keywords only on lines of the listed protocols/commands. */
+	authContexts = map[string]bool{"vrrp": true, "ospf": true, "ospfv3": true, "isis": true, "bgp": true, "rip": true, "ripng": true, "hsrp": true, "glbp": true, "eigrp": true, "ntp": true, "snmp-server": true}
+	snmpKeywords = map[string]bool{"auth": true, "priv": true, "privacy": true, "encryption": true}
+	/* qualifiers sit between a keyword and its value ("password encrypted <hash>") and are kept. */
 	qualifiers = map[string]bool{
-		"encrypted": true, "unencrypted": true, "plaintext": true, "ascii-text": true, "hexadecimal": true,
+		"encrypted": true, "unencrypted": true, "plaintext": true, "ascii": true, "ascii-text": true, "hexadecimal": true,
 		"hex": true, "text": true, "md5": true, "sha": true, "sha1": true, "sha256": true, "sha384": true,
-		"sha512": true, "des": true, "aes": true, "aes128": true, "aes192": true, "aes256": true, "3des": true,
-		"clear": true, "cleartext": true,
+		"sha512": true, "hmac-sha-256": true, "des": true, "aes": true, "aes128": true, "aes192": true, "aes256": true,
+		"3des": true, "clear": true, "cleartext": true, "simple": true, "message-digest": true, "null": true, "algorithm": true,
 	}
-	/* stops are words that follow a value and are never the value themselves. */
-	stops = map[string]bool{
-		"privilege": true, "level": true, "role": true, "ro": true, "rw": true, "view": true,
-		"address": true, "vrf": true, "group": true,
+	/* structural words that may follow a value and are kept: 0 no argument, 1 any argument, 2 numeric argument. */
+	structural = map[string]int{
+		"ro": 0, "rw": 0, "privilege": 2, "role": 1, "view": 1, "group": 1, "vrf": 1, "filter": 1, "access-list": 1,
+		"auth-port": 2, "acct-port": 2, "port": 2, "udp-port": 2, "timeout": 2, "retries": 2, "retransmit": 2, "priority": 2, "usage": 1,
 	}
 	hexLens = map[int]bool{32: true, 40: true, 56: true, 64: true, 96: true, 128: true}
 )
@@ -112,56 +113,167 @@ func pass(text string) string {
 
 type tok struct {
 	start, end int
-	text       string /* without quotes, lower case */
 	raw        string
+	text       string /* unquoted, lower case */
+	quoted     bool
 	masked     bool
 }
 
+/* tokenize splits on Unicode space; a double-quoted token may contain spaces and backslash escapes. */
+func tokenize(line string) []tok {
+	var ts []tok
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if unicode.IsSpace(r) {
+			i += size
+			continue
+		}
+		start, quoted := i, r == '"'
+		if quoted {
+			i += size
+			for i < len(line) {
+				c := line[i]
+				if c == '\\' && i+1 < len(line) {
+					i += 2
+					continue
+				}
+				i++
+				if c == '"' {
+					break
+				}
+			}
+		} else {
+			for i < len(line) {
+				r, size = utf8.DecodeRuneInString(line[i:])
+				if unicode.IsSpace(r) {
+					break
+				}
+				i += size
+			}
+		}
+		raw := line[start:i]
+		ts = append(ts, tok{start: start, end: i, raw: raw, quoted: quoted, text: strings.ToLower(strings.Trim(raw, `"`))})
+	}
+	return ts
+}
+
+func hasKeywordSub(s string) bool {
+	for _, k := range keywordSubstrings {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+/* plainWord: only lower-case letters and hyphens, so a mixed-case or digit-bearing value is never taken for a keyword. */
+func plainWord(s string) bool {
+	for i := range len(s) {
+		if c := s[i]; c != '-' && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func maskLine(line string) string {
-	spans := tokenRe.FindAllStringIndex(line, -1)
-	if len(spans) == 0 {
+	ts := tokenize(line)
+	if len(ts) == 0 {
 		return line
 	}
-	ts := make([]tok, len(spans))
-	for i, s := range spans {
-		raw := line[s[0]:s[1]]
-		ts[i] = tok{start: s[0], end: s[1], raw: raw, text: strings.ToLower(strings.Trim(raw, `"`))}
-	}
 	n := len(ts)
-	snmp := ts[0].text == "snmp-server"
-	if snmp && n > 3 && ts[1].text == "host" {
-		j := 3
-		for j < n && (ts[j].text == "traps" || ts[j].text == "informs") {
+	first := ts[0].text
+	ctx := false
+	for _, t := range ts {
+		if authContexts[t.text] {
+			ctx = true
+		}
+	}
+
+	/* snmp-server host: everything after the address, vrf, traps|informs and version is community or user. */
+	valueFrom := -1
+	if first == "snmp-server" && n > 2 && ts[1].text == "host" {
+		j := 2
+		if ts[j].text == "ipv6" {
 			j++
 		}
-		if j+1 < n && ts[j].text == "version" {
-			j += 2
-		}
-		if j < n {
-			ts[j].masked = true
+		j++
+		for j < n {
+			switch ts[j].text {
+			case "vrf":
+				j += 2
+			case "traps", "informs":
+				j++
+			case "version":
+				j += 2
+				if j < n && (ts[j].text == "auth" || ts[j].text == "noauth" || ts[j].text == "priv") {
+					j++
+				}
+			default:
+				valueFrom = j
+				j = n
+			}
 		}
 	}
+
+	inValue, leading, keyID := false, false, false
+	keep := 0 /* structural argument tokens still to keep: 0 none, else numeric flag below */
+	keepNum := false
 	for i := range ts {
-		t := ts[i].text
+		t := &ts[i]
+		if valueFrom >= 0 && i == valueFrom {
+			inValue, leading, keyID = true, true, false
+		}
+		if keep > 0 {
+			keep--
+			if !keepNum || isNumber(t.text) {
+				continue
+			}
+		}
+		kw := !t.quoted && isKeyword(t.text, first == "snmp-server", ctx)
 		switch {
-		case t == Mark:
-		case t == "encrypted":
-			markValue(ts, i, false)
-		case keyIDKeywords[t]:
-			markValue(ts, i, true)
-		case isKeyword(t), snmp && (t == "auth" || t == "priv" || t == "privacy"):
-			markValue(ts, i, false)
+		case !inValue && kw:
+			inValue, leading, keyID = true, true, keyIDKeywords[t.text]
+			if strings.Contains(t.text, "=") || !isASCII(t.text) { /* key=value in one token, or a disguised keyword */
+				t.masked = true
+			}
+		case !inValue:
+			if !isASCII(t.text) && hasKeywordSub(t.text) {
+				t.masked = true
+			}
+		case leading:
+			switch {
+			case t.text == "level" && i+1 < n && isNumber(ts[i+1].text):
+				keep, keepNum = 1, true
+			case qualifiers[t.text] && !t.quoted:
+			case keyID && isNumber(t.text):
+			default:
+				t.masked, leading = true, false
+			}
+		default: /* value phase */
+			if arg, ok := structural[t.text]; ok && !t.quoted {
+				if arg > 0 {
+					keep, keepNum = 1, arg == 2
+				}
+			} else if kw && plainWord(t.raw) {
+				leading, keyID = true, keyIDKeywords[t.text]
+			} else {
+				t.masked = true
+			}
 		}
 	}
-	/* Hash-looking tokens and, on lines with a secret-ish keyword, long base64/hex tokens. */
-	lower := strings.ToLower(line)
-	hint := false
-	for _, h := range hintSubs {
-		if strings.Contains(lower, h) {
-			hint = true
-			break
-		}
-	}
+
+	/* Hash-looking tokens and, on lines with a secret-ish keyword, long secret-like tokens. */
+	hint := hasKeywordSub(strings.ToLower(line)) || strings.Contains(strings.ToLower(line), "md5") || strings.Contains(strings.ToLower(line), "sha")
 	for i := range ts {
 		raw := strings.Trim(ts[i].raw, `"`)
 		switch {
@@ -187,40 +299,18 @@ func maskLine(line string) string {
 	return b.String()
 }
 
-func isKeyword(t string) bool {
-	if keywords[t] {
+func isKeyword(t string, snmp, ctx bool) bool {
+	switch {
+	case t == Mark:
+		return false
+	case hasKeywordSub(t):
+		return true
+	case snmp && snmpKeywords[t]:
+		return true
+	case ctx && t == "authentication":
 		return true
 	}
-	for _, s := range keywordSuffixes {
-		if strings.HasSuffix(t, s) {
-			return true
-		}
-	}
 	return false
-}
-
-/* markValue masks the value that follows the keyword at i, skipping qualifiers and key ids. */
-func markValue(ts []tok, i int, anyNumber bool) {
-	n := len(ts)
-	j := i + 1
-	for j < n {
-		t := ts[j].text
-		switch {
-		case qualifiers[t]:
-			j++
-			continue
-		case t == "level" && j+2 < n:
-			j += 2
-			continue
-		case isNumber(t) && j+1 < n && !stops[ts[j+1].text] && (anyNumber || len(t) == 1):
-			j++
-			continue
-		}
-		break
-	}
-	if j < n && !stops[ts[j].text] {
-		ts[j].masked = true
-	}
 }
 
 func isNumber(s string) bool {
@@ -237,9 +327,9 @@ func isNumber(s string) bool {
 
 func isDigest(s string) bool { return hexLens[len(s)] && hexRe.MatchString(s) }
 
-/* looksSecret: a long base64/hex/hash-like token that is not a plain hyphenated word. */
+/* looksSecret: a long printable token with a digit, a symbol or mixed case; plain lower-case words are not. */
 func looksSecret(s string) bool {
-	if len(s) < 16 || !b64Re.MatchString(s) {
+	if len(s) < 16 || !isASCII(s) || strings.Trim(s, "*") == "" {
 		return false
 	}
 	var digit, upper, lower, sym bool
@@ -251,7 +341,7 @@ func looksSecret(s string) bool {
 			upper = true
 		case c >= 'a' && c <= 'z':
 			lower = true
-		case c == '+' || c == '/' || c == '=' || c == '$':
+		case c != '-' && c != '_' && c != '.':
 			sym = true
 		}
 	}

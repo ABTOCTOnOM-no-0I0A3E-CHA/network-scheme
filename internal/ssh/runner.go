@@ -41,12 +41,15 @@ var (
 )
 
 const (
-	handshakeTimeout = 15 * time.Second
-	commandTimeout   = 60 * time.Second
-	maxOutput        = 4 << 20
-	maxPromptLen     = 256
+	handshakeTimeout   = 15 * time.Second
+	commandTimeout     = 60 * time.Second
+	longCommandTimeout = 3 * time.Minute
+	maxOutput          = 4 << 20
+	maxPromptLen       = 256
 	/* A prompt is accepted only once the device has been quiet this long after it. */
 	promptSettle = 150 * time.Millisecond
+	/* For LongOutput commands the device must also be quiet this long, and the prompt must be exactly the one seen before the command. */
+	longPromptSettle = time.Second
 )
 
 type argKind uint8
@@ -55,6 +58,7 @@ const (
 	kindInvalid argKind = iota
 	kindIfName
 	kindVLANID
+	kindIfLong
 )
 
 /*
@@ -71,6 +75,8 @@ var (
 	AnyIfName = Arg{kind: kindIfName}
 	// AnyVLANID marks a VLAN-ID argument in an allowlist entry.
 	AnyVLANID = Arg{kind: kindVLANID}
+	// AnyIfNameLong marks a two-part interface argument ("gigabitethernet 1/0/1") in an allowlist entry.
+	AnyIfNameLong = Arg{kind: kindIfLong}
 )
 
 var ifNameRe = regexp.MustCompile(`^[A-Za-z0-9/.:-]{1,64}$`)
@@ -80,6 +86,20 @@ func IfName(s string) (Arg, error) {
 	a := Arg{kind: kindIfName, val: s}
 	if !a.valid() {
 		return Arg{}, fmt.Errorf("ssh: invalid interface name %q", s)
+	}
+	return a, nil
+}
+
+var ifLongRe = regexp.MustCompile(`^[A-Za-z]{2,32} [0-9]{1,4}(/[0-9]{1,4}){0,3}(\.[0-9]{1,4})?$`)
+
+/*
+IfNameLong returns an interface argument written as a kind and a number, e.g.
+("gigabitethernet", "1/0/1") sent as "gigabitethernet 1/0/1" (ESR style).
+*/
+func IfNameLong(kind, number string) (Arg, error) {
+	a := Arg{kind: kindIfLong, val: kind + " " + number}
+	if !a.valid() {
+		return Arg{}, fmt.Errorf("ssh: invalid interface %q %q", kind, number)
 	}
 	return a, nil
 }
@@ -96,6 +116,8 @@ func (a Arg) valid() bool {
 	switch a.kind {
 	case kindIfName:
 		return ifNameRe.MatchString(a.val)
+	case kindIfLong:
+		return ifLongRe.MatchString(a.val)
 	case kindVLANID:
 		n, err := strconv.Atoi(a.val)
 		return err == nil && n >= 1 && n <= 4094 && strconv.Itoa(n) == a.val
@@ -103,10 +125,18 @@ func (a Arg) valid() bool {
 	return false
 }
 
-// ShowCommand is a read-only command: a fixed name followed by typed arguments.
+/*
+ShowCommand is a read-only command: a fixed name followed by typed arguments.
+LongOutput is for commands whose output may contain prompt-like lines (a
+configuration dump): the read then ends only after a one-second pause behind
+a last line that equals the prompt seen before the command (any other prompt
+is ErrUnexpectedPrompt), and the command timeout is three minutes. It is not
+part of the allowlist match.
+*/
 type ShowCommand struct {
-	Name string
-	Args []Arg
+	Name       string
+	Args       []Arg
+	LongOutput bool
 }
 
 func (c ShowCommand) line() string {
@@ -257,12 +287,12 @@ func Dial(ctx context.Context, addr netip.AddrPort, deviceID int64, c creds.Cred
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, err := r.readPrompt(ctx); err != nil {
+	if _, err := r.readPrompt(ctx, false); err != nil {
 		_ = r.Close()
 		return nil, err
 	}
 	for _, p := range d.PagerOff {
-		if _, err := r.exec(ctx, p); err != nil {
+		if _, err := r.exec(ctx, p, false); err != nil {
 			return nil, err
 		}
 	}
@@ -343,11 +373,11 @@ func (r *Runner) Run(ctx context.Context, cmd ShowCommand) (string, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.exec(ctx, cmd.line())
+	return r.exec(ctx, cmd.line(), cmd.LongOutput)
 }
 
 /* exec sends one line; any failure closes the session, since the CLI state is then unknown. */
-func (r *Runner) exec(ctx context.Context, line string) (string, error) {
+func (r *Runner) exec(ctx context.Context, line string, long bool) (string, error) {
 	select {
 	case <-r.done:
 		return "", ErrClosed
@@ -361,7 +391,7 @@ func (r *Runner) exec(ctx context.Context, line string) (string, error) {
 		_ = r.Close()
 		return "", fmt.Errorf("%w: %w", ErrClosed, err)
 	}
-	raw, err := r.readPrompt(ctx)
+	raw, err := r.readPrompt(ctx, long)
 	if err != nil {
 		_ = r.Close()
 		return "", err
@@ -374,8 +404,12 @@ readPrompt reads until the device has printed a prompt-like last line and
 gone quiet, records that prompt and returns the output before it. A prompt
 other than the exec prompt yields ErrUnexpectedPrompt.
 */
-func (r *Runner) readPrompt(ctx context.Context) (string, error) {
-	deadline := time.NewTimer(commandTimeout)
+func (r *Runner) readPrompt(ctx context.Context, long bool) (string, error) {
+	timeout, idle := commandTimeout, promptSettle
+	if long {
+		timeout, idle = longCommandTimeout, longPromptSettle
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	var (
 		buf    []byte
@@ -393,11 +427,15 @@ func (r *Runner) readPrompt(ctx context.Context) (string, error) {
 			}
 			settle = nil
 			if r.promptLike(lastLine(buf)) {
-				settle = time.After(promptSettle)
+				settle = time.After(idle)
 			}
 		case <-settle:
 			last := lastLine(buf)
+			prev := r.prompt
 			r.prompt = strings.TrimRight(last, " ")
+			if long && r.prompt != prev {
+				return "", ErrUnexpectedPrompt
+			}
 			if !r.d.ExecPrompt.MatchString(r.prompt) {
 				return "", ErrUnexpectedPrompt
 			}

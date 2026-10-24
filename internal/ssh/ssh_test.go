@@ -45,6 +45,7 @@ func dialect() ssh.Dialect {
 		Allowlist: []ssh.ShowCommand{
 			{Name: "show version"},
 			{Name: "show interfaces status", Args: []ssh.Arg{ssh.AnyIfName}},
+			{Name: "show interfaces status", Args: []ssh.Arg{ssh.AnyIfNameLong}},
 			{Name: "show vlan tag", Args: []ssh.Arg{ssh.AnyVLANID}},
 		},
 	}
@@ -490,5 +491,39 @@ func TestDeletedDeviceIDCannotBeReclaimed(t *testing.T) {
 	}
 	if got := log.AuthAttempts()[before:]; len(got) != 0 {
 		t.Fatalf("impostor saw auth attempts %q", got)
+	}
+}
+
+func TestLongOutputAndLongInterfaceName(t *testing.T) {
+	env := testdb.New(t)
+	hk := ssh.NewHostKeys(env.Pool("nms_poller"))
+	ctx := context.Background()
+	addr, log := emu(t, sshemu.NewHostKey(t), sshemu.Config{Responses: map[string]string{
+		"terminal datadump": "",
+		"show version":      "line1\nsw1>\nline3",
+		"show interfaces status gigabitethernet 1/0/1": "ok",
+	}})
+	r, err := ssh.Dial(ctx, addr, newDevice(t, env), cred, hk, dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	if out, err := r.Run(ctx, ssh.ShowCommand{Name: "show version", LongOutput: true}); err != nil || out != "line1\nsw1>\nline3" {
+		t.Fatalf("long output: %q %v", out, err)
+	}
+	a, err := ssh.IfNameLong("gigabitethernet", "1/0/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := r.Run(ctx, ssh.ShowCommand{Name: "show interfaces status", Args: []ssh.Arg{a}}); err != nil || out != "ok" {
+		t.Fatalf("long if name: %q %v", out, err)
+	}
+	for _, bad := range [][2]string{{"gi", "1; reload"}, {"gigabit ethernet", "1"}, {"g", "1"}, {"gi", ""}, {"gi", "1 2"}} {
+		if _, err := ssh.IfNameLong(bad[0], bad[1]); err == nil {
+			t.Errorf("IfNameLong(%q, %q) accepted", bad[0], bad[1])
+		}
+	}
+	if got := log.Commands(); len(got) != 3 {
+		t.Fatalf("device saw %q", got)
 	}
 }

@@ -91,7 +91,7 @@ func TestStructurePreserved(t *testing.T) {
 func TestMaskCases(t *testing.T) {
 	for in, want := range map[string]string{
 		"username a password 5 privilege 15":     "username a password *** privilege 15",
-		"password 7 abcdef":                      "password 7 ***",
+		"password 7 abcdef":                      "password *** ***",
 		"snmp-server community \"my comm\" ro":   "snmp-server community *** ro",
 		"snmp-server host 10.0.0.1 public":       "snmp-server host 10.0.0.1 ***",
 		"description link md5 0123456789abcdef0": "description link md5 ***",
@@ -100,6 +100,60 @@ func TestMaskCases(t *testing.T) {
 		"authentication-key":                     "authentication-key",
 		"-----BEGIN X-----\na\nb":                "-----BEGIN X-----\n***",
 		"abcdEFGH0123456789abcdEFGH0123456789":   "***",
+	} {
+		if got := mask.Secrets(in); got != want {
+			t.Errorf("Secrets(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+/* Bypasses found in review: the secret must not survive, and the line must stay stable. */
+func TestReviewBypasses(t *testing.T) {
+	nbsp := " "
+	for _, c := range []struct{ in, secret string }{
+		{"snmp-server community-group COMMSECRET grp", "COMMSECRET"},
+		{`snmp-server community "esc\"aped quote" ro`, "aped"},
+		{`snmp-server community "esc\"aped quote" ro`, "quote"},
+		{`password "a\"b c"`, "b c"},
+		{`password "a\"b c"`, `a\"b`},
+		{"snmp-server user u g v3 auth sha AUTHKEY priv aes 128 PRIVKEY", "AUTHKEY"},
+		{"snmp-server user u g v3 auth sha AUTHKEY priv aes 128 PRIVKEY", "PRIVKEY"},
+		{"snmp-server host 10.0.0.1 vrf mgmt traps version 2c COMMSECRET", "COMMSECRET"},
+		{"snmp-server host ipv6 2001:db8::1 traps COMMSECRET", "COMMSECRET"},
+		{"snmp-server host 10.0.0.1 COMMSECRET udp-port 162", "COMMSECRET"},
+		{"vrrp 1 authentication text KSECRET", "KSECRET"},
+		{"vrrp 1 authentication KSECRET", "KSECRET"},
+		{"wpa-psk ascii 0 KSECRET", "KSECRET"},
+		{"password cipher KSECRET", "KSECRET"},
+		{"bgp neighbor x password ascii KSECRET", "KSECRET"},
+		{"local-user a password irreversible-cipher %^%#abcdefghijklmnopqrstuvwx%^%#", "abcdefghijklmnopqrstuvwx"},
+		{"secret 12 KSECRET", "KSECRET"},
+		{"password 12 KSECRET", "KSECRET"},
+		{"password 99 KSECRET", "KSECRET"},
+		{"key 12 KSECRET", "KSECRET"},
+		{"password" + nbsp + "KSECRET", "KSECRET"},
+		{"password-hash KSECRET", "KSECRET"},
+		{"hash KSECRET", "KSECRET"},
+		{"password two words", "words"},
+		{"password two words", "two"},
+		{"key-id 1 algorithm md5 KSECRET", "KSECRET"},
+		{"password" + string(rune(0x200b)) + "KSECRET", "KSECRET"},
+		{"community=KSECRET", "KSECRET"},
+	} {
+		out := mask.Secrets(c.in)
+		if strings.Contains(out, c.secret) {
+			t.Errorf("Secrets(%q) = %q leaks %q", c.in, out, c.secret)
+		}
+		if mask.Secrets(out) != out {
+			t.Errorf("Secrets(%q) not idempotent", c.in)
+		}
+	}
+	/* Structure that carries no secret stays readable. */
+	for in, want := range map[string]string{
+		"snmp-server community AAA ro":                          "snmp-server community *** ro",
+		"radius-server host 1.1.1.1 key KSECRET auth-port 1812": "radius-server host 1.1.1.1 key *** auth-port 1812",
+		"ip ospf authentication message-digest":                 "ip ospf authentication message-digest",
+		"aaa authentication login default radius local":         "aaa authentication login default radius local",
 	} {
 		if got := mask.Secrets(in); got != want {
 			t.Errorf("Secrets(%q) = %q, want %q", in, got, want)

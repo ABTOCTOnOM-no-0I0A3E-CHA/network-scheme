@@ -52,7 +52,12 @@ type Driver interface {
 		drivers without a config reader and never returns partial text.
 	*/
 	FetchConfig(ctx context.Context, sh ShowRunner) (string, error)
-	/* NormalizeConfig drops volatile lines (timestamps, uptime) and unifies line ends; idempotent. */
+	/*
+		NormalizeConfig drops volatile lines (timestamps, uptime) and unifies line ends;
+		idempotent. Its result is used ONLY to compute the SHA-256 that deduplicates
+		versions: the stored encrypted full copy and the masked copy are made from the
+		raw text returned by FetchConfig, never from the normalized one.
+	*/
 	NormalizeConfig(cfg string) string
 	/* MaskSecrets replaces secret values with "***"; idempotent. */
 	MaskSecrets(cfg string) string
@@ -65,7 +70,13 @@ type Driver interface {
 	ConfigNeedsWrite() bool
 	/* ShowCommands lists the on-demand show commands (never a configuration dump). */
 	ShowCommands() []showspec.Spec
-	/* ShowCommand maps a ShowCommands key and its arguments to the allowlisted command. */
+	/*
+		ShowCommand maps a ShowCommands key and its arguments to the allowlisted
+		command. It accepts only ShowCommands keys and can never resolve to the
+		configuration read (which is also in the dialect allowlist); callers must
+		not build an ssh.ShowCommand from api-supplied text. Interface names must
+		come from the device inventory (checked by the caller).
+	*/
 	ShowCommand(key string, args []string) (ssh.ShowCommand, error)
 }
 

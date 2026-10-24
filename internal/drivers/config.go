@@ -101,31 +101,43 @@ func sanitize(s string) (string, int) {
 	return b.String(), dropped
 }
 
-/* volatileRe matches lines that change without a configuration change. */
-var volatileRe = regexp.MustCompile(`(?i)^\s*(` +
-	`[!#]\s*(last (configuration|config|change)|nvram config|running.config last|startup.config last|time ?stamp|generated|saved|configuration last)\b.*` +
-	`|[!#]?\s*building configuration.*` +
-	`|[!#]?\s*current configuration\s*:.*` +
-	`|[!#]?\s*(system )?uptime\b.*` +
-	`|[!#]\s*clock\b.*` +
-	`|ntp clock-period\b.*` +
-	`|[!#]?\s*(mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\s+.*` +
-	`|[!#]?\s*\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}.*` +
-	`|[!#]?\s*\d{2}:\d{2}:\d{2}.*)$`)
+const months = `(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*`
+
+var (
+	/* alwaysVolatile are whole-line comments the device rewrites on every save, at column 0 anywhere. */
+	alwaysVolatile = regexp.MustCompile(`(?i)^(! last configuration change at .*|! nvram config last updated.*|[!#] last change(d)?:? .*|ntp clock-period \d+)$`)
+	/* headerVolatile are whole-line banners of the header block only (before the first command). */
+	headerVolatile = regexp.MustCompile(`(?i)^(building configuration\.\.\.|current configuration ?: ?\d+ bytes|[!#] ?(system )?uptime( is|:) .*|(system )?uptime( is|:) .*|` +
+		`[!#]? ?(mon|tue|wed|thu|fri|sat|sun)[a-z]*,? ` + months + ` \d{1,2} \d\d:\d\d:\d\d.*|[!#]? ?\d{4}-\d\d-\d\d[ t]\d\d:\d\d:\d\d.*)$`)
+)
 
 /*
-NormalizeText converts CRLF to LF, drops volatile lines (timestamps, last-change
-notes, uptime, "building configuration"), trims trailing whitespace and
-surrounding blank lines, and ends the text with one newline. Idempotent.
+NormalizeText converts CRLF to LF, drops volatile lines, trims trailing
+whitespace and surrounding blank lines, and ends the text with one newline.
+Volatile lines are whole column-0 lines only: "! Last configuration change",
+"! NVRAM config last updated", "ntp clock-period N" anywhere, and in the
+header block (before the first command) "Building configuration...", "Current
+configuration : N bytes", uptime and date stamps. Indented lines and lines
+after the header are never dropped. Idempotent.
+
+The result is for computing the SHA-256 that decides whether a configuration
+changed. The stored encrypted full copy and the masked copy are made from the
+raw fetched text, never from the normalized one.
 */
 func NormalizeText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	var out []string
+	header := true
 	for _, l := range strings.Split(s, "\n") {
 		l = strings.TrimRight(l, " \t")
-		if volatileRe.MatchString(l) {
+		switch {
+		case alwaysVolatile.MatchString(l):
 			continue
+		case header && headerVolatile.MatchString(l):
+			continue
+		case header && l != "" && l[0] != '!' && l[0] != '#':
+			header = false
 		}
 		out = append(out, l)
 	}
@@ -222,19 +234,35 @@ type ShowDef struct {
 	Name string
 }
 
-/* Allowlist returns the allowlist entries (with argument placeholders) for defs. */
-func Allowlist(defs []ShowDef) []ssh.ShowCommand {
+/*
+Allowlist returns the allowlist entries (with argument placeholders) for defs.
+With longIf an interface argument is also accepted as "kind number"
+("gigabitethernet 1/0/1", ESR style).
+*/
+func Allowlist(defs []ShowDef, longIf bool) []ssh.ShowCommand {
 	out := make([]ssh.ShowCommand, 0, len(defs))
 	for _, d := range defs {
 		c := ssh.ShowCommand{Name: d.Name}
+		hasIf := false
 		for _, k := range d.Spec.Args {
 			if k == showspec.VLANID {
 				c.Args = append(c.Args, ssh.AnyVLANID)
 			} else {
-				c.Args = append(c.Args, ssh.AnyIfName)
+				c.Args, hasIf = append(c.Args, ssh.AnyIfName), true
 			}
 		}
 		out = append(out, c)
+		if hasIf && longIf {
+			long := ssh.ShowCommand{Name: d.Name}
+			for _, k := range d.Spec.Args {
+				if k == showspec.VLANID {
+					long.Args = append(long.Args, ssh.AnyVLANID)
+				} else {
+					long.Args = append(long.Args, ssh.AnyIfNameLong)
+				}
+			}
+			out = append(out, long)
+		}
 	}
 	return out
 }
@@ -248,29 +276,41 @@ func Specs(defs []ShowDef) []showspec.Spec {
 	return out
 }
 
-/* ResolveShow builds the typed command for key and string args; the arguments are validated by their kinds. */
-func ResolveShow(defs []ShowDef, key string, args []string) (ssh.ShowCommand, error) {
+/*
+ResolveShow builds the typed command for a ShowCommands key and string args,
+validated by their kinds. Only keys of defs resolve, and a definition whose
+command text mentions "config" never does (defense in depth: the dialect
+allowlist also holds the configuration read, which must never be reachable
+from the on-demand path). Interface names must come from the device inventory;
+Task 6 enforces that membership before calling this.
+*/
+func ResolveShow(defs []ShowDef, key string, args []string, longIf bool) (ssh.ShowCommand, error) {
 	for _, d := range defs {
 		if d.Spec.Key != key {
 			continue
 		}
-		if len(args) != len(d.Spec.Args) {
+		if len(args) != len(d.Spec.Args) || strings.Contains(strings.ToLower(d.Name), "config") {
 			return ssh.ShowCommand{}, ErrUnknownShow
 		}
 		c := ssh.ShowCommand{Name: d.Name}
 		for i, k := range d.Spec.Args {
+			v := args[i] //nolint:gosec // len(args) == len(d.Spec.Args) checked above
 			var (
 				a   ssh.Arg
 				err error
 			)
-			if k == showspec.VLANID {
-				n, convErr := strconv.Atoi(args[i]) //nolint:gosec // len(args) == len(d.Spec.Args) checked above
+			switch {
+			case k == showspec.VLANID:
+				n, convErr := strconv.Atoi(v)
 				if convErr != nil {
 					return ssh.ShowCommand{}, ErrUnknownShow
 				}
 				a, err = ssh.VLANID(n)
-			} else {
-				a, err = ssh.IfName(args[i]) //nolint:gosec // len(args) == len(d.Spec.Args) checked above
+			case longIf && strings.Contains(v, " "):
+				kind, num, _ := strings.Cut(v, " ")
+				a, err = ssh.IfNameLong(kind, num)
+			default:
+				a, err = ssh.IfName(v)
 			}
 			if err != nil {
 				return ssh.ShowCommand{}, fmt.Errorf("%w: %w", ErrUnknownShow, err)

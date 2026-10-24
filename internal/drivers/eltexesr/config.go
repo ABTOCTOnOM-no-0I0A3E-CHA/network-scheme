@@ -39,12 +39,12 @@ func (Driver) ShowCommands() []showspec.Spec { return drivers.Specs(showDefs) }
 
 /* ShowCommand maps a key and arguments to the allowlisted command. */
 func (Driver) ShowCommand(key string, args []string) (ssh.ShowCommand, error) {
-	return drivers.ResolveShow(showDefs, key, args)
+	return drivers.ResolveShow(showDefs, key, args, true)
 }
 
 /* FetchConfig reads "show running-config" and returns sanitised text. */
 func (d Driver) FetchConfig(ctx context.Context, sh drivers.ShowRunner) (string, error) {
-	return drivers.FetchRunning(ctx, sh, d.Dialect(), ssh.ShowCommand{Name: runningConfig})
+	return drivers.FetchRunning(ctx, sh, d.Dialect(), ssh.ShowCommand{Name: runningConfig, LongOutput: true})
 }
 
 /*

@@ -11,7 +11,11 @@ type ArgKind string
 
 /* Argument kinds. */
 const (
-	/* InterfaceName is an interface name taken from the device inventory. */
+	/*
+		InterfaceName is an interface name taken from the device inventory. The
+		caller must check membership in the inventory; the driver only validates
+		the syntax ("gi1/0/1", or on ESR "gigabitethernet 1/0/1").
+	*/
 	InterfaceName ArgKind = "interface"
 	/* VLANID is a VLAN id in 1..4094. */
 	VLANID ArgKind = "vlan"

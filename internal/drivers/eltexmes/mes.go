@@ -121,7 +121,7 @@ func (Driver) Dialect() ssh.Dialect {
 	return ssh.Dialect{
 		ExecPrompt: execPrompt,
 		PagerOff:   []string{"terminal datadump"},
-		Allowlist:  append(drivers.Allowlist(showDefs), ssh.ShowCommand{Name: runningConfig}),
+		Allowlist:  append(drivers.Allowlist(showDefs, false), ssh.ShowCommand{Name: runningConfig}),
 	}
 }
 
