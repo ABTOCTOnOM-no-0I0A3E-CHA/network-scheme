@@ -58,6 +58,10 @@ func serve(ctx context.Context, cfg poller.Config) error {
 	if err != nil {
 		return err
 	}
+	backupPub, err := cfg.BackupPubKey()
+	if err != nil {
+		return err
+	}
 	pw, err := config.ReadSecretFile(cfg.DB.PasswordFile)
 	if err != nil {
 		return err
@@ -67,7 +71,7 @@ func serve(ctx context.Context, cfg poller.Config) error {
 		return err
 	}
 	defer pool.Close()
-	return poller.New(cfg, poller.Deps{Pool: pool, Priv: priv, Pub: pub, Logger: log}).Run(ctx)
+	return poller.New(cfg, poller.Deps{Pool: pool, Priv: priv, Pub: pub, BackupPub: backupPub, Logger: log}).Run(ctx)
 }
 
 /* healthcheck exits 0 when this poller wrote a heartbeat within the last 45 s. */

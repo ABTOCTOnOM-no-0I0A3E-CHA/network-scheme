@@ -418,7 +418,7 @@ func TestRunInstalls(t *testing.T) {
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
 		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml", "config/infra.yaml", "config/egress.yaml",
-		"config/domain_read.pub", "postgres/initdb/10-roles.sh", "installed",
+		"config/domain_read.pub", "config/domain_backup.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
@@ -449,6 +449,9 @@ func TestRunInstalls(t *testing.T) {
 	/* The poller's public read key is the one keys.json publishes. */
 	if got := strings.TrimSpace(string(readFile(t, filepath.Join(etc, "config", "domain_read.pub")))); got != kj.Domains["read"].PublicKey {
 		t.Errorf("domain_read.pub = %q, keys.json read key = %q", got, kj.Domains["read"].PublicKey)
+	}
+	if got := strings.TrimSpace(string(readFile(t, filepath.Join(etc, "config", "domain_backup.pub")))); got != kj.Domains["backup"].PublicKey {
+		t.Errorf("domain_backup.pub = %q, keys.json backup key = %q", got, kj.Domains["backup"].PublicKey)
 	}
 	eg, err := install.LoadEgress(filepath.Join(etc, "config", "egress.yaml"))
 	if err != nil || eg.DevicesSubnet.String() != install.DefaultDevicesSubnet || len(eg.MgmtSubnets) != 1 || eg.MgmtSubnets[0].String() != "10.0.0.0/8" {

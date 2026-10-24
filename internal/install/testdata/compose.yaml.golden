@@ -94,6 +94,7 @@ services:
     volumes:
       - "/etc/nms/config/poller.yaml:/etc/nms/poller.yaml:ro"
       - "/etc/nms/config/domain_read.pub:/etc/nms/domain_read.pub:ro"
+      - "/etc/nms/config/domain_backup.pub:/etc/nms/domain_backup.pub:ro"
     networks:
       core: {}
       devices: {}

@@ -33,6 +33,7 @@ func (p *Poller) newRiver(life context.Context) (*river.Client[pgx.Tx], error) {
 	w := river.NewWorkers()
 	river.AddWorker(w, &pollNowWorker{p: p})
 	river.AddWorker(w, &discoveryWorker{p: p, life: life})
+	river.AddWorker(w, &backupNowWorker{p: p})
 	c, err := river.NewClient(riverpgxv5.New(p.pool), &river.Config{
 		Schema:  store.JobsSchema,
 		Queues:  map[string]river.QueueConfig{q: {MaxWorkers: pollNowWorkers}},

@@ -3,6 +3,7 @@ package install_test
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"maps"
 	"net/netip"
 	"os"
@@ -126,7 +127,7 @@ func TestRenderedPollerConfigLoads(t *testing.T) {
 	}
 	if c.PollerID != "local" || c.DB.User != "nms_poller" || c.DB.Name != "nms" || c.DB.Host != "postgres" ||
 		c.DB.PasswordFile != "/run/secrets/db_poller_password" || c.ReadKeyFile != "/run/secrets/domain_read_key" ||
-		c.ReadPubKeyFile != "/etc/nms/domain_read.pub" {
+		c.ReadPubKeyFile != "/etc/nms/domain_read.pub" || c.BackupPubKeyFile != "/etc/nms/domain_backup.pub" {
 		t.Errorf("unexpected config: %+v", c)
 	}
 }
@@ -309,6 +310,15 @@ func TestComposeHardening(t *testing.T) {
 	for name, s := range c.Services {
 		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" {
 			t.Errorf("%s must not join devices", name)
+		}
+		/* The backup-domain private key reaches no service (only the future executor); the poller gets the public key. */
+		for _, sec := range s.Secrets {
+			if strings.Contains(fmt.Sprint(sec), "backup") {
+				t.Errorf("%s gets secret %v: the backup domain key must stay on the host", name, sec)
+			}
+		}
+		if name == "poller" != slices.ContainsFunc(s.Volumes, func(v string) bool { return strings.Contains(v, "domain_backup.pub") }) {
+			t.Errorf("%s volumes %v: only the poller mounts domain_backup.pub", name, s.Volumes)
 		}
 		if name != "poller" && name != "eventd" && slices.Contains(s.Secrets, any("domain_read_key")) {
 			t.Errorf("%s must not get the read domain key", name)

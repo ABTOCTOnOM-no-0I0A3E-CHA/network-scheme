@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,7 +25,11 @@ import (
 const (
 	KindPollNow       = "poll_now"
 	KindDiscoveryScan = "discovery_scan"
+	KindBackupNow     = "backup_now"
 )
+
+/* BackupGap is the window in which one device gets at most one backup_now job, whoever enqueues it. */
+const BackupGap = 5 * time.Minute
 
 /* pollerIDRe keeps "poller_" + id a valid River queue name of at most 64 characters. */
 var pollerIDRe = regexp.MustCompile(`^[a-z0-9]+(?:[_-][a-z0-9]+)*$`)
@@ -57,6 +62,24 @@ func (PollNowArgs) Kind() string { return KindPollNow }
 // InsertOpts implements river.JobArgsWithInsertOpts.
 func (PollNowArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: liveStates}}
+}
+
+/*
+BackupNowArgs asks the device's poller to back up its configuration now. Only
+one job per device is accepted within BackupGap (whatever its state: a burst of
+config-change events makes one backup); it is never retried.
+*/
+type BackupNowArgs struct {
+	DeviceID int64  `json:"device_id" river:"unique"`
+	Source   string `json:"source,omitempty"` /* "manual" for a user's request; anything else is recorded as "event" */
+}
+
+// Kind implements river.JobArgs.
+func (BackupNowArgs) Kind() string { return KindBackupNow }
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (BackupNowArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 1, UniqueOpts: river.UniqueOpts{ByArgs: true, ByPeriod: BackupGap}}
 }
 
 /*
@@ -105,6 +128,18 @@ func (e *Enqueuer) EnqueuePollNow(ctx context.Context, tx pgx.Tx, deviceID int64
 	}
 	if _, err := e.client.InsertTx(ctx, tx, PollNowArgs{DeviceID: deviceID}, &river.InsertOpts{Queue: q}); err != nil {
 		return fmt.Errorf("jobs: enqueue poll: %w", err)
+	}
+	return nil
+}
+
+// EnqueueBackupNow queues a configuration backup ("manual" or "event" source) of deviceID on the device's poller (coalesced within BackupGap).
+func (e *Enqueuer) EnqueueBackupNow(ctx context.Context, tx pgx.Tx, deviceID int64, source string) error {
+	q, err := ownerQueue(ctx, tx, `SELECT poller_id FROM core.device WHERE id = $1`, "device", deviceID)
+	if err != nil {
+		return err
+	}
+	if _, err := e.client.InsertTx(ctx, tx, BackupNowArgs{DeviceID: deviceID, Source: source}, &river.InsertOpts{Queue: q}); err != nil {
+		return fmt.Errorf("jobs: enqueue backup: %w", err)
 	}
 	return nil
 }

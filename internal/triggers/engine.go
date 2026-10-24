@@ -39,11 +39,20 @@ type Config struct {
 	Clock    Clock /* nil: the wall clock */
 	/* PollNow asks for an extra read-only poll of a device; nil: none. It is called at most once per device and PollNowGap. */
 	PollNow func(ctx context.Context, deviceID int64) error
-	Log     *slog.Logger
+	/*
+		BackupNow asks for a configuration backup of a device whose configuration
+		a trap or syslog message reported changed; nil: none. It is called at most
+		once per device and BackupGap.
+	*/
+	BackupNow func(ctx context.Context, deviceID int64) error
+	Log       *slog.Logger
 }
 
 /* PollNowGap is the minimum gap between two extra polls requested for one device. */
 const PollNowGap = 30 * time.Second
+
+/* BackupGap is the minimum gap between two backups requested for one device by configuration-change events. */
+const BackupGap = 5 * time.Minute
 
 type devMeta struct {
 	name  string
@@ -74,12 +83,13 @@ problems.engine_state plus, through the optional PollNow hook, an extra
 read-only poll request. Create it with New and run it with Run.
 */
 type Engine struct {
-	pool     *pgxpool.Pool
-	samples  SampleSource
-	channels []notify.Channel
-	clock    Clock
-	pollNow  func(ctx context.Context, deviceID int64) error
-	log      *slog.Logger
+	pool      *pgxpool.Pool
+	samples   SampleSource
+	channels  []notify.Channel
+	clock     Clock
+	pollNow   func(ctx context.Context, deviceID int64) error
+	backupNow func(ctx context.Context, deviceID int64) error
+	log       *slog.Logger
 
 	lastFilterWarn time.Time /* rate limit of the syslog filter cap warning */
 
@@ -96,6 +106,8 @@ type Engine struct {
 	sampleCut bool /* the last sample round stopped before reaching now */
 	polled    map[int64]time.Time
 	pollHints map[int64]time.Time
+	cfgHints  map[int64]time.Time /* devices whose configuration an event reported changed this cycle */
+	backedUp  map[int64]time.Time /* last backup request per device; kept across memory resets so a failing cycle cannot repeat requests */
 	unknown   map[string][]counterSample
 	sysFalse  map[pkey]int
 	supp      *suppressCtx
@@ -105,7 +117,7 @@ type Engine struct {
 
 // New returns an engine over c.
 func New(c Config) *Engine {
-	e := &Engine{pool: c.Pool, samples: c.Samples, channels: c.Channels, clock: c.Clock, pollNow: c.PollNow, log: c.Log, meta: map[int64]devMeta{}, reload: make(chan struct{}, 1)}
+	e := &Engine{pool: c.Pool, samples: c.Samples, channels: c.Channels, clock: c.Clock, pollNow: c.PollNow, backupNow: c.BackupNow, log: c.Log, meta: map[int64]devMeta{}, reload: make(chan struct{}, 1), backedUp: map[int64]time.Time{}}
 	if e.clock == nil {
 		e.clock = realClock{}
 	}
@@ -138,6 +150,7 @@ func (e *Engine) resetMemory() {
 	e.sampleTo = time.Time{}
 	e.seenUp = map[[2]int64]time.Time{}
 	e.polled, e.pollHints, e.unknown, e.sysFalse = map[int64]time.Time{}, map[int64]time.Time{}, map[string][]counterSample{}, map[pkey]int{}
+	e.cfgHints = map[int64]time.Time{}
 }
 
 /*
@@ -329,6 +342,7 @@ func (e *Engine) cycle(ctx context.Context, kind cycleKind) error {
 		e.wmSeq[name] = max(e.wmSeq[name], w)
 	}
 	e.requestPolls(ctx, now)
+	e.requestBackups(ctx, now)
 	return nil
 }
 
@@ -365,6 +379,28 @@ func (e *Engine) tracker(k tkey) *tracker {
 		e.trackers[k] = t
 	}
 	return t
+}
+
+/* requestBackups asks for a backup of each device whose configuration an event reported changed, at most once per BackupGap. */
+func (e *Engine) requestBackups(ctx context.Context, now time.Time) {
+	for dev, at := range e.backedUp {
+		if now.Sub(at) > BackupGap {
+			delete(e.backedUp, dev)
+		}
+	}
+	for dev, at := range e.cfgHints {
+		delete(e.cfgHints, dev)
+		if e.backupNow == nil || at.Before(now.Add(-time.Minute)) {
+			continue
+		}
+		if last, ok := e.backedUp[dev]; ok && now.Sub(last) < BackupGap {
+			continue
+		}
+		e.backedUp[dev] = now
+		if err := e.backupNow(ctx, dev); err != nil {
+			e.log.Warn("backup request failed", "device", dev, "error", err.Error())
+		}
+	}
 }
 
 /* requestPolls asks for the extra polls the cycle's traps called for. */

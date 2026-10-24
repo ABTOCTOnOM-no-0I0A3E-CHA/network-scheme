@@ -32,6 +32,7 @@ type device struct {
 	Addr      netip.AddrPort
 	Driver    string
 	Intervals [numClasses]time.Duration
+	Backup    time.Duration /* effective configuration backup interval (device ?? group ?? template ?? 24 h) */
 }
 
 /*
@@ -353,6 +354,17 @@ func (s *scheduler) runNow(ctx context.Context, id int64, fn func(d device, cach
 	d := ds.dev
 	s.mu.Unlock()
 	return fn(d, ds.cache)
+}
+
+/* snapshot returns the scheduled devices. */
+func (s *scheduler) snapshot() []device {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]device, 0, len(s.devs))
+	for _, ds := range s.devs {
+		out = append(out, ds.dev)
+	}
+	return out
 }
 
 /* known reports whether device id is scheduled. */

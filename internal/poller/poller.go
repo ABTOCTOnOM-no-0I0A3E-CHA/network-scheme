@@ -43,14 +43,16 @@ Deps are the poller's collaborators. Nil members select the production
 implementation; tests replace ICMP and SNMP dialing.
 */
 type Deps struct {
-	Pool     *pgxpool.Pool /* connected as nms_poller */
-	Priv     *[32]byte     /* read-domain key pair (Config.ReadKeys) */
-	Pub      *[32]byte
-	Pinger   Pinger            /* nil: ICMP echo via pro-bing */
-	DialSNMP DialFunc          /* nil: snmp.Dial */
-	Registry *drivers.Registry /* nil: drivers.Default() */
-	Clock    func() time.Time  /* nil: time.Now */
-	Logger   *slog.Logger      /* nil: slog.Default() */
+	Pool *pgxpool.Pool /* connected as nms_poller */
+	Priv *[32]byte     /* read-domain key pair (Config.ReadKeys) */
+	Pub  *[32]byte
+	/* BackupPub is the backup-domain public key (Config.BackupPubKey); nil: configuration backups are off. The private key is never available here. */
+	BackupPub *[32]byte
+	Pinger    Pinger            /* nil: ICMP echo via pro-bing */
+	DialSNMP  DialFunc          /* nil: snmp.Dial */
+	Registry  *drivers.Registry /* nil: drivers.Default() */
+	Clock     func() time.Time  /* nil: time.Now */
+	Logger    *slog.Logger      /* nil: slog.Default() */
 	/*
 		AvailabilityStarted, when set, is called as each scheduled availability
 		run starts, with the time the run was due; load tests measure the
@@ -65,6 +67,9 @@ type Poller struct {
 	pool        *pgxpool.Pool
 	priv        *[32]byte
 	pub         *[32]byte
+	backupPub   *[32]byte
+	backupTick  time.Duration
+	fetchRaw    func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
 	pinger      Pinger
 	dial        DialFunc
 	reg         *drivers.Registry
@@ -86,19 +91,23 @@ type Poller struct {
 	jobReload     sync.Mutex   /* single-flight reloadForJob */
 	lastJobReload time.Time    /* guarded by jobReload */
 	jobReloads    atomic.Int64 /* rereads done for jobs; tests read it */
-	unknownJobs   atomic.Int64 /* poll_now jobs cancelled for a device not assigned here */
+	unknownJobs   atomic.Int64 /* poll_now and backup_now jobs cancelled for a device not assigned here */
+
+	backupVersions atomic.Int64 /* configuration versions stored */
+	backupOversize atomic.Int64 /* configurations refused for exceeding 4 MiB */
 }
 
 // New returns a poller for a validated cfg.
 func New(cfg Config, d Deps) *Poller {
 	p := &Poller{
-		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, pinger: d.Pinger, dial: d.DialSNMP,
+		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, backupPub: d.BackupPub, backupTick: backupTick, pinger: d.Pinger, dial: d.DialSNMP,
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
 		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
 		scanFloor: minScanInterval, scanGap: minScanGap,
 	}
 	p.recheck = p.scanState
+	p.fetchRaw = p.sshFetch
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
 	}
@@ -150,6 +159,9 @@ func (p *Poller) Run(ctx context.Context) error {
 	wg.Go(func() { p.heartbeat(ctx) })
 	wg.Go(func() { p.listen(ctx) })
 	wg.Go(func() { p.discoverLoop(ctx) })
+	if p.backupPub != nil {
+		wg.Go(func() { p.backupLoop(ctx) })
+	}
 	p.sched.loop(ctx)
 	wg.Wait()
 	sctx, cancel := context.WithTimeout(context.Background(), stopTimeout)

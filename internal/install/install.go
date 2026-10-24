@@ -42,6 +42,9 @@ var anchorUnits = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"}
 /* readPubFile is the public read-domain key for the poller, relative to Paths.Etc. */
 const readPubFile = "config/domain_read.pub"
 
+/* backupPubFile is the public backup-domain key for the poller; the private half is never mounted anywhere but the future executor. */
+const backupPubFile = "config/domain_backup.pub"
+
 /* composeUpTimeout bounds "docker compose up --wait" in seconds. */
 const composeUpTimeout = "600"
 
@@ -210,12 +213,14 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	if err := WriteSecrets(secretsDir, web); err != nil {
 		return err
 	}
-	fps, readPub, err := writeKeysJSON(secretsDir, filepath.Join(vr, "gateway"))
+	fps, pubs, err := writeKeysJSON(secretsDir, filepath.Join(vr, "gateway"))
 	if err != nil {
 		return err
 	}
 	/* The poller checks that its private read key matches this public key. */
+	readPub, backupPub := pubs["read"], pubs["backup"]
 	p.files[readPubFile] = []byte(base64.StdEncoding.EncodeToString(readPub[:]) + "\n")
+	p.files[backupPubFile] = []byte(base64.StdEncoding.EncodeToString(backupPub[:]) + "\n")
 	if err := writeRendered(etc, p.files); err != nil {
 		return err
 	}
@@ -293,19 +298,19 @@ func writeRendered(etc string, files map[string][]byte) error {
 /*
 writeKeysJSON derives the public domain keys from the private key files and
 writes keys.json for the gateway. It returns the fingerprints by domain and
-the public key of the read domain.
+the public keys by domain.
 */
-func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, [32]byte, error) {
+func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, map[string][32]byte, error) {
 	pubs := map[string][32]byte{}
 	fps := map[string]string{}
 	for d, file := range DomainKeyFiles {
 		priv, err := config.ReadKeyFile(filepath.Join(secretsDir, file))
 		if err != nil {
-			return nil, [32]byte{}, fmt.Errorf("install: %w", err)
+			return nil, nil, fmt.Errorf("install: %w", err)
 		}
 		k, err := ecdh.X25519().NewPrivateKey(priv[:])
 		if err != nil {
-			return nil, [32]byte{}, fmt.Errorf("install: %s: %w", file, err)
+			return nil, nil, fmt.Errorf("install: %s: %w", file, err)
 		}
 		var pub [32]byte
 		copy(pub[:], k.PublicKey().Bytes())
@@ -313,12 +318,12 @@ func writeKeysJSON(secretsDir, gatewayDir string) (map[string]string, [32]byte, 
 	}
 	doc, err := keys.BuildKeysJSON(pubs)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("install: %w", err)
+		return nil, nil, fmt.Errorf("install: %w", err)
 	}
 	if err := os.MkdirAll(gatewayDir, 0o750); err != nil {
-		return nil, [32]byte{}, fmt.Errorf("install: %w", err)
+		return nil, nil, fmt.Errorf("install: %w", err)
 	}
-	return fps, pubs["read"], writeExcl(filepath.Join(gatewayDir, "keys.json"), doc, 0o644)
+	return fps, pubs, writeExcl(filepath.Join(gatewayDir, "keys.json"), doc, 0o644)
 }
 
 /*

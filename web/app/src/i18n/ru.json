@@ -519,7 +519,8 @@
       "poller_unavailable": "Поллер недоступен",
       "unknown_source": "События от неизвестных источников",
       "access_profile_mismatch": "Профиль доступа не подходит устройству",
-      "ssh_host_key_mismatch": "Ключ SSH-хоста не совпадает с закреплённым"
+      "ssh_host_key_mismatch": "Ключ SSH-хоста не совпадает с закреплённым",
+      "config_drift": "Конфигурация изменена вне сессии изменений"
     },
     "seeded": {
       "deviceUnavailable": "Устройство недоступно",
