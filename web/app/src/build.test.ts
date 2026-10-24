@@ -42,6 +42,10 @@ describe("production build", () => {
       "https://react.dev/errors/",
       "https://react.i18next.com/",
       "https://tailwindcss.com",
+      /* ELK: EMF/Ecore namespace identifiers of its graph metamodel, and the bundler's message for an unresolvable require() */
+      "http://www.eclipse.org/",
+      "http:///org/eclipse/",
+      "https://rolldown.rs/",
     ];
     const offenders: string[] = [];
     for (const f of walk(out)) {
@@ -76,6 +80,23 @@ describe("production build", () => {
     const css = walk(out).filter((p) => p.endsWith(".css")).map((f) => readFileSync(f, "utf8")).join(" ");
     expect(css).toContain(".uplot");
     expect(html).toMatch(/<link[^>]+rel="stylesheet"/);
+  });
+
+  it("map: no eval or new Function anywhere, Cytoscape runtime <style> disarmed, ELK worker is a bundled file under /assets/", () => {
+    const files = walk(out).filter((p) => p.endsWith(".js"));
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      expect(text, path.basename(f)).not.toMatch(/\bnew Function\s*\(|[^\w.$]eval\s*\(|createObjectURL|importScripts\s*\(/);
+    }
+    /* Cytoscape skips its style element when an element with this id exists */
+    expect(html).toMatch(/<meta\s+id="__________cytoscape_stylesheet"/);
+    const workers = files.filter((f) => /^layout\.worker-.*\.js$/.test(path.basename(f)));
+    expect(workers).toHaveLength(1);
+    expect(path.relative(out, workers[0]).split(path.sep)[0]).toBe("assets");
+    /* the main bundle starts it from an absolute /assets/ URL, as a module worker: no blob: URL */
+    const main = files.map((f) => readFileSync(f, "utf8")).join("\n");
+    expect(main).toMatch(/new Worker\(new URL\(`\/assets\/layout\.worker-[\w-]+\.js`/);
+    expect(readFileSync(workers[0], "utf8")).toContain("onmessage");
   });
 
   it("sealing is pure JS: no WebAssembly and no wasm CSP relaxation", () => {

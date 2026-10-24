@@ -50,3 +50,8 @@ export function canAckProblems(session: Session | null | undefined): boolean {
 export function canReceiveProblems(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role !== "auditor");
 }
+
+/** UI hint only: map.manage (views, areas, backgrounds, pinned positions) is not group-scoped, so only a global admin binding holds it. */
+export function canManageMap(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin" && r.group_id === null);
+}

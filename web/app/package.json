@@ -25,6 +25,8 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "cmdk": "1.1.1",
+    "cytoscape": "3.34.3",
+    "elkjs": "0.12.0",
     "i18next": "26.5.3",
     "input-otp": "1.5.0",
     "lucide-react": "1.59.0",
