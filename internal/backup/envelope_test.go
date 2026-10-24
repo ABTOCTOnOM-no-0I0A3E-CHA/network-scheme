@@ -80,15 +80,26 @@ func TestOpenFailures(t *testing.T) {
 	}
 }
 
-/* The opening package, which needs the private key, is linked into no service but the executor. */
+/* The opening package, which needs the private key, is linked into no binary but the (future) executor. */
 func TestOpenNotLinkedIntoServices(t *testing.T) {
-	for _, cmd := range []string{"poller", "api", "eventd", "nmsctl"} {
-		out, err := exec.Command("go", "list", "-deps", "github.com/beekamai/network-scheme/cmd/"+cmd).CombinedOutput()
-		if err != nil {
-			t.Fatalf("go list %s: %v\n%s", cmd, err, out)
+	out, err := exec.Command("go", "list", "github.com/beekamai/network-scheme/cmd/...").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list cmd/...: %v\n%s", err, out)
+	}
+	cmds := strings.Fields(string(out))
+	if len(cmds) < 4 {
+		t.Fatalf("binaries found: %v", cmds)
+	}
+	for _, cmd := range cmds {
+		if strings.HasSuffix(cmd, "/cmd/executor") || strings.Contains(cmd, "/cmd/executor/") {
+			continue
 		}
-		if strings.Contains(string(out), "internal/backup/open") {
-			t.Errorf("cmd/%s depends on internal/backup/open", cmd)
+		deps, err := exec.Command("go", "list", "-deps", cmd).CombinedOutput()
+		if err != nil {
+			t.Fatalf("go list %s: %v\n%s", cmd, err, deps)
+		}
+		if strings.Contains(string(deps), "internal/backup/open") {
+			t.Errorf("%s depends on internal/backup/open", cmd)
 		}
 	}
 }

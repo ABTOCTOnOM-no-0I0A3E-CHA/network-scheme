@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,7 +29,13 @@ const (
 	KindBackupNow     = "backup_now"
 )
 
-/* BackupGap is the window in which one device gets at most one backup_now job, whoever enqueues it. */
+/*
+BackupGap is the width of the River uniqueness bucket for backup_now: jobs for
+one device in the same BackupGap-wide period (River buckets time, it is not a
+sliding window) are coalesced. The api's trigger engine additionally keeps
+BackupGap between its own requests per device, and the poller enforces the gap
+itself (it does not trust the api's unique key).
+*/
 const BackupGap = 5 * time.Minute
 
 /* pollerIDRe keeps "poller_" + id a valid River queue name of at most 64 characters. */
@@ -38,6 +45,14 @@ const maxPollerID = 64 - len("poller_")
 
 // ValidPollerID reports whether id can name a poller (and its queue).
 func ValidPollerID(id string) bool { return len(id) <= maxPollerID && pollerIDRe.MatchString(id) }
+
+// BackupQueue returns the queue of poller pollerID that carries only backup_now jobs, so a burst of them cannot starve polls.
+func BackupQueue(pollerID string) (string, error) {
+	if !ValidPollerID(pollerID) {
+		return "", fmt.Errorf("jobs: invalid poller id %q", pollerID)
+	}
+	return "backup_" + pollerID, nil
+}
 
 // Queue returns the queue worked by poller pollerID.
 func Queue(pollerID string) (string, error) {
@@ -138,6 +153,7 @@ func (e *Enqueuer) EnqueueBackupNow(ctx context.Context, tx pgx.Tx, deviceID int
 	if err != nil {
 		return err
 	}
+	q = "backup_" + strings.TrimPrefix(q, "poller_")
 	if _, err := e.client.InsertTx(ctx, tx, BackupNowArgs{DeviceID: deviceID, Source: source}, &river.InsertOpts{Queue: q}); err != nil {
 		return fmt.Errorf("jobs: enqueue backup: %w", err)
 	}

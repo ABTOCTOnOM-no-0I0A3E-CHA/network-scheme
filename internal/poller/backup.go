@@ -43,6 +43,8 @@ const (
 	backupTimeout         = 5 * time.Minute  /* identification (SNMP) plus the fetch */
 	backupParallel        = 4                /* scheduled backups running at once */
 	retryBackupAfter      = time.Hour        /* after a failed scheduled backup, or the interval if shorter */
+	backupStartGap        = 3 * time.Second  /* per backupParallel overdue devices when spreading first runs */
+	backupSpreadMax       = 10 * time.Minute
 	maxConfigBytes        = 4 << 20
 )
 
@@ -114,10 +116,10 @@ func (p *Poller) backupDevice(ctx context.Context, d device, cache *devCache, so
 	text := errFetchFailed
 	var f *backupFail
 	switch {
-	case errors.As(err, &f):
-		text = f.text
 	case errors.Is(err, context.DeadlineExceeded):
 		text = errBackupTimeout
+	case errors.As(err, &f):
+		text = f.text
 	}
 	p.setBackupError(context.WithoutCancel(ctx), d.ID, text, false)
 	p.log.Info("configuration backup failed", slog.Int64("device_id", d.ID), slog.String("reason", text))
@@ -269,16 +271,66 @@ type backupSlot struct {
 }
 
 /*
-backupLoop runs the scheduled backups: a device's first backup falls at a
-random point of its interval (a restart does not back up everything at once),
+backupSpread is the window over which n devices that are overdue (or have no
+backup yet) are spread: backupStartGap per backupParallel devices, at most
+backupSpreadMax, so a restart or a new fleet does not open all sessions at once
+and a new device still gets its baseline within a few seconds.
+*/
+func backupSpread(n int) time.Duration {
+	return min(time.Duration(n)*backupStartGap/backupParallel, backupSpreadMax)
+}
+
+/*
+seedBackupSlots plans the first run of devs. A device with a recorded
+last_ok_at keeps its place (last_ok_at + interval), so a restart postpones
+nothing; devices overdue or never backed up start at a random point of
+backupSpread(overdue count), never later than their own interval.
+*/
+func (p *Poller) seedBackupSlots(ctx context.Context, devs []device, now time.Time) map[int64]backupSlot {
+	ids := make([]int64, len(devs))
+	for i, d := range devs {
+		ids[i] = d.ID
+	}
+	last := map[int64]time.Time{}
+	rows, err := p.pool.Query(ctx, `SELECT device_id, last_ok_at FROM backups.backup_state WHERE device_id = ANY($1) AND last_ok_at IS NOT NULL`, ids)
+	if err == nil {
+		var id int64
+		var at time.Time
+		_, err = pgx.ForEachRow(rows, []any{&id, &at}, func() error { last[id] = at; return nil })
+	}
+	if err != nil && ctx.Err() == nil {
+		p.log.Warn("reading the backup state failed; scheduling as if none existed", slog.String("err", err.Error()))
+	}
+	out := make(map[int64]backupSlot, len(devs))
+	var overdue []device
+	for _, d := range devs {
+		if at, ok := last[d.ID]; ok {
+			if at.After(now) {
+				at = now
+			}
+			if next := at.Add(d.Backup); next.After(now) {
+				out[d.ID] = backupSlot{next: next, every: d.Backup}
+				continue
+			}
+		}
+		overdue = append(overdue, d)
+	}
+	spread := backupSpread(len(overdue))
+	for _, d := range overdue {
+		out[d.ID] = backupSlot{next: now.Add(jitter(min(spread, d.Backup))), every: d.Backup}
+	}
+	return out
+}
+
+/*
+backupLoop runs the scheduled backups. First runs come from seedBackupSlots;
 later ones one interval after the previous finished. A failed backup is retried
-after an hour (or the interval, if shorter). At most backupParallel run at
-once; each takes the device lock like a poll.
+after an hour (or the interval, if shorter). Fetches share the poller's
+backupParallel slots with backup_now jobs.
 */
 func (p *Poller) backupLoop(ctx context.Context) {
 	var (
 		wg    sync.WaitGroup
-		sem   = make(chan struct{}, backupParallel)
 		mu    sync.Mutex
 		slots = map[int64]backupSlot{}
 		busy  = map[int64]bool{}
@@ -291,15 +343,14 @@ func (p *Poller) backupLoop(ctx context.Context) {
 		devs := p.sched.snapshot()
 		mu.Lock()
 		seen := make(map[int64]bool, len(devs))
-		var due []device
+		var fresh, due []device
 		for _, d := range devs {
 			seen[d.ID] = true
 			s, ok := slots[d.ID]
-			if !ok || s.every != d.Backup {
-				slots[d.ID] = backupSlot{next: now.Add(jitter(d.Backup)), every: d.Backup}
-				continue
-			}
-			if !s.next.After(now) && !busy[d.ID] {
+			switch {
+			case !ok || s.every != d.Backup:
+				fresh = append(fresh, d)
+			case !s.next.After(now) && !busy[d.ID]:
 				busy[d.ID] = true
 				due = append(due, d)
 			}
@@ -310,17 +361,18 @@ func (p *Poller) backupLoop(ctx context.Context) {
 			}
 		}
 		mu.Unlock()
-		for _, d := range due {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
+		if len(fresh) > 0 {
+			seeds := p.seedBackupSlots(ctx, fresh, now)
+			mu.Lock()
+			for id, s := range seeds {
+				slots[id] = s
 			}
+			mu.Unlock()
+		}
+		p.pruneBackupAttempts(now)
+		for _, d := range due {
 			wg.Go(func() {
-				defer func() { <-sem }()
-				err := p.sched.runNow(ctx, d.ID, func(dv device, cache *devCache) error {
-					return p.backupDevice(ctx, dv, cache, sourceSchedule, nil)
-				})
+				err := p.backupGuarded(ctx, d.ID, sourceSchedule, nil)
 				after := d.Backup
 				if err != nil {
 					after = min(d.Backup, retryBackupAfter)
@@ -337,6 +389,53 @@ func (p *Poller) backupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+/*
+backupGuarded is how both the schedule and backup_now back a device up: it
+takes one of the poller's backupParallel fetch slots, then the device lock, and
+skips the device when it was backed up (or attempted) less than backupGap ago.
+The gap is enforced here because the api, which enqueues the jobs, is not
+trusted to keep it.
+*/
+func (p *Poller) backupGuarded(ctx context.Context, id int64, source string, jobID *int64) error {
+	select {
+	case p.backupSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.backupSem }()
+	return p.sched.runNow(ctx, id, func(d device, cache *devCache) error {
+		if p.backupTooSoon(ctx, id) {
+			return nil
+		}
+		return p.backupDevice(ctx, d, cache, source, jobID)
+	})
+}
+
+/* backupTooSoon reports whether device id was attempted (in memory) or backed up successfully (database clock) within backupGap; otherwise it records the attempt. */
+func (p *Poller) backupTooSoon(ctx context.Context, id int64) bool {
+	now := p.now()
+	p.backupMu.Lock()
+	defer p.backupMu.Unlock()
+	if at, ok := p.backupAt[id]; ok && now.Sub(at) < p.backupGap {
+		return true
+	}
+	p.backupAt[id] = now
+	var recent bool
+	err := p.pool.QueryRow(ctx, `SELECT last_ok_at > now() - make_interval(secs => $2) FROM backups.backup_state WHERE device_id = $1 AND last_ok_at IS NOT NULL`,
+		id, p.backupGap.Seconds()).Scan(&recent)
+	return err == nil && recent
+}
+
+func (p *Poller) pruneBackupAttempts(now time.Time) {
+	p.backupMu.Lock()
+	defer p.backupMu.Unlock()
+	for id, at := range p.backupAt {
+		if now.Sub(at) >= p.backupGap {
+			delete(p.backupAt, id)
 		}
 	}
 }
@@ -365,11 +464,7 @@ func (w *backupNowWorker) Work(ctx context.Context, job *river.Job[jobs.BackupNo
 	}
 	jid := job.ID
 	arrived := w.p.now()
-	run := func() error {
-		return w.p.sched.runNow(ctx, id, func(d device, cache *devCache) error {
-			return w.p.backupDevice(ctx, d, cache, source, &jid)
-		})
-	}
+	run := func() error { return w.p.backupGuarded(ctx, id, source, &jid) }
 	err := run()
 	if errors.Is(err, errNotMine) {
 		/* Possibly created a moment ago: reread once before refusing. */

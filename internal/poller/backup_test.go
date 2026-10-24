@@ -351,6 +351,7 @@ func TestBackupScheduleRuns(t *testing.T) {
 	e := newBackupEnv(t, "192.0.2.116:161")
 	e.cfg.Store(&fetched{text: "hostname a\n"})
 	e.p.backupTick = 10 * time.Millisecond
+	e.p.backupGap = 10 * time.Millisecond
 	devs := e.p.sched.snapshot()
 	for i := range devs {
 		devs[i].Backup = 80 * time.Millisecond
@@ -480,5 +481,143 @@ func TestAPIRoleSeesNoSecretOfABackedUpConfig(t *testing.T) {
 	}
 	if !sawMasked {
 		t.Error("the scan did not reach the masked copy (it must be readable and clean)")
+	}
+}
+
+/* A restart postpones nothing: a device keeps last_ok_at + interval; overdue and new devices are spread over a short window. */
+func TestBackupSlotsSurviveRestartAndSpreadOverdue(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.120:161")
+	ctx := context.Background()
+	root := e.env.Pool("postgres")
+	if _, err := root.Exec(ctx, `INSERT INTO backups.backup_state (device_id, last_ok_at) VALUES ($1, now() - interval '30 minutes')`, e.dev); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	devs := []device{{ID: e.dev, Backup: 2 * time.Hour}}
+	got := e.p.seedBackupSlots(ctx, devs, now)[e.dev]
+	want := now.Add(-30 * time.Minute).Add(2 * time.Hour)
+	if d := got.next.Sub(want); d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("next = %v, want about %v (last_ok_at + interval)", got.next, want)
+	}
+	/* Overdue (last backup 3 h ago, interval 2 h) and never backed up: both inside the spread window. */
+	if _, err := root.Exec(ctx, `UPDATE backups.backup_state SET last_ok_at = now() - interval '3 hours' WHERE device_id = $1`, e.dev); err != nil {
+		t.Fatal(err)
+	}
+	var many []device
+	for i := range 200 {
+		many = append(many, device{ID: int64(9_000_000 + i), Backup: 24 * time.Hour})
+	}
+	many = append(many, devs...)
+	slots := e.p.seedBackupSlots(ctx, many, now)
+	window := backupSpread(len(many))
+	if window != 201*backupStartGap/backupParallel {
+		t.Fatalf("spread of 201 devices = %v", window)
+	}
+	late := 0
+	for id, s := range slots {
+		if s.next.Before(now) || s.next.After(now.Add(window)) {
+			t.Fatalf("device %d next = %v, outside [now, now+%v]", id, s.next.Sub(now), window)
+		}
+		if s.next.Sub(now) > window/2 {
+			late++
+		}
+	}
+	if late == 0 {
+		t.Error("overdue devices are not spread over the window")
+	}
+	if backupSpread(100000) != backupSpreadMax || backupSpread(1) >= time.Second {
+		t.Errorf("spread bounds: %v, %v", backupSpread(100000), backupSpread(1))
+	}
+	/* A short interval caps the window. */
+	short := e.p.seedBackupSlots(ctx, []device{{ID: 8_000_000, Backup: 50 * time.Millisecond}}, now)
+	if short[8_000_000].next.After(now.Add(50 * time.Millisecond)) {
+		t.Error("first run later than the interval")
+	}
+}
+
+func TestBackupTimeoutIsClassified(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.121:161")
+	e.p.fetchRaw = func(context.Context, device, *devCache, drivers.Driver) (string, error) {
+		return "", fail(errSSHFailed, context.DeadlineExceeded)
+	}
+	if err := e.run(sourceSchedule); err == nil {
+		t.Fatal("no error")
+	}
+	if got := e.str(`SELECT last_error FROM backups.backup_state WHERE device_id = $1`, e.dev); got != errBackupTimeout {
+		t.Fatalf("last_error = %q", got)
+	}
+}
+
+/* backup_now is bounded: its own queue, backupParallel fetches at most, one fetch per device inside the gap, polls stay prompt. */
+func TestBackupBurstDoesNotStarvePollsAndKeepsLimits(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.122:161")
+	e.cfg.Store(&fetched{text: "hostname burst\n"})
+	var cur, peak atomic.Int64
+	e.p.fetchRaw = func(ctx context.Context, d device, _ *devCache, _ drivers.Driver) (string, error) {
+		n := cur.Add(1)
+		defer cur.Add(-1)
+		for {
+			m := peak.Load()
+			if n <= m || peak.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		e.fetchN.Add(1)
+		select {
+		case <-time.After(150 * time.Millisecond):
+		case <-ctx.Done():
+		}
+		return fmt.Sprintf("hostname d%d\n", d.ID), nil
+	}
+	ids := []int64{e.dev}
+	for i := range 99 {
+		ids = append(ids, e.device(netip.MustParseAddrPort(fmt.Sprintf("192.0.2.%d:161", 140+i))))
+	}
+	if err := e.p.reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.p.sched.mu.Lock()
+	for _, id := range ids {
+		e.p.sched.devs[id].cache.drv = e.drv
+	}
+	e.p.sched.mu.Unlock()
+	start(t, e.p)
+
+	api := e.env.Pool("nms_api")
+	enq, err := jobs.NewEnqueuer(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, id := range ids {
+		if err := pgx.BeginFunc(ctx, api, func(tx pgx.Tx) error { return enq.EnqueueBackupNow(ctx, tx, id, "event") }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	/* A poll_now behind the burst still runs at once: backups have their own queue. */
+	if err := pgx.BeginFunc(ctx, api, func(tx pgx.Tx) error { return enq.EnqueuePollNow(ctx, tx, e.dev) }); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "poll_now completed", func() bool {
+		return e.count(`SELECT count(*) FROM jobs.river_job WHERE kind = 'poll_now' AND state = 'completed'`) == 1
+	})
+	if done := e.count(`SELECT count(DISTINCT device_id) FROM backups.config_version`); done >= 100 {
+		t.Fatalf("poll_now finished only after all %d backups", done)
+	}
+	eventually(t, 60*time.Second, "all backups", func() bool {
+		return e.count(`SELECT count(DISTINCT device_id) FROM backups.config_version WHERE device_id = ANY($1)`, ids) == len(ids)
+	})
+	if p := peak.Load(); p > backupParallel || p < 2 {
+		t.Fatalf("peak concurrent fetches = %d, want 2..%d", p, backupParallel)
+	}
+	/* The poller keeps the gap itself: more requests for the same device, whatever the api's unique key says, fetch nothing. */
+	before := e.fetchN.Load()
+	for range 5 {
+		if err := e.p.backupGuarded(ctx, ids[0], sourceEvent, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e.fetchN.Load() != before {
+		t.Fatalf("%d extra fetches inside the gap", e.fetchN.Load()-before)
 	}
 }
