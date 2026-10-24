@@ -64,7 +64,7 @@ func fullInventory(k int) drivers.Inventory {
 	inv.ARP = []drivers.ARPEntry{{IP: netip.AddrFrom4([4]byte{10, 0, 0, b}), MAC: mac, IfIndex: k}}
 	inv.MAC = []drivers.MACEntry{{MAC: mac, VLAN: 10, IfIndex: k}}
 	inv.VLANs = []drivers.VLAN{{ID: k, Name: fmt.Sprintf("v%d", k)}}
-	inv.LLDP = []drivers.LLDPNeighbor{{LocalIfIndex: k, ChassisID: mac, PortID: "gi1/0/1", SysName: "sw"}}
+	inv.LLDP = []drivers.LLDPNeighbor{{LocalIfIndex: k, LocalPortResolved: true, ChassisID: mac, PortID: "gi1/0/1", PortDescr: "uplink", SysName: "sw"}}
 	inv.Entities = []drivers.Entity{{Index: k, Class: "chassis", Name: "c", Model: "MES2424", Serial: "S"}}
 	inv.Routes = []drivers.Route{{Dest: netip.PrefixFrom(netip.AddrFrom4([4]byte{10, b, 0, 0}), 16), IfIndex: k, Proto: "local"}}
 	return inv
@@ -470,6 +470,11 @@ func TestListPages(t *testing.T) {
 	ll, err := api.LLDP(ctx, dev, inventory.Page{Limit: 10})
 	if err != nil || len(ll) != 5 || ll[0].MgmtAddr != nil || ll[0].PortID != "gi1/0/1" {
 		t.Errorf("lldp = %+v, %v", ll, err)
+	}
+	var descr string
+	var resolved int
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT min(remote_port_descr), count(*) FILTER (WHERE local_port_resolved) FROM inventory.lldp_neighbor WHERE device_id = $1`, dev).Scan(&descr, &resolved); err != nil || descr != "uplink" || resolved != 5 {
+		t.Errorf("lldp port resolution = %q, %d, %v", descr, resolved, err)
 	}
 	en, err := api.Entities(ctx, dev, inventory.Page{Limit: 10})
 	if err != nil || len(en) != 5 || en[0].Model != "MES2424" {

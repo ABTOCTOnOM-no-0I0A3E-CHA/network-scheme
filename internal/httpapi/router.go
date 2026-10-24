@@ -41,7 +41,7 @@ type Deps struct {
 	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
 	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
 	Shutdown      <-chan struct{}  /* closed on server shutdown: open WebSockets get a close frame; nil: never */
-	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows or device parents, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
+	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows, device parents, device create/delete (incl. discovery accept), group membership or group update/delete, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
 	ConfigChanged func()
 }
 
@@ -94,6 +94,8 @@ type server struct {
 	authRL    *httprate.RateLimiter
 	loginSem  chan struct{}
 	loginWait time.Duration
+	uploadSem chan struct{} /* one background upload is processed at a time */
+	serveSem  chan struct{} /* at most serveSlots background downloads stream at a time */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -106,7 +108,7 @@ type server struct {
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
-		loginSem: make(chan struct{}, maxConcurrentLogins), loginWait: loginQueueWait,
+		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), loginWait: loginQueueWait,
 		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {
@@ -237,6 +239,26 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/maintenance", maint, s.listMaintenance)
 	s.route(r, http.MethodPost, "/api/maintenance", maint, s.createMaintenance)
 	s.route(r, http.MethodDelete, "/api/maintenance/{id}", maint, s.deleteMaintenance)
+
+	/* Topology and map: viewing follows device visibility; views, areas, manual links and pinned positions are global map.manage. */
+	mapManage := Policy{Perm: rbac.PermMapManage}
+	s.route(r, http.MethodGet, "/api/topology", read, s.getTopology)
+	s.route(r, http.MethodGet, "/api/topology/changes", read, s.listTopologyChanges)
+	s.route(r, http.MethodPost, "/api/links", mapManage, s.createLink)
+	s.route(r, http.MethodDelete, "/api/links/{id}", mapManage, s.deleteLink)
+	s.route(r, http.MethodGet, "/api/map/views", read, s.listViews)
+	s.route(r, http.MethodPost, "/api/map/views", mapManage, s.createView)
+	s.route(r, http.MethodPatch, "/api/map/views/{id}", mapManage, s.updateView)
+	s.route(r, http.MethodDelete, "/api/map/views/{id}", mapManage, s.deleteView)
+	s.route(r, http.MethodGet, "/api/map/views/{id}/areas", read, s.listAreas)
+	s.route(r, http.MethodPost, "/api/map/views/{id}/areas", mapManage, s.createArea)
+	s.route(r, http.MethodPatch, "/api/map/views/{id}/areas/{area_id}", mapManage, s.updateArea)
+	s.route(r, http.MethodDelete, "/api/map/views/{id}/areas/{area_id}", mapManage, s.deleteArea)
+	s.route(r, http.MethodPut, "/api/map/views/{id}/positions", mapManage, s.putPositions)
+	/* Backgrounds are admin objects: any devices.read holder may fetch one (they are shown under maps). */
+	s.route(r, http.MethodPost, uploadPath, mapManage, s.uploadBackground)
+	s.route(r, http.MethodGet, "/api/map/backgrounds/{id}", read, s.getBackground)
+	s.route(r, http.MethodDelete, "/api/map/backgrounds/{id}", mapManage, s.deleteBackground)
 	return r
 }
 

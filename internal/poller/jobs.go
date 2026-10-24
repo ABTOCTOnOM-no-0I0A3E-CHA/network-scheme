@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,20 +48,41 @@ func (p *Poller) newRiver(life context.Context) (*river.Client[pgx.Tx], error) {
 /*
 reloadForJob rereads the device list for a job naming an unknown device. The
 api can enqueue such jobs at will, so rereads are single-flight and at most
-one runs per jobReloadGap: a job arriving sooner relies on the last one.
+one runs per jobReloadGap. A job that arrived before the last reread started
+relies on it. One that arrived later while the gap is still running gets the
+time to wait (the worker snoozes the job instead of holding a slot); on its
+retry (retry set) the reread started since then covers it, and it is cancelled
+if the device is still unknown.
 */
-func (p *Poller) reloadForJob(ctx context.Context) error {
+func (p *Poller) reloadForJob(ctx context.Context, arrived time.Time, retry bool) (time.Duration, error) {
 	p.jobReload.Lock()
 	defer p.jobReload.Unlock()
-	if !p.lastJobReload.IsZero() && p.now().Sub(p.lastJobReload) < jobReloadGap {
-		return nil
+	if !p.lastJobReload.IsZero() {
+		if !p.lastJobReload.Before(arrived) {
+			return 0, nil
+		}
+		if wait := jobReloadGap - p.now().Sub(p.lastJobReload); wait > 0 {
+			if retry {
+				return 0, nil
+			}
+			return wait, nil
+		}
 	}
+	start := p.now()
 	if err := p.reload(ctx); err != nil {
-		return err
+		return 0, err
 	}
-	p.lastJobReload = p.now()
+	p.lastJobReload = start
 	p.jobReloads.Add(1)
-	return nil
+	return 0, nil
+}
+
+/* snoozed reports whether River has already snoozed the job (metadata maintained by River, not trusted further); unreadable metadata counts as snoozed, so a job is never snoozed forever. */
+func snoozed(metadata []byte) bool {
+	var m struct {
+		Snoozes int `json:"snoozes"`
+	}
+	return json.Unmarshal(metadata, &m) != nil || m.Snoozes > 0
 }
 
 /*
@@ -80,16 +102,24 @@ func (*pollNowWorker) Timeout(*river.Job[jobs.PollNowArgs]) time.Duration { retu
 // Work implements river.Worker.
 func (w *pollNowWorker) Work(ctx context.Context, job *river.Job[jobs.PollNowArgs]) error {
 	id := job.Args.DeviceID
+	arrived := w.p.now()
 	poll := func(d device, cache *devCache) error { return w.p.pollAll(ctx, d, cache) }
 	err := w.p.sched.runNow(ctx, id, poll)
 	if errors.Is(err, errNotMine) {
 		/* Possibly created a moment ago: reread once before refusing. */
-		if rerr := w.p.reloadForJob(ctx); rerr != nil {
+		wait, rerr := w.p.reloadForJob(ctx, arrived, snoozed(job.Metadata))
+		if rerr != nil {
 			return rerr
+		}
+		if wait > 0 {
+			return river.JobSnooze(wait + time.Second)
 		}
 		err = w.p.sched.runNow(ctx, id, poll)
 	}
 	if errors.Is(err, errNotMine) {
+		/* Debug only: the api can enqueue these at will. */
+		w.p.unknownJobs.Add(1)
+		w.p.log.Debug("poll now for a device not assigned here", slog.Int64("device_id", id))
 		return river.JobCancel(err)
 	}
 	if err != nil {

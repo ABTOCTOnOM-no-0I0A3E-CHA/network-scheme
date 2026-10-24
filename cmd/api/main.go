@@ -26,6 +26,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/notify"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/store"
+	"github.com/beekamai/network-scheme/internal/topology"
 	"github.com/beekamai/network-scheme/internal/triggers"
 	"github.com/beekamai/network-scheme/internal/triggers/metricsrc"
 )
@@ -146,12 +147,15 @@ func serve(ctx context.Context, args []string) error {
 			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueuePollNow(c, tx, id) })
 		},
 	})
+	/* The topology builder reads neighbour data and writes links; it stops with the server. */
+	topo := topology.New(topology.Config{Pool: pool, Log: log})
+	topoDone := make(chan struct{})
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
 			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: mstore, Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
-			Hub: hub, Shutdown: closing, ConfigChanged: eng.Reload,
+			Hub: hub, Shutdown: closing, ConfigChanged: func() { eng.Reload(); topo.Reload() },
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -169,7 +173,13 @@ func serve(ctx context.Context, args []string) error {
 			log.Error("trigger engine stopped", slog.String("error", err.Error()))
 		}
 	}()
-	defer func() { stopEngine(); <-engDone }()
+	go func() {
+		defer close(topoDone)
+		if err := topo.Run(engCtx); err != nil {
+			log.Error("topology builder stopped", slog.String("error", err.Error()))
+		}
+	}()
+	defer func() { stopEngine(); <-engDone; <-topoDone }()
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

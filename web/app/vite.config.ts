@@ -18,6 +18,8 @@ export default defineConfig({
     cssCodeSplit: false,
     modulePreload: { polyfill: false },
   },
+  /* the layout worker is a separate bundled file under /assets/ (CSP: script-src covers workers) */
+  worker: { format: "es" },
   server: { proxy: { "/api": "http://localhost:8080" } },
   test: {
     environment: "jsdom",

@@ -233,6 +233,15 @@ describe("EventFeed", () => {
     expect(row.textContent).toContain("Свёрнуто событий (Syslog)");
   });
 
+  it("shows a topology row as a link change with the device and port text", async () => {
+    eventsFn = () => HttpResponse.json({ items: [ev(0, { kind: "topology", severity: "warning", name: "disappeared", text: "sw1 gi1 ↔ sw2 gi2" })], next_cursor: null });
+    wrap(<EventFeed />);
+    await waitFor(() => expect(dataRows()).toHaveLength(1));
+    const row = dataRows()[0];
+    expect(within(row).getByText(ru.events.kind.topology)).toBeInTheDocument();
+    expect(row.textContent).toContain(`${ru.events.linkDisappeared}: sw1 gi1 ↔ sw2 gi2`);
+  });
+
   it("maps API errors to a localized message", async () => {
     eventsFn = () => err(400, "bad_request");
     wrap(<EventFeed />);

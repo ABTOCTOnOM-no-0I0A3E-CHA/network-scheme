@@ -821,7 +821,10 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        /** Delete a device and its credentials */
+        /**
+         * Delete a device and its credentials
+         * @description The disappearance of each of its links is recorded in the link change history first.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -1805,13 +1808,15 @@ export interface paths {
          *     and stable for events at the same instant; repeat the filters with it.
          *     Syslog severity 0-1 maps to disaster, 2 high, 3 average, 4 warning,
          *     5-7 info; a trap no rule named has severity null and counts as info
-         *     for severity_min. Varbinds over 16 KiB are left out. All text comes from
+         *     for severity_min. Varbinds over 16 KiB are left out. Topology rows (a link
+         *     appeared or disappeared) need both ends visible; device_id matches either end;
+         *     they never match q. All text comes from
          *     devices: render it as text only.
          */
         get: {
             parameters: {
                 query?: {
-                    kind?: "syslog" | "trap" | "storm";
+                    kind?: "syslog" | "trap" | "storm" | "topology";
                     device_id?: number;
                     severity_min?: components["schemas"]["EventSeverity"];
                     from?: string;
@@ -2875,6 +2880,777 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/topology": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Nodes, links and areas for the map
+         * @description Only devices the caller can see (devices.read, subgroups included) are
+         *     nodes; a link is returned only if both of its ends are visible, and the
+         *     summary status of an area counts visible devices only. group_id narrows
+         *     the nodes to that group and its subgroups (404 for a group the caller
+         *     cannot see or that does not exist); links then need both ends inside it.
+         *     view_id adds the stored positions (x, y, pinned), the areas of the view
+         *     and the area of each node: the smallest area whose rectangle contains the
+         *     node's position (a node without a position has none); without view_id
+         *     areas is empty. Views and areas are global admin-entered objects whose
+         *     names every devices.read holder sees; they are not device data. The area
+         *     status is the worst state of the visible devices in it and its sub-areas
+         *     (down, partial, unknown, up; an area without visible devices is unknown).
+         *     Link ends are in canonical order (a < b). Port names come from the
+         *     devices' interface tables (name, else alias): render as text only.
+         *     speed_bps is the lower known speed of the two ends. Link utilisation is
+         *     not part of this response; read it per interface from the metrics
+         *     endpoint.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    view_id?: number;
+                    group_id?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The topology */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Topology"];
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/topology/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Link appearances and disappearances, newest first
+         * @description A change is visible when both ends are visible to the caller; one whose
+         *     device has been deleted since is visible only to a global binding (its
+         *     name is then empty). The same rows are in GET /api/events as kind
+         *     topology. The cursor is opaque; repeat limit with it.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of changes */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["LinkChange"][];
+                            /** @description null on the last page */
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Draw a manual link
+         * @description A manual link has confidence 1 and is never changed or removed by the
+         *     builder; it suppresses automatic links over the same cable. Both devices
+         *     must be visible to the caller (else 404). Ports are optional (unknown);
+         *     the ends are stored in canonical order whatever order is sent. Writes a
+         *     link change "appeared" (source manual) in the same transaction, is
+         *     audited, and the builder reloads. 409 link_exists for an identical manual
+         *     link, 409 too_many_links at 64 links between the pair. A detected link with
+         *     exactly the same ends (unknown ports match unknown ports only) is not a
+         *     duplicate: that row becomes the manual link (same id, confidence 1) and the
+         *     id is returned with 201; no change is written since it already appeared, and
+         *     the audit record carries converted_from (its former source).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        a_device_id: number;
+                        a_if_index?: number | null;
+                        /** Format: int64 */
+                        b_device_id: number;
+                        b_if_index?: number | null;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/links/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a manual link
+         * @description Only manual links; an automatic link, a missing one and one with an end
+         *     the caller cannot see all answer 404. Writes a link change "disappeared"
+         *     (source manual) in the same transaction and is audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/map/views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Map views
+         * @description At most 100. Views are global objects; every devices.read holder sees them.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Views */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MapView"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a map view
+         * @description At most 100 views (409 too_many_views). A background_id that does not exist answers 400. Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        /** @enum {string} */
+                        kind: "logical" | "plan";
+                        /** Format: int64 */
+                        background_id?: number | null;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/map/views/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a map view with its areas and node positions
+         * @description Its background is deleted too when no other view uses it. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Change a map view
+         * @description Only the given fields change; background_id null removes the background. At least one field is required.
+         *     A background that no other view uses any more is deleted in the same transaction (the audit record
+         *     carries deleted_background_id). Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        /** @enum {string} */
+                        kind?: "logical" | "plan";
+                        /** Format: int64 */
+                        background_id?: number | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Changed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/map/views/{id}/areas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Areas of a view
+         * @description Geometry only; the summary status per area is part of GET /api/topology. At most 2000.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Areas */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MapArea"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Create an area
+         * @description Areas nest to at most 8 levels and the parent must be in the same view
+         *     (409 area_other_view; a parent that does not exist is reported the same
+         *     way), without cycles (409 area_cycle; 409 area_too_deep). At most 2000
+         *     areas per view (409 too_many_areas). Coordinates are within +-1e6, w and
+         *     h positive and at most 1e6. Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        parent_id?: number | null;
+                        kind: components["schemas"]["MapAreaKind"];
+                        name: string;
+                        x: number;
+                        y: number;
+                        w: number;
+                        h: number;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/map/views/{id}/areas/{area_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete an area
+         * @description Its sub-areas become roots of the view. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    area_id: components["parameters"]["AreaId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Change an area
+         * @description Only the given fields change; parent_id null makes the area a root. The view of an area never changes. Same parent errors as on create. Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                    area_id: components["parameters"]["AreaId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        parent_id?: number | null;
+                        kind?: components["schemas"]["MapAreaKind"];
+                        name?: string;
+                        x?: number;
+                        y?: number;
+                        w?: number;
+                        h?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Changed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/map/views/{id}/positions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Store node positions of a view in one batch
+         * @description 1 to 5000 items, all or nothing: a device the caller cannot see or that
+         *     does not exist answers 404 for the whole batch and nothing is written; a
+         *     repeated device or a coordinate outside +-1e6 answers 400. An existing
+         *     position is replaced as sent (send pinned=false to unpin). Audited with
+         *     counts only.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        items: {
+                            /** Format: int64 */
+                            device_id: number;
+                            x: number;
+                            y: number;
+                            pinned: boolean;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Stored */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/map/backgrounds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a map background
+         * @description multipart/form-data with exactly one part named `file` (file name up to 200 characters). The type is taken
+         *     from the content only: PNG, JPEG, WebP (header checked, at most 16384 x 16384 pixels) or SVG (rewritten through
+         *     an allowlist of elements and attributes; what is stored and served is the sanitized document). At most 20 MiB;
+         *     this is the only route whose request body may exceed 1 MiB. Immutable once stored; at most 200 backgrounds
+         *     (409 too_many_backgrounds). Uploads are processed one at a time; a second one waits up to 10 s, then 429.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Stored */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            id: number;
+                            /** @enum {string} */
+                            mime: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+                            width: number;
+                            height: number;
+                            /** @description Stored bytes (the sanitized document for SVG) */
+                            size: number;
+                            /** @description Hex digest of the stored bytes (the ETag) */
+                            sha256: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+                413: components["responses"]["Error"];
+                415: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/map/backgrounds/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a map background
+         * @description Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
+         *     carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox`,
+         *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
+         *     and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
+         *     pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
+         *     Retry-After. Use it only as an `<img src>`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The image */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "image/png": string;
+                        "image/jpeg": string;
+                        "image/webp": string;
+                        "image/svg+xml": string;
+                    };
+                };
+                /** @description Not modified */
+                304: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Delete a map background
+         * @description Views that use it fall back to no background. Unused backgrounds are also deleted automatically when
+         *     the last view using one drops it or is deleted, so this is for backgrounds that were uploaded but
+         *     never assigned. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3053,15 +3829,15 @@ export interface components {
             /** Format: date-time */
             ts: string;
             /**
-             * @description storm: events a source sent above its rate limit, folded per minute
+             * @description storm: events a source sent above its rate limit, folded per minute; topology: a link appeared or disappeared (name is appeared or disappeared, text is the device and port names of both ends, device_id is end A, severity info or warning)
              * @enum {string}
              */
-            kind: "syslog" | "trap" | "storm";
+            kind: "syslog" | "trap" | "storm" | "topology";
             /** Format: int64 */
             device_id: number;
             device_name: string;
             severity: components["schemas"]["EventSeverity"] | null;
-            /** @description Trap name (traps only) */
+            /** @description Trap name (traps), or appeared/disappeared (topology) */
             name?: string;
             /** @description Syslog application (syslog only) */
             app?: string;
@@ -3293,10 +4069,123 @@ export interface components {
             /** Format: int64 */
             speed_bps: number;
         };
+        /** @enum {string} */
+        MapAreaKind: "organization" | "building" | "floor" | "room";
+        MapView: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            /** @enum {string} */
+            kind: "logical" | "plan";
+            /** Format: int64 */
+            background_id: number | null;
+        };
+        MapArea: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            parent_id: number | null;
+            kind: components["schemas"]["MapAreaKind"];
+            name: string;
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+        };
+        TopologyNode: {
+            /** Format: int64 */
+            device_id: number;
+            name: string;
+            /** @enum {string} */
+            state: "up" | "partial" | "down" | "unknown";
+            driver: string;
+            /**
+             * Format: int64
+             * @description Smallest area of the requested view whose rectangle contains the position; absent without view_id or position
+             */
+            area_id?: number;
+            /** @description Present with view_id when the node has a position */
+            x?: number;
+            y?: number;
+            pinned: boolean;
+        };
+        TopologyLink: {
+            /** Format: int64 */
+            id: number;
+            /**
+             * Format: int64
+             * @description Device id; always smaller than b
+             */
+            a: number;
+            /** Format: int64 */
+            b: number;
+            /** @description ifIndex on a; null when unknown */
+            a_if: number | null;
+            b_if: number | null;
+            /** @description Interface name, else alias, else empty; from the device, render as text only */
+            a_port_name: string;
+            b_port_name: string;
+            /**
+             * Format: int64
+             * @description Lower known speed of the two ends
+             */
+            speed_bps: number | null;
+            /** @enum {string} */
+            source: "lldp" | "cdp" | "mac" | "manual";
+            confidence: number;
+            manual: boolean;
+        };
+        TopologyArea: components["schemas"]["MapArea"] & {
+            /** @description Visible devices in the area and its sub-areas */
+            device_count: number;
+            states: {
+                up: number;
+                partial: number;
+                down: number;
+                unknown: number;
+            };
+            /**
+             * @description Worst state of the visible devices in the area
+             * @enum {string}
+             */
+            status: "up" | "partial" | "down" | "unknown";
+        };
+        Topology: {
+            nodes: components["schemas"]["TopologyNode"][];
+            links: components["schemas"]["TopologyLink"][];
+            areas: components["schemas"]["TopologyArea"][];
+        };
+        /** @description Names come from the devices and their interface tables; render as text only */
+        LinkChange: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            at: string;
+            /** @enum {string} */
+            change: "appeared" | "disappeared";
+            /** @enum {string} */
+            source: "lldp" | "cdp" | "mac" | "manual";
+            /**
+             * Format: int64
+             * @description The link may be gone by now
+             */
+            link_id: number | null;
+            /** Format: int64 */
+            a_device_id: number;
+            /** @description Empty when the device was deleted */
+            a_device_name: string;
+            a_if_index: number | null;
+            a_port_name: string;
+            /** Format: int64 */
+            b_device_id: number;
+            b_device_name: string;
+            b_if_index: number | null;
+            b_port_name: string;
+        };
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -3328,6 +4217,7 @@ export interface components {
     parameters: {
         Id: number;
         ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
+        AreaId: number;
         TriggerId: number;
         Limit: number;
         Offset: number;

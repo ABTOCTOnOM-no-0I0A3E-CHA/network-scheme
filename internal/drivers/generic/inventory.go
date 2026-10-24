@@ -22,6 +22,8 @@ const (
 	dot1dTpFdbPort             = "1.3.6.1.2.1.17.4.3.1.2"     /* BRIDGE-MIB */
 	dot1qTpFdbPort             = "1.3.6.1.2.1.17.7.1.2.2.1.2" /* Q-BRIDGE-MIB */
 	dot1qVlanStaticName        = "1.3.6.1.2.1.17.7.1.4.3.1.1"
+	dot1qVlanFdbID             = "1.3.6.1.2.1.17.7.1.4.2.1.3"
+	lldpLocPortEntry           = "1.0.8802.1.1.2.1.3.7.1" /* lldpLocPortTable */
 	lldpRemEntry               = "1.0.8802.1.1.2.1.4.1.1" /* LLDP-MIB */
 	lldpRemManAddrIfSubtype    = "1.0.8802.1.1.2.1.4.2.1.3"
 	inetCidrRouteEntry         = "1.3.6.1.2.1.4.24.7.1" /* IP-FORWARD-MIB */
@@ -135,8 +137,10 @@ func (d Driver) arp(ctx context.Context, r snmp.Reader, inv *drivers.Inventory) 
 }
 
 /*
-fdb walks dot1qTpFdbTable (VLAN taken from the FDB id when it is 1..4094), or
-dot1dTpFdbTable when the former is empty. Bridge ports are mapped to ifIndex
+fdb walks dot1qTpFdbTable, or dot1dTpFdbTable when the former is empty. The
+VLAN of an entry is the one dot1qVlanFdbId maps its FDB id to (none when the id
+is shared by several VLANs); an id absent from that table is taken as the VLAN
+itself when it is 1..4094. Bridge ports are mapped to ifIndex
 through dot1dBasePortIfIndex; without that table the port is taken as ifIndex.
 */
 func (d Driver) fdb(ctx context.Context, r snmp.Reader, inv *drivers.Inventory) (int, error) {
@@ -174,14 +178,30 @@ func (d Driver) fdb(ctx context.Context, r snmp.Reader, inv *drivers.Inventory) 
 		}
 		inv.MAC = append(inv.MAC, drivers.MACEntry{MAC: mac, VLAN: vlan, IfIndex: ifIndex})
 	}
+	/* index: timeMark, VlanIndex; a malformed row is skipped, the FDB id then falls back to itself */
+	fdbVLAN := map[uint32]int{}
+	_, err = drivers.WalkColumn(ctx, r, dot1qVlanFdbID, d.limit(), func(idx []uint32, v snmp.Var) {
+		id, ok := snmp.AsUint64(v)
+		if len(idx) != 2 || idx[1] < 1 || idx[1] > 4094 || !ok || id < 1 || id > math.MaxUint32 {
+			return
+		}
+		if old, dup := fdbVLAN[uint32(id)]; dup && old != int(idx[1]) {
+			fdbVLAN[uint32(id)] = 0 /* shared FDB: the VLAN of an entry is unknown */
+			return
+		}
+		fdbVLAN[uint32(id)] = int(idx[1])
+	})
+	if err != nil {
+		return bad, err
+	}
 	/* index: dot1qFdbId, MAC */
 	n, err := drivers.WalkColumn(ctx, r, dot1qTpFdbPort, d.limit(), func(idx []uint32, v snmp.Var) {
 		if len(idx) != 7 {
 			bad++
 			return
 		}
-		vlan := 0
-		if idx[0] >= 1 && idx[0] <= 4094 {
+		vlan, mapped := fdbVLAN[idx[0]]
+		if !mapped && idx[0] >= 1 && idx[0] <= 4094 {
 			vlan = int(idx[0])
 		}
 		add(idx[1:], vlan, v)
@@ -219,6 +239,9 @@ const (
 	chassisNet = 5
 	portMAC    = 3
 	portNet    = 4
+
+	lldpPortIfName = 5 /* lldpLocPortIdSubtype: interfaceName */
+	lldpPortLocal  = 7 /* local */
 )
 
 type lldpRow struct {
@@ -229,9 +252,9 @@ type lldpRow struct {
 }
 
 /*
-lldp walks lldpRemTable and lldpRemManAddrTable. The local port number is
-reported as LocalIfIndex: LLDP-MIB does not tie it to ifIndex, but agents
-commonly use the same numbering. Rows without a chassis ID are malformed.
+lldp walks lldpRemTable and lldpRemManAddrTable. LocalIfIndex is the ifIndex
+lldpLocPortTable ties the local port number to (see lldpLocalPorts); rows without
+a chassis ID are malformed.
 */
 func (d Driver) lldp(ctx context.Context, r snmp.Reader, inv *drivers.Inventory) (int, error) {
 	rows := map[[3]uint32]*lldpRow{}
@@ -270,20 +293,22 @@ func (d Driver) lldp(ctx context.Context, r snmp.Reader, inv *drivers.Inventory)
 			return malformed, err
 		}
 	}
-	/* index: lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex, address subtype, length-prefixed address */
+	/* index: lldpRemTimeMark, lldpRemLocalPortNum, lldpRemIndex, address subtype, length-prefixed address; IPv4 is taken, IPv6 only when the row has no IPv4 */
 	_, err := drivers.WalkColumn(ctx, r, lldpRemManAddrIfSubtype, d.limit(), func(idx []uint32, _ snmp.Var) {
 		if len(idx) < 5 {
 			return
 		}
 		row := rows[[3]uint32(idx[:3])]
 		ip, rest, ok := inetAddr(idx[3], idx[4:])
-		if row == nil || !ok || len(rest) != 0 {
+		if row == nil || !ok || len(rest) != 0 || (row.mgmt.IsValid() && (row.mgmt.Is4() || !ip.Is4())) {
 			return
 		}
-		if !row.mgmt.IsValid() || (row.mgmt.Is6() && ip.Is4()) { /* prefer IPv4 */
-			row.mgmt = ip
-		}
+		row.mgmt = ip
 	})
+	if err != nil {
+		return malformed, err
+	}
+	locIf, err := d.lldpLocalPorts(ctx, r)
 	if err != nil {
 		return malformed, err
 	}
@@ -293,16 +318,86 @@ func (d Driver) lldp(ctx context.Context, r snmp.Reader, inv *drivers.Inventory)
 			malformed++
 			continue
 		}
+		ifIndex, resolved := locIf(k[1])
 		inv.LLDP = append(inv.LLDP, drivers.LLDPNeighbor{
-			LocalIfIndex: int(k[1]),
-			ChassisID:    lldpID(row.chassisSub, row.chassis, chassisMAC, chassisNet),
-			PortID:       lldpID(row.portSub, row.port, portMAC, portNet),
-			PortDescr:    row.portDescr,
-			SysName:      row.sysName,
-			MgmtAddr:     row.mgmt,
+			LocalIfIndex: ifIndex, LocalPortResolved: resolved,
+			ChassisID: lldpID(row.chassisSub, row.chassis, chassisMAC, chassisNet),
+			PortID:    lldpID(row.portSub, row.port, portMAC, portNet),
+			PortDescr: row.portDescr,
+			SysName:   row.sysName,
+			MgmtAddr:  row.mgmt,
 		})
 	}
 	return malformed, nil
+}
+
+/*
+lldpLocalPorts maps lldpRemLocalPortNum to an ifIndex. LLDP-MIB does not tie the
+two together, so a port is resolved only when its lldpLocPortId (interfaceName(5)
+or local(7) subtype) equals exactly one ifName/ifDescr; that ifIndex is returned
+with resolved=true. Otherwise the port number is returned as is, unresolved
+(agents commonly number ports like ifIndex, but nothing confirms it). Malformed
+rows are ignored.
+*/
+func (d Driver) lldpLocalPorts(ctx context.Context, r snmp.Reader) (func(uint32) (int, bool), error) {
+	type loc struct {
+		sub int64
+		id  string
+	}
+	locs := map[uint32]*loc{}
+	for _, c := range []struct {
+		col string
+		set func(*loc, snmp.Var)
+	}{
+		{"2", func(l *loc, v snmp.Var) { l.sub, _ = intVal(v) }},
+		{"3", func(l *loc, v snmp.Var) { l.id = lldpText(rawBytes(v)) }},
+	} {
+		/* index: lldpLocPortNum */
+		_, err := drivers.WalkColumn(ctx, r, lldpLocPortEntry+"."+c.col, d.limit(), func(idx []uint32, v snmp.Var) {
+			if len(idx) != 1 || !validIndex(idx[0]) {
+				return
+			}
+			l := locs[idx[0]]
+			if l == nil {
+				l = &loc{}
+				locs[idx[0]] = l
+			}
+			c.set(l, v)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	byName := map[string][]int{}
+	if len(locs) > 0 {
+		rows, keys, _, err := d.walkInterfaces(ctx, r, []ifColumn{colDescr, colName})
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range keys {
+			for _, n := range []string{rows[i].descr, rows[i].name} {
+				if n != "" && !slices.Contains(byName[n], i) {
+					byName[n] = append(byName[n], i)
+				}
+			}
+		}
+	}
+	return func(port uint32) (int, bool) {
+		if l := locs[port]; l != nil && (l.sub == lldpPortIfName || l.sub == lldpPortLocal) && l.id != "" {
+			if c := byName[l.id]; len(c) == 1 {
+				return c[0], true
+			}
+		}
+		return int(port), false
+	}, nil
+}
+
+/* lldpText renders an LLDP ID as text; empty when it is not printable. */
+func lldpText(b []byte) string {
+	if len(b) == 0 || !utf8.Valid(b) || strings.ContainsFunc(string(b), unicode.IsControl) {
+		return ""
+	}
+	return drivers.CleanText(b)
 }
 
 func rawBytes(v snmp.Var) []byte {

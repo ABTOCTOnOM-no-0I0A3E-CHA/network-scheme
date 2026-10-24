@@ -40,11 +40,15 @@ export const problemKeys = {
 
 export const PAGE_LIMIT = 100;
 
+/* the open list and details refresh while mounted, so changes made elsewhere (resolution, suppression) show up without a reload */
+const REFRESH_MS = 30_000;
+
 /** Problems, newest first, chained by the opaque cursor; the filters are repeated with every page. */
 export function useProblems(f: ProblemFilter) {
   return useInfiniteQuery({
     queryKey: problemKeys.list(f),
     retry: false,
+    refetchInterval: REFRESH_MS,
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) =>
       unwrap(
@@ -62,6 +66,7 @@ export function useProblem(id: number, enabled = true) {
     queryKey: problemKeys.one(id),
     enabled,
     retry: false,
+    refetchInterval: REFRESH_MS,
     queryFn: async () => unwrap(await api.GET("/api/problems/{id}", { params: { path: { id } } })),
   });
 }

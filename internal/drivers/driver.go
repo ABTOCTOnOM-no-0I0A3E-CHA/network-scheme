@@ -172,14 +172,17 @@ type VLAN struct {
 /*
 LLDPNeighbor is a remote LLDP system seen on a local port. MgmtAddr is the
 zero Addr when the neighbor advertised no IP management address.
+LocalPortResolved is true when LocalIfIndex was tied to an interface by name
+(lldpLocPortId), false when the LLDP port number is passed through unchecked.
 */
 type LLDPNeighbor struct {
-	LocalIfIndex int
-	ChassisID    string
-	PortID       string
-	PortDescr    string
-	SysName      string
-	MgmtAddr     netip.Addr
+	LocalIfIndex      int
+	LocalPortResolved bool
+	ChassisID         string
+	PortID            string
+	PortDescr         string
+	SysName           string
+	MgmtAddr          netip.Addr
 }
 
 /* Entity is a physical component (ENTITY-MIB); Class is the MIB enum name. */

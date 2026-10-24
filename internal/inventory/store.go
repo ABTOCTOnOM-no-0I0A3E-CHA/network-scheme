@@ -115,10 +115,12 @@ var tables = []table{
 			return len(rows), []any{id, name}
 		}},
 	{drivers.TableLLDP, `
-		INSERT INTO inventory.lldp_neighbor AS t (device_id, local_if_index, chassis_id, port_id, sys_name, mgmt_addr, seen_at)
-		SELECT $1, i, c, p, n, NULLIF(m, '')::inet, $2 FROM unnest($3::int[], $4::text[], $5::text[], $6::text[], $7::text[]) AS u(i, c, p, n, m)
+		INSERT INTO inventory.lldp_neighbor AS t (device_id, local_if_index, chassis_id, port_id, sys_name, mgmt_addr, remote_port_descr, local_port_resolved, seen_at)
+		SELECT $1, i, c, p, n, NULLIF(m, '')::inet, NULLIF(d, ''), r, $2
+		FROM unnest($3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::bool[]) AS u(i, c, p, n, m, d, r)
 		ON CONFLICT (device_id, local_if_index, chassis_id, port_id) DO UPDATE SET sys_name = excluded.sys_name,
-			mgmt_addr = excluded.mgmt_addr, seen_at = excluded.seen_at`,
+			mgmt_addr = excluded.mgmt_addr, remote_port_descr = excluded.remote_port_descr,
+			local_port_resolved = excluded.local_port_resolved, seen_at = excluded.seen_at`,
 		func(inv drivers.Inventory) (int, []any) {
 			type key struct {
 				ifIndex       int
@@ -126,10 +128,12 @@ var tables = []table{
 			}
 			rows := dedupe(inv.LLDP, func(r drivers.LLDPNeighbor) key { return key{r.LocalIfIndex, r.ChassisID, r.PortID} })
 			idx, chassis, port, name, mgmt := make([]int, len(rows)), make([]string, len(rows)), make([]string, len(rows)), make([]string, len(rows)), make([]string, len(rows))
+			descr, resolved := make([]string, len(rows)), make([]bool, len(rows))
 			for k, r := range rows {
 				idx[k], chassis[k], port[k], name[k], mgmt[k] = r.LocalIfIndex, r.ChassisID, r.PortID, r.SysName, addrText(r.MgmtAddr)
+				descr[k], resolved[k] = r.PortDescr, r.LocalPortResolved
 			}
-			return len(rows), []any{idx, chassis, port, name, mgmt}
+			return len(rows), []any{idx, chassis, port, name, mgmt, descr, resolved}
 		}},
 	{drivers.TableEntities, `
 		INSERT INTO inventory.entity AS t (device_id, ent_index, class, name, model, serial, seen_at)

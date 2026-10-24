@@ -57,10 +57,14 @@ function EventRow({ e, expanded, onToggle, showDevice }: { e: NmsEvent; expanded
   const { t, i18n } = useTranslation();
   const storm = e.kind === "storm";
   /* a storm row folds events above the rate limit: text carries the folded kind, ts the minute */
+  const topology = e.kind === "topology";
+  /* a topology row carries the change in name and the "A port ↔ B port" text built from device data */
   const text = storm
     ? t("events.storm", { kind: t(`events.kind.${e.text === "trap" ? "trap" : "syslog"}`), count: e.count ?? 0, minute: new Date(e.ts).toLocaleTimeString(i18n.language, { hour: "2-digit", minute: "2-digit" }) })
-    : safeText(e.text);
-  const source = storm ? "" : safeText(e.kind === "trap" ? e.name : e.app);
+    : topology
+      ? `${t(e.name === "disappeared" ? "events.linkDisappeared" : "events.linkAppeared")}: ${safeText(e.text)}`
+      : safeText(e.text);
+  const source = storm || topology ? "" : safeText(e.kind === "trap" ? e.name : e.app);
   return (
     <>
       <div className={cn(GRID, "h-10 text-sm")}>

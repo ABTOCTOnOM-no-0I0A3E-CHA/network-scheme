@@ -356,6 +356,12 @@ func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "devices.delete", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10),
 		Details: map[string]any{"name": d.Name, "address": d.Address.String()}}
 	if !s.change(w, r, ev, func(tx pgx.Tx, _ *audit.Event) error {
+		/* The links go with the device (cascade): their disappearance is recorded first. */
+		if _, err := tx.Exec(r.Context(), `INSERT INTO core.link_change (link_id, a_device_id, a_if_index, b_device_id, b_if_index, change, source)
+			SELECT id, a_device_id, a_if_index, b_device_id, b_if_index, 'disappeared', source FROM core.link
+			WHERE a_device_id = $1 OR b_device_id = $1`, id); err != nil {
+			return err
+		}
 		return s.devices.Delete(r.Context(), tx, id)
 	}) {
 		return

@@ -36,6 +36,11 @@ export function canManageTriggers(session: Session | null | undefined): boolean 
   return !!session?.roles.some((r) => r.role === "admin");
 }
 
+/** UI hint only: devices.read belongs to every role but the auditor (audit.read only). */
+export function canReadDevices(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role !== "auditor");
+}
+
 /** UI hint only: maintenance.manage belongs to the admin role, global or on a group. */
 export function canManageMaintenance(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "admin");
@@ -48,5 +53,10 @@ export function canAckProblems(session: Session | null | undefined): boolean {
 
 /** UI hint only: the problem feed (/api/ws) needs devices.read, which every role but the auditor has. */
 export function canReceiveProblems(session: Session | null | undefined): boolean {
-  return !!session?.roles.some((r) => r.role !== "auditor");
+  return canReadDevices(session);
+}
+
+/** UI hint only: map.manage (views, areas, backgrounds, pinned positions) is not group-scoped, so only a global admin binding holds it. */
+export function canManageMap(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin" && r.group_id === null);
 }

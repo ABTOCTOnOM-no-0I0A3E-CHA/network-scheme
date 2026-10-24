@@ -404,7 +404,10 @@ func (e *Engine) syslogRange(ctx context.Context, a *actions, lo, hi int64, floo
 		}
 		for _, t := range e.cfg.eff[h.dev] {
 			par, ok := t.params.(*Syslog)
-			if !ok || idx[syslogFilter(par)] != h.f {
+			if !ok {
+				continue
+			}
+			if i, known := idx[syslogFilter(par)]; !known || i != h.f { /* a filter missing from idx must not alias filter 0 */
 				continue
 			}
 			a.open(e, openReq{key: pkey{trig: t.id, dev: h.dev}, severity: t.severity, value: msg, event: true})

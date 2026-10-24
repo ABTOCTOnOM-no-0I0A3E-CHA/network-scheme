@@ -19,12 +19,14 @@ import (
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/httpapi/clientip"
+	"github.com/beekamai/network-scheme/internal/mapimg"
 )
 
 const (
-	maxBodyBytes     = 1 << 20 /* 1 MiB per request body */
-	generalRateLimit = 600     /* requests per minute per client IP */
-	defaultAuthLimit = 10      /* requests per minute per client IP on credential endpoints */
+	maxBodyBytes     = 1 << 20                        /* 1 MiB per request body */
+	maxUploadBody    = mapimg.MaxBytes + maxBodyBytes /* a background upload: the image plus multipart framing */
+	generalRateLimit = 600                            /* requests per minute per client IP */
+	defaultAuthLimit = 10                             /* requests per minute per client IP on credential endpoints */
 	cookieName       = "__Host-nms_session"
 	csrfHeader       = "X-CSRF-Token"
 )
@@ -101,14 +103,18 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-/* limitBody rejects declared oversize bodies at once and caps streamed ones. */
+/* limitBody rejects declared oversize bodies at once and caps streamed ones; only the background upload may exceed 1 MiB. */
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ContentLength > maxBodyBytes {
+		limit := int64(maxBodyBytes)
+		if r.Method == http.MethodPost && r.URL.Path == uploadPath {
+			limit = maxUploadBody
+		}
+		if r.ContentLength > limit {
 			writeError(w, errTooLarge)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }

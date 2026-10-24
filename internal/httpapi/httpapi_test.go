@@ -138,11 +138,13 @@ type req struct {
 	method, path string
 	body         any
 	raw          []byte
+	ctype        string /* Content-Type of the body; empty: application/json */
 	cookie       string
 	csrf         string
 	origin       string
 	remote       string
 	xff          string
+	inm          string /* If-None-Match */
 }
 
 func (f *fixture) do(r req) *http.Response {
@@ -162,9 +164,15 @@ func (f *fixture) do(r req) *http.Response {
 	if body != nil {
 		hr.Header.Set("Content-Type", "application/json")
 	}
+	if r.ctype != "" {
+		hr.Header.Set("Content-Type", r.ctype)
+	}
 	hr.RemoteAddr = f.ip + ":40000"
 	if r.remote != "" {
 		hr.RemoteAddr = r.remote
+	}
+	if r.inm != "" {
+		hr.Header.Set("If-None-Match", r.inm)
 	}
 	if r.xff != "" {
 		hr.Header.Set("X-Forwarded-For", r.xff)

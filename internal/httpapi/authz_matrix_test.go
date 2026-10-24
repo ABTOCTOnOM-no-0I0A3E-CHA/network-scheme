@@ -98,6 +98,22 @@ var matrix = map[string]map[string]int{
 	"POST /api/maintenance":                                   {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 201},
 	"DELETE /api/maintenance/{id}":                            {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
 	"GET /api/system/status":                                  {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 200, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"GET /api/topology":                                       {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/topology/changes":                               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/links":                                         {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"DELETE /api/links/{id}":                                  {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/map/views":                                      {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/map/views":                                     {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"PATCH /api/map/views/{id}":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"DELETE /api/map/views/{id}":                              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"GET /api/map/views/{id}/areas":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/map/views/{id}/areas":                          {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"PATCH /api/map/views/{id}/areas/{area_id}":               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"DELETE /api/map/views/{id}/areas/{area_id}":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"PUT /api/map/views/{id}/positions":                       {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
+	"POST /api/map/backgrounds":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
+	"GET /api/map/backgrounds/{id}":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"DELETE /api/map/backgrounds/{id}":                        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
 }
 
 /*
@@ -151,6 +167,11 @@ var foreignMatrix = map[string]map[string]int{
 	"POST /api/maintenance":                                   {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"DELETE /api/maintenance/{id}":                            {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"GET /api/ws":                                             {"viewerA": 426, "operatorA": 426, "adminA": 426},
+	"GET /api/topology":                                       {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/topology/changes":                               {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/map/views":                                      {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/map/views/{id}/areas":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/map/backgrounds/{id}":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -336,6 +357,9 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 	if r, ok := m.monitoringRequest(key); ok {
 		return r
 	}
+	if r, ok := m.mapRequest(key); ok {
+		return r
+	}
 	m.t.Fatalf("no valid request for %s", key)
 	return req{}
 }
@@ -468,10 +492,13 @@ func TestAuthzMatrix(t *testing.T) {
 	keys := routeKeys()
 	/* Logout ends the sessions the other rows need, so it runs last. */
 	keys = append(slices.DeleteFunc(keys, func(k string) bool { return k == "POST /api/auth/logout" }), "POST /api/auth/logout")
-	for _, k := range keys {
+	for i, k := range keys {
 		for _, n := range subjectNames {
 			s := m.subjects[n]
-			resp := m.do(s.authed(m.validRequest(k, s)))
+			/* Each route is asked from a client address of its own: the whole matrix would exceed the per-IP limit of 600 requests a minute. */
+			rq := m.validRequest(k, s)
+			rq.remote, rq.xff = "10.0.0.1:40000", fmt.Sprintf("192.0.%d.%d", 100+i/250, i%250+1)
+			resp := m.do(s.authed(rq))
 			want := matrix[k][n]
 			if resp.StatusCode != want {
 				b, _ := io.ReadAll(resp.Body)

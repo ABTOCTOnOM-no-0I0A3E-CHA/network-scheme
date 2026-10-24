@@ -44,3 +44,13 @@ eltex-esr.snmprec
   under elHardware (ELTEX-SMI-ACTUAL); no real ESR model OID is documented or
   implied. Addresses are documentation ranges (RFC 5737).
   NOT captured from hardware; values not verified on a real device.
+
+topology-a.snmprec .. topology-d.snmprec
+  Synthetic data generated for the topology end-to-end test (test/lab/topology.yaml
+  is the reference list of links). Four 4-port switches with LLDP-MIB (lldpRemTable,
+  lldpRemManAddrTable, lldpLocPortTable) pointing at each other, IF-MIB, Q-BRIDGE-MIB
+  dot1qTpFdbTable and IP-MIB ipNetToPhysicalTable. Management addresses
+  172.30.1.201..204 are the addresses the CI job gives the simulator containers.
+  Links: a-b and a-c reported by both sides (mutual), a-d reported by a only
+  (one-sided), b-d known only from the MAC tables (no LLDP). Same sysObjectID as
+  generic-switch. NOT captured from hardware.
