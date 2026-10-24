@@ -238,6 +238,7 @@ type lldpRow struct {
 	dev     int64
 	rawIf   int32 /* as reported (may be an LLDP port number until resolved upstream) */
 	ifx     int32 /* rawIf when it is an interface of the device, else 0 */
+	named   bool  /* rawIf was confirmed by name through lldpLocPortTable */
 	chassis string
 	portID  string
 	sysName string
@@ -384,7 +385,7 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 		return nil, err
 	}
 	/* Per reporter the quietest ports come first, so a flood on one port cannot push out genuine rows on others. */
-	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at FROM (
+	rows, err = pool.Query(ctx, `SELECT device_id, local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at, local_port_resolved FROM (
 			SELECT *, row_number() OVER (PARTITION BY device_id ORDER BY pc, local_if_index, chassis_id, port_id) AS rn FROM (
 				SELECT *, count(*) OVER (PARTITION BY device_id, local_if_index) AS pc FROM inventory.lldp_neighbor) c
 			WHERE pc <= $2) t
@@ -393,13 +394,17 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 		return nil, fmt.Errorf("lldp: %w", err)
 	}
 	perDev := map[int64]int{}
+	tabled := map[int64]bool{} /* reporters with a resolved row: they have an lldpLocPortTable */
 	for rows.Next() {
 		var r lldpRow
 		var mgmt *string
 		var seen time.Time
-		if err := rows.Scan(&r.dev, &r.rawIf, &r.chassis, &r.portID, &r.sysName, &mgmt, &seen); err != nil {
+		if err := rows.Scan(&r.dev, &r.rawIf, &r.chassis, &r.portID, &r.sysName, &mgmt, &seen, &r.named); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if r.named {
+			tabled[r.dev] = true
 		}
 		if seen.After(in.invAt[r.dev]) {
 			in.invAt[r.dev] = seen
@@ -425,6 +430,16 @@ func (b *Builder) load(ctx context.Context, pool querier) (*inputs, error) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	/*
+		A reporter with a port table resolves its ports by name: a row it could not
+		resolve names no known interface, even if its LLDP port number happens to
+		equal some ifIndex.
+	*/
+	for i := range in.lldp {
+		if r := &in.lldp[i]; !r.named && tabled[r.dev] {
+			r.ifx = 0
+		}
 	}
 	for _, n := range perDev {
 		if n >= hardRowCap {

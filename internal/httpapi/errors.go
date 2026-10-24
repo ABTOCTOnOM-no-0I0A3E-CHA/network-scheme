@@ -69,6 +69,7 @@ var (
 	errInvalidImage       = apiError{http.StatusBadRequest, "invalid_image", "Файл подложки повреждён или не допускается (не больше 16384 пикселей по каждой стороне)"}
 	errLocked             = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited        = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
+	errBusy               = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят отдачей подложек, повторите позже"}
 	errInternal           = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
 )
 

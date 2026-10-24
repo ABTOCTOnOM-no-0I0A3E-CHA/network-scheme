@@ -164,6 +164,11 @@ func (s *server) createView(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext('core.map_view.cap'))`); err != nil {
 			return err
 		}
+		if in.BackgroundID != nil {
+			if err := lockBackgroundUse(r, tx); err != nil {
+				return err
+			}
+		}
 		var n int
 		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.map_view`).Scan(&n); err != nil {
 			return err
@@ -212,18 +217,62 @@ func (s *server) updateView(w http.ResponseWriter, r *http.Request) {
 	if in.BackgroundID.set {
 		ev.Details["background_id"] = in.BackgroundID.v
 	}
-	if !s.change(w, r, ev, func(tx pgx.Tx, _ *audit.Event) error {
-		_, err := tx.Exec(r.Context(), `UPDATE core.map_view SET name = coalesce($2, name), kind = coalesce($3, kind),
+	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		var old *int64
+		if in.BackgroundID.v != nil {
+			if err := lockBackgroundUse(r, tx); err != nil {
+				return err
+			}
+		}
+		if err := tx.QueryRow(r.Context(), `SELECT background_id FROM core.map_view WHERE id = $1 FOR UPDATE`, id).Scan(&old); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errMapNotFound
+			}
+			return err
+		}
+		if _, err := tx.Exec(r.Context(), `UPDATE core.map_view SET name = coalesce($2, name), kind = coalesce($3, kind),
 			background_id = CASE WHEN $4::bool THEN $5 ELSE background_id END WHERE id = $1`,
-			id, in.Name, in.Kind, in.BackgroundID.set, in.BackgroundID.v)
-		if err != nil {
+			id, in.Name, in.Kind, in.BackgroundID.set, in.BackgroundID.v); err != nil {
 			return bgFKError(err)
 		}
-		return needView(tx, r, id)
+		if in.BackgroundID.set && old != nil && (in.BackgroundID.v == nil || *in.BackgroundID.v != *old) {
+			return collectBackground(r, tx, ev, *old)
+		}
+		return nil
 	}) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+/* lockBackgroundUse serializes views taking a background with the collection of unused ones until the end of the transaction. */
+func lockBackgroundUse(r *http.Request, tx pgx.Tx) error {
+	_, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext('core.map_background.use'))`)
+	return err
+}
+
+/*
+collectBackground deletes background id when no view references it any more
+(a view dropped it or was deleted in this transaction) and notes that in the audit
+details. A view taking a background holds the same advisory lock, so the delete
+below, a new statement after the lock, sees every such view committed.
+*/
+func collectBackground(r *http.Request, tx pgx.Tx, ev *audit.Event, id int64) error {
+	if err := lockBackgroundUse(r, tx); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(r.Context(), `DELETE FROM core.map_background b WHERE b.id = $1
+		AND NOT EXISTS (SELECT 1 FROM core.map_view v WHERE v.background_id = b.id)`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		if ev.Details == nil {
+			ev.Details = map[string]any{}
+		}
+		ev.Details["deleted_background_id"] = id
+	}
+	return nil
 }
 
 /* needView returns errMapNotFound unless the view exists; it holds a share lock until the end of the transaction. */
@@ -245,7 +294,8 @@ func (s *server) deleteView(w http.ResponseWriter, r *http.Request) {
 	ev := audit.Event{Action: "map.view.delete", ObjectType: "map_view", ObjectID: strconv.FormatInt(id, 10)}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
 		var name string
-		err := tx.QueryRow(r.Context(), `DELETE FROM core.map_view WHERE id = $1 RETURNING name`, id).Scan(&name)
+		var bg *int64
+		err := tx.QueryRow(r.Context(), `DELETE FROM core.map_view WHERE id = $1 RETURNING name, background_id`, id).Scan(&name, &bg)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errMapNotFound
 		}
@@ -253,6 +303,9 @@ func (s *server) deleteView(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		ev.Details = map[string]any{"name": name}
+		if bg != nil {
+			return collectBackground(r, tx, ev, *bg)
+		}
 		return nil
 	}) {
 		return
@@ -572,6 +625,19 @@ const maxBackgrounds = 200
 /* uploadWait is how long an upload waits for the one processing slot before answering 429. */
 const uploadWait = 10 * time.Second
 
+/* uploadReadTimeout is the time a client gets to send an upload body; uploadWriteExtra is added for the answer. */
+const (
+	uploadReadTimeout = 5 * time.Minute
+	uploadWriteExtra  = 30 * time.Second
+)
+
+/* Serving a background: at most serveSlots at a time (each holds a chunk, not the blob), a short wait, then 503. */
+const (
+	serveSlots = 4
+	serveWait  = time.Second
+	serveChunk = 1 << 20
+)
+
 /* backgroundCSP confines a served image: no loading, no scripts, a unique origin. */
 const backgroundCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
 
@@ -654,6 +720,10 @@ func (s *server) uploadBackground(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		return
 	}
+	/* The server-wide deadlines suit small bodies; a slow link gets a longer one for this route, counted after the slot wait. */
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(uploadReadTimeout))
+	_ = rc.SetWriteDeadline(time.Now().Add(uploadReadTimeout + uploadWriteExtra))
 	data, ok := readUpload(w, r)
 	if !ok {
 		return
@@ -721,10 +791,12 @@ func (s *server) getBackground(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	/* Metadata first: a revalidation never touches the bytes. */
 	var mimeType string
-	var data, sum []byte
-	if err := s.pool.QueryRow(r.Context(), `SELECT mime, bytes, sha256 FROM core.map_background WHERE id = $1`, id).
-		Scan(&mimeType, &data, &sum); err != nil {
+	var sum []byte
+	var size int
+	if err := s.pool.QueryRow(r.Context(), `SELECT mime, sha256, octet_length(bytes) FROM core.map_background WHERE id = $1`, id).
+		Scan(&mimeType, &sum, &size); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = errMapNotFound
 		}
@@ -743,6 +815,60 @@ func (s *server) getBackground(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	h.Set("Content-Length", strconv.Itoa(len(data)))
-	_, _ = w.Write(data)
+	select {
+	case s.serveSem <- struct{}{}:
+		defer func() { <-s.serveSem }()
+	case <-time.After(serveWait):
+		h.Set("Retry-After", "1")
+		writeError(w, errBusy)
+		return
+	case <-r.Context().Done():
+		return
+	}
+	h.Set("Content-Length", strconv.Itoa(size))
+	/*
+		The blob is read in chunks, each by its own query, so neither the api nor a
+		pooled connection holds up to 20 MiB while a slow client drains it. Rows are
+		immutable; if one is deleted mid-way the body ends short of Content-Length
+		and the connection is dropped.
+	*/
+	for off := 0; off < size; off += serveChunk {
+		var chunk []byte
+		if err := s.pool.QueryRow(r.Context(), `SELECT substring(bytes from $2::int for $3::int) FROM core.map_background WHERE id = $1`,
+			id, off+1, serveChunk).Scan(&chunk); err != nil || len(chunk) == 0 {
+			panic(http.ErrAbortHandler)
+		}
+		if _, err := w.Write(chunk); err != nil {
+			return
+		}
+	}
+}
+
+/* deleteBackground removes a background; views that used it fall back to no background (ON DELETE SET NULL). */
+func (s *server) deleteBackground(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	ev := audit.Event{Action: "map.background.delete", ObjectType: "map_background", ObjectID: strconv.FormatInt(id, 10)}
+	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
+		var mimeType string
+		var size int
+		var views int64
+		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.map_view WHERE background_id = $1`, id).Scan(&views); err != nil {
+			return err
+		}
+		err := tx.QueryRow(r.Context(), `DELETE FROM core.map_background WHERE id = $1 RETURNING mime, octet_length(bytes)`, id).Scan(&mimeType, &size)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errMapNotFound
+		}
+		if err != nil {
+			return err
+		}
+		ev.Details = map[string]any{"mime": mimeType, "size": size, "views_detached": views}
+		return nil
+	}) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

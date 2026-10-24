@@ -463,6 +463,7 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
     delete:
       summary: Delete a device and its credentials
+      description: The disappearance of each of its links is recorded in the link change history first.
       x-permission: devices.manage
       x-step-up: true
       x-scoped: true
@@ -1591,8 +1592,12 @@ paths:
         must be visible to the caller (else 404). Ports are optional (unknown);
         the ends are stored in canonical order whatever order is sent. Writes a
         link change "appeared" (source manual) in the same transaction, is
-        audited, and the builder reloads. 409 link_exists for an identical link,
-        409 too_many_links at 64 links between the pair.
+        audited, and the builder reloads. 409 link_exists for an identical manual
+        link, 409 too_many_links at 64 links between the pair. A detected link with
+        exactly the same ends (unknown ports match unknown ports only) is not a
+        duplicate: that row becomes the manual link (same id, confidence 1) and the
+        id is returned with 201; no change is written since it already appeared, and
+        the audit record carries converted_from (its former source).
       x-permission: map.manage
       parameters: [{ $ref: "#/components/parameters/CSRF" }]
       requestBody:
@@ -1671,7 +1676,10 @@ paths:
   /api/map/views/{id}:
     patch:
       summary: Change a map view
-      description: Only the given fields change; background_id null removes the background. At least one field is required. Audited.
+      description: |
+        Only the given fields change; background_id null removes the background. At least one field is required.
+        A background that no other view uses any more is deleted in the same transaction (the audit record
+        carries deleted_background_id). Audited.
       x-permission: map.manage
       parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
       requestBody:
@@ -1693,7 +1701,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Delete a map view with its areas and node positions
-      description: Audited.
+      description: Its background is deleted too when no other view uses it. Audited.
       x-permission: map.manage
       parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
       responses:
@@ -1878,7 +1886,9 @@ paths:
         Backgrounds are admin objects shown under maps, so any devices.read holder may fetch one. The response
         carries the stored type, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox`,
         `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
-        and a sha256 ETag (If-None-Match answers 304). Use it only as an `<img src>`.
+        and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
+        pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
+        Retry-After. Use it only as an `<img src>`.
       x-permission: devices.read
       x-scoped: true
       parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1891,6 +1901,20 @@ paths:
             image/webp: { schema: { type: string, format: binary } }
             image/svg+xml: { schema: { type: string, format: binary } }
         "304": { description: Not modified }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a map background
+      description: |
+        Views that use it fall back to no background. Unused backgrounds are also deleted automatically when
+        the last view using one drops it or is deleted, so this is for backgrounds that were uploaded but
+        never assigned. Audited.
+      x-permission: map.manage
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -2501,6 +2525,7 @@ components:
                 - too_many_points
                 - locked
                 - rate_limited
+                - busy
                 - internal
                 - gateway_error # from the gateway itself (upstream down, proxy limits), never from api
             message: { type: string, description: "Human-readable, Russian" }

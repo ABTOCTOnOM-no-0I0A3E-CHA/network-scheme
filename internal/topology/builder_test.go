@@ -614,3 +614,35 @@ func TestFloodOnOnePortKeepsOtherPorts(t *testing.T) {
 		t.Errorf("links %+v", h.links())
 	}
 }
+
+/*
+A reporter with a port table (some row resolved by name) is not trusted on a row
+it could not resolve, even when the LLDP port number equals one of its ifIndexes;
+a reporter without a port table keeps the number as the interface.
+*/
+func TestUnresolvedPortOfTabledReporterIsUnknown(t *testing.T) {
+	h := newHarness(t)
+	a, aIP := h.dev("a")
+	b, bIP := h.dev("b")
+	c, cIP := h.dev("c")
+	d, dIP := h.dev("d")
+	h.nb(a, 3, "02:00:00:00:00:0b", "g2", "b", bIP) /* unresolved; 3 is an interface of a only by coincidence */
+	h.nb(b, 2, "02:00:00:00:00:0a", "port-99", "a", aIP)
+	h.nb(a, 1, "02:00:00:00:00:0c", "g2", "c", cIP) /* resolved: a has a port table */
+	h.nb(c, 2, "02:00:00:00:00:0a", "g1", "a", aIP)
+	h.exec(`UPDATE inventory.lldp_neighbor SET local_port_resolved = true WHERE device_id = $1 AND local_if_index = 1`, a)
+	/* control: d has no resolved row, its number 3 stays the interface */
+	h.nb(d, 3, "02:00:00:00:00:0b", "g4", "b", bIP)
+	h.nb(b, 4, "02:00:00:00:00:0d", "g3", "d", dIP)
+	h.build()
+
+	if ai, bi := h.one(a, b).ports(a); ai != 0 || bi != 2 {
+		t.Errorf("a-b ports = %d, %d; want the unresolved end unknown (0) and 2", ai, bi)
+	}
+	if ai, ci := h.one(a, c).ports(a); ai != 1 || ci != 2 {
+		t.Errorf("a-c ports = %d, %d; want 1, 2", ai, ci)
+	}
+	if di, bi := h.one(d, b).ports(d); di != 3 || bi != 4 {
+		t.Errorf("d-b ports = %d, %d; want 3, 4", di, bi)
+	}
+}

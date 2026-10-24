@@ -462,6 +462,28 @@ func (s *server) createLink(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fmt.Sprintf("link-pair:%d:%d", a, b)); err != nil {
 			return err
 		}
+		/*
+			A detected link with exactly these ends becomes the manual one: same row and
+			id, confidence 1, no longer subject to disappearance. It already appeared in
+			the history, so no change row is written; the audit record says what it was.
+		*/
+		var from string
+		err := tx.QueryRow(r.Context(), `
+WITH old AS (
+    SELECT id, source FROM core.link
+    WHERE a_device_id = $1 AND coalesce(a_if_index, -1) = coalesce($2::int, -1)
+      AND b_device_id = $3 AND coalesce(b_if_index, -1) = coalesce($4::int, -1) AND NOT manual
+    FOR UPDATE)
+UPDATE core.link l SET source = 'manual', manual = true, confidence = 1, misses = 0, last_confirmed = now()
+FROM old WHERE l.id = old.id RETURNING l.id, old.source`, a, aIf, b, bIf).Scan(&id, &from)
+		if err == nil {
+			ev.ObjectID = strconv.FormatInt(id, 10)
+			ev.Details["converted_from"] = from
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		var n int
 		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.link WHERE a_device_id = $1 AND b_device_id = $2`, a, b).Scan(&n); err != nil {
 			return err
@@ -469,7 +491,7 @@ func (s *server) createLink(w http.ResponseWriter, r *http.Request) {
 		if n >= maxLinksPerPair {
 			return errCapLinks
 		}
-		err := tx.QueryRow(r.Context(), `INSERT INTO core.link (a_device_id, a_if_index, b_device_id, b_if_index, source, confidence, manual)
+		err = tx.QueryRow(r.Context(), `INSERT INTO core.link (a_device_id, a_if_index, b_device_id, b_if_index, source, confidence, manual)
 			VALUES ($1, $2, $3, $4, 'manual', 1, true) RETURNING id`, a, aIf, b, bIf).Scan(&id)
 		if pe := pgErrOf(err); pe != nil {
 			switch pe.Code {

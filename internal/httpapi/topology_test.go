@@ -175,6 +175,8 @@ func (m *matrixEnv) mapRequest(key string) (req, bool) {
 		return req{method: "POST", path: "/api/map/backgrounds", raw: raw, ctype: ctype}, true
 	case "GET /api/map/backgrounds/{id}":
 		return req{method: "GET", path: fmt.Sprintf("/api/map/backgrounds/%d", m.newBackground("image/png", pngBytes(), 1, 1))}, true
+	case "DELETE /api/map/backgrounds/{id}":
+		return req{method: "DELETE", path: fmt.Sprintf("/api/map/backgrounds/%d", m.newBackground("image/png", pngBytes(), 1, 1))}, true
 	}
 	return req{}, false
 }

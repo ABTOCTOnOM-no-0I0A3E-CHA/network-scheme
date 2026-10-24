@@ -113,6 +113,7 @@ var matrix = map[string]map[string]int{
 	"PUT /api/map/views/{id}/positions":                       {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
 	"POST /api/map/backgrounds":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
 	"GET /api/map/backgrounds/{id}":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"DELETE /api/map/backgrounds/{id}":                        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
 }
 
 /*
