@@ -12,13 +12,17 @@ import { ProblemList } from "@/features/problems/ProblemList";
 import { useDevice, useDevices, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
 import { ChartsTab } from "@/features/charts/ChartsTab";
 import { EventFeed } from "@/features/events/EventFeed";
+import { BackupJournal, BackupsTab } from "./BackupsTab";
+import { CliTab } from "./CliTab";
+import { ConfigTab } from "./ConfigTab";
 import { DeviceEditForm } from "./DeviceEditForm";
 import { InventoryTable, Text, type Column } from "./InventoryTable";
+import { PhysicalTab } from "./PhysicalTab";
 import { ProfileForm } from "./ProfileForm";
 import { useProfiles } from "./profiles";
 
-type TabId = DeviceTable | "graphs" | "profiles" | "journal" | "problems";
-const TABS: TabId[] = ["interfaces", "graphs", "arp", "mac", "vlans", "lldp", "entities", "routes", "problems", "journal", "profiles"];
+type TabId = DeviceTable | "physical" | "config" | "cli" | "graphs" | "backups" | "profiles" | "journal" | "problems";
+const TABS: TabId[] = ["physical", "config", "cli", "interfaces", "arp", "mac", "vlans", "lldp", "entities", "routes", "graphs", "backups", "problems", "journal", "profiles"];
 const KINDS: CredKind[] = ["snmp2c", "snmp3", "ssh_read"];
 
 type Props = {
@@ -28,6 +32,10 @@ type Props = {
   canManage: boolean;
   /** problems.ack hint. */
   canAck?: boolean;
+  /** devices.show hint: without it the CLI tab is hidden. */
+  canShow?: boolean;
+  /** devices.backup hint: without it the manual backup button is hidden. */
+  canBackup?: boolean;
   /** Whether group names can be fetched (global admin). */
   canListGroups?: boolean;
 };
@@ -38,7 +46,7 @@ export function DeviceCard(props: Props) {
   return <DeviceCardBody key={props.id} {...props} />;
 }
 
-function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false }: Props) {
+function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false, canShow = false, canBackup = false }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>("interfaces");
@@ -65,7 +73,7 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
     <section className="grid gap-4">
       <Header device={device.data} canPoll={canPoll} canManage={canManage} canListGroups={canListGroups} />
       <div role="tablist" aria-label={t("card.tabs")} className="flex flex-wrap gap-1 border-b">
-        {TABS.map((k) => (
+        {TABS.filter((k) => k !== "cli" || canShow).map((k) => (
           <button
             key={k}
             type="button"
@@ -88,6 +96,7 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
           deviceId={device.data.id}
           canManage={canManage}
           canAck={canAck}
+          canBackup={canBackup}
           chartIf={chartIf}
           onChartIf={setChartIf}
           onShowChart={(i) => {
@@ -207,12 +216,13 @@ type TabBodyProps = {
   deviceId: number;
   canManage: boolean;
   canAck: boolean;
+  canBackup: boolean;
   chartIf: number | undefined;
   onChartIf: (i: number) => void;
   onShowChart: (i: number) => void;
 };
 
-function TabBody({ tab, deviceId, canManage, canAck, chartIf, onChartIf, onShowChart }: TabBodyProps) {
+function TabBody({ tab, deviceId, canManage, canAck, canBackup, chartIf, onChartIf, onShowChart }: TabBodyProps) {
   const { t, i18n } = useTranslation();
   const num = (n: number) => <span className="tabular-nums">{n}</span>;
   const col = <R,>(cid: string, cell: (r: R) => ReactNode): Column<R> => ({ id: cid, header: t(`card.col.${cid}`), cell });
@@ -224,7 +234,20 @@ function TabBody({ tab, deviceId, canManage, canAck, chartIf, onChartIf, onShowC
     case "problems":
       return <ProblemList deviceId={deviceId} canAck={canAck} />;
     case "journal":
-      return <EventFeed deviceId={deviceId} />;
+      return (
+        <div className="grid gap-4">
+          <BackupJournal deviceId={deviceId} />
+          <EventFeed deviceId={deviceId} />
+        </div>
+      );
+    case "physical":
+      return <PhysicalTab deviceId={deviceId} onShowChart={onShowChart} />;
+    case "config":
+      return <ConfigTab deviceId={deviceId} />;
+    case "cli":
+      return <CliTab deviceId={deviceId} />;
+    case "backups":
+      return <BackupsTab deviceId={deviceId} canBackup={canBackup} />;
     case "profiles":
       return <ProfilesTab deviceId={deviceId} canManage={canManage} />;
     case "interfaces":
@@ -233,6 +256,10 @@ function TabBody({ tab, deviceId, canManage, canAck, chartIf, onChartIf, onShowC
           deviceId={deviceId}
           table="interfaces"
           seenAt={seen}
+          filters={[
+            { id: "up", label: t("card.up"), test: (r) => r.oper_up },
+            { id: "down", label: t("card.down"), test: (r) => !r.oper_up },
+          ]}
           columns={[
             col("ifIndex", (r: { if_index: number }) => num(r.if_index)),
             col("name", (r: { name: string }) => <Text value={r.name} />),

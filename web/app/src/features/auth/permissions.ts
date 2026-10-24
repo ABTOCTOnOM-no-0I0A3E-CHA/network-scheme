@@ -60,3 +60,13 @@ export function canReceiveProblems(session: Session | null | undefined): boolean
 export function canManageMap(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "admin" && r.group_id === null);
 }
+
+/** UI hint only: devices.show (on-demand show commands) belongs to the operator and admin roles, global or on a group. */
+export function canShowDevices(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
+}
+
+/** UI hint only: devices.backup (manual backup) belongs to the operator and admin roles, global or on a group. */
+export function canBackupDevices(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
+}

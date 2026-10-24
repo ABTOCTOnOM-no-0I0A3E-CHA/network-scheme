@@ -12,7 +12,7 @@ const FALLBACK_AXIS = "#888";
 const FALLBACK_GRID = "rgba(136,136,136,0.2)";
 const HEIGHT = 220;
 
-type Spec = { label: string; fmt: (v: number) => string };
+export type Spec = { label: string; fmt: (v: number) => string };
 
 type Theme = { axis: string; grid: string };
 
@@ -61,8 +61,8 @@ export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number)
   };
 }
 
-/* Canvas plot of the columns; rebuilt when the data or formatting changes. */
-function Plot({ data, series, fmtAxis, label }: { data: Columns; series: Spec[]; fmtAxis: (v: number) => string; label: string }) {
+/** Canvas plot of the columns; rebuilt when the data or formatting changes. */
+export function Plot({ data, series, fmtAxis, label }: { data: Columns; series: Spec[]; fmtAxis: (v: number) => string; label: string }) {
   const host = useRef<HTMLDivElement>(null);
   const themeVersion = useThemeVersion();
 

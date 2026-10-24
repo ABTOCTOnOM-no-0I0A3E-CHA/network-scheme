@@ -13,3 +13,16 @@ export function safeText(s: string | null | undefined): string {
   }
   return out;
 }
+
+/**
+ * Multi-line device text (configuration, command output) made safe line by
+ * line: tabs become spaces, line breaks are kept, everything else follows
+ * safeText. The result is plain text for a <pre>.
+ */
+export function safeLines(s: string | null | undefined): string {
+  if (!s) return "";
+  return s
+    .split(/\r?\n/)
+    .map((l) => safeText(l.replace(/\t/g, "    ")))
+    .join("\n");
+}
