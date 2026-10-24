@@ -35,7 +35,6 @@ var (
 	keyIDKeywords = map[string]bool{"authentication-key": true, "message-digest-key": true, "trusted-key": true, "key-id": true}
 	/* contextKeywords are secret keywords only on lines of the listed protocols/commands. */
 	authContexts = map[string]bool{"vrrp": true, "ospf": true, "ospfv3": true, "isis": true, "bgp": true, "rip": true, "ripng": true, "hsrp": true, "glbp": true, "eigrp": true, "ntp": true, "snmp-server": true}
-	snmpKeywords = map[string]bool{"auth": true, "priv": true, "privacy": true, "encryption": true}
 	/* qualifiers sit between a keyword and its value ("password encrypted <hash>") and are kept. */
 	qualifiers = map[string]bool{
 		"encrypted": true, "unencrypted": true, "plaintext": true, "ascii": true, "ascii-text": true, "hexadecimal": true,
@@ -185,95 +184,197 @@ func isASCII(s string) bool {
 	return true
 }
 
+/* authFamily words are keywords when a value token follows (snmp user "auth"/"priv", block lines "auth K"). */
+var authFamily = map[string]bool{"auth": true, "priv": true, "privacy": true, "encryption": true}
+
+/* authExcluded words after an authFamily word mean it is not a secret keyword ("auth login ..."). */
+var authExcluded = map[string]bool{"login": true, "enable": true, "default": true, "none": true, "local": true, "radius": true, "tacacs": true, "ldap": true}
+
+/* hostWords introduce the notification receiver of "snmp-server host" and its variants. */
+var hostWords = map[string]bool{"host": true, "trap-host": true, "trap-hosts": true}
+
+type scan struct {
+	ts  []tok
+	ctx bool
+}
+
+/* kwAt reports whether token i starts a secret value. */
+func (s *scan) kwAt(i int) bool {
+	t := s.ts[i].text
+	if t == Mark || t == "" {
+		return false
+	}
+	if !plainWord(t) {
+		return hasKeywordSub(t) /* glued or disguised keyword: the token itself is masked too */
+	}
+	switch {
+	case hasKeywordSub(t), pwForm(t):
+		return true
+	case authFamily[t]:
+		return i+1 < len(s.ts) && !authExcluded[s.ts[i+1].text]
+	case s.ctx && t == "authentication":
+		return true
+	}
+	return false
+}
+
+/* pwForm: short password spellings (pw, pwd, pass, bind-pw, auth-pass). */
+func pwForm(t string) bool {
+	switch t {
+	case "pw", "pwd", "pass":
+		return true
+	}
+	for _, p := range []string{"-pw", "-pwd", "-pass"} {
+		if strings.HasSuffix(t, p) {
+			return true
+		}
+	}
+	return strings.HasPrefix(t, "pw-") || strings.HasPrefix(t, "pass-")
+}
+
+/*
+region masks from index j to the end of the line: the first token when first
+is set, then every token except structural words (with their argument when it
+is harmless). It returns the index of an auth/priv keyword that starts a new
+value, or len(ts).
+*/
+func (s *scan) region(j int, first bool) int {
+	n := len(s.ts)
+	for k := j; k < n; k++ {
+		t := &s.ts[k]
+		if k == j && first {
+			t.masked = true
+			continue
+		}
+		if arg, ok := structural[t.text]; ok && !t.quoted && plainWord(t.text) {
+			if arg > 0 && k+1 < n {
+				a := s.ts[k+1]
+				if (arg == 2 && isNumber(a.text)) || (arg == 1 && !a.quoted && plainWord(a.text) && !looksSecret(a.raw)) {
+					k++
+				}
+			}
+			continue
+		}
+		if plainWord(t.text) && authFamily[t.text] && s.kwAt(k) {
+			return k
+		}
+		t.masked = true
+	}
+	return n
+}
+
+/* value handles the secret keyword at i and returns the index where scanning resumes. */
+func (s *scan) value(i int) int {
+	ts, n := s.ts, len(s.ts)
+	kw := ts[i].text
+	if !plainWord(kw) || strings.Contains(ts[i].raw, "=") {
+		ts[i].masked = true
+	}
+	keyID := keyIDKeywords[kw]
+	var cands []int
+	idSeen, typeSeen := false, false
+	j := i + 1
+loop:
+	for j < n {
+		t := ts[j]
+		switch {
+		case t.quoted:
+			break loop
+		case qualifiers[t.text]:
+			cands = append(cands, j)
+		case t.text == "level" && j+1 < n && isNumber(ts[j+1].text):
+			cands = append(cands, j, j+1)
+			j++
+		case keyID && !idSeen && isNumber(t.text) && len(t.text) <= 3:
+			idSeen = true
+			cands = append(cands, j)
+		case isNumber(t.text) && len(t.text) == 1 && !typeSeen:
+			typeSeen = true
+			cands = append(cands, j)
+		default:
+			break loop
+		}
+		j++
+	}
+	maskCands := func() {
+		for _, c := range cands {
+			ts[c].masked = true
+		}
+	}
+	if j >= n {
+		if kw != "authentication" {
+			maskCands() /* no value follows: what looked like a qualifier is the value */
+		}
+		return n
+	}
+	if _, ok := structural[ts[j].text]; ok && len(cands) > 0 && plainWord(ts[j].text) {
+		maskCands()
+		return s.region(j, false)
+	}
+	return s.region(j, true)
+}
+
 func maskLine(line string) string {
 	ts := tokenize(line)
 	if len(ts) == 0 {
 		return line
 	}
 	n := len(ts)
-	first := ts[0].text
-	ctx := false
+	s := &scan{ts: ts}
 	for _, t := range ts {
 		if authContexts[t.text] {
-			ctx = true
+			s.ctx = true
 		}
 	}
 
-	/* snmp-server host: everything after the address, vrf, traps|informs and version is community or user. */
-	valueFrom := -1
-	if first == "snmp-server" && n > 2 && ts[1].text == "host" {
-		j := 2
-		if ts[j].text == "ipv6" {
-			j++
+	/* snmp host variants: everything after the address, vrf, traps|informs and version is community or user. */
+	end := n
+	if strings.HasPrefix(ts[0].text, "snmp") && n > 2 {
+		h := -1
+		for _, c := range []int{1, 2} {
+			if h < 0 && c < n && hostWords[ts[c].text] {
+				h = c
+			}
 		}
-		j++
-		for j < n {
-			switch ts[j].text {
-			case "vrf":
-				j += 2
-			case "traps", "informs":
+		if h >= 0 {
+			j := h + 1
+			if j < n && ts[j].text == "ipv6" {
 				j++
-			case "version":
-				j += 2
-				if j < n && (ts[j].text == "auth" || ts[j].text == "noauth" || ts[j].text == "priv") {
+			}
+			j++
+		scanHost:
+			for j < n {
+				switch ts[j].text {
+				case "vrf":
+					j += 2
+				case "traps", "informs":
 					j++
+				case "version":
+					j += 2
+					if j < n && (ts[j].text == "auth" || ts[j].text == "noauth" || ts[j].text == "priv") {
+						j++
+					}
+				default:
+					break scanHost
 				}
-			default:
-				valueFrom = j
-				j = n
+			}
+			if j < n {
+				end = j
+				s.region(j, true)
 			}
 		}
 	}
-
-	inValue, leading, keyID := false, false, false
-	keep := 0 /* structural argument tokens still to keep: 0 none, else numeric flag below */
-	keepNum := false
-	for i := range ts {
-		t := &ts[i]
-		if valueFrom >= 0 && i == valueFrom {
-			inValue, leading, keyID = true, true, false
+	for i := 0; i < end; {
+		if s.kwAt(i) {
+			i = s.value(i)
+			continue
 		}
-		if keep > 0 {
-			keep--
-			if !keepNum || isNumber(t.text) {
-				continue
-			}
-		}
-		kw := !t.quoted && isKeyword(t.text, first == "snmp-server", ctx)
-		switch {
-		case !inValue && kw:
-			inValue, leading, keyID = true, true, keyIDKeywords[t.text]
-			if strings.Contains(t.text, "=") || !isASCII(t.text) { /* key=value in one token, or a disguised keyword */
-				t.masked = true
-			}
-		case !inValue:
-			if !isASCII(t.text) && hasKeywordSub(t.text) {
-				t.masked = true
-			}
-		case leading:
-			switch {
-			case t.text == "level" && i+1 < n && isNumber(ts[i+1].text):
-				keep, keepNum = 1, true
-			case qualifiers[t.text] && !t.quoted:
-			case keyID && isNumber(t.text):
-			default:
-				t.masked, leading = true, false
-			}
-		default: /* value phase */
-			if arg, ok := structural[t.text]; ok && !t.quoted {
-				if arg > 0 {
-					keep, keepNum = 1, arg == 2
-				}
-			} else if kw && plainWord(t.raw) {
-				leading, keyID = true, keyIDKeywords[t.text]
-			} else {
-				t.masked = true
-			}
-		}
+		i++
 	}
 
 	/* Hash-looking tokens and, on lines with a secret-ish keyword, long secret-like tokens. */
-	hint := hasKeywordSub(strings.ToLower(line)) || strings.Contains(strings.ToLower(line), "md5") || strings.Contains(strings.ToLower(line), "sha")
+	low := strings.ToLower(line)
+	hint := hasKeywordSub(low) || strings.Contains(low, "md5") || strings.Contains(low, "sha")
 	for i := range ts {
 		raw := strings.Trim(ts[i].raw, `"`)
 		switch {
@@ -297,20 +398,6 @@ func maskLine(line string) string {
 	}
 	b.WriteString(line[prev:])
 	return b.String()
-}
-
-func isKeyword(t string, snmp, ctx bool) bool {
-	switch {
-	case t == Mark:
-		return false
-	case hasKeywordSub(t):
-		return true
-	case snmp && snmpKeywords[t]:
-		return true
-	case ctx && t == "authentication":
-		return true
-	}
-	return false
 }
 
 func isNumber(s string) bool {
