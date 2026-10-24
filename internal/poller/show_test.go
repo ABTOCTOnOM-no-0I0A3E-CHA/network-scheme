@@ -379,7 +379,7 @@ func TestShowNowJobs(t *testing.T) {
 	if err := e.env.Pool("postgres").QueryRow(ctx, `SELECT queue FROM jobs.river_job WHERE kind = 'show_now' LIMIT 1`).Scan(&queueName); err != nil || queueName != "show_"+e.pollerID {
 		t.Errorf("queue %q, %v", queueName, err)
 	}
-	/* A job for a device of another poller cannot be routed here by the api: a forged one is cancelled and the row failed. */
+	/* A job for a device of another poller cannot be routed here by the api: a forged one is cancelled and the row left queued. */
 	forgedRow := e.row(foreign, "version", `{}`)
 	var q string
 	if err := e.env.Pool("postgres").QueryRow(ctx, `SELECT queue FROM jobs.river_job WHERE kind = 'show_now' LIMIT 1`).Scan(&q); err != nil {
