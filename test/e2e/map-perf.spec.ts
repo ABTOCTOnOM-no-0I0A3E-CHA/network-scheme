@@ -51,8 +51,8 @@ test(`map: ${NODES} devices stay interactive (pan/zoom >= ${CI_MIN_FPS} fps)`, a
   await page.route("**/api/topology**", (r) => r.fulfill({ json: synthetic() }));
   await page.goto("/map");
 
-  /* Cytoscape keeps its instance on the container element */
-  const count = () => page.evaluate(() => (document.querySelector("[data-testid=map-canvas]") as unknown as { _cyreg?: { cy: { nodes(): { length: number } } } })._cyreg?.cy.nodes().length ?? 0);
+  /* Cytoscape keeps its instance on the container element; the canvas is absent until the page has rendered */
+  const count = () => page.evaluate(() => (document.querySelector("[data-testid=map-canvas]") as unknown as { _cyreg?: { cy: { nodes(): { length: number } } } } | null)?._cyreg?.cy.nodes().length ?? 0);
   await expect.poll(count, { timeout: 60_000 }).toBe(NODES);
 
   const result = await page.evaluate(async (ms) => {
