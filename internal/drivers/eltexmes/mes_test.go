@@ -2,6 +2,7 @@ package eltexmes_test
 
 import (
 	"context"
+	"maps"
 	"regexp"
 	"strings"
 	"testing"
@@ -121,5 +122,19 @@ func TestDialectAllowlistReadOnly(t *testing.T) {
 func TestVerifiedFlag(t *testing.T) {
 	if eltexmes.Verified || eltexmes.New().Verified() {
 		t.Fatal("MES driver must stay unverified until checked on hardware")
+	}
+}
+
+func TestMESPortKinds(t *testing.T) {
+	inv, err := eltexmes.New().Inventory(ctx(t), reader(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]drivers.PortKind{}
+	for _, i := range inv.Interfaces {
+		got[i.Name] = i.PortKind
+	}
+	if want := map[string]drivers.PortKind{"gi1/0/1": drivers.PortRJ45, "te1/0/1": drivers.PortSFP}; !maps.Equal(got, want) {
+		t.Fatalf("port kinds %v, want %v", got, want)
 	}
 }

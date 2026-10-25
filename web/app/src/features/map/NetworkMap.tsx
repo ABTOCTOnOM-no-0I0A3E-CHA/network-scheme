@@ -80,6 +80,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
   const [posOv, setPosOv] = useState<ReadonlyMap<number, { x: number; y: number }>>(new Map());
   const [pinOv, setPinOv] = useState<ReadonlySet<number>>(new Set());
   const pinOvRef = useRef(pinOv);
+  const posOvRef = useRef(posOv);
   const tried = useRef(new Set<string>());
   const fitted = useRef(false);
   const saver = useRef<PositionSaver | undefined>(undefined);
@@ -91,6 +92,7 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
 
   useEffect(() => {
     pinOvRef.current = pinOv;
+    posOvRef.current = posOv;
   });
 
   /* batched saving of dragged positions */
@@ -221,9 +223,16 @@ export function NetworkMap({ topology, severity, backgroundUrl, save, onSaved, o
     async (scope: ReadonlySet<string> | undefined, persist: boolean) => {
       const topo = live.current.topology;
       try {
-        const laid = placeDevices(await runLayout(buildElkGraph(topo)), topo);
         const pinned = new Set(topo.nodes.filter((n) => n.pinned).map((n) => deviceEid(n.device_id)));
         for (const id of pinOvRef.current) pinned.add(deviceEid(id));
+        /* devices that keep their place: new ones of no area are put clear of them */
+        const fixed = new Map<string, { x: number; y: number }>();
+        for (const n of topo.nodes) {
+          const eid = deviceEid(n.device_id);
+          const p = posOvRef.current.get(n.device_id) ?? (n.x != null && n.y != null ? { x: n.x, y: n.y } : undefined);
+          if (p && (pinned.has(eid) || (scope && !scope.has(eid)))) fixed.set(eid, p);
+        }
+        const laid = placeDevices(await runLayout(buildElkGraph(topo)), topo, fixed);
         const moves = layoutMoves(laid, pinned, scope);
         const items: PositionItem[] = [...moves].map(([eid, p]) => ({ device_id: Number(eid.slice(1)), x: p.x, y: p.y, pinned: false }));
         setPosOv((m) => {

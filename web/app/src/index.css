@@ -134,6 +134,11 @@
     pointer-events: all !important;
 }
 
+/* Static copy of the rules react-draggable would inject while a dashboard widget is dragged (blocked by the panel CSP). */
+.react-draggable-transparent-selection *::selection {
+    all: inherit;
+}
+
 /* uPlot drag-zoom area: its default fill is invisible on a dark background */
 .dark .u-select {
     background: rgba(255, 255, 255, 0.15);

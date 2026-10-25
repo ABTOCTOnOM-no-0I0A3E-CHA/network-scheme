@@ -5,8 +5,8 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errText } from "@/features/common/errText";
-import { NetworkMap } from "./NetworkMap";
-import { useOpenProblemSeverity, useTopology, useViews } from "./useTopology";
+import { NetworkMap } from "@/features/map/NetworkMap";
+import { useOpenProblemSeverity, useTopology, useViews } from "@/features/map/useTopology";
 
 const QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -26,11 +26,12 @@ function useReducedMotion(): boolean {
 const BUBBLE = "origin-top transition-[scale,box-shadow] duration-200 ease-out hover:z-10 hover:scale-[1.04] hover:shadow-lg focus-within:z-10 focus-within:scale-[1.04] focus-within:shadow-lg";
 
 /**
- * Compact network map for the home page (Phase 3 dashboards embed it as a widget). Self-contained: loads the view (viewId or
+ * Compact network map, the mini-map widget of dashboards. Self-contained: loads the view (viewId or
  * the first one), the topology and the problem severities itself. The "Open" button sits in a strip above the map box, so it
- * never covers map content, and leads to /map with the same view.
+ * never covers map content, and leads to /map with the same view. `fill` stretches the map box to the parent's height
+ * (a dashboard cell) instead of the fixed 20rem.
  */
-export function MiniMap({ viewId, className = "" }: { viewId?: number; className?: string }) {
+export function MiniMap({ viewId, className = "", fill = false }: { viewId?: number; className?: string; fill?: boolean }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const reduced = useReducedMotion();
@@ -50,7 +51,7 @@ export function MiniMap({ viewId, className = "" }: { viewId?: number; className
           {t("map.mini.open")}
         </Button>
       </div>
-      <div className={`h-80 rounded-md ${reduced ? "" : BUBBLE}`} data-testid="mini-map-box">
+      <div className={`${fill ? "min-h-0 flex-1" : "h-80"} rounded-md ${reduced ? "" : BUBBLE}`} data-testid="mini-map-box">
         {err ? (
           <p role="alert" className="text-sm text-destructive">
             {errText(t, err)}

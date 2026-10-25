@@ -320,6 +320,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/stepup-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether the session holds a fresh step-up
+         * @description 204 while a step-up TOTP was given within the last 5 minutes, else 403
+         *     stepup_required. The web client asks for the code before it starts a
+         *     download that needs step-up (the browser fetches it, not the client).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Step-up is fresh */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users": {
         parameters: {
             query?: never;
@@ -1063,6 +1104,475 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Configuration versions of the device, newest first
+         * @description Metadata only (the text is fetched per version). sha256 is a 12-character
+         *     prefix of the hash of the normalized configuration. drift marks a change
+         *     made outside a change session of the panel. The cursor is opaque.
+         *     Versions of a deleted device are not listed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description A page of versions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["BackupVersion"][];
+                            /** @description null on the last page */
+                            next_cursor: string | null;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Queue a manual configuration backup
+         * @description Audited and limited to 10 a minute per user; refusals over the limit are
+         *     audited too, one record per user a minute. An attempt whose job could
+         *     not be queued does not count. The poller keeps its own gap
+         *     of 5 minutes per device: when the last successful backup is younger, the
+         *     job completes without fetching and the answer carries
+         *     note "recent backup exists".
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            note?: "recent backup exists";
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unified diff of the masked texts of two versions of the device
+         * @description a is the earlier text, b the later one; both must belong to the device
+         *     (else 404). Computed on the server. Masked texts over 1 MiB or over
+         *     200 000 lines, a diff over 1 MiB or one with too many changed lines
+         *     answer 413 too_large; while every diff slot stays taken for 2 seconds the
+         *     answer is 503 busy (with Retry-After). A missing final newline is shown
+         *     as a change followed by the line "\ No newline at end of file". The text
+         *     comes from devices: render it as text only.
+         */
+        get: {
+            parameters: {
+                query: {
+                    a: number;
+                    b: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The diff (empty when the masked texts are equal) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            a: components["schemas"]["BackupDiffSide"];
+                            b: components["schemas"]["BackupDiffSide"];
+                            diff: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                413: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/{vid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The masked text of one configuration version
+         * @description Secrets are masked by the poller before storage; the full text is never served by the api. The text comes from devices - render it as text only.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    vid: components["parameters"]["VersionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The version with its masked text */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BackupVersion"] & {
+                            text: string;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backups/{vid}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The masked text of one version as a plain-text attachment
+         * @description File name is "<device name, unsafe characters replaced by _>-<taken_at UTC>.txt".
+         *     Downloads are audited (devices.backup_download), one record per user a minute.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    vid: components["parameters"]["VersionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The masked text */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/backup-state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * State of the last configuration backup of the device
+         * @description last_error is one of a fixed set of texts (never device output). needs_write:
+         *     the model needs a write account to read its configuration, so it is not
+         *     backed up before phase 4. latest_version carries the drift flag of the
+         *     newest version; all fields are empty for a device never backed up.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Backup state */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: date-time */
+                            last_ok_at: string | null;
+                            last_error: string | null;
+                            needs_write: boolean;
+                            /** @description 12-character prefix */
+                            last_sha256: string | null;
+                            latest_version: components["schemas"]["BackupVersion"] | null;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/show-commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * On-demand show commands of the device's driver
+         * @description Keys and the kinds of their arguments ("interface" or "vlan"), from the
+         *     driver the device was identified with. A device not identified yet, or
+         *     with a driver without show commands, lists none.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Commands */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            commands: {
+                                key: string;
+                                args: ("interface" | "vlan")[];
+                            }[];
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/show": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run an allowlisted show command on the device
+         * @description Queues the command; the result is read from GET /api/show/{id}. key must
+         *     be one of the device's show-commands and args an object with exactly one
+         *     member per argument, named after its kind: "interface" (a name from this
+         *     device's inventory) or "vlan" (an integer 1..4094). Anything else answers
+         *     400 invalid_show (also audited). Audited; limited to 10 requests a minute
+         *     per user (429) and one command at a time per device (409 device_busy).
+         *     The poller checks the row again before it sends anything.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        key: string;
+                        args: {
+                            interface?: string;
+                            vlan?: number;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Queued */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            id: number;
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/show/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Result of a show command
+         * @description Only for the user who ran it or a global admin, and only while the caller
+         *     holds devices.show on the device's group; anything else, and a result
+         *     older than an hour, answers 404. output is text from the device (untrusted:
+         *     render as text only), at most 1 MiB; truncated says it was cut. A failed
+         *     command carries one of a fixed set of texts in output.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Result */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ShowResult"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices/{id}/interfaces": {
         parameters: {
             query?: never;
@@ -1427,6 +1937,172 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/export/{table}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One inventory table of the device as a CSV attachment
+         * @description A bulk export: needs a fresh step-up and is audited (inventory.export with
+         *     the table, the row count and the filters). Columns are the API fields of
+         *     the table's rows, in order; a header row comes first, records end with
+         *     CRLF and every field is quoted (RFC 4180), after a UTF-8 BOM. A text cell
+         *     whose first character other than white space (NBSP included) is =, +, -
+         *     or @, or that starts with a tab or a carriage return, gets a leading
+         *     apostrophe so that spreadsheets do not run it as a formula. q keeps the
+         *     rows with a field containing it (case-insensitive); filter applies a named
+         *     filter of the table (interfaces only: up, down). At most 20 000 rows are
+         *     written, after at most 200 000 read; X-Export-Capped tells whether rows
+         *     were left out. Values come from the device: treat them as text.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    filter?: "up" | "down";
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    table: "interfaces" | "arp" | "mac" | "vlans" | "lldp" | "entities" | "routes";
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The CSV file */
+                200: {
+                    headers: {
+                        /** @description true when rows were left out */
+                        "X-Export-Capped"?: "true" | "false";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Global search over the visible devices
+         * @description Devices by name (substring) or address (prefix), ARP entries by IP address (prefix),
+         *     MACs from the forwarding databases and ARP tables (prefix of at least four hex digits,
+         *     any separators ":", "-", "." or none, any case; a dotted decimal query is not taken as a
+         *     MAC) and ports by name or alias (substring, from 3 characters). Only devices in the caller's devices.read
+         *     scope are searched; each type returns at most 50 items, "more" tells that there were more.
+         *     LIKE wildcards in q match literally. An absent, empty or shorter than 2 characters (after
+         *     trimming) q answers empty results. Each query is limited to 2 seconds; a slower one
+         *     answers 503 query_timeout. Panel sections are matched by the web client. Names,
+         *     aliases and port names are device data: render as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Results by type */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            devices: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    id: number;
+                                    name: string;
+                                    address: string;
+                                }[];
+                            };
+                            ips: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    ip: string;
+                                    mac: string;
+                                    if_index: number;
+                                    /** @description Empty when the interface is unknown */
+                                    port_name: string;
+                                }[];
+                            };
+                            macs: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    mac: string;
+                                    /** @enum {string} */
+                                    source: "fdb" | "arp";
+                                    /** @description Set for source fdb; 0 is unknown */
+                                    vlan: number | null;
+                                    /** @description Set for source arp */
+                                    ip: string | null;
+                                    if_index: number;
+                                    /** @description Empty when the interface is unknown */
+                                    port_name: string;
+                                }[];
+                            };
+                            ports: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    if_index: number;
+                                    name: string;
+                                    alias: string;
+                                }[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices/{id}/metrics/if": {
         parameters: {
             query?: never;
@@ -1469,6 +2145,62 @@ export interface paths {
                             /** @description Bucket width actually used in seconds; 0 for raw points */
                             step_s: number;
                             points: components["schemas"]["IfPoint"][];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/metrics/sys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * CPU, memory and temperature series of the device, oldest first
+         * @description Same sources, step and bounds as /api/devices/{id}/metrics/if (400
+         *     too_many_points, 400 bad_request). A value the device did not report is null.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    /** @description Exclusive; must be after from */
+                    to: string;
+                    /** @description Bucket width in seconds; absent keeps the source resolution */
+                    step?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Points */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Bucket width actually used in seconds; 0 for raw points */
+                            step_s: number;
+                            points: components["schemas"]["SysPoint"][];
                         };
                     };
                 };
@@ -3498,7 +4230,33 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List map backgrounds
+         * @description Metadata of the stored backgrounds (at most 200, by id) with the number of views using each; `unused`
+         *     marks the ones no view references, which the admin may delete. The image content is never part of the list.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Backgrounds */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MapBackground"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
         put?: never;
         /**
          * Upload a map background
@@ -3575,7 +4333,8 @@ export interface paths {
          *     `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
          *     and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
          *     pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
-         *     Retry-After. Use it only as an `<img src>`.
+         *     Retry-After. A failure before the first byte answers 404 (the background was deleted meanwhile) or 500;
+         *     one later ends the body short of Content-Length. Use it only as an `<img src>`.
          */
         get: {
             parameters: {
@@ -3651,10 +4410,530 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The caller's personal dashboards and every shared one
+         * @description At most 100 (50 personal, 50 shared), shared first. editable tells whether the
+         *     caller may change the dashboard: always for a personal one, with dashboards.manage
+         *     for a shared one. default_for_role marks the shared dashboard shown by default to a role.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Dashboards */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Dashboard"][];
+                    };
+                };
+                401: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        /**
+         * Create a dashboard
+         * @description A personal dashboard belongs to the caller and is visible to nobody else. A shared one
+         *     (shared true) needs dashboards.manage (else 403); it may be made the default of a role,
+         *     which the former default of that role stops being. default_for_role on a personal
+         *     dashboard answers 400. At most 50 personal dashboards per user and 50 shared ones
+         *     (409 too_many_dashboards). Audited.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        /** @default false */
+                        shared?: boolean;
+                        /** @enum {string|null} */
+                        default_for_role?: "viewer" | "operator" | "admin" | "auditor" | null;
+                    };
+                };
+            };
+            responses: {
+                201: components["responses"]["Created"];
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A dashboard with its widgets
+         * @description A personal dashboard of another user answers 404, as a missing one.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The dashboard */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardDetail"];
+                    };
+                };
+                401: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /**
+         * Delete a dashboard with its widgets
+         * @description A shared dashboard needs dashboards.manage (403); a personal one of another user answers 404. Audited.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Rename a dashboard or change the role it is the default of
+         * @description Only the given fields change; at least one is required. default_for_role (shared
+         *     dashboards only, else 400) makes it the default of the role, taking that over from
+         *     another dashboard; null makes it no role's default. A shared dashboard needs
+         *     dashboards.manage (403); a personal one of another user answers 404. Audited.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        /** @enum {string|null} */
+                        default_for_role?: "viewer" | "operator" | "admin" | "auditor" | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Changed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/dashboards/{id}/widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the widgets of a dashboard (layout and settings)
+         * @description Replaces the widget set: a widget with the id of a widget of this dashboard is
+         *     updated, one without an id is added, the ones left out are removed (an id of
+         *     another dashboard answers 400). At most 50 widgets on a 12-column grid
+         *     (x + w <= 12, y <= 1000, h <= 48). The type is one of a closed set and config is
+         *     checked against the schema of the type: an unknown type, an unknown field, a wrong
+         *     type or a value out of range answers 400 invalid_widget. Configs are stored
+         *     normalized (see DashboardWidget). A shared dashboard needs dashboards.manage (403);
+         *     a personal one of another user answers 404. Audited. Answers the stored dashboard.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        widgets: {
+                            /** Format: int64 */
+                            id?: number | null;
+                            type: components["schemas"]["WidgetType"];
+                            x: number;
+                            y: number;
+                            w: number;
+                            h: number;
+                            /** @description At most 2048 bytes; schema by type, see DashboardWidget */
+                            config: {
+                                [key: string]: unknown;
+                            };
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description The stored dashboard */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DashboardDetail"];
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+                409: components["responses"]["Error"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/device-states": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Visible devices counted by availability state */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            total: number;
+                            up: number;
+                            partial: number;
+                            down: number;
+                            unknown: number;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/top-devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Visible devices ranked by CPU, RAM or uptime
+         * @description cpu and mem rank by the latest sample of the last 15 minutes (value in percent, at the
+         *     sample time); uptime ranks the devices that are up by how long they have been
+         *     continuously available (value in seconds, at the start), longest first. The ranking
+         *     query is limited to 2 seconds; a slower one answers 503 query_timeout.
+         */
+        get: {
+            parameters: {
+                query: {
+                    metric: "cpu" | "mem" | "uptime";
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ranked devices */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                value: number;
+                                /** Format: date-time */
+                                at: string;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/top-interfaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Interfaces of visible devices ranked by load
+         * @description Rates of each interface's latest sample of the last 10 minutes; util_pct is the busier
+         *     direction against the reported speed. Interfaces without a speed are skipped. A ranking
+         *     is reused for 30 seconds for the same visible devices and limit. The query is limited
+         *     to 2 seconds; a slower one answers 503 query_timeout. The port name is device data:
+         *     render as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ranked interfaces */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                if_index: number;
+                                port_name: string;
+                                in_bps: number;
+                                out_bps: number;
+                                /** Format: int64 */
+                                speed_bps: number;
+                                util_pct: number;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/stats/config-drift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Visible devices whose newest configuration version is marked as drift
+         * @description One item per device (its newest version, when that is drift), newest first. Together
+         *     with GET /api/topology/changes it makes the recent changes widget. The query is limited
+         *     to 2 seconds; a slower one answers 503 query_timeout.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Drift versions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: int64 */
+                                version_id: number;
+                                /** Format: int64 */
+                                device_id: number;
+                                device_name: string;
+                                /** Format: date-time */
+                                taken_at: string;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        BackupVersion: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            taken_at: string;
+            /** @enum {string} */
+            source: "schedule" | "event" | "manual" | "pre_session";
+            /** @description Bytes of the full configuration */
+            size: number;
+            /** @description 12-character prefix of the hash of the normalized configuration */
+            sha256: string;
+            drift: boolean;
+        };
+        ShowResult: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            device_id: number;
+            key: string;
+            args: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "queued" | "running" | "done" | "failed";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            finished_at: string | null;
+            /** @description Untrusted device text; null until finished */
+            output: string | null;
+            truncated: boolean;
+        };
+        BackupDiffSide: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            taken_at: string;
+        };
         Problem: components["schemas"]["ProblemSummary"] & {
             /**
              * Format: int64
@@ -3995,6 +5274,11 @@ export interface components {
             oper_up: boolean;
             /** Format: date-time */
             seen_at: string;
+            /**
+             * @description Physical port kind derived by the driver from ifType, name and speed
+             * @enum {string}
+             */
+            port_kind: "rj45" | "sfp" | "other";
         };
         InventoryARPEntry: {
             ip: string;
@@ -4069,6 +5353,14 @@ export interface components {
             /** Format: int64 */
             speed_bps: number;
         };
+        SysPoint: {
+            /** Format: date-time */
+            ts: string;
+            /** @description Average inside the bucket; null when not reported */
+            cpu_pct: number | null;
+            mem_used_pct: number | null;
+            temp_c: number | null;
+        };
         /** @enum {string} */
         MapAreaKind: "organization" | "building" | "floor" | "room";
         MapView: {
@@ -4079,6 +5371,24 @@ export interface components {
             kind: "logical" | "plan";
             /** Format: int64 */
             background_id: number | null;
+        };
+        MapBackground: {
+            /** Format: int64 */
+            id: number;
+            /** @enum {string} */
+            mime: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+            width: number;
+            height: number;
+            /** @description Stored bytes (the sanitized document for SVG) */
+            size: number;
+            /** @description Hex digest of the stored bytes (the ETag) */
+            sha256: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            /** @description Views that use the background */
+            views: number;
+            /** @description No view uses the background (views = 0) */
+            unused: boolean;
         };
         MapArea: {
             /** Format: int64 */
@@ -4182,10 +5492,45 @@ export interface components {
             b_if_index: number | null;
             b_port_name: string;
         };
+        Dashboard: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            shared: boolean;
+            /** @enum {string|null} */
+            default_for_role: "viewer" | "operator" | "admin" | "auditor" | null;
+            editable: boolean;
+        };
+        /** @enum {string} */
+        WidgetType: "device_status" | "problems" | "top_devices" | "log_stream" | "metric_chart" | "top_interfaces" | "recent_changes" | "mini_map";
+        /**
+         * @description config by type (every field optional unless noted; title 0..100 characters, limit 1..N):
+         *     device_status {title}; problems {title, severity_min, limit up to 50};
+         *     top_devices {title, metric (required: cpu, mem, uptime), limit up to 50};
+         *     log_stream {title, kind (syslog, trap), severity_min, limit up to 100};
+         *     metric_chart {title, device_id (required), metric (required: cpu, mem, temp, traffic),
+         *     if_index (required exactly for traffic), range (1h, 6h, 24h, 7d)};
+         *     top_interfaces {title, limit up to 50}; recent_changes {title, limit up to 50}; mini_map {title, view_id}.
+         */
+        DashboardWidget: {
+            /** Format: int64 */
+            id: number;
+            type: components["schemas"]["WidgetType"];
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+            config: {
+                [key: string]: unknown;
+            };
+        };
+        DashboardDetail: components["schemas"]["Dashboard"] & {
+            widgets: components["schemas"]["DashboardWidget"][];
+        };
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_dashboards" | "too_many_widgets" | "invalid_widget" | "too_many_points" | "locked" | "rate_limited" | "busy" | "query_timeout" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };
@@ -4216,6 +5561,7 @@ export interface components {
     };
     parameters: {
         Id: number;
+        VersionId: number;
         ProfileKind: "snmp2c" | "snmp3" | "ssh_read" | "telnet_read";
         AreaId: number;
         TriggerId: number;

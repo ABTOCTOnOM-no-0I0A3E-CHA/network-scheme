@@ -219,10 +219,9 @@ func (s *server) updateView(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
 		var old *int64
-		if in.BackgroundID.v != nil {
-			if err := lockBackgroundUse(r, tx); err != nil {
-				return err
-			}
+		/* The background lock comes before any row lock (see lockBackgroundUse). */
+		if err := lockBackgroundUse(r, tx); err != nil {
+			return err
 		}
 		if err := tx.QueryRow(r.Context(), `SELECT background_id FROM core.map_view WHERE id = $1 FOR UPDATE`, id).Scan(&old); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -245,7 +244,14 @@ func (s *server) updateView(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-/* lockBackgroundUse serializes views taking a background with the collection of unused ones until the end of the transaction. */
+/*
+lockBackgroundUse serializes views taking a background with the collection of
+unused ones until the end of the transaction. Every path that changes a view's
+background or deletes a view or a background takes it before any row lock:
+deleting a background locks its row and then, through ON DELETE SET NULL, the
+rows of its views, while deleting a view locks the view row and then the
+background row, so taking the rows first would deadlock (40P01).
+*/
 func lockBackgroundUse(r *http.Request, tx pgx.Tx) error {
 	_, err := tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtext('core.map_background.use'))`)
 	return err
@@ -295,6 +301,9 @@ func (s *server) deleteView(w http.ResponseWriter, r *http.Request) {
 	if !s.change(w, r, ev, func(tx pgx.Tx, ev *audit.Event) error {
 		var name string
 		var bg *int64
+		if err := lockBackgroundUse(r, tx); err != nil {
+			return err
+		}
 		err := tx.QueryRow(r.Context(), `DELETE FROM core.map_view WHERE id = $1 RETURNING name, background_id`, id).Scan(&name, &bg)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errMapNotFound
@@ -769,6 +778,43 @@ func (s *server) uploadBackground(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
+/* beforeBackgroundBody, when set by a test, runs after the headers of a download are prepared and before its first chunk is read. */
+var beforeBackgroundBody func()
+
+type backgroundListItem struct {
+	ID         int64     `json:"id"`
+	Mime       string    `json:"mime"`
+	Width      int       `json:"width"`
+	Height     int       `json:"height"`
+	Size       int       `json:"size"`
+	SHA256     string    `json:"sha256"`
+	UploadedAt time.Time `json:"uploaded_at"`
+	Views      int       `json:"views"`
+	Unused     bool      `json:"unused"`
+}
+
+/* listBackgrounds lists the stored backgrounds with their metadata and how many views use each; the image bytes are never part of it. */
+func (s *server) listBackgrounds(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.pool.Query(r.Context(), `SELECT b.id, b.mime, b.width, b.height, octet_length(b.bytes), encode(b.sha256, 'hex'), b.uploaded_at,
+			u.views, u.views = 0
+		FROM core.map_background b
+		CROSS JOIN LATERAL (SELECT count(*)::int AS views FROM core.map_view v WHERE v.background_id = b.id) u
+		ORDER BY b.id LIMIT $1`, maxBackgrounds)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[backgroundListItem])
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if out == nil {
+		out = []backgroundListItem{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 /* etagMatches reports whether an If-None-Match header lists etag (weak comparison) or "*". */
 func etagMatches(header, etag string) bool {
 	for _, c := range strings.Split(header, ",") {
@@ -826,17 +872,36 @@ func (s *server) getBackground(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Set("Content-Length", strconv.Itoa(size))
+	if beforeBackgroundBody != nil {
+		beforeBackgroundBody()
+	}
 	/*
 		The blob is read in chunks, each by its own query, so neither the api nor a
 		pooled connection holds up to 20 MiB while a slow client drains it. Rows are
 		immutable; if one is deleted mid-way the body ends short of Content-Length
-		and the connection is dropped.
+		and the connection is dropped. Before the first byte an error is still an
+		ordinary answer: 404 for a row deleted meanwhile, 500 otherwise.
 	*/
 	for off := 0; off < size; off += serveChunk {
 		var chunk []byte
-		if err := s.pool.QueryRow(r.Context(), `SELECT substring(bytes from $2::int for $3::int) FROM core.map_background WHERE id = $1`,
-			id, off+1, serveChunk).Scan(&chunk); err != nil || len(chunk) == 0 {
+		err := s.pool.QueryRow(r.Context(), `SELECT substring(bytes from $2::int for $3::int) FROM core.map_background WHERE id = $1`,
+			id, off+1, serveChunk).Scan(&chunk)
+		if err == nil && len(chunk) == 0 {
+			err = pgx.ErrNoRows
+		}
+		if err != nil && (off > 0 || r.Context().Err() != nil) {
 			panic(http.ErrAbortHandler)
+		}
+		if err != nil {
+			for _, k := range []string{"Content-Length", "Content-Disposition", "ETag"} {
+				h.Del(k)
+			}
+			h.Set("Cache-Control", "no-store")
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = errMapNotFound
+			}
+			s.fail(w, r, err)
+			return
 		}
 		if _, err := w.Write(chunk); err != nil {
 			return
@@ -855,6 +920,9 @@ func (s *server) deleteBackground(w http.ResponseWriter, r *http.Request) {
 		var mimeType string
 		var size int
 		var views int64
+		if err := lockBackgroundUse(r, tx); err != nil {
+			return err
+		}
 		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM core.map_view WHERE background_id = $1`, id).Scan(&views); err != nil {
 			return err
 		}

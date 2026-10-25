@@ -9,6 +9,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/rbac"
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /* apiError is a client-facing error: a stable snake_case code and a Russian message. */
@@ -64,12 +65,16 @@ var (
 	errAreaTooDeep        = apiError{http.StatusConflict, "area_too_deep", "Вложенность областей больше 8 уровней"}
 	errAreaOtherView      = apiError{http.StatusConflict, "area_other_view", "Родитель области должен быть в том же виде"}
 	errTooManyBackgrounds = apiError{http.StatusConflict, "too_many_backgrounds", "Подложек не может быть больше 200"}
+	errTooManyDashboards  = apiError{http.StatusConflict, "too_many_dashboards", "Дашбордов не может быть больше 50 (общих — тоже 50)"}
+	errTooManyWidgets     = apiError{http.StatusConflict, "too_many_widgets", "На дашборде не может быть больше 50 виджетов"}
+	errInvalidWidget      = apiError{http.StatusBadRequest, "invalid_widget", "Неизвестный тип виджета или недопустимые настройки"}
 	errNotMultipart       = apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "Ожидается Content-Type: multipart/form-data"}
 	errUnsupportedImage   = apiError{http.StatusUnsupportedMediaType, "unsupported_media", "Подложка должна быть PNG, JPEG, WebP или SVG"}
 	errInvalidImage       = apiError{http.StatusBadRequest, "invalid_image", "Файл подложки повреждён или не допускается (не больше 16384 пикселей по каждой стороне)"}
 	errLocked             = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited        = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errBusy               = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят отдачей подложек, повторите позже"}
+	errQueryTimeout       = apiError{http.StatusServiceUnavailable, "query_timeout", "Запрос выполнялся слишком долго: уточните условия или повторите позже"}
 	errInternal           = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
 )
 
@@ -146,6 +151,14 @@ var knownErrors = []struct {
 	{errCapBackgrounds, errTooManyBackgrounds},
 	{errMapBackground, errBadRequest},
 	{errMapInvalid, errBadRequest},
+	{errShowInvalid, apiShowInvalid},
+	{errDashboardNotFound, errNotFound},
+	{errDashboardShared, errForbidden},
+	{errDashboardInvalid, errBadRequest},
+	{errCapDashboards, errTooManyDashboards},
+	{errCapWidgets, errTooManyWidgets},
+	{errShowBusy, apiShowBusy},
+	{store.ErrTimeout, errQueryTimeout},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

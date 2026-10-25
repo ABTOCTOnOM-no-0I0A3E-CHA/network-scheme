@@ -54,12 +54,14 @@ Config is poller.yaml. Secrets are never inline: the database password and
 the read-domain key pair are files named here.
 */
 type Config struct {
-	PollerID       string        `yaml:"poller_id"`
-	DB             config.DB     `yaml:"db"`
-	ReadKeyFile    string        `yaml:"read_key_file"`
-	ReadPubKeyFile string        `yaml:"read_pub_key_file"`
-	Workers        int           `yaml:"workers"`
-	SNMPTimeout    time.Duration `yaml:"snmp_timeout"`
+	PollerID       string    `yaml:"poller_id"`
+	DB             config.DB `yaml:"db"`
+	ReadKeyFile    string    `yaml:"read_key_file"`
+	ReadPubKeyFile string    `yaml:"read_pub_key_file"`
+	/* BackupPubKeyFile is the public key of the backup domain; empty disables configuration backups. The private key is never given to the poller. */
+	BackupPubKeyFile string        `yaml:"backup_pub_key_file"`
+	Workers          int           `yaml:"workers"`
+	SNMPTimeout      time.Duration `yaml:"snmp_timeout"`
 	/* SNMPRetries is a pointer so that an explicit 0 (no retries) differs from "not set". */
 	SNMPRetries       *int      `yaml:"snmp_retries"`
 	DefaultIntervals  Intervals `yaml:"default_intervals"`
@@ -175,6 +177,14 @@ func (c Config) ReadKeys() (priv, pub *[32]byte, err error) {
 		return nil, nil, errors.New("read_pub_key_file does not belong to read_key_file")
 	}
 	return priv, pub, nil
+}
+
+/* BackupPubKey reads the backup-domain public key; nil when backups are not configured. */
+func (c Config) BackupPubKey() (*[32]byte, error) {
+	if c.BackupPubKeyFile == "" {
+		return nil, nil
+	}
+	return config.ReadKeyFile(c.BackupPubKeyFile)
 }
 
 /* Bounds of an SNMPv3 engine ID (RFC 3411 SnmpEngineID), as in core.device_v3_engine. */

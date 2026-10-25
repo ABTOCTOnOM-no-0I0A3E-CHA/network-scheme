@@ -34,7 +34,8 @@ func (p *Poller) loadDevices(ctx context.Context) ([]device, error) {
 		SELECT d.id, d.address, d.snmp_port, d.driver, d.group_id,
 			coalesce(d.interval_avail_s, g.interval_avail_s),
 			coalesce(d.interval_metrics_s, g.interval_metrics_s),
-			coalesce(d.interval_inventory_s, g.interval_inventory_s)
+			coalesce(d.interval_inventory_s, g.interval_inventory_s),
+			coalesce(d.interval_backup_s, g.interval_backup_s)
 		FROM core.device d JOIN core.device_group g ON g.id = d.group_id
 		WHERE d.poller_id = $1`, p.cfg.PollerID)
 	if err != nil {
@@ -47,9 +48,9 @@ func (p *Poller) loadDevices(ctx context.Context) ([]device, error) {
 			addr  netip.Addr
 			port  int
 			group int64
-			iv    [numClasses]*int
+			iv    [numIntervals]*int
 		)
-		if err := r.Scan(&d.ID, &addr, &port, &d.Driver, &group, &iv[classAvail], &iv[classMetrics], &iv[classInventory]); err != nil {
+		if err := r.Scan(&d.ID, &addr, &port, &d.Driver, &group, &iv[classAvail], &iv[classMetrics], &iv[classInventory], &iv[ivBackup]); err != nil {
 			return d, err
 		}
 		d.Addr = netip.AddrPortFrom(addr.Unmap(), uint16(port)) // #nosec G115 -- CHECK 1..65535 in the schema
@@ -62,6 +63,14 @@ func (p *Poller) loadDevices(ctx context.Context) ([]device, error) {
 			if secs != nil {
 				d.Intervals[c] = clampInterval(c, *secs)
 			}
+		}
+		d.Backup = defaultBackupInterval
+		secs := iv[ivBackup]
+		if secs == nil {
+			secs = tpl.interval(group, d.Driver, ivBackup)
+		}
+		if secs != nil {
+			d.Backup = clampBackup(*secs)
 		}
 		return d, nil
 	})
@@ -77,13 +86,13 @@ const maxGroupDepth = 64
 /* templates are the interval settings of core.monitoring_template and the group tree they apply through. */
 type templates struct {
 	parent   map[int64]int64 /* group -> parent group */
-	byGroup  map[int64][][numClasses]*int
-	byDriver map[string][][numClasses]*int
+	byGroup  map[int64][][numIntervals]*int
+	byDriver map[string][][numIntervals]*int
 }
 
 /* loadTemplates reads the group tree and the templates that set an interval, lowest id first. */
 func (p *Poller) loadTemplates(ctx context.Context) (templates, error) {
-	t := templates{parent: map[int64]int64{}, byGroup: map[int64][][numClasses]*int{}, byDriver: map[string][][numClasses]*int{}}
+	t := templates{parent: map[int64]int64{}, byGroup: map[int64][][numIntervals]*int{}, byDriver: map[string][][numIntervals]*int{}}
 	rows, err := p.pool.Query(ctx, `SELECT id, parent_id FROM core.device_group WHERE parent_id IS NOT NULL`)
 	if err != nil {
 		return t, fmt.Errorf("poller: load groups: %w", err)
@@ -93,9 +102,9 @@ func (p *Poller) loadTemplates(ctx context.Context) (templates, error) {
 		return t, fmt.Errorf("poller: load groups: %w", err)
 	}
 	rows, err = p.pool.Query(ctx, `
-		SELECT driver, group_id, interval_avail_s, interval_metrics_s, interval_inventory_s
+		SELECT driver, group_id, interval_avail_s, interval_metrics_s, interval_inventory_s, interval_backup_s
 		FROM core.monitoring_template
-		WHERE num_nonnulls(interval_avail_s, interval_metrics_s, interval_inventory_s) > 0
+		WHERE num_nonnulls(interval_avail_s, interval_metrics_s, interval_inventory_s, interval_backup_s) > 0
 		ORDER BY id`)
 	if err != nil {
 		return t, fmt.Errorf("poller: load templates: %w", err)
@@ -103,9 +112,9 @@ func (p *Poller) loadTemplates(ctx context.Context) (templates, error) {
 	var (
 		driver *string
 		group  *int64
-		iv     [numClasses]*int
+		iv     [numIntervals]*int
 	)
-	if _, err := pgx.ForEachRow(rows, []any{&driver, &group, &iv[classAvail], &iv[classMetrics], &iv[classInventory]}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&driver, &group, &iv[classAvail], &iv[classMetrics], &iv[classInventory], &iv[ivBackup]}, func() error {
 		switch {
 		case group != nil:
 			t.byGroup[*group] = append(t.byGroup[*group], iv)
@@ -125,7 +134,7 @@ and driver, or nil: templates of g, then of its ancestors (nearest first), then
 of the driver; the first one that sets the class wins, the lowest id first.
 */
 func (t templates) interval(g int64, driver string, c class) *int {
-	first := func(list [][numClasses]*int) *int {
+	first := func(list [][numIntervals]*int) *int {
 		for _, iv := range list {
 			if iv[c] != nil {
 				return iv[c]

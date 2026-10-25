@@ -353,6 +353,17 @@ func TestSysSinceAndIfSince(t *testing.T) {
 	if lim, err := r.SysSince(ctx, base.Add(-time.Second), base.Add(time.Minute), 1); err != nil || len(lim) != 1 || *lim[0].CPUPct != 10 {
 		t.Fatalf("limit: %+v %v", lim, err)
 	}
+	/* QuerySys is [from, to) of one device; a step regroups into averaged buckets. */
+	if q, err := r.QuerySys(ctx, dev1, base, base.Add(20*time.Second), 0); err != nil || len(q) != 2 || *q[0].CPUPct != 10 || *q[1].CPUPct != 20 {
+		t.Fatalf("QuerySys raw = %+v %v", q, err)
+	}
+	/* the three samples span 20 s, so a 2 h bucket boundary splits them at most once */
+	if q, err := r.QuerySys(ctx, dev1, base.Add(-time.Hour), base.Add(time.Hour), 2*time.Hour); err != nil || len(q) < 1 || len(q) > 2 || (len(q) == 1 && *q[0].CPUPct != 20) || q[0].MemUsedPct != nil {
+		t.Fatalf("QuerySys bucketed = %+v %v", q, err)
+	}
+	if q, err := r.QuerySys(ctx, dev2, base, base.Add(time.Minute), 0); err != nil || len(q) != 0 {
+		t.Fatalf("QuerySys other device = %+v %v", q, err)
+	}
 
 	ifp := func(dev int64, idx int, at time.Duration, up bool) IfPoint {
 		return IfPoint{DeviceID: dev, IfIndex: idx, TS: base.Add(at), OperUp: up, SpeedBps: 1_000_000_000, InBps: 5}

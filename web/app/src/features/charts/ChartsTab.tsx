@@ -5,6 +5,7 @@ import { useDeviceTable, type MetricsRange } from "@/features/devices/api";
 import { safeText } from "@/lib/text";
 import { IfChart } from "./IfChart";
 import { RangePicker } from "./RangePicker";
+import { SysChart } from "./SysChart";
 import { presetRange, type Preset } from "./series";
 
 type Props = { deviceId: number; ifIndex: number | undefined; onIfIndex: (i: number) => void };
@@ -49,6 +50,7 @@ export function ChartsTab({ deviceId, ifIndex, onIfIndex }: Props) {
         )}
       </div>
       {ifIndex === undefined ? <p className="text-sm text-muted-foreground">{t("chart.pick")}</p> : <IfChart key={ifIndex} deviceId={deviceId} ifIndex={ifIndex} range={sel.range} />}
+      <SysChart deviceId={deviceId} range={sel.range} />
     </div>
   );
 }

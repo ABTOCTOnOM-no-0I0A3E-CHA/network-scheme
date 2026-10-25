@@ -23,6 +23,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/creds"
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/inventory"
+	"github.com/beekamai/network-scheme/internal/jobs"
 	"github.com/beekamai/network-scheme/internal/metrics"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
@@ -43,14 +44,16 @@ Deps are the poller's collaborators. Nil members select the production
 implementation; tests replace ICMP and SNMP dialing.
 */
 type Deps struct {
-	Pool     *pgxpool.Pool /* connected as nms_poller */
-	Priv     *[32]byte     /* read-domain key pair (Config.ReadKeys) */
-	Pub      *[32]byte
-	Pinger   Pinger            /* nil: ICMP echo via pro-bing */
-	DialSNMP DialFunc          /* nil: snmp.Dial */
-	Registry *drivers.Registry /* nil: drivers.Default() */
-	Clock    func() time.Time  /* nil: time.Now */
-	Logger   *slog.Logger      /* nil: slog.Default() */
+	Pool *pgxpool.Pool /* connected as nms_poller */
+	Priv *[32]byte     /* read-domain key pair (Config.ReadKeys) */
+	Pub  *[32]byte
+	/* BackupPub is the backup-domain public key (Config.BackupPubKey); nil: configuration backups are off. The private key is never available here. */
+	BackupPub *[32]byte
+	Pinger    Pinger            /* nil: ICMP echo via pro-bing */
+	DialSNMP  DialFunc          /* nil: snmp.Dial */
+	Registry  *drivers.Registry /* nil: drivers.Default() */
+	Clock     func() time.Time  /* nil: time.Now */
+	Logger    *slog.Logger      /* nil: slog.Default() */
 	/*
 		AvailabilityStarted, when set, is called as each scheduled availability
 		run starts, with the time the run was due; load tests measure the
@@ -61,44 +64,64 @@ type Deps struct {
 
 // Poller polls the devices of one poller id.
 type Poller struct {
-	cfg         Config
-	pool        *pgxpool.Pool
-	priv        *[32]byte
-	pub         *[32]byte
-	pinger      Pinger
-	dial        DialFunc
-	reg         *drivers.Registry
-	now         func() time.Time
-	log         *slog.Logger
-	sched       *scheduler
-	rates       *metrics.RateCalc
-	metrics     *metrics.Store
-	inv         *inventory.Store
-	hostKeys    *ssh.HostKeys
-	disc        *discovery
-	discEvery   time.Duration
-	scanRecheck time.Duration
-	scanFloor   time.Duration                                          /* least interval between scheduled runs of a scan, whatever interval_s says */
-	scanGap     time.Duration                                          /* least time between two runs of a scan, however requested */
-	scanPanics  atomic.Int64                                           /* recovered panics of discovery runs */
-	recheck     func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
+	cfg            Config
+	pool           *pgxpool.Pool
+	priv           *[32]byte
+	pub            *[32]byte
+	backupPub      *[32]byte
+	backupTick     time.Duration
+	backupGap      time.Duration /* least time between two backups of a device, whoever asks */
+	backupSlotWait time.Duration
+	schedSem       chan struct{} /* backupParallel-1 slots for scheduled runs: one is always left for jobs */
+	backupSem      chan struct{} /* backupParallel fetch slots shared by the schedule and backup_now */
+	backupMu       sync.Mutex
+	backupAt       map[int64]time.Time                                                                      /* last backup attempt per device; guarded by backupMu */
+	fetchRaw       func(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) /* sshFetch; replaced in tests */
+	showMu         sync.Mutex
+	showEvery      time.Duration                                                                                                 /* least time between show commands per device */
+	showAt         map[int64]time.Time                                                                                           /* last command that reached a device; guarded by showMu */
+	showBusy       map[int64]bool                                                                                                /* devices with a show command waiting or running; guarded by showMu */
+	runShowCmd     func(ctx context.Context, d device, cache *devCache, drv drivers.Driver, cmd ssh.ShowCommand) (string, error) /* sshShow; replaced in tests */
+	pinger         Pinger
+	dial           DialFunc
+	reg            *drivers.Registry
+	now            func() time.Time
+	log            *slog.Logger
+	sched          *scheduler
+	rates          *metrics.RateCalc
+	metrics        *metrics.Store
+	inv            *inventory.Store
+	hostKeys       *ssh.HostKeys
+	disc           *discovery
+	discEvery      time.Duration
+	scanRecheck    time.Duration
+	scanFloor      time.Duration                                          /* least interval between scheduled runs of a scan, whatever interval_s says */
+	scanGap        time.Duration                                          /* least time between two runs of a scan, however requested */
+	scanPanics     atomic.Int64                                           /* recovered panics of discovery runs */
+	recheck        func(ctx context.Context, id int64) (scanState, error) /* scanState; replaced in tests */
 
 	jobReload     sync.Mutex   /* single-flight reloadForJob */
 	lastJobReload time.Time    /* guarded by jobReload */
 	jobReloads    atomic.Int64 /* rereads done for jobs; tests read it */
-	unknownJobs   atomic.Int64 /* poll_now jobs cancelled for a device not assigned here */
+	unknownJobs   atomic.Int64 /* poll_now and backup_now jobs cancelled for a device not assigned here */
+
+	backupVersions atomic.Int64 /* configuration versions stored */
+	backupOversize atomic.Int64 /* configurations refused for exceeding 4 MiB */
 }
 
 // New returns a poller for a validated cfg.
 func New(cfg Config, d Deps) *Poller {
 	p := &Poller{
-		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, pinger: d.Pinger, dial: d.DialSNMP,
+		cfg: cfg, pool: d.Pool, priv: d.Priv, pub: d.Pub, backupPub: d.BackupPub, backupTick: backupTick, backupGap: jobs.BackupGap, backupSem: make(chan struct{}, backupParallel), schedSem: make(chan struct{}, backupParallel-1), backupSlotWait: backupSlotWait, backupAt: map[int64]time.Time{}, pinger: d.Pinger, dial: d.DialSNMP,
 		reg: d.Registry, now: d.Clock, log: d.Logger,
 		metrics: metrics.NewStore(d.Pool), inv: inventory.NewStore(d.Pool), hostKeys: ssh.NewHostKeys(d.Pool),
 		disc: newDiscovery(), discEvery: discoveryEvery, scanRecheck: scanRecheckEvery,
 		scanFloor: minScanInterval, scanGap: minScanGap,
 	}
 	p.recheck = p.scanState
+	p.fetchRaw = p.sshFetch
+	p.showEvery = showGap
+	p.runShowCmd, p.showBusy, p.showAt = p.sshShow, map[int64]bool{}, map[int64]time.Time{}
 	if p.pinger == nil {
 		p.pinger = ICMPPinger{}
 	}
@@ -150,6 +173,13 @@ func (p *Poller) Run(ctx context.Context) error {
 	wg.Go(func() { p.heartbeat(ctx) })
 	wg.Go(func() { p.listen(ctx) })
 	wg.Go(func() { p.discoverLoop(ctx) })
+	wg.Go(func() { p.cleanShow(ctx) })
+	if p.backupPub != nil {
+		wg.Go(func() { p.backupLoop(ctx) })
+	} else {
+		/* Documented choice: a startup warning only; backup_now jobs record a fixed last_error per device. */
+		p.log.Warn("configuration backups are disabled: backup_pub_key_file is not set")
+	}
 	p.sched.loop(ctx)
 	wg.Wait()
 	sctx, cancel := context.WithTimeout(context.Background(), stopTimeout)

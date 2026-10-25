@@ -114,11 +114,33 @@ func parseRFC3339(q url.Values, name string) (time.Time, bool) {
 }
 
 /*
-ifMetrics returns the rate series of one interface. The answer is bounded:
-a range of at most two years and at most maxMetricPoints buckets after the
-store clamps the step to its source resolution (raw points are counted at
-the densest poll interval).
+metricRange reads from, to and step of a metric read and returns the bucket
+width the store will use. The answer is bounded: a range of at most two years
+and at most maxMetricPoints buckets after the store clamps the step to its
+source resolution (raw points are counted at the densest poll interval).
 */
+func (s *server) metricRange(w http.ResponseWriter, q url.Values) (from, to time.Time, step, bucket time.Duration, ok bool) {
+	stepS, okS := queryInt(q, "step", 0, 1, int(maxMetricRange/time.Second))
+	from, okF := parseRFC3339(q, "from")
+	to, okT := parseRFC3339(q, "to")
+	if !okS || !okF || !okT || !to.After(from) || to.Sub(from) > maxMetricRange {
+		writeError(w, errBadRequest)
+		return from, to, 0, 0, false
+	}
+	step = time.Duration(stepS) * time.Second
+	bucket = s.metrics.IfStep(from, to, step)
+	spacing := bucket
+	if spacing == 0 {
+		spacing = rawSpacing
+	}
+	if (to.Sub(from)+spacing-1)/spacing > maxMetricPoints {
+		writeError(w, errTooManyPoints)
+		return from, to, 0, 0, false
+	}
+	return from, to, step, bucket, true
+}
+
+/* ifMetrics returns the rate series of one interface, bounded by metricRange. */
 func (s *server) ifMetrics(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -130,21 +152,12 @@ func (s *server) ifMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ifIndex, okI := queryInt(q, "if_index", 0, 1, math.MaxInt32)
-	stepS, okS := queryInt(q, "step", 0, 1, int(maxMetricRange/time.Second))
-	from, okF := parseRFC3339(q, "from")
-	to, okT := parseRFC3339(q, "to")
-	if _, given := q["if_index"]; !given || !okI || !okS || !okF || !okT || !to.After(from) || to.Sub(from) > maxMetricRange {
+	if _, given := q["if_index"]; !given || !okI {
 		writeError(w, errBadRequest)
 		return
 	}
-	step := time.Duration(stepS) * time.Second
-	bucket := s.metrics.IfStep(from, to, step)
-	spacing := bucket
-	if spacing == 0 {
-		spacing = rawSpacing
-	}
-	if (to.Sub(from)+spacing-1)/spacing > maxMetricPoints {
-		writeError(w, errTooManyPoints)
+	from, to, step, bucket, ok := s.metricRange(w, q)
+	if !ok {
 		return
 	}
 	pts, err := s.metrics.QueryIf(r.Context(), id, ifIndex, from, to, step)
@@ -159,6 +172,42 @@ func (s *server) ifMetrics(w http.ResponseWriter, r *http.Request) {
 			InErrPS: p.InErrPS, OutErrPS: p.OutErrPS, InDiscPS: p.InDiscPS, OutDiscPS: p.OutDiscPS,
 			OperUp: p.OperUp, SpeedBps: p.SpeedBps,
 		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type sysPointResponse struct {
+	TS         time.Time `json:"ts"`
+	CPUPct     *float64  `json:"cpu_pct"`
+	MemUsedPct *float64  `json:"mem_used_pct"`
+	TempC      *float64  `json:"temp_c"`
+}
+
+/* sysMetrics returns the CPU, memory and temperature series of one device, bounded like ifMetrics. */
+func (s *server) sysMetrics(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if _, err := s.authorizeDevice(r, rbac.PermDevicesRead, id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	from, to, step, bucket, ok := s.metricRange(w, r.URL.Query())
+	if !ok {
+		return
+	}
+	pts, err := s.metrics.QuerySys(r.Context(), id, from, to, step)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := struct {
+		StepS  int64              `json:"step_s"`
+		Points []sysPointResponse `json:"points"`
+	}{int64(bucket / time.Second), make([]sysPointResponse, 0, len(pts))}
+	for _, p := range pts {
+		out.Points = append(out.Points, sysPointResponse{TS: p.TS, CPUPct: p.CPUPct, MemUsedPct: p.MemUsedPct, TempC: p.TempC})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

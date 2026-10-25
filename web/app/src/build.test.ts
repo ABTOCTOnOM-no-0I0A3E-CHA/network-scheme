@@ -46,14 +46,28 @@ describe("production build", () => {
       "http://www.eclipse.org/",
       "http:///org/eclipse/",
       "https://rolldown.rs/",
+      /* zod (widget config schemas): JSON Schema dialect identifiers (its IPv6 check is allowed separately below) */
+      "http://json-schema.org/",
+      "https://json-schema.org/",
+      /* links inside warning messages of prop-types and react-draggable (dashboard grid) */
+      "http://fb.me/",
+      "https://github.com/react-grid-layout/",
     ];
+    /* an entry matches its exact host: past the entry the URL ends or goes on with a path, port, query or fragment */
+    const isAllowed = (u: string) => allowed.some((a) => u.startsWith(a) && (a.endsWith("/") || u.length === a.length || "/:?#".includes(u[a.length])));
+    /* zod's IPv6 check parses `http://[${address}]` with URL: exactly that template literal, nothing else under "http://[" */
+    const zodIPv6 = /^http:\/\/\[\$\{[\w$]+\}\]$/;
     const offenders: string[] = [];
     for (const f of walk(out)) {
       if (/\.(woff2?|png|ico)$/.test(f)) continue;
       const text = readFileSync(f, "utf8");
-      for (const m of text.matchAll(/https?:\/\/[^\s"'`)\\<>]+/g)) {
-        if (!allowed.some((a) => m[0].startsWith(a))) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
+      for (const m of text.matchAll(/(?:https?|wss?):\/\/[^\s"'`)\\<>]+/g)) {
+        const i = m.index;
+        if (zodIPv6.test(m[0]) && text[i - 1] === "`" && text[i + m[0].length] === "`") continue;
+        if (!isAllowed(m[0])) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
       }
+      /* protocol-relative //host.tld at the start of a string literal or url( */
+      for (const m of text.matchAll(/(?<=["'`(])\/\/[\w-]+(?:\.[\w-]+)+/g)) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
     }
     expect(offenders).toEqual([]);
   });
@@ -66,14 +80,19 @@ describe("production build", () => {
      *  - react-remove-scroll / react-style-singleton (modal Radix Dialog/Menu/Popover/Select):
      *    absent (vite aliases react-remove-scroll to a no-op), identified by the
      *    __webpack_nonce__ lookup and scroll-lock markers;
-     *  - input-otp: skips its injection when an element with id input-otp-style exists.
+     *  - input-otp: skips its injection when an element with id input-otp-style exists;
+     *  - react-draggable (dashboard grid): its nonce lookup sits right before the style injection,
+     *    which it skips when an element with id react-draggable-style-el exists; that guarded copy
+     *    is the only __webpack_nonce__ allowed.
      */
+    const draggable = /typeof __webpack_nonce__<`u`\?__webpack_nonce__:void 0\}function [\w$]+\([\w$]+,[\w$]+\)\{if\(![\w$]+\)return;let [\w$]+=[\w$]+\.getElementById\(`react-draggable-style-el`\)/g;
     const js = walk(out).filter((p) => p.endsWith(".js")).map((f) => readFileSync(f, "utf8"));
     for (const text of js) {
-      expect(text).not.toContain("__webpack_nonce__");
+      expect(text.replace(draggable, "")).not.toContain("__webpack_nonce__");
       expect(text).not.toContain("data-scroll-locked");
     }
     expect(html).toMatch(/<meta\s+id="input-otp-style"/);
+    expect(html).toMatch(/<meta\s+id="react-draggable-style-el"/);
   });
 
   it("uPlot styles ship in the bundled CSS file, not through script", () => {
@@ -82,11 +101,17 @@ describe("production build", () => {
     expect(html).toMatch(/<link[^>]+rel="stylesheet"/);
   });
 
-  it("map: no eval or new Function anywhere, Cytoscape runtime <style> disarmed, ELK worker is a bundled file under /assets/", () => {
+  it("map: no eval, new Function or unknown bare Function() anywhere, Cytoscape runtime <style> disarmed, ELK worker is a bundled file under /assets/", () => {
     const files = walk(out).filter((p) => p.endsWith(".js"));
+    /*
+     * Bare Function() is eval too. Known inert shapes only: zod's CSP probe Function(``) (never reached: zod runs jitless)
+     * and the global-object fallback Function(`return this`) (after typeof global/self checks).
+     */
+    const knownFunction = /(?<![\w$.])Function\((?:``|`return this`)\)/g;
     for (const f of files) {
       const text = readFileSync(f, "utf8");
       expect(text, path.basename(f)).not.toMatch(/\bnew Function\s*\(|[^\w.$]eval\s*\(|createObjectURL|importScripts\s*\(/);
+      expect(text.replace(knownFunction, "").match(/(?<![\w$.])Function\s*\(.{0,40}/g) ?? [], path.basename(f)).toEqual([]);
     }
     /* Cytoscape skips its style element when an element with this id exists */
     expect(html).toMatch(/<meta\s+id="__________cytoscape_stylesheet"/);

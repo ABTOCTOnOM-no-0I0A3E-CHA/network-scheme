@@ -77,15 +77,20 @@ const inside = (a: Area, p: Pos) => p.x >= a.x && p.x < a.x + a.w && p.y >= a.y 
 /**
  * Centers of the laid-out devices, keyed by element id, such that no device changes its area: the devices of an area are
  * scaled down (never up) into its rectangle and kept out of the smaller areas inside it, the devices of no area go to the
- * right of every rectangle. A device that has no free place in its area keeps the position it has.
+ * right of every rectangle and of every device in `fixed` (the devices that keep their place, with their positions), so
+ * that the moved ones cover neither. A device that has no free place in its area keeps the position it has.
  */
-export function placeDevices(laid: ElkNode, topo: Topology): Map<string, Pos> {
+export function placeDevices(laid: ElkNode, topo: Topology, fixed?: ReadonlyMap<string, Pos>): Map<string, Pos> {
   const out = new Map<string, Pos>();
   const order = areaOrder(topo.areas);
   const rank = new Map(order.map((a, i) => [a.id, i]));
   const byEid = new Map(topo.nodes.map((n) => [deviceEid(n.device_id), n]));
-  const right = topo.areas.reduce((m, a) => Math.max(m, a.x + a.w), -Infinity);
-  const top = topo.areas.reduce((m, a) => Math.min(m, a.y), Infinity);
+  let right = topo.areas.reduce((m, a) => Math.max(m, a.x + a.w), -Infinity);
+  let top = topo.areas.reduce((m, a) => Math.min(m, a.y), Infinity);
+  for (const p of fixed?.values() ?? []) {
+    right = Math.max(right, p.x + NODE / 2);
+    top = Math.min(top, p.y - NODE / 2);
+  }
 
   for (const g of laid.children ?? []) {
     const key = Number(g.id.slice(1));
@@ -96,8 +101,11 @@ export function placeDevices(laid: ElkNode, topo: Topology): Map<string, Pos> {
     const area = key === OUTSIDE ? undefined : topo.areas.find((a) => a.id === key);
 
     if (!area) {
-      const ox = topo.areas.length > 0 ? right + OUTSIDE_GAP - minX : 0;
-      const oy = topo.areas.length > 0 ? top - minY : 0;
+      /* the offset aligns the devices that move; those in `fixed` are only obstacles here */
+      const moving = kids.filter((k) => !fixed?.has(k.id));
+      const ref = moving.length > 0 ? moving : kids;
+      const ox = Number.isFinite(right) ? right + OUTSIDE_GAP - Math.min(...ref.map((k) => k.x)) : 0;
+      const oy = Number.isFinite(top) ? top - Math.min(...ref.map((k) => k.y)) : 0;
       for (const k of kids) out.set(k.id, { x: k.x + ox, y: k.y + oy });
       continue;
     }

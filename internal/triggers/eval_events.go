@@ -38,6 +38,25 @@ const (
 	sampleRunes  = 200
 )
 
+/*
+Configuration-change events. The traps are the standard ENTITY-MIB
+entConfigChange (trap.Standard) and the name config_changed, which an operator
+can give to a vendor trap OID with a trap rule; the syslog patterns are
+case-insensitive substrings of messages of severity info or more severe. No
+Eltex message text is documented, so these are generic and not verified on
+hardware; a missed event only means the scheduled backup finds the change.
+*/
+const (
+	trapEntConfigChange = "entConfigChange"
+	trapConfigChanged   = "config_changed"
+)
+
+var configSyslogPatterns = []string{"configuration changed", "configuration saved", "config changed", "config saved", "running-config changed"}
+
+const configSyslogSeverity = 6
+
+func isConfigTrap(name string) bool { return name == trapEntConfigChange || name == trapConfigChanged }
+
 const (
 	streamTrap   = "trap"
 	streamSyslog = "syslog"
@@ -147,6 +166,9 @@ func (e *Engine) readTraps(ctx context.Context, a *actions, now time.Time) error
 	if len(e.cfg.byKind[KindIfOperDown]) > 0 {
 		names[trapLinkDown], names[trapLinkUp] = true, true
 	}
+	if e.backupNow != nil {
+		names[trapEntConfigChange], names[trapConfigChanged] = true, true
+	}
 	list := make([]string, 0, len(names))
 	for n := range names {
 		list = append(list, n)
@@ -221,6 +243,11 @@ func (e *Engine) trapGroups(ctx context.Context, lo, hi int64, floor time.Time, 
 
 /* onTrap applies the traps of one group to the trap triggers (by name) and the interface triggers (link traps) of its device. */
 func (e *Engine) onTrap(a *actions, r trapGroup, now time.Time) {
+	if isConfigTrap(r.name) && e.backupNow != nil {
+		if _, ok := e.cfg.devices[r.dev]; ok {
+			e.cfgHints[r.dev] = now
+		}
+	}
 	link := r.name == trapLinkDown || r.name == trapLinkUp
 	idx := r.ifIndex
 	obj := ""
@@ -332,7 +359,7 @@ func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) erro
 	for d := range devSet {
 		devs = append(devs, d)
 	}
-	if len(sevs) == 0 {
+	if len(sevs) == 0 && e.backupNow == nil {
 		return e.skipToHead(ctx, a, streamSyslog, pos, now)
 	}
 	floor := now.Add(-eventTSFloor)
@@ -349,6 +376,11 @@ func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) erro
 				return err
 			}
 		}
+		if e.backupNow != nil {
+			if err := e.configSyslog(ctx, pos, hi, floor, now); err != nil {
+				return err
+			}
+		}
 		pos = hi
 		a.wmSeq[streamSyslog] = hi
 		if !more {
@@ -356,6 +388,29 @@ func (e *Engine) readSyslog(ctx context.Context, a *actions, now time.Time) erro
 		}
 	}
 	return nil
+}
+
+/* configSyslog marks the known devices that logged a configuration-change message in (lo, hi]. */
+func (e *Engine) configSyslog(ctx context.Context, lo, hi int64, floor, now time.Time) error {
+	rows, err := e.pool.Query(ctx, `
+		SELECT DISTINCT device_id FROM events.syslog
+		WHERE ingest_seq > $1 AND ingest_seq <= $2 AND ts > $3 AND severity <= $4
+		  AND EXISTS (SELECT 1 FROM unnest($5::text[]) p WHERE position(p in lower(msg)) > 0)`,
+		lo, hi, floor, configSyslogSeverity, configSyslogPatterns)
+	if err != nil {
+		return fmt.Errorf("triggers: read config-change syslog: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var dev int64
+		if err := rows.Scan(&dev); err != nil {
+			return fmt.Errorf("triggers: read config-change syslog: %w", err)
+		}
+		if _, ok := e.cfg.devices[dev]; ok {
+			e.cfgHints[dev] = now
+		}
+	}
+	return rows.Err()
 }
 
 /*

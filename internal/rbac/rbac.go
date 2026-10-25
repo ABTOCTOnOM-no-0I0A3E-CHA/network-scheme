@@ -38,6 +38,8 @@ const (
 
 	PermDevicesRead       Perm = "devices.read"
 	PermDevicesPoll       Perm = "devices.poll"
+	PermDevicesBackup     Perm = "devices.backup"
+	PermDevicesShow       Perm = "devices.show"
 	PermDevicesManage     Perm = "devices.manage"
 	PermDeviceCredentials Perm = "device.credentials" //nolint:gosec // a permission name, not a credential
 
@@ -48,15 +50,18 @@ const (
 
 	/* Map views, areas, backgrounds, manual links and pinned positions; global only (not group-scoped). */
 	PermMapManage Perm = "map.manage"
+
+	/* Shared dashboards and the default dashboard of each role; global only (not group-scoped). */
+	PermDashboardsManage Perm = "dashboards.manage"
 )
 
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
 var matrix = map[Role][]Perm{
 	RoleViewer:   {PermDevicesRead},
-	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermSystemRead, PermProblemsAck},
+	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermSystemRead, PermProblemsAck},
 	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
-		PermDevicesRead, PermDevicesPoll, PermDevicesManage, PermDeviceCredentials,
-		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage},
+		PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermDevicesManage, PermDeviceCredentials,
+		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage, PermDashboardsManage},
 	RoleAuditor: {PermAuditRead},
 }
 

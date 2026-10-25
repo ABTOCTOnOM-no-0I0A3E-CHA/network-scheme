@@ -8,3 +8,4 @@ db:
   password_file: "/run/secrets/db_poller_password"
 read_key_file: "/run/secrets/domain_read_key"
 read_pub_key_file: "/etc/nms/domain_read.pub"
+backup_pub_key_file: "/etc/nms/domain_backup.pub"

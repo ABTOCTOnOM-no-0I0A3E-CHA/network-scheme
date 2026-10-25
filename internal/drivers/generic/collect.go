@@ -33,6 +33,7 @@ type ifRow struct {
 	descr, name, alias, mac string
 	speed, high             uint64
 	operUp                  bool
+	ifType                  uint64
 	c                       [6]uint64 /* in/out octets, in/out errors, in/out discards (32-bit) */
 	has                     [6]bool   /* which of c were read */
 	hcIn, hcOut             uint64
@@ -79,6 +80,7 @@ func gauge(dst func(*ifRow) *uint64) func(*ifRow, snmp.Var) {
 
 var (
 	colDescr = ifColumn{ifEntry + ".2", false, func(r *ifRow, v snmp.Var) { r.descr = str(v) }}
+	colType  = ifColumn{ifEntry + ".3", false, gauge(func(r *ifRow) *uint64 { return &r.ifType })}
 	colSpeed = ifColumn{ifEntry + ".5", false, gauge(func(r *ifRow) *uint64 { return &r.speed })}
 	colMAC   = ifColumn{ifEntry + ".6", false, func(r *ifRow, v snmp.Var) {
 		if b, ok := v.Value.([]byte); ok && v.Type == snmp.TypeOctetString {
@@ -105,7 +107,7 @@ var (
 		{ifEntry + ".20", false, counter(3)}, /* ifOutErrors */
 		colName, colHCIn, colHCOut, colHigh, colAlias,
 	}
-	inventoryColumns = []ifColumn{colDescr, colSpeed, colMAC, colOper, colName, colHigh, colAlias}
+	inventoryColumns = []ifColumn{colDescr, colType, colSpeed, colMAC, colOper, colName, colHigh, colAlias}
 )
 
 func counter64(v snmp.Var) (uint64, bool) {

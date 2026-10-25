@@ -15,7 +15,18 @@ const (
 	SystemUnknownSource   = "unknown_source"
 	SystemProfileMismatch = "access_profile_mismatch"
 	SystemSSHMismatch     = "ssh_host_key_mismatch"
+	SystemConfigDrift     = "config_drift"
 )
+
+/*
+config_drift (warning) is open while the newest configuration version of a
+device is drift (a change outside a change session of the panel; before
+phase 4 every change) and is at most configDriftFor old. It resolves when that
+time has passed or when a newer version that is not drift is stored, never
+earlier on acknowledgement: an acknowledged problem stays open, but visibly
+handled, until then. Only metadata columns of backups.config_version are read.
+*/
+const configDriftFor = 24 * time.Hour
 
 /*
 An SSH host key mismatch is a problem while the device has a pinned key
@@ -56,6 +67,8 @@ func systemName(kind string) string {
 		return "Access profile does not match the device"
 	case SystemSSHMismatch:
 		return "SSH host key does not match the pinned one"
+	case SystemConfigDrift:
+		return "Device configuration changed outside a change session"
 	}
 	return "System problem"
 }
@@ -135,6 +148,29 @@ func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) erro
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("triggers: access profile check: %w", err)
+	}
+
+	rows, err = e.pool.Query(ctx, `
+		SELECT v.device_id, v.id FROM (
+		    SELECT DISTINCT ON (device_id) device_id, id, drift
+		    FROM backups.config_version WHERE taken_at > $1
+		    ORDER BY device_id, taken_at DESC, id DESC) v
+		JOIN core.device d ON d.id = v.device_id
+		WHERE v.drift`, now.Add(-configDriftFor))
+	if err != nil {
+		return fmt.Errorf("triggers: config drift check: %w", err)
+	}
+	for rows.Next() {
+		var dev, ver int64
+		if err := rows.Scan(&dev, &ver); err != nil {
+			rows.Close()
+			return fmt.Errorf("triggers: config drift check: %w", err)
+		}
+		want[pkey{sys: SystemConfigDrift, dev: dev, obj: "config"}] = sysWant{"warning", fmt.Sprintf("configuration version %d differs from the previous one", ver)}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("triggers: config drift check: %w", err)
 	}
 
 	if grew, err := e.unknownSourceGrowth(ctx, now); err != nil {

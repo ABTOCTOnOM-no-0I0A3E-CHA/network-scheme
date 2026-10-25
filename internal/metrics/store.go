@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /*
@@ -241,6 +243,46 @@ func (s *Store) QueryIf(ctx context.Context, deviceID int64, ifIndex int, from, 
 	return pts, nil
 }
 
+/* Source tables of QuerySys, tier for tier with ifSources (same resolutions and retention). */
+var sysTables = []string{"metrics.sys_metrics", "metrics.sys_metrics_5m", "metrics.sys_metrics_1h"}
+
+/*
+QuerySys returns the CPU, memory and temperature samples of one device in
+[from, to), oldest first. It reads the same tier and regroups into the same
+buckets as QueryIf for the same arguments (IfStep gives the bucket width);
+the aggregates contribute their averages. PSUOk is not filled.
+*/
+func (s *Store) QuerySys(ctx context.Context, deviceID int64, from, to time.Time, step time.Duration) ([]SysPoint, error) {
+	if !to.After(from) {
+		return nil, errors.New("metrics: empty time range")
+	}
+	i, bucket := s.ifPlan(from, to, step)
+	/* The identifier comes from the sysTables constants only; values are parameters. */
+	q := `SELECT ts, cpu_pct, mem_used_pct, temp_c FROM ` + sysTables[i] + `
+	      WHERE device_id = $1 AND ts >= $2 AND ts < $3 ORDER BY ts`
+	args := []any{deviceID, from, to}
+	if bucket > 0 {
+		q = `SELECT date_bin($4::interval, ts, '2000-01-01 00:00:00+00') AS b, avg(cpu_pct), avg(mem_used_pct), avg(temp_c)
+		     FROM ` + sysTables[i] + `
+		     WHERE device_id = $1 AND ts >= $2 AND ts < $3
+		     GROUP BY b ORDER BY b`
+		args = append(args, bucket)
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query system metrics: %w", err)
+	}
+	pts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SysPoint, error) {
+		p := SysPoint{DeviceID: deviceID}
+		err := row.Scan(&p.TS, &p.CPUPct, &p.MemUsedPct, &p.TempC)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query system metrics: %w", err)
+	}
+	return pts, nil
+}
+
 // SysSince implements MetricStore.
 func (s *Store) SysSince(ctx context.Context, from, to time.Time, limit int) ([]SysPoint, error) {
 	rows, err := s.pool.Query(ctx, `SELECT device_id, ts, cpu_pct, mem_used_pct, temp_c, psu_ok
@@ -301,4 +343,91 @@ func (s *Store) IfUpSince(ctx context.Context, from, to time.Time) ([]IfFirstUp,
 		return nil, fmt.Errorf("query up interfaces: %w", err)
 	}
 	return pairs, nil
+}
+
+// SysLatest is the most recent value of one system metric of a device.
+type SysLatest struct {
+	DeviceID int64
+	TS       time.Time
+	Value    float64
+}
+
+/* Columns TopSys ranks by; the identifier comes from this map only. */
+var sysTopColumns = map[string]string{"cpu": "cpu_pct", "mem": "mem_used_pct"}
+
+/*
+TopSys returns the devices with the highest latest value of metric ("cpu" or
+"mem") among the raw samples newer than since of deviceIDs, highest first,
+at most limit. The query runs under store.QueryTimeout (store.ErrTimeout).
+*/
+func (s *Store) TopSys(ctx context.Context, metric string, deviceIDs []int64, since time.Time, limit int) ([]SysLatest, error) {
+	col, ok := sysTopColumns[metric]
+	if !ok {
+		return nil, fmt.Errorf("metrics: unknown system metric %q", metric)
+	}
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+	q := `SELECT device_id, ts, v FROM (
+	        SELECT DISTINCT ON (device_id) device_id, ts, ` + col + `::float8 AS v
+	        FROM metrics.sys_metrics
+	        WHERE ts > $1 AND ` + col + ` IS NOT NULL AND device_id = ANY($2)
+	        ORDER BY device_id, ts DESC) t
+	      ORDER BY v DESC, device_id LIMIT $3`
+	var out []SysLatest
+	err := store.BoundedRead(ctx, s.pool, store.QueryTimeout, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, since, deviceIDs, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[SysLatest])
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query top system metrics: %w", err)
+	}
+	return out, nil
+}
+
+// IfLoad is the load of one interface in its latest sample.
+type IfLoad struct {
+	DeviceID      int64
+	IfIndex       int
+	InBps, OutBps float64
+	SpeedBps      int64
+	UtilPct       float64 /* the busier direction against the speed */
+}
+
+/*
+TopIfLoad returns the interfaces of deviceIDs with the highest utilization
+(the busier direction against the reported speed) in their latest raw sample
+newer than since, busiest first, at most limit. Interfaces without a speed
+are skipped. Taking the latest sample walks the (device_id, if_index, ts)
+index in order instead of aggregating every sample of the window; the query
+runs under store.QueryTimeout (store.ErrTimeout).
+*/
+func (s *Store) TopIfLoad(ctx context.Context, deviceIDs []int64, since time.Time, limit int) ([]IfLoad, error) {
+	if len(deviceIDs) == 0 {
+		return nil, nil
+	}
+	var out []IfLoad
+	err := store.BoundedRead(ctx, s.pool, store.QueryTimeout, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT device_id, if_index, in_bps, out_bps, speed_bps,
+		        greatest(in_bps, out_bps) * 100 / speed_bps AS util FROM (
+		          SELECT DISTINCT ON (device_id, if_index) device_id, if_index, in_bps, out_bps, speed_bps
+		          FROM metrics.if_metrics
+		          WHERE ts > $1 AND device_id = ANY($2)
+		          ORDER BY device_id, if_index, ts DESC) t
+		      WHERE speed_bps > 0
+		      ORDER BY util DESC, device_id, if_index LIMIT $3`, since, deviceIDs, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[IfLoad])
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query top interface load: %w", err)
+	}
+	return out, nil
 }

@@ -79,23 +79,32 @@ const (
 )
 
 type server struct {
-	auth      *auth.Service
-	users     *auth.UserStore
-	rbac      *rbac.Store
-	pool      *pgxpool.Pool
-	devices   *devices.Store
-	inventory *inventory.Store
-	metrics   *metrics.Store
-	jobs      Enqueuer
-	now       func() time.Time
-	cfg       config.API
-	log       *slog.Logger
-	generalRL *httprate.RateLimiter
-	authRL    *httprate.RateLimiter
-	loginSem  chan struct{}
-	loginWait time.Duration
-	uploadSem chan struct{} /* one background upload is processed at a time */
-	serveSem  chan struct{} /* at most serveSlots background downloads stream at a time */
+	auth        *auth.Service
+	users       *auth.UserStore
+	rbac        *rbac.Store
+	pool        *pgxpool.Pool
+	devices     *devices.Store
+	inventory   *inventory.Store
+	metrics     *metrics.Store
+	jobs        Enqueuer
+	now         func() time.Time
+	cfg         config.API
+	log         *slog.Logger
+	generalRL   *httprate.RateLimiter
+	authRL      *httprate.RateLimiter
+	loginSem    chan struct{}
+	loginWait   time.Duration
+	uploadSem   chan struct{} /* one background upload is processed at a time */
+	serveSem    chan struct{} /* at most serveSlots background downloads stream at a time */
+	diffSem     chan struct{} /* at most diffSlots backup diffs are computed at a time */
+	exportSem   chan struct{} /* at most exportSlots inventory exports read at a time */
+	backupRL    userLimiter   /* manual backups per user */
+	showRL      userLimiter   /* show requests per user */
+	showAuditRL userLimiter   /* audit records of refused show requests, one per user a minute */
+
+	backupAuditRL   userLimiter          /* audit records of refused manual backups, one per user a minute */
+	downloadAuditRL keyLimiter[[2]int64] /* audit records of config downloads, one per user and device a minute */
+	topIf           topIfCache           /* recent interface load rankings */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -108,7 +117,7 @@ type server struct {
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
-		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), loginWait: loginQueueWait,
+		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), diffSem: make(chan struct{}, diffSlots), exportSem: make(chan struct{}, exportSlots), loginWait: loginQueueWait,
 		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {
@@ -157,6 +166,7 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPost, "/api/auth/stepup", self, s.stepUp)
 	s.route(r, http.MethodPost, "/api/auth/logout", self, s.logout)
 	s.route(r, http.MethodGet, "/api/auth/me", self, s.me)
+	s.route(r, http.MethodGet, "/api/auth/stepup-status", Policy{Perm: rbac.PermSelf, StepUp: true}, s.stepUpStatus)
 
 	/* Phase 0 permissions are global: Can(perm, nil, nil). */
 	users := Policy{Perm: rbac.PermUsersManage}
@@ -198,7 +208,22 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/devices/{id}/lldp", read, inventoryList(s, (*inventory.Store).LLDP))
 	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
 	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
+	/* A table export is a bulk read: it needs a fresh step-up and is audited (security.md §9, §11). */
+	s.route(r, http.MethodGet, "/api/devices/{id}/export/{table}", Policy{Perm: rbac.PermDevicesRead, StepUp: true, Scoped: true}, s.exportInventory)
+	s.route(r, http.MethodGet, "/api/search", read, s.search)
 	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
+	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/sys", read, s.sysMetrics)
+	backupP := Policy{Perm: rbac.PermDevicesBackup, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups", read, s.listBackups)
+	s.route(r, http.MethodPost, "/api/devices/{id}/backups", backupP, s.backupNow)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/diff", read, s.diffBackups)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}", read, s.getBackup)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backups/{vid}/download", read, s.downloadBackup)
+	s.route(r, http.MethodGet, "/api/devices/{id}/backup-state", read, s.backupState)
+	showP := Policy{Perm: rbac.PermDevicesShow, Scoped: true}
+	s.route(r, http.MethodGet, "/api/devices/{id}/show-commands", showP, s.listShowCommands)
+	s.route(r, http.MethodPost, "/api/devices/{id}/show", showP, s.startShow)
+	s.route(r, http.MethodGet, "/api/show/{id}", showP, s.getShow)
 	s.route(r, http.MethodGet, "/api/discovery/scans", manage, s.listScans)
 	s.route(r, http.MethodPost, "/api/discovery/scans", manage, s.createScan)
 	s.route(r, http.MethodPatch, "/api/discovery/scans/{id}", manage, s.updateScan)
@@ -256,9 +281,27 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodDelete, "/api/map/views/{id}/areas/{area_id}", mapManage, s.deleteArea)
 	s.route(r, http.MethodPut, "/api/map/views/{id}/positions", mapManage, s.putPositions)
 	/* Backgrounds are admin objects: any devices.read holder may fetch one (they are shown under maps). */
+	s.route(r, http.MethodGet, uploadPath, mapManage, s.listBackgrounds)
 	s.route(r, http.MethodPost, uploadPath, mapManage, s.uploadBackground)
 	s.route(r, http.MethodGet, "/api/map/backgrounds/{id}", read, s.getBackground)
 	s.route(r, http.MethodDelete, "/api/map/backgrounds/{id}", mapManage, s.deleteBackground)
+
+	/*
+		Dashboards are the caller's own (personal) or shared; the handlers hide
+		other users' personal dashboards (404) and require the global
+		dashboards.manage for changes of shared ones. Widget data comes from the
+		scoped device endpoints and the aggregates below.
+	*/
+	s.route(r, http.MethodGet, "/api/dashboards", self, s.listDashboards)
+	s.route(r, http.MethodPost, "/api/dashboards", self, s.createDashboard)
+	s.route(r, http.MethodGet, "/api/dashboards/{id}", self, s.getDashboard)
+	s.route(r, http.MethodPatch, "/api/dashboards/{id}", self, s.updateDashboard)
+	s.route(r, http.MethodDelete, "/api/dashboards/{id}", self, s.deleteDashboard)
+	s.route(r, http.MethodPut, "/api/dashboards/{id}/widgets", self, s.putWidgets)
+	s.route(r, http.MethodGet, "/api/stats/device-states", read, s.deviceStateCounts)
+	s.route(r, http.MethodGet, "/api/stats/top-devices", read, s.topDevices)
+	s.route(r, http.MethodGet, "/api/stats/top-interfaces", read, s.topInterfaces)
+	s.route(r, http.MethodGet, "/api/stats/config-drift", read, s.configDrift)
 	return r
 }
 

@@ -146,6 +146,9 @@ func serve(ctx context.Context, args []string) error {
 		PollNow: func(c context.Context, id int64) error {
 			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueuePollNow(c, tx, id) })
 		},
+		BackupNow: func(c context.Context, id int64) error {
+			return pgx.BeginFunc(c, pool, func(tx pgx.Tx) error { return enq.EnqueueBackupNow(c, tx, id, "event") })
+		},
 	})
 	/* The topology builder reads neighbour data and writes links; it stops with the server. */
 	topo := topology.New(topology.Config{Pool: pool, Log: log})

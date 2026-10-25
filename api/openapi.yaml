@@ -165,6 +165,19 @@ paths:
                           description: null for a global binding
                   csrf_token: { type: string }
         "401": { $ref: "#/components/responses/Error" }
+  /api/auth/stepup-status:
+    get:
+      summary: Whether the session holds a fresh step-up
+      description: |
+        204 while a step-up TOTP was given within the last 5 minutes, else 403
+        stepup_required. The web client asks for the code before it starts a
+        download that needs step-up (the browser fetches it, not the client).
+      x-permission: self
+      x-step-up: true
+      responses:
+        "204": { description: Step-up is fresh }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /api/users:
     get:
       summary: List panel users
@@ -534,6 +547,271 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups:
+    get:
+      summary: Configuration versions of the device, newest first
+      description: |
+        Metadata only (the text is fetched per version). sha256 is a 12-character
+        prefix of the hash of the normalized configuration. drift marks a change
+        made outside a change session of the panel. The cursor is opaque.
+        Versions of a deleted device are not listed.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 4096 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: A page of versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/BackupVersion" }
+                  next_cursor: { type: [string, "null"], description: null on the last page }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Queue a manual configuration backup
+      description: |
+        Audited and limited to 10 a minute per user; refusals over the limit are
+        audited too, one record per user a minute. An attempt whose job could
+        not be queued does not count. The poller keeps its own gap
+        of 5 minutes per device: when the last successful backup is younger, the
+        job completes without fetching and the answer carries
+        note "recent backup exists".
+      x-permission: devices.backup
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note: { type: string, enum: [recent backup exists] }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/diff:
+    get:
+      summary: Unified diff of the masked texts of two versions of the device
+      description: |
+        a is the earlier text, b the later one; both must belong to the device
+        (else 404). Computed on the server. Masked texts over 1 MiB or over
+        200 000 lines, a diff over 1 MiB or one with too many changed lines
+        answer 413 too_large; while every diff slot stays taken for 2 seconds the
+        answer is 503 busy (with Retry-After). A missing final newline is shown
+        as a change followed by the line "\ No newline at end of file". The text
+        comes from devices: render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: a, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: b, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200":
+          description: The diff (empty when the masked texts are equal)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [a, b, diff]
+                properties:
+                  a: { $ref: "#/components/schemas/BackupDiffSide" }
+                  b: { $ref: "#/components/schemas/BackupDiffSide" }
+                  diff: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/{vid}:
+    get:
+      summary: The masked text of one configuration version
+      description: Secrets are masked by the poller before storage; the full text is never served by the api. The text comes from devices - render it as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/VersionId" }]
+      responses:
+        "200":
+          description: The version with its masked text
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/BackupVersion"
+                  - type: object
+                    required: [text]
+                    properties:
+                      text: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backups/{vid}/download:
+    get:
+      summary: The masked text of one version as a plain-text attachment
+      description: |
+        File name is "<device name, unsafe characters replaced by _>-<taken_at UTC>.txt".
+        Downloads are audited (devices.backup_download), one record per user a minute.
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/VersionId" }]
+      responses:
+        "200":
+          description: The masked text
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/backup-state:
+    get:
+      summary: State of the last configuration backup of the device
+      description: |
+        last_error is one of a fixed set of texts (never device output). needs_write:
+        the model needs a write account to read its configuration, so it is not
+        backed up before phase 4. latest_version carries the drift flag of the
+        newest version; all fields are empty for a device never backed up.
+      x-permission: devices.read
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Backup state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [last_ok_at, last_error, needs_write, last_sha256, latest_version]
+                properties:
+                  last_ok_at: { type: [string, "null"], format: date-time }
+                  last_error: { type: [string, "null"] }
+                  needs_write: { type: boolean }
+                  last_sha256: { type: [string, "null"], description: 12-character prefix }
+                  latest_version:
+                    oneOf:
+                      - $ref: "#/components/schemas/BackupVersion"
+                      - type: "null"
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/show-commands:
+    get:
+      summary: On-demand show commands of the device's driver
+      description: |
+        Keys and the kinds of their arguments ("interface" or "vlan"), from the
+        driver the device was identified with. A device not identified yet, or
+        with a driver without show commands, lists none.
+      x-permission: devices.show
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Commands
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [commands]
+                properties:
+                  commands:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, args]
+                      properties:
+                        key: { type: string }
+                        args:
+                          type: array
+                          items: { type: string, enum: [interface, vlan] }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/show:
+    post:
+      summary: Run an allowlisted show command on the device
+      description: |
+        Queues the command; the result is read from GET /api/show/{id}. key must
+        be one of the device's show-commands and args an object with exactly one
+        member per argument, named after its kind: "interface" (a name from this
+        device's inventory) or "vlan" (an integer 1..4094). Anything else answers
+        400 invalid_show (also audited). Audited; limited to 10 requests a minute
+        per user (429) and one command at a time per device (409 device_busy).
+        The poller checks the row again before it sends anything.
+      x-permission: devices.show
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [key, args]
+              properties:
+                key: { type: string, maxLength: 64 }
+                args:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    interface: { type: string, maxLength: 64 }
+                    vlan: { type: integer, minimum: 1, maximum: 4094 }
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/show/{id}:
+    get:
+      summary: Result of a show command
+      description: |
+        Only for the user who ran it or a global admin, and only while the caller
+        holds devices.show on the device's group; anything else, and a result
+        older than an hour, answers 404. output is text from the device (untrusted:
+        render as text only), at most 1 MiB; truncated says it was cut. A failed
+        command carries one of a fixed set of texts in output.
+      x-permission: devices.show
+      x-scoped: true
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShowResult" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/devices/{id}/interfaces:
     get:
       summary: "Interfaces by if_index, as last seen by the poller"
@@ -716,6 +994,152 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/export/{table}:
+    get:
+      summary: One inventory table of the device as a CSV attachment
+      description: |
+        A bulk export: needs a fresh step-up and is audited (inventory.export with
+        the table, the row count and the filters). Columns are the API fields of
+        the table's rows, in order; a header row comes first, records end with
+        CRLF and every field is quoted (RFC 4180), after a UTF-8 BOM. A text cell
+        whose first character other than white space (NBSP included) is =, +, -
+        or @, or that starts with a tab or a carriage return, gets a leading
+        apostrophe so that spreadsheets do not run it as a formula. q keeps the
+        rows with a field containing it (case-insensitive); filter applies a named
+        filter of the table (interfaces only: up, down). At most 20 000 rows are
+        written, after at most 200 000 read; X-Export-Capped tells whether rows
+        were left out. Values come from the device: treat them as text.
+      x-permission: devices.read
+      x-step-up: true
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: table
+          in: path
+          required: true
+          schema: { type: string, enum: [interfaces, arp, mac, vlans, lldp, entities, routes] }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: filter
+          in: query
+          schema: { type: string, enum: [up, down] }
+      responses:
+        "200":
+          description: The CSV file
+          headers:
+            X-Export-Capped:
+              description: true when rows were left out
+              schema: { type: string, enum: ["true", "false"] }
+          content:
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/search:
+    get:
+      summary: Global search over the visible devices
+      description: |
+        Devices by name (substring) or address (prefix), ARP entries by IP address (prefix),
+        MACs from the forwarding databases and ARP tables (prefix of at least four hex digits,
+        any separators ":", "-", "." or none, any case; a dotted decimal query is not taken as a
+        MAC) and ports by name or alias (substring, from 3 characters). Only devices in the caller's devices.read
+        scope are searched; each type returns at most 50 items, "more" tells that there were more.
+        LIKE wildcards in q match literally. An absent, empty or shorter than 2 characters (after
+        trimming) q answers empty results. Each query is limited to 2 seconds; a slower one
+        answers 503 query_timeout. Panel sections are matched by the web client. Names,
+        aliases and port names are device data: render as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: Results by type
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices, ips, macs, ports]
+                properties:
+                  devices:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [id, name, address]
+                          properties:
+                            id: { type: integer, format: int64 }
+                            name: { type: string }
+                            address: { type: string }
+                  ips:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, ip, mac, if_index, port_name]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            ip: { type: string }
+                            mac: { type: string }
+                            if_index: { type: integer }
+                            port_name: { type: string, description: Empty when the interface is unknown }
+                  macs:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, mac, source, vlan, ip, if_index, port_name]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            mac: { type: string }
+                            source: { type: string, enum: [fdb, arp] }
+                            vlan: { type: [integer, "null"], description: "Set for source fdb; 0 is unknown" }
+                            ip: { type: [string, "null"], description: Set for source arp }
+                            if_index: { type: integer }
+                            port_name: { type: string, description: Empty when the interface is unknown }
+                  ports:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, if_index, name, alias]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            if_index: { type: integer }
+                            name: { type: string }
+                            alias: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /api/devices/{id}/metrics/if:
     get:
       summary: Rate series of one interface, oldest first
@@ -758,6 +1182,46 @@ paths:
                   points:
                     type: array
                     items: { $ref: "#/components/schemas/IfPoint" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/metrics/sys:
+    get:
+      summary: CPU, memory and temperature series of the device, oldest first
+      description: |
+        Same sources, step and bounds as /api/devices/{id}/metrics/if (400
+        too_many_points, 400 bad_request). A value the device did not report is null.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Exclusive; must be after from
+          schema: { type: string, format: date-time }
+        - name: step
+          in: query
+          description: Bucket width in seconds; absent keeps the source resolution
+          schema: { type: integer, minimum: 1, maximum: 63072000 }
+      responses:
+        "200":
+          description: Points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [step_s, points]
+                properties:
+                  step_s: { type: integer, description: Bucket width actually used in seconds; 0 for raw points }
+                  points:
+                    type: array
+                    items: { $ref: "#/components/schemas/SysPoint" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
@@ -1838,6 +2302,22 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /api/map/backgrounds:
+    get:
+      summary: List map backgrounds
+      description: |
+        Metadata of the stored backgrounds (at most 200, by id) with the number of views using each; `unused`
+        marks the ones no view references, which the admin may delete. The image content is never part of the list.
+      x-permission: map.manage
+      responses:
+        "200":
+          description: Backgrounds
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MapBackground" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
     post:
       summary: Upload a map background
       description: |
@@ -1888,7 +2368,8 @@ paths:
         `X-Content-Type-Options: nosniff`, `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`
         and a sha256 ETag (If-None-Match answers 304 without reading the image). The body is streamed in 1 MiB
         pieces; at most 4 downloads stream at a time, a further one waits about 1 s and then gets 503 busy with
-        Retry-After. Use it only as an `<img src>`.
+        Retry-After. A failure before the first byte answers 404 (the background was deleted meanwhile) or 500;
+        one later ends the body short of Content-Length. Use it only as an `<img src>`.
       x-permission: devices.read
       x-scoped: true
       parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1918,6 +2399,289 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/dashboards:
+    get:
+      summary: The caller's personal dashboards and every shared one
+      description: |
+        At most 100 (50 personal, 50 shared), shared first. editable tells whether the
+        caller may change the dashboard: always for a personal one, with dashboards.manage
+        for a shared one. default_for_role marks the shared dashboard shown by default to a role.
+      x-permission: self
+      responses:
+        "200":
+          description: Dashboards
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dashboard" }
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a dashboard
+      description: |
+        A personal dashboard belongs to the caller and is visible to nobody else. A shared one
+        (shared true) needs dashboards.manage (else 403); it may be made the default of a role,
+        which the former default of that role stops being. default_for_role on a personal
+        dashboard answers 400. At most 50 personal dashboards per user and 50 shared ones
+        (409 too_many_dashboards). Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                shared: { type: boolean, default: false }
+                default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+      responses:
+        "201": { $ref: "#/components/responses/Created" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/dashboards/{id}:
+    get:
+      summary: A dashboard with its widgets
+      description: A personal dashboard of another user answers 404, as a missing one.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: The dashboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardDetail" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Rename a dashboard or change the role it is the default of
+      description: |
+        Only the given fields change; at least one is required. default_for_role (shared
+        dashboards only, else 400) makes it the default of the role, taking that over from
+        another dashboard; null makes it no role's default. A shared dashboard needs
+        dashboards.manage (403); a personal one of another user answers 404. Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+      responses:
+        "204": { description: Changed }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a dashboard with its widgets
+      description: A shared dashboard needs dashboards.manage (403); a personal one of another user answers 404. Audited.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/dashboards/{id}/widgets:
+    put:
+      summary: Save the widgets of a dashboard (layout and settings)
+      description: |
+        Replaces the widget set: a widget with the id of a widget of this dashboard is
+        updated, one without an id is added, the ones left out are removed (an id of
+        another dashboard answers 400). At most 50 widgets on a 12-column grid
+        (x + w <= 12, y <= 1000, h <= 48). The type is one of a closed set and config is
+        checked against the schema of the type: an unknown type, an unknown field, a wrong
+        type or a value out of range answers 400 invalid_widget. Configs are stored
+        normalized (see DashboardWidget). A shared dashboard needs dashboards.manage (403);
+        a personal one of another user answers 404. Audited. Answers the stored dashboard.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/CSRF" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [widgets]
+              properties:
+                widgets:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [type, x, y, w, h, config]
+                    properties:
+                      id: { type: [integer, "null"], format: int64, minimum: 1 }
+                      type: { $ref: "#/components/schemas/WidgetType" }
+                      x: { type: integer, minimum: 0, maximum: 11 }
+                      y: { type: integer, minimum: 0, maximum: 1000 }
+                      w: { type: integer, minimum: 1, maximum: 12 }
+                      h: { type: integer, minimum: 1, maximum: 48 }
+                      config: { type: object, additionalProperties: true, description: "At most 2048 bytes; schema by type, see DashboardWidget" }
+      responses:
+        "200":
+          description: The stored dashboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardDetail" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/stats/device-states:
+    get:
+      summary: Visible devices counted by availability state
+      x-permission: devices.read
+      x-scoped: true
+      responses:
+        "200":
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, up, partial, down, unknown]
+                properties:
+                  total: { type: integer }
+                  up: { type: integer }
+                  partial: { type: integer }
+                  down: { type: integer }
+                  unknown: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/stats/top-devices:
+    get:
+      summary: Visible devices ranked by CPU, RAM or uptime
+      description: |
+        cpu and mem rank by the latest sample of the last 15 minutes (value in percent, at the
+        sample time); uptime ranks the devices that are up by how long they have been
+        continuously available (value in seconds, at the start), longest first. The ranking
+        query is limited to 2 seconds; a slower one answers 503 query_timeout.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema: { type: string, enum: [cpu, mem, uptime] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Ranked devices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [device_id, device_name, value, at]
+                      properties:
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        value: { type: number }
+                        at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/stats/top-interfaces:
+    get:
+      summary: Interfaces of visible devices ranked by load
+      description: |
+        Rates of each interface's latest sample of the last 10 minutes; util_pct is the busier
+        direction against the reported speed. Interfaces without a speed are skipped. A ranking
+        is reused for 30 seconds for the same visible devices and limit. The query is limited
+        to 2 seconds; a slower one answers 503 query_timeout. The port name is device data:
+        render as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Ranked interfaces
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [device_id, device_name, if_index, port_name, in_bps, out_bps, speed_bps, util_pct]
+                      properties:
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        if_index: { type: integer }
+                        port_name: { type: string }
+                        in_bps: { type: number }
+                        out_bps: { type: number }
+                        speed_bps: { type: integer, format: int64 }
+                        util_pct: { type: number }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/stats/config-drift:
+    get:
+      summary: Visible devices whose newest configuration version is marked as drift
+      description: |
+        One item per device (its newest version, when that is drift), newest first. Together
+        with GET /api/topology/changes it makes the recent changes widget. The query is limited
+        to 2 seconds; a slower one answers 503 query_timeout.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Drift versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [version_id, device_id, device_name, taken_at]
+                      properties:
+                        version_id: { type: integer, format: int64 }
+                        device_id: { type: integer, format: int64 }
+                        device_name: { type: string }
+                        taken_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:
@@ -1927,6 +2691,11 @@ components:
   parameters:
     Id:
       name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+    VersionId:
+      name: vid
       in: path
       required: true
       schema: { type: integer, format: int64, minimum: 1 }
@@ -1990,6 +2759,35 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    BackupVersion:
+      type: object
+      required: [id, taken_at, source, size, sha256, drift]
+      properties:
+        id: { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
+        source: { type: string, enum: [schedule, event, manual, pre_session] }
+        size: { type: integer, description: Bytes of the full configuration }
+        sha256: { type: string, description: 12-character prefix of the hash of the normalized configuration }
+        drift: { type: boolean }
+    ShowResult:
+      type: object
+      required: [id, device_id, key, args, status, requested_at, finished_at, output, truncated]
+      properties:
+        id: { type: integer, format: int64 }
+        device_id: { type: integer, format: int64 }
+        key: { type: string }
+        args: { type: object, additionalProperties: true }
+        status: { type: string, enum: [queued, running, done, failed] }
+        requested_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        output: { type: [string, "null"], description: Untrusted device text; null until finished }
+        truncated: { type: boolean }
+    BackupDiffSide:
+      type: object
+      required: [id, taken_at]
+      properties:
+        id: { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
     Problem:
       allOf:
         - $ref: "#/components/schemas/ProblemSummary"
@@ -2294,7 +3092,7 @@ components:
         status: { type: string, enum: [pending, accepted, ignored] }
     InventoryInterface:
       type: object
-      required: [if_index, name, alias, speed_bps, oper_up, seen_at]
+      required: [if_index, name, alias, speed_bps, oper_up, seen_at, port_kind]
       properties:
         if_index: { type: integer }
         name: { type: string, description: Reported by the device; render as text only }
@@ -2302,6 +3100,7 @@ components:
         speed_bps: { type: integer, format: int64 }
         oper_up: { type: boolean }
         seen_at: { type: string, format: date-time }
+        port_kind: { type: string, enum: [rj45, sfp, other], description: "Physical port kind derived by the driver from ifType, name and speed" }
     InventoryARPEntry:
       type: object
       required: [ip, mac, if_index, seen_at]
@@ -2369,6 +3168,14 @@ components:
         out_disc_ps: { type: [number, "null"] }
         oper_up: { type: boolean }
         speed_bps: { type: integer, format: int64 }
+    SysPoint:
+      type: object
+      required: [ts, cpu_pct, mem_used_pct, temp_c]
+      properties:
+        ts: { type: string, format: date-time }
+        cpu_pct: { type: [number, "null"], description: Average inside the bucket; null when not reported }
+        mem_used_pct: { type: [number, "null"] }
+        temp_c: { type: [number, "null"] }
     MapAreaKind:
       type: string
       enum: [organization, building, floor, room]
@@ -2380,6 +3187,19 @@ components:
         name: { type: string }
         kind: { type: string, enum: [logical, plan] }
         background_id: { type: [integer, "null"], format: int64 }
+    MapBackground:
+      type: object
+      required: [id, mime, width, height, size, sha256, uploaded_at, views, unused]
+      properties:
+        id: { type: integer, format: int64 }
+        mime: { type: string, enum: [image/png, image/jpeg, image/webp, image/svg+xml] }
+        width: { type: integer, minimum: 1, maximum: 16384 }
+        height: { type: integer, minimum: 1, maximum: 16384 }
+        size: { type: integer, description: "Stored bytes (the sanitized document for SVG)" }
+        sha256: { type: string, description: "Hex digest of the stored bytes (the ETag)" }
+        uploaded_at: { type: string, format: date-time }
+        views: { type: integer, minimum: 0, description: "Views that use the background" }
+        unused: { type: boolean, description: "No view uses the background (views = 0)" }
     MapArea:
       type: object
       required: [id, parent_id, kind, name, x, y, w, h]
@@ -2466,6 +3286,46 @@ components:
         b_device_name: { type: string }
         b_if_index: { type: [integer, "null"] }
         b_port_name: { type: string }
+    Dashboard:
+      type: object
+      required: [id, name, shared, default_for_role, editable]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        shared: { type: boolean }
+        default_for_role: { type: [string, "null"], enum: [viewer, operator, admin, auditor, null] }
+        editable: { type: boolean }
+    WidgetType:
+      type: string
+      enum: [device_status, problems, top_devices, log_stream, metric_chart, top_interfaces, recent_changes, mini_map]
+    DashboardWidget:
+      type: object
+      required: [id, type, x, y, w, h, config]
+      description: |
+        config by type (every field optional unless noted; title 0..100 characters, limit 1..N):
+        device_status {title}; problems {title, severity_min, limit up to 50};
+        top_devices {title, metric (required: cpu, mem, uptime), limit up to 50};
+        log_stream {title, kind (syslog, trap), severity_min, limit up to 100};
+        metric_chart {title, device_id (required), metric (required: cpu, mem, temp, traffic),
+        if_index (required exactly for traffic), range (1h, 6h, 24h, 7d)};
+        top_interfaces {title, limit up to 50}; recent_changes {title, limit up to 50}; mini_map {title, view_id}.
+      properties:
+        id: { type: integer, format: int64 }
+        type: { $ref: "#/components/schemas/WidgetType" }
+        x: { type: integer }
+        y: { type: integer }
+        w: { type: integer }
+        h: { type: integer }
+        config: { type: object, additionalProperties: true }
+    DashboardDetail:
+      allOf:
+        - $ref: "#/components/schemas/Dashboard"
+        - type: object
+          required: [widgets]
+          properties:
+            widgets:
+              type: array
+              items: { $ref: "#/components/schemas/DashboardWidget" }
     Error:
       type: object
       required: [error]
@@ -2488,6 +3348,9 @@ components:
                 - not_found
                 - method_not_allowed
                 - payload_too_large
+                - too_large
+                - invalid_show
+                - device_busy
                 - unsupported_media_type
                 - user_exists
                 - group_exists
@@ -2522,10 +3385,14 @@ components:
                 - too_many_templates
                 - too_many_filters
                 - too_many_windows
+                - too_many_dashboards
+                - too_many_widgets
+                - invalid_widget
                 - too_many_points
                 - locked
                 - rate_limited
                 - busy
+                - query_timeout
                 - internal
                 - gateway_error # from the gateway itself (upstream down, proxy limits), never from api
             message: { type: string, description: "Human-readable, Russian" }

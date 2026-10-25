@@ -5,8 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import "@/i18n";
-import { installCanvasStub } from "./canvasStub";
-import { node } from "./fixtures";
+import { installCanvasStub } from "@/features/map/canvasStub";
+import { node } from "@/features/map/fixtures";
 import { MiniMap } from "./MiniMap";
 
 const navigate = vi.fn();

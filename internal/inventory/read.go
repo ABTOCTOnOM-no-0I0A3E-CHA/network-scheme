@@ -21,6 +21,8 @@ type Interface struct {
 	SpeedBps int64     `json:"speed_bps"`
 	OperUp   bool      `json:"oper_up"`
 	SeenAt   time.Time `json:"seen_at"`
+	/* PortKind is rj45, sfp or other (physical kind derived by the driver). */
+	PortKind string `json:"port_kind"`
 }
 
 // ARPEntry is a stored IP-to-MAC row.
@@ -80,9 +82,56 @@ type Page struct {
 	Limit, Offset int
 }
 
-/* page runs q ($1 device, $2 limit, $3 offset) and maps the columns to T's fields in order. */
-func page[T any](ctx context.Context, s *Store, q string, deviceID int64, p Page) ([]T, error) {
-	rows, err := s.pool.Query(ctx, q+` LIMIT $2 OFFSET $3`, deviceID, p.Limit, p.Offset)
+// Table is the list query of one inventory table ($1 device, in the table's key order), typed by its row.
+type Table[T any] struct{ query string }
+
+// The inventory tables.
+var (
+	InterfaceTable = Table[Interface]{`SELECT if_index, name, alias, speed_bps, oper_up, seen_at, port_kind
+		FROM inventory.interface WHERE device_id = $1 ORDER BY if_index`}
+	ARPTable = Table[ARPEntry]{`SELECT host(ip), mac::text, if_index, seen_at
+		FROM inventory.arp_entry WHERE device_id = $1 ORDER BY ip, if_index`}
+	MACTable = Table[MACEntry]{`SELECT mac::text, vlan, if_index, seen_at
+		FROM inventory.mac_entry WHERE device_id = $1 ORDER BY vlan, mac`}
+	VLANTable = Table[VLAN]{`SELECT vlan_id, name, seen_at
+		FROM inventory.vlan WHERE device_id = $1 ORDER BY vlan_id`}
+	LLDPTable = Table[LLDPNeighbor]{`SELECT local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at
+		FROM inventory.lldp_neighbor WHERE device_id = $1 ORDER BY local_if_index, chassis_id, port_id`}
+	EntityTable = Table[Entity]{`SELECT ent_index, class, name, model, serial, seen_at
+		FROM inventory.entity WHERE device_id = $1 ORDER BY ent_index`}
+	RouteTable = Table[Route]{`SELECT dest::text, host(next_hop), if_index, proto, seen_at
+		FROM inventory.route WHERE device_id = $1 ORDER BY dest, next_hop NULLS FIRST, if_index`}
+)
+
+/*
+Each passes at most limit of a device's rows, in key order, to fn, all read by
+one statement of tx (whose snapshot and limits the caller chose). An error of
+fn stops the read and is returned as it is.
+*/
+func (t Table[T]) Each(ctx context.Context, tx pgx.Tx, deviceID int64, limit int, fn func(T) error) error {
+	rows, err := tx.Query(ctx, t.query+` LIMIT $2`, deviceID, limit)
+	if err != nil {
+		return fmt.Errorf("inventory: read: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		v, err := pgx.RowToStructByPos[T](rows)
+		if err != nil {
+			return fmt.Errorf("inventory: read: %w", err)
+		}
+		if err := fn(v); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inventory: read: %w", err)
+	}
+	return nil
+}
+
+/* page runs t's query with p's limit and offset and maps the columns to T's fields in order. */
+func page[T any](ctx context.Context, s *Store, t Table[T], deviceID int64, p Page) ([]T, error) {
+	rows, err := s.pool.Query(ctx, t.query+` LIMIT $2 OFFSET $3`, deviceID, p.Limit, p.Offset)
 	if err != nil {
 		return nil, fmt.Errorf("inventory: list: %w", err)
 	}
@@ -95,44 +144,37 @@ func page[T any](ctx context.Context, s *Store, q string, deviceID int64, p Page
 
 // Interfaces lists a device's interfaces by if_index.
 func (s *Store) Interfaces(ctx context.Context, deviceID int64, p Page) ([]Interface, error) {
-	return page[Interface](ctx, s, `SELECT if_index, name, alias, speed_bps, oper_up, seen_at
-		FROM inventory.interface WHERE device_id = $1 ORDER BY if_index`, deviceID, p)
+	return page(ctx, s, InterfaceTable, deviceID, p)
 }
 
 // ARP lists a device's ARP entries by address.
 func (s *Store) ARP(ctx context.Context, deviceID int64, p Page) ([]ARPEntry, error) {
-	return page[ARPEntry](ctx, s, `SELECT host(ip), mac::text, if_index, seen_at
-		FROM inventory.arp_entry WHERE device_id = $1 ORDER BY ip, if_index`, deviceID, p)
+	return page(ctx, s, ARPTable, deviceID, p)
 }
 
 // MAC lists a device's forwarding database by VLAN and MAC.
 func (s *Store) MAC(ctx context.Context, deviceID int64, p Page) ([]MACEntry, error) {
-	return page[MACEntry](ctx, s, `SELECT mac::text, vlan, if_index, seen_at
-		FROM inventory.mac_entry WHERE device_id = $1 ORDER BY vlan, mac`, deviceID, p)
+	return page(ctx, s, MACTable, deviceID, p)
 }
 
 // VLANs lists a device's VLANs by id.
 func (s *Store) VLANs(ctx context.Context, deviceID int64, p Page) ([]VLAN, error) {
-	return page[VLAN](ctx, s, `SELECT vlan_id, name, seen_at
-		FROM inventory.vlan WHERE device_id = $1 ORDER BY vlan_id`, deviceID, p)
+	return page(ctx, s, VLANTable, deviceID, p)
 }
 
 // LLDP lists a device's LLDP neighbors by local port.
 func (s *Store) LLDP(ctx context.Context, deviceID int64, p Page) ([]LLDPNeighbor, error) {
-	return page[LLDPNeighbor](ctx, s, `SELECT local_if_index, chassis_id, port_id, sys_name, host(mgmt_addr), seen_at
-		FROM inventory.lldp_neighbor WHERE device_id = $1 ORDER BY local_if_index, chassis_id, port_id`, deviceID, p)
+	return page(ctx, s, LLDPTable, deviceID, p)
 }
 
 // Entities lists a device's physical components by index.
 func (s *Store) Entities(ctx context.Context, deviceID int64, p Page) ([]Entity, error) {
-	return page[Entity](ctx, s, `SELECT ent_index, class, name, model, serial, seen_at
-		FROM inventory.entity WHERE device_id = $1 ORDER BY ent_index`, deviceID, p)
+	return page(ctx, s, EntityTable, deviceID, p)
 }
 
 // Routes lists a device's routes by destination.
 func (s *Store) Routes(ctx context.Context, deviceID int64, p Page) ([]Route, error) {
-	return page[Route](ctx, s, `SELECT dest::text, host(next_hop), if_index, proto, seen_at
-		FROM inventory.route WHERE device_id = $1 ORDER BY dest, next_hop NULLS FIRST, if_index`, deviceID, p)
+	return page(ctx, s, RouteTable, deviceID, p)
 }
 
 // DeviceState is the availability a device shows in the API; Since is nil when never polled.

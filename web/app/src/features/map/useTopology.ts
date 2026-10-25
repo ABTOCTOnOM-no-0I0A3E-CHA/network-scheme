@@ -10,6 +10,7 @@ import { severityByDevice, type Topology } from "./semanticZoom";
 type S = components["schemas"];
 export type MapView = S["MapView"];
 export type MapAreaKind = S["MapAreaKind"];
+export type MapBackground = S["MapBackground"];
 export type AreaBody = { parent_id?: number | null; kind: MapAreaKind; name: string; x: number; y: number; w: number; h: number };
 
 /* the typed header is required by the schema; the api middleware overwrites it with the real token */
@@ -22,6 +23,7 @@ export const topologyKeys = {
   all: ["topology"] as const,
   one: (viewId: number | undefined) => ["topology", viewId ?? null] as const,
   views: ["map", "views"] as const,
+  backgrounds: ["map", "backgrounds"] as const,
 };
 
 /** Topology of a view (all visible devices and links when no view is chosen). */
@@ -37,6 +39,11 @@ export function useTopology(viewId: number | undefined, enabled = true) {
 
 export function useViews() {
   return useQuery({ queryKey: topologyKeys.views, retry: false, queryFn: async () => unwrap(await api.GET("/api/map/views")) });
+}
+
+/** Stored backgrounds with their use counts (map.manage). */
+export function useBackgrounds() {
+  return useQuery({ queryKey: topologyKeys.backgrounds, retry: false, queryFn: async () => unwrap(await api.GET("/api/map/backgrounds")) });
 }
 
 const MAX_PROBLEM_PAGES = 10;
@@ -119,6 +126,7 @@ export const useDeleteBackground = () =>
 
 /** Uploads an image; resolves to the new background id. */
 export function useUploadBackground() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (file: File) =>
       withStepUp(async () => {
@@ -135,5 +143,6 @@ export function useUploadBackground() {
         );
         return r.id;
       }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: topologyKeys.backgrounds }),
   });
 }

@@ -13,6 +13,9 @@ const KNOWN = new Set([
   "not_found",
   "method_not_allowed",
   "payload_too_large",
+  "too_large",
+  "invalid_show",
+  "device_busy",
   "unsupported_media_type",
   "user_exists",
   "group_exists",
@@ -48,7 +51,11 @@ const KNOWN = new Set([
   "too_many_templates",
   "too_many_filters",
   "too_many_windows",
+  "too_many_dashboards",
+  "too_many_widgets",
+  "invalid_widget",
   "busy",
+  "query_timeout",
   "internal",
 ]);
 

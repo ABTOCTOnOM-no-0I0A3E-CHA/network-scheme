@@ -1,4 +1,3 @@
-import type { IfPoint } from "@/features/devices/api";
 
 /* The API answers 400 too_many_points above this many buckets; aim lower to leave headroom. */
 export const MAX_POINTS = 5000;
@@ -63,7 +62,7 @@ function typicalDelta(ts: number[]): number {
  * value (not read from the device) stays null, never 0; a hole longer than two
  * buckets gets a null point so the line breaks instead of bridging it.
  */
-export function shapeData(points: IfPoint[], keys: readonly (keyof IfPoint)[], stepS: number): Columns {
+export function shapeData<P extends { ts: string }>(points: P[], keys: readonly (keyof P)[], stepS: number): Columns {
   const ts = points.map((p) => Math.floor(Date.parse(p.ts) / 1000));
   /* the server only returns buckets with data: with a poll interval above the step the normal spacing is the typical delta */
   const unit = Math.max(stepS, typicalDelta(ts));

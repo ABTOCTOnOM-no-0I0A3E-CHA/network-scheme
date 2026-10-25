@@ -2,7 +2,7 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import { describe, expect, it } from "vitest";
 import { area, link, node } from "./fixtures";
-import { buildElkGraph, layoutMoves, placeDevices } from "./layout";
+import { buildElkGraph, layoutMoves, placeDevices, type Pos } from "./layout";
 import type { Topology } from "./semanticZoom";
 
 const topo: Topology = {
@@ -71,6 +71,31 @@ describe("layout", () => {
       expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true);
       expect(areaAt(t, p), `device ${n.device_id} at ${p.x},${p.y}`).toBe(n.area_id);
     }
+  });
+
+  /*
+   * The spot the layout picks for a new device of no area is taken by a device that stays (dragged there or placed by an
+   * earlier layout): the new one goes elsewhere, clear of every device that stays, of every area and of the other new ones.
+   */
+  it.each([
+    ["with areas", [area(1, { x: 0, y: 0, w: 300, h: 300 })]],
+    ["without areas", []],
+  ])("places new devices of no area clear of the devices that stay and of the areas (%s)", async (_, areas) => {
+    const NODE = 40;
+    const t: Topology = { areas, nodes: [node(1, { x: 20, y: 20 }), node(2, { x: 80, y: 20 }), node(3), node(4)], links: [link(1, 3, 4)] };
+    const g = await new ELK().layout(buildElkGraph(t));
+    const fixed = new Map([
+      ["d1", placeDevices(g, t).get("d3")!],
+      ["d2", placeDevices(g, t).get("d4")!],
+    ]);
+    const laid = placeDevices(g, t, fixed);
+    const fresh = ["d3", "d4"].map((id) => laid.get(id)!);
+    const hits = (p: Pos, q: Pos) => Math.abs(p.x - q.x) < NODE && Math.abs(p.y - q.y) < NODE;
+    for (const p of fresh) {
+      for (const q of fixed.values()) expect(hits(p, q), `${p.x},${p.y} covers ${q.x},${q.y}`).toBe(false);
+      for (const a of areas) expect(p.x - NODE / 2 >= a.x + a.w || p.x + NODE / 2 <= a.x || p.y - NODE / 2 >= a.y + a.h || p.y + NODE / 2 <= a.y).toBe(true);
+    }
+    expect(hits(fresh[0], fresh[1])).toBe(false);
   });
 
   it("packs big graphs into a grid instead of running a slow algorithm", async () => {

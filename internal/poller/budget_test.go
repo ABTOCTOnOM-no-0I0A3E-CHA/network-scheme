@@ -12,6 +12,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/creds/credstest"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/drivers"
+	"github.com/beekamai/network-scheme/internal/drivers/showspec"
 	"github.com/beekamai/network-scheme/internal/events/trap"
 	"github.com/beekamai/network-scheme/internal/snmp"
 	"github.com/beekamai/network-scheme/internal/ssh"
@@ -99,4 +100,16 @@ func TestHeavyTablesSkippedWhenCPUHigh(t *testing.T) {
 			t.Fatalf("cpu %v%%: SkipHeavy = %v, want %v", c.cpu, skip, c.skip)
 		}
 	}
+}
+
+func (budgetDriver) FetchConfig(context.Context, drivers.ShowRunner) (string, error) {
+	return "", drivers.ErrNotSupported
+}
+func (budgetDriver) NormalizeConfig(s string) string         { return s }
+func (budgetDriver) MaskSecrets(s string) string             { return s }
+func (budgetDriver) ConfigSections(string) []drivers.Section { return nil }
+func (budgetDriver) ConfigNeedsWrite() bool                  { return false }
+func (budgetDriver) ShowCommands() []showspec.Spec           { return nil }
+func (budgetDriver) ShowCommand(string, []string) (ssh.ShowCommand, error) {
+	return ssh.ShowCommand{}, drivers.ErrUnknownShow
 }

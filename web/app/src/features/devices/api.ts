@@ -9,6 +9,7 @@ export type Device = S["Device"];
 export type DeviceDetail = S["DeviceDetail"];
 export type Group = S["Group"];
 export type IfPoint = S["IfPoint"];
+export type SysPoint = S["SysPoint"];
 
 /* the typed header is required by the schema; the api middleware overwrites it with the real token */
 const CSRF = { header: { "X-CSRF-Token": "" } };
@@ -35,6 +36,7 @@ export const deviceKeys = {
   one: (id: number) => ["devices", "one", id] as const,
   table: (id: number, table: DeviceTable, page: PageParams) => ["devices", "table", id, table, page.limit ?? null, page.offset ?? 0] as const,
   metrics: (id: number, ifIndex: number, from: string, to: string, step?: number) => ["devices", "metrics", id, ifIndex, from, to, step ?? null] as const,
+  sys: (id: number, from: string, to: string, step?: number) => ["devices", "sys", id, from, to, step ?? null] as const,
   groups: ["groups"] as const,
 };
 
@@ -99,15 +101,36 @@ export type MetricsRange = { from: Date; to: Date; step?: number };
  * picked to stay under the point limit; on `too_many_points` the step is
  * doubled and the request repeated once.
  */
-export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange) {
+export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange, staleTime = 0) {
   const from = range.from.toISOString();
   const to = range.to.toISOString();
   return useQuery({
     queryKey: deviceKeys.metrics(id, ifIndex, from, to, range.step),
     retry: false,
+    staleTime,
     queryFn: async () => {
       const fetchOnce = async (step: number) =>
         unwrap(await api.GET("/api/devices/{id}/metrics/if", { params: { path: { id }, query: { if_index: ifIndex, from, to, step } } }));
+      const step = range.step ?? pickStep(range.from, range.to);
+      try {
+        return await fetchOnce(step);
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "too_many_points") return fetchOnce(coarserStep(step));
+        throw e;
+      }
+    },
+  });
+}
+
+/** CPU, memory and temperature series of the device over `range`; the step is picked like useIfMetrics. */
+export function useSysMetrics(id: number, range: MetricsRange) {
+  const from = range.from.toISOString();
+  const to = range.to.toISOString();
+  return useQuery({
+    queryKey: deviceKeys.sys(id, from, to, range.step),
+    retry: false,
+    queryFn: async () => {
+      const fetchOnce = async (step: number) => unwrap(await api.GET("/api/devices/{id}/metrics/sys", { params: { path: { id }, query: { from, to, step } } }));
       const step = range.step ?? pickStep(range.from, range.to);
       try {
         return await fetchOnce(step);
