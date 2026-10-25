@@ -13,6 +13,11 @@ const RUN = join(import.meta.dir, ".run");
 const BASE = "https://localhost";
 const GROUP = "Демо-стенд";
 const DASHBOARD = "Демо";
+/*
+ * Roles set by hand where the poller cannot tell: the generic router fixture reports no sysServices, and nothing answers
+ * at offline-1. The other devices keep the automatic role (driver and sysServices).
+ */
+const ROLES: Record<string, string> = { "rtr-branch-1": "router", "offline-1": "server" };
 /* the read account of the simulated CLI: test values, the same in devices.sh */
 const SSH = { username: "demo-read", password: "demo-read-pw" };
 
@@ -95,7 +100,7 @@ for (const d of devices) {
   const id = (await must<{ id: number }>("POST", "/api/devices", { name: d.name, address: d.address, group_id: group })).id;
   ids[d.name] = id;
   /* metrics every 30 s, so charts and the interface load fill within minutes */
-  await must("PATCH", `/api/devices/${id}`, { interval_metrics_s: 30 });
+  await must("PATCH", `/api/devices/${id}`, { interval_metrics_s: 30, ...(ROLES[d.name] ? { role: ROLES[d.name] } : {}) });
   /* SSH first: the schedule backs a new device up within seconds, and it needs both */
   const profiles: [string, object][] = [];
   if (d.ssh !== "-") profiles.push(["ssh_read", SSH]);

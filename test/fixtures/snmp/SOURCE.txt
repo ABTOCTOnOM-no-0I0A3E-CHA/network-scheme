@@ -28,10 +28,16 @@ eltex-mes.snmprec
   temperature readings), plus the standard system group and IF-MIB counters.
   sysObjectID 1.3.6.1.4.1.35265.1.65535 is a placeholder under elHardware
   (ELTEX-SMI-ACTUAL); no real MES model OID is documented or implied. sysDescr
-  follows the LLDP example in the MES23xx/33xx/35xx/5324 user manual 4.0.22.
-  One temperature row (500) is deliberately out of range. Port 1 is a gigabit
-  RJ-45 port (gi1/0/1), port 2 an unused 10G SFP+ uplink (te1/0/1, ifSpeed
-  saturated, ifHighSpeed 10000), both ifType ethernetCsmacd(6).
+  "MES2324 28-port 1G/10G Managed Switch" follows the format reported by an
+  MES2324P in the LibreNMS community thread "OS definition problems"
+  (https://community.librenms.org/t/os-definition-problems/13863); sysServices 6
+  (layers 2 and 3). One temperature row (500) is deliberately out of range.
+  Models an MES2324: ifIndex 1-24 are gigabit RJ-45 ports gi1/0/1..24, ifIndex
+  25-28 10G SFP+ uplinks te1/0/1..4 (ifSpeed saturated, ifHighSpeed 10000), all
+  ifType ethernetCsmacd(6), a mix of up and down ports with 64-bit counters,
+  some ifAlias values and locally administered MACs. entPhysicalTable: the
+  chassis (model MES2324, software 6.6.2, serial), two power supplies and a fan,
+  with RADLAN-style indexes.
   NOT captured from hardware; values not verified on a real device.
 
 eltex-esr.snmprec
@@ -41,8 +47,10 @@ eltex-esr.snmprec
   cpmCPUTotal1min per core (one out-of-range core), CISCO-MEMORY-POOL-MIB
   ciscoMemoryPoolValid/Used/Free (one invalid pool), rlPhdUnitEnvParamTable
   temperature value/status
-  pairs (one sensor not ok), plus IF-MIB counters (gi1/0/1 RJ-45 and the 10G SFP+
-  te1/0/1, as for eltex-mes) and IP-FORWARD-MIB
+  pairs (one sensor not ok), plus IF-MIB (ifIndex 1-24 gigabit RJ-45 ports
+  gi1/0/1..24, ifIndex 25-32 10G SFP+ te1/0/1..8, a mix of up and down ports),
+  entPhysicalTable (chassis ESR-1000, software 1.23.3, a power supply and a
+  fan), sysServices 76 (layers 3, 4 and 7) and IP-FORWARD-MIB
   inetCidrRouteTable. sysObjectID 1.3.6.1.4.1.35265.1.65534 is a placeholder
   under elHardware (ELTEX-SMI-ACTUAL); no real ESR model OID is documented or
   implied. Addresses are documentation ranges (RFC 5737).
@@ -56,4 +64,6 @@ topology-a.snmprec .. topology-d.snmprec
   172.30.1.201..204 are the addresses the CI job gives the simulator containers.
   Links: a-b and a-c reported by both sides (mutual), a-d reported by a only
   (one-sided), b-d known only from the MAC tables (no LLDP). Same sysObjectID as
-  generic-switch. NOT captured from hardware.
+  generic-switch. sysServices 6 (layers 2 and 3) for topo-a, 2 for the others,
+  and an entPhysicalTable chassis row each (synthetic models SIM-L3-4 and
+  SIM-SW-4). NOT captured from hardware.
