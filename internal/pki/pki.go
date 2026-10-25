@@ -1,4 +1,4 @@
-// Package pki issues the internal ECDSA P-256 CA and server certificates.
+// Package pki issues the internal ECDSA P-256 CA and server and client certificates.
 package pki
 
 import (
@@ -84,6 +84,38 @@ func IssueServerCert(caCertPEM, caKeyPEM []byte, dnsNames []string, ips []net.IP
 	if len(dnsNames) == 0 && len(ips) == 0 {
 		return nil, nil, errors.New("at least one DNS name or IP is required")
 	}
+	cn := ""
+	if len(dnsNames) > 0 {
+		cn = dnsNames[0]
+	} else {
+		cn = ips[0].String()
+	}
+	return issueLeaf(caCertPEM, caKeyPEM, validity, &x509.Certificate{
+		Subject:     pkix.Name{CommonName: cn},
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:    dnsNames,
+		IPAddresses: ips,
+	})
+}
+
+// IssueClientCert issues an ECDSA P-256 client-auth certificate (EKU clientAuth only, no SANs) with
+// subject CN cn, signed by the given CA. The peer identifies the client by cn.
+func IssueClientCert(caCertPEM, caKeyPEM []byte, cn string, validity time.Duration) (certPEM, keyPEM []byte, err error) {
+	if cn == "" {
+		return nil, nil, errors.New("a common name is required")
+	}
+	return issueLeaf(caCertPEM, caKeyPEM, validity, &x509.Certificate{
+		Subject:     pkix.Name{CommonName: cn},
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+}
+
+/*
+issueLeaf signs tmpl (subject, extended key usage and SANs set by the caller)
+with the CA for validity, under a new ECDSA P-256 key: a non-CA
+digital-signature certificate with a random 128-bit serial.
+*/
+func issueLeaf(caCertPEM, caKeyPEM []byte, validity time.Duration, tmpl *x509.Certificate) (certPEM, keyPEM []byte, err error) {
 	if validity <= 0 {
 		return nil, nil, errors.New("validity must be positive")
 	}
@@ -116,25 +148,13 @@ func IssueServerCert(caCertPEM, caKeyPEM []byte, dnsNames []string, ips []net.IP
 		return nil, nil, err
 	}
 	now := time.Now()
-	cn := ""
-	if len(dnsNames) > 0 {
-		cn = dnsNames[0]
-	} else {
-		cn = ips[0].String()
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          sn,
-		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             now.Add(-skew),
-		NotAfter:              now.Add(validity),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              dnsNames,
-		IPAddresses:           ips,
-		SubjectKeyId:          keyID(&key.PublicKey),
-		AuthorityKeyId:        ca.SubjectKeyId,
-	}
+	tmpl.SerialNumber = sn
+	tmpl.NotBefore = now.Add(-skew)
+	tmpl.NotAfter = now.Add(validity)
+	tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+	tmpl.BasicConstraintsValid = true
+	tmpl.SubjectKeyId = keyID(&key.PublicKey)
+	tmpl.AuthorityKeyId = ca.SubjectKeyId
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {
 		return nil, nil, err

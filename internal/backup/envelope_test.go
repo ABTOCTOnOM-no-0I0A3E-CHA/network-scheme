@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,15 +81,15 @@ func TestOpenFailures(t *testing.T) {
 	}
 }
 
-/* The opening package, which needs the private key, is linked into no binary but the (future) executor. */
-func TestOpenNotLinkedIntoServices(t *testing.T) {
+/* The opening package, which needs the private key, is linked into no binary but the executor (which may link it). */
+func TestOnlyExecutorLinksBackupOpen(t *testing.T) {
 	out, err := exec.Command("go", "list", "github.com/beekamai/network-scheme/cmd/...").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list cmd/...: %v\n%s", err, out)
 	}
 	cmds := strings.Fields(string(out))
-	if len(cmds) < 4 {
-		t.Fatalf("binaries found: %v", cmds)
+	if len(cmds) < 5 || !slices.Contains(cmds, "github.com/beekamai/network-scheme/cmd/executor") {
+		t.Fatalf("binaries found: %v (the exemption must name the real executor)", cmds)
 	}
 	for _, cmd := range cmds {
 		if strings.HasSuffix(cmd, "/cmd/executor") || strings.Contains(cmd, "/cmd/executor/") {

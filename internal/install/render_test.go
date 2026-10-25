@@ -49,6 +49,9 @@ var goldenFiles = map[string]string{
 	"config/api.yaml":    "api.yaml.golden",
 	"config/poller.yaml": "poller.yaml.golden",
 	"config/eventd.yaml": "eventd.yaml.golden",
+
+	"config/executor.yaml":   "executor.yaml.golden",
+	"policies/executor.yaml": "executor-policy.yaml.golden",
 }
 
 func TestRenderGolden(t *testing.T) {
@@ -135,6 +138,7 @@ func TestRenderedPollerConfigLoads(t *testing.T) {
 func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	in := sampleInput()
 	in.HTTPSPort = 8443
+	in.ExecutorPort = 9443
 	in.CoreSubnet = "10.99.0.0/24"
 	in.DevicesSubnet = "10.99.8.0/22"
 	out := render(t, in)
@@ -149,6 +153,13 @@ func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	}
 	if !bytes.Contains(out["config/api.yaml"], []byte(`"10.99.0.2/32"`)) {
 		t.Error("default gateway IP must be derived from CoreSubnet")
+	}
+	if ex := out["config/executor.yaml"]; !bytes.Contains(ex, []byte(`executor_origin: "https://nms.example.org:9443"`)) ||
+		!bytes.Contains(ex, []byte(`panel_origin: "https://nms.example.org:8443"`)) {
+		t.Errorf("executor origins must carry the ports: %s", ex)
+	}
+	if !bytes.Contains(out["compose.yaml"], []byte(`ports: ["8443:8443", "9443:9443"]`)) {
+		t.Error("gateway must publish both ports")
 	}
 }
 
@@ -174,6 +185,13 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		"devices ipv6":         func(in *install.RenderInput) { in.DevicesSubnet = "fd00::/64" },
 		"devices host bits":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.1/24" },
 		"devices too small":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/30" },
+		"exec port = https":    func(in *install.RenderInput) { in.ExecutorPort = 443 },
+		"exec port range":      func(in *install.RenderInput) { in.ExecutorPort = 70000 },
+		"exec image tag":       func(in *install.RenderInput) { in.ExecutorImage = "nms/executor:latest" },
+		"xnet overlaps core":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.0.0/24" },
+		"xnet overlaps devs":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.1.0/25" },
+		"xnet ipv6":            func(in *install.RenderInput) { in.XnetSubnet = "fd00::/64" },
+		"xnet host bits":       func(in *install.RenderInput) { in.XnetSubnet = "172.30.2.1/24" },
 		"devices injection":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/24\"\n  x: y" },
 	}
 	for name, mutate := range cases {
@@ -208,6 +226,7 @@ type compose struct {
 		MemLimit    string            `yaml:"mem_limit"`
 		Volumes     []string          `yaml:"volumes"`
 		Networks    map[string]any    `yaml:"networks"`
+		Tmpfs       []string          `yaml:"tmpfs"`
 	} `yaml:"services"`
 	Networks map[string]struct {
 		Internal   bool  `yaml:"internal"`
@@ -225,12 +244,15 @@ type compose struct {
 
 var sensitive = regexp.MustCompile(`(?i)PASSWORD|SECRET|KEY`)
 
+/* executorSecret matches the secrets that belong to the executor. */
+var executorSecret = regexp.MustCompile(`backup|write|sealing|executor|ticket_pub`)
+
 func TestComposeHardening(t *testing.T) {
 	var c compose
 	if err := yaml.Unmarshal(render(t, sampleInput())["compose.yaml"], &c); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"postgres", "migrate", "api", "poller", "eventd", "gateway", "nmsctl"} {
+	for _, want := range []string{"postgres", "migrate", "api", "poller", "eventd", "executor", "gateway", "nmsctl"} {
 		if _, ok := c.Services[want]; !ok {
 			t.Errorf("service %s missing", want)
 		}
@@ -271,7 +293,7 @@ func TestComposeHardening(t *testing.T) {
 			}
 		}
 	}
-	if !slices.Equal(c.Services["gateway"].Ports, []string{"443:8443"}) {
+	if !slices.Equal(c.Services["gateway"].Ports, []string{"443:8443", "8443:9443"}) {
 		t.Errorf("gateway ports = %v", c.Services["gateway"].Ports)
 	}
 	if _, ok := c.Services["postgres"].Networks["edge"]; ok {
@@ -308,13 +330,13 @@ func TestComposeHardening(t *testing.T) {
 		t.Errorf("poller networks = %v", got)
 	}
 	for name, s := range c.Services {
-		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" {
+		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" && name != "executor" {
 			t.Errorf("%s must not join devices", name)
 		}
-		/* The backup-domain private key reaches no service (only the future executor); the poller gets the public key. */
+		/* The write and backup private keys, the sealing key and the executor's TLS key reach the executor only; the poller gets the public backup key. */
 		for _, sec := range s.Secrets {
-			if strings.Contains(fmt.Sprint(sec), "backup") {
-				t.Errorf("%s gets secret %v: the backup domain key must stay on the host", name, sec)
+			if executorSecret.MatchString(fmt.Sprint(sec)) && name != "executor" && (name != "postgres" || sec != "db_executor_password") {
+				t.Errorf("%s gets secret %v: it belongs to the executor", name, sec)
 			}
 		}
 		if name == "poller" != slices.ContainsFunc(s.Volumes, func(v string) bool { return strings.Contains(v, "domain_backup.pub") }) {
@@ -345,6 +367,54 @@ func TestComposeHardening(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(e.Networks)); !slices.Equal(got, []string{"core", "devices"}) {
 		t.Errorf("eventd networks = %v", got)
 	}
+	/*
+		executor: its own image and user, a tmpfs only it can enter, its own state volume, a static
+		address in the internal xnet, exactly its secrets; the ticket signing key goes to the api only.
+	*/
+	x := c.Services["executor"]
+	if x.Image != "nms/executor:1.0.0" || x.User != "65533:65533" || len(x.Entrypoint) != 0 || !slices.Equal(x.Healthcheck.Test, []string{"CMD", "/executor", "healthcheck"}) {
+		t.Errorf("executor image/user/entrypoint/healthcheck = %q %q %v %v", x.Image, x.User, x.Entrypoint, x.Healthcheck.Test)
+	}
+	if !slices.Equal(x.Tmpfs, []string{"/run/executor:mode=0700,uid=65533,gid=65533"}) {
+		t.Errorf("executor tmpfs = %v", x.Tmpfs)
+	}
+	if want := []any{"db_executor_password", "executor_sealing_key", "domain_write_key", "domain_backup_key", "ticket_pub", "executor_tls_crt", "executor_tls_key", "ca_crt"}; !slices.Equal(x.Secrets, want) {
+		t.Errorf("executor secrets = %v, want %v", x.Secrets, want)
+	}
+	if want := []string{
+		"executor-state:/var/lib/executor", "/etc/nms/config/executor.yaml:/etc/nms/executor.yaml:ro",
+		"/etc/nms/config/egress.yaml:/etc/nms/egress.yaml:ro", "/etc/nms/policies/executor.yaml:/etc/nms/policies/executor.yaml:ro",
+	}; !slices.Equal(x.Volumes, want) {
+		t.Errorf("executor volumes = %v", x.Volumes)
+	}
+	if got := slices.Sorted(maps.Keys(x.Networks)); !slices.Equal(got, []string{"core", "devices", "xnet"}) {
+		t.Errorf("executor networks = %v", got)
+	}
+	if xn, _ := x.Networks["xnet"].(map[string]any); xn["ipv4_address"] != "172.30.2.2" {
+		t.Errorf("executor xnet = %v, want the static address 172.30.2.2", x.Networks["xnet"])
+	}
+	xnet := c.Networks["xnet"]
+	if !xnet.Internal || len(xnet.IPAM.Config) != 1 || xnet.IPAM.Config[0].Subnet != install.DefaultXnetSubnet {
+		t.Errorf("xnet = %+v, want internal with subnet %s", xnet, install.DefaultXnetSubnet)
+	}
+	for name, s := range c.Services {
+		if _, ok := s.Networks["xnet"]; ok != (name == "executor" || name == "gateway") {
+			t.Errorf("%s: xnet membership %v, want only executor and gateway", name, ok)
+		}
+		if slices.ContainsFunc(s.Volumes, func(v string) bool { return strings.HasPrefix(v, "executor-state:") }) != (name == "executor") {
+			t.Errorf("%s volumes %v: only the executor mounts executor-state", name, s.Volumes)
+		}
+		if slices.Contains(s.Secrets, any("ticket_key")) != (name == "api") {
+			t.Errorf("%s: only the api gets ticket_key", name)
+		}
+	}
+	gw := c.Services["gateway"]
+	for _, want := range []string{"gateway_client_crt", "gateway_client_key", "ca_crt"} {
+		if !slices.ContainsFunc(gw.Secrets, func(s any) bool { m, _ := s.(map[string]any); return m["source"] == want }) {
+			t.Errorf("gateway secrets %v: %s missing", gw.Secrets, want)
+		}
+	}
+
 	dev := c.Networks["devices"]
 	if dev.Internal || len(dev.IPAM.Config) != 1 || dev.IPAM.Config[0].Subnet != install.DefaultDevicesSubnet {
 		t.Errorf("devices network = %+v, want routed with subnet %s", dev, install.DefaultDevicesSubnet)

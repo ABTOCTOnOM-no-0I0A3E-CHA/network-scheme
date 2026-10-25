@@ -28,9 +28,10 @@ import (
 
 /* Image repositories of the services built from this repository. */
 const (
-	DefaultAPIImage     = "nms/api"
-	DefaultGatewayImage = "nms/gateway"
-	DefaultAdminUser    = "admin"
+	DefaultAPIImage      = "nms/api"
+	DefaultGatewayImage  = "nms/gateway"
+	DefaultExecutorImage = "nms/executor"
+	DefaultAdminUser     = "admin"
 )
 
 /* systemdDir receives the systemd units. */
@@ -42,7 +43,7 @@ var anchorUnits = []string{"nms-audit-anchor.service", "nms-audit-anchor.timer"}
 /* readPubFile is the public read-domain key for the poller, relative to Paths.Etc. */
 const readPubFile = "config/domain_read.pub"
 
-/* backupPubFile is the public backup-domain key for the poller; the private half is never mounted anywhere but the future executor. */
+/* backupPubFile is the public backup-domain key for the poller; the private half is mounted only into the executor. */
 const backupPubFile = "config/domain_backup.pub"
 
 /* composeUpTimeout bounds "docker compose up --wait" in seconds. */
@@ -127,7 +128,7 @@ func prepareInstall(o Options) (prepared, error) {
 	devices := cmp.Or(o.DevicesSubnet, DefaultDevicesSubnet)
 	files, err := Render(RenderInput{
 		PublicHost: o.PublicHost, ImageTag: o.ImageTag,
-		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, Paths: ps, DevicesSubnet: devices,
+		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, ExecutorImage: DefaultExecutorImage, Paths: ps, DevicesSubnet: devices,
 	})
 	if err != nil {
 		return prepared{}, fmt.Errorf("install: %w", err)

@@ -19,6 +19,7 @@ step "Building images (product images with tag $TAG, the host, the simulator)"
 docker build -q -t nms-demo-host -f "$DEMO/host.Dockerfile" "$DEMO" > /dev/null
 docker build -q -t "nms/api:$TAG" -f deploy/docker/api.Dockerfile . > /dev/null
 docker build -q -t "nms/gateway:$TAG" -f deploy/docker/gateway.Dockerfile . > /dev/null
+docker build -q -t "nms/executor:$TAG" -f deploy/docker/executor.Dockerfile . > /dev/null
 docker build -q -t "nms-snmpsim:$TAG" test/sim/snmpsim > /dev/null
 DB_IMAGE="$(sed -n 's/^const DefaultDBImage = "\(.*\)"/\1/p' internal/install/render.go)"
 [ -n "$DB_IMAGE" ] || { echo "DefaultDBImage not found in internal/install/render.go"; exit 1; }
@@ -41,7 +42,7 @@ in_host docker info > /dev/null
 in_host sh -c 'docker rm -f $(docker ps -aq) > /dev/null 2>&1; docker volume prune -af > /dev/null; docker network prune -f > /dev/null'
 
 step "Loading images into the host (only the changed ones)"
-for img in "nms/api:$TAG" "nms/gateway:$TAG" "nms-snmpsim:$TAG" "$DB_IMAGE"; do
+for img in "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" "$DB_IMAGE"; do
   want="$(docker image inspect -f '{{.Id}}' "$img")"
   if [ "$(in_host docker image inspect -f '{{.Id}}' "$img" 2>/dev/null)" != "$want" ]; then
     echo "  $img"

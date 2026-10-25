@@ -157,6 +157,7 @@ jobs:
         run: |
           docker build -t nms/api:ci -f deploy/docker/api.Dockerfile .
           docker build -t nms/gateway:ci -f deploy/docker/gateway.Dockerfile .
+          docker build -t nms/executor:ci -f deploy/docker/executor.Dockerfile .
           docker build -t nms-snmpsim:ci test/sim/snmpsim
       - name: Build nmsctl
         run: |
@@ -192,8 +193,8 @@ jobs:
       - name: Start egress capture
         run: |
           test/egress/capture.sh start
-          # recreate the services with a route out (gateway: edge, poller and eventd: devices) so their startup is captured too
-          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller eventd
+          # recreate the services with a route out (gateway: edge, poller, eventd and executor: devices) so their startup is captured too
+          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller eventd executor
       - name: Start the event sources on the devices network
         run: |
           # Two containers of the simulator image, each sending syslog (UDP, TCP) and a v2c linkDown trap to eventd

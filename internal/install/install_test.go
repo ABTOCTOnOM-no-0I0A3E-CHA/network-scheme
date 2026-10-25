@@ -3,6 +3,7 @@ package install_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -141,9 +142,10 @@ func TestPreflightErrors(t *testing.T) {
 /* secretNames is the exact set WriteSecrets must create. */
 var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
-	"db_api_password", "db_cli_password", "db_eventd_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
+	"db_api_password", "db_cli_password", "db_eventd_password", "db_executor_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
-	"executor_sealing_key", "syslog.crt", "syslog.key", "web.crt", "web.key",
+	"executor_sealing_key", "executor_tls.crt", "executor_tls.key", "gateway_client.crt", "gateway_client.key",
+	"syslog.crt", "syslog.key", "ticket.key", "ticket.pub", "web.crt", "web.key",
 }
 
 /* wantOwner is the owner table: consumer container uid/gid and mode. */
@@ -162,12 +164,19 @@ var wantOwner = map[string]struct {
 	"syslog.key":           {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
-	"ca.crt":               {0, 0, 0o400},
+	"ca.crt":               {0, 0, 0o444},
 	"ca.key":               {0, 0, 0o400},
 	"domain_read.key":      {install.ContainerUID, install.ContainerUID, 0o400},
-	"domain_write.key":     {0, 0, 0o400},
-	"domain_backup.key":    {0, 0, 0o400},
-	"executor_sealing_key": {0, 0, 0o400},
+	"domain_write.key":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"domain_backup.key":    {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_sealing_key": {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"db_executor_password": {install.ExecutorUID, install.PostgresUID, 0o440},
+	"ticket.key":           {install.ContainerUID, install.ContainerUID, 0o400},
+	"ticket.pub":           {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_tls.crt":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_tls.key":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"gateway_client.crt":   {install.ContainerUID, install.ContainerUID, 0o400},
+	"gateway_client.key":   {install.ContainerUID, install.ContainerUID, 0o400},
 }
 
 func listDir(t *testing.T, dir string) []string {
@@ -213,6 +222,9 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 			owners[filepath.Base(p)] = o
 		}
 	}
+	if len(wantOwner) != len(secretNames) {
+		t.Fatalf("owner table covers %d of %d secrets", len(wantOwner), len(secretNames))
+	}
 	for name, w := range wantOwner {
 		p := filepath.Join(dir, name)
 		if got, ok := owners[name]; !ok || got != [2]int{w.uid, w.gid} {
@@ -239,7 +251,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 
 	/* Contents. */
-	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password"} {
+	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password", "db_executor_password"} {
 		raw := readFile(t, filepath.Join(dir, n))
 		b, err := base64.RawURLEncoding.DecodeString(string(raw))
 		if err != nil || len(b) != 32 {
@@ -264,6 +276,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 	verifyCert(t, dir, "web.crt", "nms.example.org")
 	verifyCert(t, dir, "syslog.crt", "nms.example.org")
+	verifyXnetAndTicketKeys(t, dir)
 
 	/* Second call: refused, nothing changed. */
 	before := snapshot(t, dir)
@@ -321,6 +334,45 @@ func TestWriteSecretsUsesSuppliedWebCert(t *testing.T) {
 	}
 	if _, err := os.Stat(dir2); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("secrets dir created on error: %v", err)
+	}
+}
+
+/*
+The xnet pair: the executor's server certificate for "executor" and the gateway's client-only
+certificate with CN "gateway", both under ca.crt and each matching its key; ticket.pub is the
+public half of ticket.key.
+*/
+func verifyXnetAndTicketKeys(t *testing.T, dir string) {
+	t.Helper()
+	verifyCert(t, dir, "executor_tls.crt", "executor")
+	for _, n := range []string{"executor_tls", "gateway_client"} {
+		if _, err := tls.X509KeyPair(readFile(t, filepath.Join(dir, n+".crt")), readFile(t, filepath.Join(dir, n+".key"))); err != nil {
+			t.Errorf("%s: certificate and key do not form a pair: %v", n, err)
+		}
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(readFile(t, filepath.Join(dir, "ca.crt")))
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir, "gateway_client.crt")))
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Subject.CommonName != "gateway" || !slices.Equal(c.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) {
+		t.Errorf("gateway client certificate: CN %q, EKU %v", c.Subject.CommonName, c.ExtKeyUsage)
+	}
+	if _, err := c.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Errorf("gateway client certificate does not verify against ca.crt: %v", err)
+	}
+	seed, err := config.ReadKeyFile(filepath.Join(dir, "ticket.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := config.ReadKeyFile(filepath.Join(dir, "ticket.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey); !bytes.Equal(got, pub[:]) {
+		t.Error("ticket.pub is not the public key of ticket.key")
 	}
 }
 
@@ -418,7 +470,7 @@ func TestRunInstalls(t *testing.T) {
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
 		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml", "config/infra.yaml", "config/egress.yaml",
-		"config/domain_read.pub", "config/domain_backup.pub", "postgres/initdb/10-roles.sh", "installed",
+		"config/executor.yaml", "policies/executor.yaml", "config/domain_read.pub", "config/domain_backup.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
@@ -733,7 +785,7 @@ func TestPreflightHostPorts(t *testing.T) {
 		proto   string
 		port    int
 		culprit string
-	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}} {
+	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}, {"tcp", 8443, "executor origin"}} {
 		busy := errors.New("address already in use")
 		err := install.Preflight(install.Options{Root: root, PortFree: func(proto string, port int) error {
 			if proto == c.proto && port == c.port {

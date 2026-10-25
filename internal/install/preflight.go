@@ -104,6 +104,7 @@ type hostPort struct {
 
 var hostPorts = []hostPort{
 	{"tcp", "a web server or another proxy", 443},
+	{"tcp", "a web server or another proxy (the executor origin)", DefaultExecutorPort},
 	{"udp", "rsyslog or syslog-ng", 514},
 	{"tcp", "rsyslog or syslog-ng", 514},
 	{"tcp", "rsyslog or syslog-ng (TLS)", 6514},
