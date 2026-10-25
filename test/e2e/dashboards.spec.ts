@@ -18,8 +18,9 @@ import { expect, test } from "./guard";
  */
 type Widget = { type: string; name: string; config: Record<string, unknown>; fill: Record<string, string> };
 const GROUP = "dashboards-e2e";
-const PEER = { name: "e2e-dashboard", address: "192.0.2.77" };
 const PROBE = { name: "e2e-dashboard-probe", address: process.env.NMS_E2E_EVENT_PROBE ?? "" };
+/* The link peer: an unused address of the devices subnet (as NMS_E2E_PROBE_DEAD, which ends in .250), so its pings stay off the egress check. */
+const PEER = { name: "e2e-dashboard", address: PROBE.address.replace(/\.\d+$/, ".251") };
 const COMMUNITY = "e2e-events-community-01";
 const CONTROL = ".auth/trap-control";
 const MARKER = "e2eprob"; /* the probe sender's syslog marker: its messages read e2eprobudp and e2eprobtcp (event search matches whole words) */
