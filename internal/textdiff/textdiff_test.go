@@ -1,6 +1,7 @@
 package textdiff
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"runtime"
@@ -12,7 +13,7 @@ import (
 func TestUnifiedGolden(t *testing.T) {
 	a := "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n"
 	b := "l1\nl2\nL3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\n"
-	got, err := Unified("a", "b", a, b, 2, 100)
+	got, err := Unified(context.Background(), "a", "b", a, b, 2, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,15 +27,15 @@ func TestUnifiedGolden(t *testing.T) {
 
 func TestUnifiedEqualAndEmpty(t *testing.T) {
 	for _, c := range [][2]string{{"", ""}, {"x\ny\n", "x\ny\n"}} {
-		if d, err := Unified("a", "b", c[0], c[1], 3, 10); err != nil || d != "" {
+		if d, err := Unified(context.Background(), "a", "b", c[0], c[1], 3, 10); err != nil || d != "" {
 			t.Errorf("%q vs %q: %q, %v", c[0], c[1], d, err)
 		}
 	}
-	d, err := Unified("a", "b", "", "x\n", 3, 10)
+	d, err := Unified(context.Background(), "a", "b", "", "x\n", 3, 10)
 	if err != nil || d != "--- a\n+++ b\n@@ -0,0 +1 @@\n+x\n" {
 		t.Errorf("from empty: %q, %v", d, err)
 	}
-	d, err = Unified("a", "b", "x\n", "", 3, 10)
+	d, err = Unified(context.Background(), "a", "b", "x\n", "", 3, 10)
 	if err != nil || d != "--- a\n+++ b\n@@ -1 +0,0 @@\n-x\n" {
 		t.Errorf("to empty: %q, %v", d, err)
 	}
@@ -70,7 +71,7 @@ func TestMyersMinimalAndValid(t *testing.T) {
 		for j := range b {
 			b[j] = int32(rnd.Intn(4))
 		}
-		ops, err := myers(a, b, 100)
+		ops, err := myers(context.Background(), a, b, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,10 +111,10 @@ func TestUnifiedTooManyEdits(t *testing.T) {
 		a.WriteString("a" + strings.Repeat("x", i) + "\n")
 		b.WriteString("b" + strings.Repeat("y", i) + "\n")
 	}
-	if _, err := Unified("a", "b", a.String(), b.String(), 3, 100); !errors.Is(err, ErrTooLarge) {
+	if _, err := Unified(context.Background(), "a", "b", a.String(), b.String(), 3, 100); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := Unified("a", "b", a.String(), b.String(), 3, 400); err != nil {
+	if _, err := Unified(context.Background(), "a", "b", a.String(), b.String(), 3, 400); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -125,23 +126,23 @@ func TestUnifiedNoNewlineAtEOF(t *testing.T) {
 		{"a\n", "a", "--- a\n+++ b\n@@ -1 +1 @@\n-a\n+a\n" + noEOL},
 		{"x\na", "y\na", "--- a\n+++ b\n@@ -1,2 +1,2 @@\n-x\n+y\n a\n" + noEOL},
 	} {
-		got, err := Unified("a", "b", c.a, c.b, 3, 10)
+		got, err := Unified(context.Background(), "a", "b", c.a, c.b, 3, 10)
 		if err != nil || got != c.want {
 			t.Errorf("%q vs %q:\n%s(%v)\nwant:\n%s", c.a, c.b, got, err, c.want)
 		}
 	}
-	if d, err := Unified("a", "b", "a", "a", 3, 10); err != nil || d != "" {
+	if d, err := Unified(context.Background(), "a", "b", "a", "a", 3, 10); err != nil || d != "" {
 		t.Errorf("equal without newline: %q, %v", d, err)
 	}
 }
 
 func TestUnifiedTooManyLines(t *testing.T) {
 	long := strings.Repeat("\n", MaxLines+1)
-	if _, err := Unified("a", "b", long, "x\n", 3, 10); !errors.Is(err, ErrTooLarge) {
+	if _, err := Unified(context.Background(), "a", "b", long, "x\n", 3, 10); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
 	at := strings.Repeat("\n", MaxLines)
-	if d, err := Unified("a", "b", at, at[1:]+"x", 3, 10); err != nil || !strings.HasSuffix(d, "+x\n"+noEOL) {
+	if d, err := Unified(context.Background(), "a", "b", at, at[1:]+"x", 3, 10); err != nil || !strings.HasSuffix(d, "+x\n"+noEOL) {
 		t.Fatalf("at the cap: %q, %v", d, err)
 	}
 }
@@ -165,7 +166,7 @@ func TestUnifiedAllocationBound(t *testing.T) {
 	blank := strings.Repeat("\n", 2<<20)
 	other := blank[1:] + "x\n"
 	if n := allocated(func() {
-		if _, err := Unified("a", "b", blank, other, 3, 2500); !errors.Is(err, ErrTooLarge) {
+		if _, err := Unified(context.Background(), "a", "b", blank, other, 3, 2500); !errors.Is(err, ErrTooLarge) {
 			t.Errorf("2 MiB blank pair: %v", err)
 		}
 	}); n > 64<<10 {
@@ -176,7 +177,7 @@ func TestUnifiedAllocationBound(t *testing.T) {
 	var d string
 	n := allocated(func() {
 		var err error
-		if d, err = Unified("a", "b", a, b, 3, 2500); err != nil {
+		if d, err = Unified(context.Background(), "a", "b", a, b, 3, 2500); err != nil {
 			t.Error(err)
 		}
 	})
@@ -276,12 +277,26 @@ func TestUnifiedApplies(t *testing.T) {
 	for i := 0; i < 2000; i++ {
 		a, b := text(), text()
 		ctx := rnd.Intn(4)
-		d, err := Unified("a", "b", a, b, ctx, 200)
+		d, err := Unified(context.Background(), "a", "b", a, b, ctx, 200)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := apply(t, a, d); got != b {
 			t.Fatalf("context %d: %q -> %q\n%s\nrebuilt %q", ctx, a, b, d, got)
 		}
+	}
+}
+
+/* A cancelled context stops the search with the context's error. */
+func TestUnifiedCancelled(t *testing.T) {
+	var a, b strings.Builder
+	for i := range 1000 {
+		a.WriteString("a" + strconv.Itoa(i) + "\n")
+		b.WriteString("b" + strconv.Itoa(i) + "\n")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Unified(ctx, "a", "b", a.String(), b.String(), 3, 2500); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: %v", err)
 	}
 }

@@ -2,6 +2,7 @@
 package textdiff
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -12,6 +13,9 @@ var ErrTooLarge = errors.New("textdiff: texts too large or too different")
 
 // MaxLines is the most lines either text may have; a longer one is ErrTooLarge before any line is split.
 const MaxLines = 200_000
+
+/* ctxCheckRounds is how many rounds of myers run between checks of the context. */
+const ctxCheckRounds = 64
 
 /* noEOL follows a line that ends its text without a newline (as diff(1) writes it). */
 const noEOL = "\\ No newline at end of file\n"
@@ -41,11 +45,12 @@ Unified returns the unified diff of a and b with the given number of context
 lines ("" when the texts are equal). nameA and nameB are the header labels.
 A text with more than MaxLines lines, or more than maxEdits inserted plus
 deleted lines, is ErrTooLarge; that bounds the work to the size of the texts
-plus about maxEdits^2 * 2 bytes. Only the edits are kept, not one entry per
-line. A missing final newline is a difference of its own and is marked
-"\ No newline at end of file".
+plus the search trace of about 4·maxEdits² bytes (about 25 MB at 2500 edits).
+Only the edits are kept, not one entry per line. A missing final newline is a
+difference of its own and is marked "\ No newline at end of file". A
+cancelled ctx stops the search with ctx's error.
 */
-func Unified(nameA, nameB, a, b string, context, maxEdits int) (string, error) {
+func Unified(ctx context.Context, nameA, nameB, a, b string, contextLines, maxEdits int) (string, error) {
 	if lineCount(a) > MaxLines || lineCount(b) > MaxLines {
 		return "", ErrTooLarge
 	}
@@ -78,7 +83,7 @@ func Unified(nameA, nameB, a, b string, context, maxEdits int) (string, error) {
 	for suf < len(ia)-pre && suf < len(ib)-pre && ia[len(ia)-1-suf] == ib[len(ib)-1-suf] {
 		suf++
 	}
-	edits, err := myers(ia[pre:len(ia)-suf], ib[pre:len(ib)-suf], maxEdits)
+	edits, err := myers(ctx, ia[pre:len(ia)-suf], ib[pre:len(ib)-suf], maxEdits)
 	if err != nil || len(edits) == 0 {
 		return "", err
 	}
@@ -86,7 +91,7 @@ func Unified(nameA, nameB, a, b string, context, maxEdits int) (string, error) {
 		edits[i].ai += pre
 		edits[i].bi += pre
 	}
-	return format(nameA, nameB, ta, tb, edits, context), nil
+	return format(nameA, nameB, ta, tb, edits, contextLines), nil
 }
 
 /* lineCount is the number of lines split returns, without splitting. */
@@ -107,8 +112,11 @@ func split(s string) text {
 	return text{strings.Split(strings.TrimSuffix(s, "\n"), "\n"), eol}
 }
 
-/* myers returns the edit script (deletes and inserts only) turning a into b, or ErrTooLarge. */
-func myers(a, b []int32, maxD int) ([]op, error) {
+/*
+myers returns the edit script (deletes and inserts only) turning a into b, or
+ErrTooLarge. It checks ctx every ctxCheckRounds rounds.
+*/
+func myers(ctx context.Context, a, b []int32, maxD int) ([]op, error) {
 	n, m := len(a), len(b)
 	if n == 0 && m == 0 {
 		return nil, nil
@@ -120,6 +128,9 @@ func myers(a, b []int32, maxD int) ([]op, error) {
 	trace := make([][]int32, 0, 64)
 	found := false
 	for d := 0; d <= limit && !found; d++ {
+		if d%ctxCheckRounds == 0 && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		w := make([]int32, 2*d+3)
 		for k := -d - 1; k <= d+1; k++ {
 			w[k+d+1] = int32(v[off+k]) //nolint:gosec // a line index

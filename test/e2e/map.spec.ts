@@ -98,6 +98,7 @@ test("topology and map end to end", async ({ page }) => {
   const ids = new Map<string, number>(); /* device name -> id */
   const names = new Map<number, string>();
   let view = 0;
+  let dashboard = 0;
   try {
     const read = (await (await api.get("/keys.json")).json()).domains.read as { public_key: string; key_version: number };
     for (const d of ref.devices) {
@@ -208,8 +209,17 @@ test("topology and map end to end", async ({ page }) => {
       page.evaluate(() => (document.querySelector("[data-testid=map-canvas]") as unknown as { _cyreg?: { cy: { nodes(): { length: number } } } })._cyreg?.cy.nodes().length ?? 0);
     await expect.poll(nodes, { timeout: 30_000 }).toBeGreaterThanOrEqual(ref.devices.length);
 
-    /* Mini map on the home page. */
-    await page.goto("/");
+    /* Mini map on the home page: a personal dashboard of this test with one mini map widget, independent of other specs. */
+    res = await api.post("/api/dashboards", { headers: await csrf(), data: { name: "map-e2e", shared: false } });
+    expect(res.status()).toBe(201);
+    dashboard = ((await res.json()) as { id: number }).id;
+    res = await api.put(`/api/dashboards/${dashboard}/widgets`, {
+      headers: await csrf(),
+      data: { widgets: [{ type: "mini_map", x: 0, y: 0, w: 6, h: 6, config: { view_id: view } }] },
+    });
+    expect(res.status()).toBe(200);
+    const home = `/?d=${dashboard}`;
+    await page.goto(home);
     const mini = page.getByRole("region", { name: "Карта сети" });
     const box = mini.getByTestId("mini-map-box");
     await expect(box).toBeVisible();
@@ -222,7 +232,7 @@ test("topology and map end to end", async ({ page }) => {
     await expect.poll(() => scale(box), { timeout: 5_000 }).toBe("1.04");
 
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await page.goto("/");
+    await page.goto(home);
     const calm = page.getByRole("region", { name: "Карта сети" }).getByTestId("mini-map-box");
     await expect(calm).toBeVisible();
     expect(await calm.getAttribute("class")).not.toContain("hover:scale");
@@ -231,7 +241,7 @@ test("topology and map end to end", async ({ page }) => {
     expect(await calm.evaluate((e) => getComputedStyle(e).scale)).toBe("none");
     await page.emulateMedia({ reducedMotion: null });
 
-    await page.goto("/");
+    await page.goto(home);
     await page.getByRole("region", { name: "Карта сети" }).getByRole("button", { name: "Открыть" }).click();
     await expect(page).toHaveURL(`${ORIGIN}/map?view=${view}`);
     await expect(page.getByTestId("network-map")).toBeVisible();
@@ -240,6 +250,7 @@ test("topology and map end to end", async ({ page }) => {
     expect(errors, "page errors").toEqual([]);
   } finally {
     /* Clean up: the view, then the devices (their links and neighbour data go with them) and the group. */
+    if (dashboard !== 0) await api.delete(`/api/dashboards/${dashboard}`, { headers: await csrf() });
     if (view !== 0) await api.delete(`/api/map/views/${view}`, { headers: await csrf() });
     await stepUp(page);
     for (const did of ids.values()) await api.delete(`/api/devices/${did}`, { headers: await csrf() });

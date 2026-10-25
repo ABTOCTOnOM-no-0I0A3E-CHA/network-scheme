@@ -243,15 +243,21 @@ func TestBackupGetDownloadAndState(t *testing.T) {
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("download lacks nosniff")
 	}
-	/* Downloads are audited, one record per user a minute. */
+	/* Downloads are audited, one record per user and device a minute. */
 	wantStatus(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s/backups/%d/download", base, v)})), http.StatusOK)
 	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 1 {
 		t.Errorf("%d download audit records in a minute, want 1", n)
 	}
+	dev2 := f.newDevice(g)
+	v2 := f.newVersion(dev2, text, "event", false, taken)
+	wantStatus(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("/api/devices/%d/backups/%d/download", dev2, v2)})), http.StatusOK)
+	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 2 {
+		t.Errorf("%d download audit records after another device, want 2", n)
+	}
 	f.clk.Advance(61 * time.Second)
 	wantStatus(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s/backups/%d/download", base, v)})), http.StatusOK)
-	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 2 {
-		t.Errorf("%d download audit records after a minute, want 2", n)
+	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 3 {
+		t.Errorf("%d download audit records after a minute, want 3", n)
 	}
 	state := decode[struct {
 		LastOKAt   *time.Time   `json:"last_ok_at"`

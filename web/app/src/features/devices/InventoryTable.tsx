@@ -117,6 +117,7 @@ export function InventoryTable<T extends DeviceTable>({ deviceId, table, columns
           {t("data.csv")}
         </Button>
       </div>
+      <p className="text-xs text-muted-foreground">{t("data.csvHint")}</p>
       {exportError && (
         <p role="alert" className="text-sm text-destructive">
           {exportError}

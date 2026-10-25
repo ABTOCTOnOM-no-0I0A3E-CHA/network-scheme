@@ -97,13 +97,14 @@ type server struct {
 	uploadSem   chan struct{} /* one background upload is processed at a time */
 	serveSem    chan struct{} /* at most serveSlots background downloads stream at a time */
 	diffSem     chan struct{} /* at most diffSlots backup diffs are computed at a time */
+	exportSem   chan struct{} /* at most exportSlots inventory exports read at a time */
 	backupRL    userLimiter   /* manual backups per user */
 	showRL      userLimiter   /* show requests per user */
 	showAuditRL userLimiter   /* audit records of refused show requests, one per user a minute */
 
-	backupAuditRL   userLimiter /* audit records of refused manual backups, one per user a minute */
-	downloadAuditRL userLimiter /* audit records of config downloads, one per user a minute */
-	topIf           topIfCache  /* recent interface load rankings */
+	backupAuditRL   userLimiter          /* audit records of refused manual backups, one per user a minute */
+	downloadAuditRL keyLimiter[[2]int64] /* audit records of config downloads, one per user and device a minute */
+	topIf           topIfCache           /* recent interface load rankings */
 
 	hub         *notify.Hub
 	wsConns     wsConns
@@ -116,7 +117,7 @@ type server struct {
 func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
-		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), diffSem: make(chan struct{}, diffSlots), loginWait: loginQueueWait,
+		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), diffSem: make(chan struct{}, diffSlots), exportSem: make(chan struct{}, exportSlots), loginWait: loginQueueWait,
 		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {

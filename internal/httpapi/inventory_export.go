@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -20,15 +22,25 @@ import (
 	"github.com/beekamai/network-scheme/internal/audit"
 	"github.com/beekamai/network-scheme/internal/inventory"
 	"github.com/beekamai/network-scheme/internal/rbac"
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /* Limits of the inventory CSV export. */
 const (
 	maxExportRows  = 20000   /* rows written at most */
 	maxExportScan  = 200_000 /* rows read at most while filtering (the poller's per-table cap) */
-	exportPage     = 5000
-	maxExportQuery = 100 /* characters of q, as in the global search */
+	maxExportQuery = 100     /* characters of q, as in the global search */
+	exportSlots    = 2
+	exportWait     = time.Second /* how long an export waits for a slot before answering 503 */
 )
+
+/* exportTimeout is the statement limit of the export's read (a variable for tests). */
+var exportTimeout = 15 * time.Second
+
+var errExportBusy = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят выгрузкой таблиц, повторите позже"}
+
+/* errExportFull stops the read once the outcome is known to be capped. */
+var errExportFull = errors.New("export: capped")
 
 /*
 exportTable reads one inventory table of a device for the export: the header
@@ -55,16 +67,22 @@ func operIs(up bool) func(header, cells []string) bool {
 }
 
 var exportTables = map[string]exportTable{
-	"interfaces": {exportRows((*inventory.Store).Interfaces), map[string]func([]string, []string) bool{"up": operIs(true), "down": operIs(false)}},
-	"arp":        {exportRows((*inventory.Store).ARP), nil},
-	"mac":        {exportRows((*inventory.Store).MAC), nil},
-	"vlans":      {exportRows((*inventory.Store).VLANs), nil},
-	"lldp":       {exportRows((*inventory.Store).LLDP), nil},
-	"entities":   {exportRows((*inventory.Store).Entities), nil},
-	"routes":     {exportRows((*inventory.Store).Routes), nil},
+	"interfaces": {exportRows(inventory.InterfaceTable), map[string]func([]string, []string) bool{"up": operIs(true), "down": operIs(false)}},
+	"arp":        {exportRows(inventory.ARPTable), nil},
+	"mac":        {exportRows(inventory.MACTable), nil},
+	"vlans":      {exportRows(inventory.VLANTable), nil},
+	"lldp":       {exportRows(inventory.LLDPTable), nil},
+	"entities":   {exportRows(inventory.EntityTable), nil},
+	"routes":     {exportRows(inventory.RouteTable), nil},
 }
 
-func exportRows[T any](list func(*inventory.Store, context.Context, int64, inventory.Page) ([]T, error)) func(*server, context.Context, int64, func([]string, []string) bool) ([]string, [][]string, bool, error) {
+/*
+exportRows reads the table by one statement (at most maxExportScan+1 rows) in
+a read-only REPEATABLE READ transaction under exportTimeout, stopping as soon
+as the export is known to be capped: a kept row past maxExportRows, or a row
+past maxExportScan.
+*/
+func exportRows[T any](t inventory.Table[T]) func(*server, context.Context, int64, func([]string, []string) bool) ([]string, [][]string, bool, error) {
 	return func(s *server, ctx context.Context, id int64, keep func([]string, []string) bool) ([]string, [][]string, bool, error) {
 		var zero T
 		header, _, err := rowCells(zero)
@@ -72,30 +90,45 @@ func exportRows[T any](list func(*inventory.Store, context.Context, int64, inven
 			return nil, nil, false, err
 		}
 		var out [][]string
-		for off := 0; off < maxExportScan; off += exportPage {
-			page, err := list(s.inventory, ctx, id, inventory.Page{Limit: exportPage, Offset: off})
-			if err != nil {
-				return nil, nil, false, err
-			}
-			for _, row := range page {
-				_, cells, err := rowCells(row)
+		scanned, capped := 0, false
+		err = store.BoundedSnapshot(ctx, s.pool, exportTimeout, func(tx pgx.Tx) error {
+			return t.Each(ctx, tx, id, maxExportScan+1, func(row T) error {
+				if scanned++; scanned > maxExportScan {
+					capped = true
+					return errExportFull
+				}
+				cells, err := headerCells(header, row)
 				if err != nil {
-					return nil, nil, false, err
+					return err
 				}
 				if !keep(header, cells) {
-					continue
+					return nil
 				}
 				if len(out) == maxExportRows {
-					return header, out, true, nil
+					capped = true
+					return errExportFull
 				}
 				out = append(out, cells)
-			}
-			if len(page) < exportPage {
-				return header, out, false, nil
-			}
+				return nil
+			})
+		})
+		if err != nil && !errors.Is(err, errExportFull) {
+			return nil, nil, false, err
 		}
-		return header, out, true, nil
+		return header, out, capped, nil
 	}
+}
+
+/* headerCells renders row by rowCells and fails unless its fields are header, in order (a cell would land in another column). */
+func headerCells(header []string, row any) ([]string, error) {
+	keys, cells, err := rowCells(row)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Equal(keys, header) {
+		return nil, fmt.Errorf("export: row fields %v differ from the header %v", keys, header)
+	}
+	return cells, nil
 }
 
 /*
@@ -176,8 +209,10 @@ exportInventory streams one inventory table of a device as a CSV attachment
 (security.md §9: needs a fresh step-up; §11: audited as inventory.export).
 q keeps the rows with a field containing it (case-insensitive, as the table
 search of the panel) and filter applies a named filter of the table. At most
-maxExportRows rows are written; X-Export-Capped tells whether rows were left
-out. A BOM lets spreadsheets read the file as UTF-8.
+maxExportRows rows are written; X-Export-Capped and a "-capped" suffix of the
+file name tell that rows were left out. At most exportSlots exports run at a
+time; with every slot taken for exportWait the answer is 503 busy. A BOM
+lets spreadsheets read the file as UTF-8.
 */
 func (s *server) exportInventory(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -219,6 +254,16 @@ func (s *server) exportInventory(w http.ResponseWriter, r *http.Request) {
 		}
 		return false
 	}
+	select {
+	case s.exportSem <- struct{}{}:
+		defer func() { <-s.exportSem }()
+	case <-time.After(exportWait):
+		w.Header().Set("Retry-After", "1")
+		writeError(w, errExportBusy)
+		return
+	case <-r.Context().Done():
+		return
+	}
 	header, rows, capped, err := tbl.read(s, r.Context(), id, keep)
 	if err != nil {
 		s.fail(w, r, err)
@@ -231,7 +276,11 @@ func (s *server) exportInventory(w http.ResponseWriter, r *http.Request) {
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/csv; charset=utf-8")
-	h.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s.csv"`, name, strings.TrimSuffix(downloadName(d.Name, s.now()), ".txt")))
+	suffix := ""
+	if capped {
+		suffix = "-capped"
+	}
+	h.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s%s.csv"`, name, strings.TrimSuffix(downloadName(d.Name, s.now()), ".txt"), suffix))
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Export-Capped", strconv.FormatBool(capped))
 	w.WriteHeader(http.StatusOK)

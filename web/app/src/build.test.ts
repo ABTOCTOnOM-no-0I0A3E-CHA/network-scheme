@@ -53,17 +53,21 @@ describe("production build", () => {
       "http://fb.me/",
       "https://github.com/react-grid-layout/",
     ];
+    /* an entry matches its exact host: past the entry the URL ends or goes on with a path, port, query or fragment */
+    const isAllowed = (u: string) => allowed.some((a) => u.startsWith(a) && (a.endsWith("/") || u.length === a.length || "/:?#".includes(u[a.length])));
     /* zod's IPv6 check parses `http://[${address}]` with URL: exactly that template literal, nothing else under "http://[" */
     const zodIPv6 = /^http:\/\/\[\$\{[\w$]+\}\]$/;
     const offenders: string[] = [];
     for (const f of walk(out)) {
       if (/\.(woff2?|png|ico)$/.test(f)) continue;
       const text = readFileSync(f, "utf8");
-      for (const m of text.matchAll(/https?:\/\/[^\s"'`)\\<>]+/g)) {
+      for (const m of text.matchAll(/(?:https?|wss?):\/\/[^\s"'`)\\<>]+/g)) {
         const i = m.index;
         if (zodIPv6.test(m[0]) && text[i - 1] === "`" && text[i + m[0].length] === "`") continue;
-        if (!allowed.some((a) => m[0].startsWith(a))) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
+        if (!isAllowed(m[0])) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
       }
+      /* protocol-relative //host.tld at the start of a string literal or url( */
+      for (const m of text.matchAll(/(?<=["'`(])\/\/[\w-]+(?:\.[\w-]+)+/g)) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
     }
     expect(offenders).toEqual([]);
   });

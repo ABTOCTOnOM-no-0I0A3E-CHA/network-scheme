@@ -1,11 +1,14 @@
 package httpapi_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/beekamai/network-scheme/internal/httpapi"
 	"github.com/beekamai/network-scheme/internal/rbac"
 )
 
@@ -42,7 +45,7 @@ func TestInventoryExport(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/csv; charset=utf-8" {
 		t.Errorf("Content-Type %q", ct)
 	}
-	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, `attachment; filename="interfaces-`) || !strings.HasSuffix(cd, `.csv"`) {
+	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, `attachment; filename="interfaces-`) || !strings.HasSuffix(cd, `.csv"`) || strings.Contains(cd, "-capped") {
 		t.Errorf("Content-Disposition %q", cd)
 	}
 	if resp.Header.Get("X-Export-Capped") != "false" || resp.Header.Get("Cache-Control") != "no-store" {
@@ -79,4 +82,74 @@ func TestInventoryExport(t *testing.T) {
 	if resp.Header.Get("X-Export-Capped") != "true" || len(lines) != 20001 {
 		t.Errorf("capped %q, %d lines", resp.Header.Get("X-Export-Capped"), len(lines))
 	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.HasSuffix(cd, `-capped.csv"`) {
+		t.Errorf("capped Content-Disposition %q", cd)
+	}
+}
+
+/*
+TestInventoryExportSlotsAndTimeout: an export whose read runs past its
+statement limit answers 503 query_timeout; with both export slots taken a
+third waits briefly and answers 503 busy with Retry-After.
+*/
+func TestInventoryExportSlotsAndTimeout(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	dev := f.newDevice(g)
+	f.newIface(dev, 1, "Gi1/0/1", "uplink", 1000)
+	u := f.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g})
+	f.stepUp(u)
+	path := fmt.Sprintf("/api/devices/%d/export/interfaces", dev)
+
+	/* A held lock makes every export read wait. */
+	ctx := context.Background()
+	lock, err := f.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Rollback(ctx) }()
+	if _, err := lock.Exec(ctx, `LOCK TABLE inventory.interface IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := httpapi.SetExportTimeout(300 * time.Millisecond)
+	defer restore()
+	wantError(t, f.do(u.authed(req{method: "GET", path: path})), http.StatusServiceUnavailable, "query_timeout")
+
+	httpapi.SetExportTimeout(30 * time.Second)
+	codes := make(chan int, 2)
+	for range 2 {
+		go func() {
+			resp := f.do(u.authed(req{method: "GET", path: path}))
+			_ = resp.Body.Close()
+			codes <- resp.StatusCode
+		}()
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		var waiting int
+		if err := f.env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE relation = 'inventory.interface'::regclass AND NOT granted`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d exports wait for the table, want 2", waiting)
+		}
+	}
+	resp := f.do(u.authed(req{method: "GET", path: path}))
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("503 without Retry-After")
+	}
+	wantError(t, resp, http.StatusServiceUnavailable, "busy")
+
+	if err := lock.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if code := <-codes; code != http.StatusOK {
+			t.Errorf("held export = %d, want 200", code)
+		}
+	}
+	wantStatus(t, f.do(u.authed(req{method: "GET", path: path})), http.StatusOK)
 }

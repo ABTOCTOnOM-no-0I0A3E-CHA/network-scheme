@@ -125,6 +125,7 @@ function Editor({ dashboard, canManage, onDone }: { dashboard: DashboardDetail; 
     setError(undefined);
     const trimmed = name.trim();
     if (!trimmed) return setError(t("dashboards.create.required"));
+    if (items.some((it) => !getWidget(it.type))) return setError(t("dashboards.unknownWidget"));
     if (items.some((it) => !getWidget(it.type)?.configSchema.safeParse(it.config).success)) return setError(t("dashboards.unconfigured"));
     try {
       const patch: { name?: string; default_for_role?: Role | null } = {};

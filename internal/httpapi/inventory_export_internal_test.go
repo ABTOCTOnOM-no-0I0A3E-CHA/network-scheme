@@ -59,3 +59,23 @@ func TestRowCells(t *testing.T) {
 		t.Errorf("cells %q, want %q", cells, want)
 	}
 }
+
+/* A row whose fields differ from the header (an omitted field) fails instead of shifting cells into other columns. */
+func TestHeaderCellsRefusesShiftedRows(t *testing.T) {
+	type row struct {
+		A string  `json:"a"`
+		B *string `json:"b,omitempty"`
+		C string  `json:"c"`
+	}
+	b := "x"
+	header, _, err := rowCells(row{B: &b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cells, err := headerCells(header, row{A: "1", B: &b, C: "3"}); err != nil || strings.Join(cells, "|") != "1|x|3" {
+		t.Fatalf("matching row: %q, %v", cells, err)
+	}
+	if _, err := headerCells(header, row{A: "1", C: "3"}); err == nil {
+		t.Fatal("a row without b was accepted")
+	}
+}

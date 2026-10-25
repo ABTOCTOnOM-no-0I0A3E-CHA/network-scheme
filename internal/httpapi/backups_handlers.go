@@ -39,17 +39,24 @@ var (
 	errDiffBusy     = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят сравнением конфигураций, повторите позже"}
 )
 
-/* userLimiter allows n events per user in any sliding minute. */
-type userLimiter struct {
+/*
+keyLimiter allows n events per key in any sliding minute. Keys with nothing
+in the last minute are forgotten on every call, so it holds at most the keys
+of the last minute's events.
+*/
+type keyLimiter[K comparable] struct {
 	mu   sync.Mutex
-	seen map[int64][]time.Time
+	seen map[K][]time.Time
 }
 
-func (l *userLimiter) allow(uid int64, now time.Time, n int) bool {
+/* userLimiter allows n events per user in any sliding minute. */
+type userLimiter = keyLimiter[int64]
+
+func (l *keyLimiter[K]) allow(uid K, now time.Time, n int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.seen == nil {
-		l.seen = map[int64][]time.Time{}
+		l.seen = map[K][]time.Time{}
 	}
 	for u, ts := range l.seen { /* forget users with nothing recent */
 		if len(ts) > 0 && now.Sub(ts[len(ts)-1]) >= time.Minute {
@@ -69,7 +76,7 @@ func (l *userLimiter) allow(uid int64, now time.Time, n int) bool {
 }
 
 /* refund forgets the event allow admitted at now (for an action that did not happen after all). */
-func (l *userLimiter) refund(uid int64, now time.Time) {
+func (l *keyLimiter[K]) refund(uid K, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ts := l.seen[uid]
@@ -272,7 +279,7 @@ func (s *server) downloadBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc, _ := sessionFrom(r.Context())
-	if s.downloadAuditRL.allow(sc.sess.UserID, s.now(), 1) {
+	if s.downloadAuditRL.allow([2]int64{sc.sess.UserID, id}, s.now(), 1) {
 		ev := audit.Event{Action: "devices.backup_download", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10), Details: map[string]any{"version_id": vid}}
 		if !s.change(w, r, ev, func(pgx.Tx, *audit.Event) error { return nil }) {
 			return
@@ -387,7 +394,10 @@ func (s *server) writeDiff(w http.ResponseWriter, r *http.Request, va, vb backup
 	label := func(v backupVersion) string {
 		return "version " + strconv.FormatInt(v.ID, 10) + " " + v.TakenAt.UTC().Format(time.RFC3339)
 	}
-	d, err := textdiff.Unified(label(va), label(vb), ta, tb, diffContext, maxDiffEdits)
+	d, err := textdiff.Unified(r.Context(), label(va), label(vb), ta, tb, diffContext, maxDiffEdits)
+	if r.Context().Err() != nil {
+		return /* the client is gone */
+	}
 	if errors.Is(err, textdiff.ErrTooLarge) || len(d) > maxDiffText {
 		writeError(w, errDiffTooLarge)
 		return

@@ -92,6 +92,22 @@ describe("widget registry contract", () => {
     expect(await screen.findByText(ru.widgets.unknown.title)).toBeInTheDocument();
     expect(await screen.findByText(ru.widgets.invalidConfig)).toBeInTheDocument();
   });
+
+  it("refuses to save an unknown widget type with its own message until that widget is removed", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    list = [dash(1)];
+    stored[1] = { ...list[0], widgets: [{ id: 1, type: "gone_widget" as never, x: 0, y: 0, w: 2, h: 2, config: {} }, status] };
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: ru.dashboards.edit }));
+    await user.click(screen.getByRole("button", { name: ru.dashboards.save }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(ru.dashboards.unknownWidget);
+    expect(puts).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: `Убрать виджет «${ru.widgets.unknown.title}»` }));
+    await user.click(screen.getByRole("button", { name: ru.dashboards.save }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0].body.widgets.map((w) => w.type)).toEqual(["device_status"]);
+  });
 });
 
 describe("dashboard page", () => {

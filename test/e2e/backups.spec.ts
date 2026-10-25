@@ -26,6 +26,8 @@ const MODELS = {
 type Model = keyof typeof MODELS;
 const GROUP = "backups-e2e";
 const BACKUP_GAP_MS = 5 * 60_000;
+/* how often the window re-reads the backup state while it waits for a manual backup (web/app backups.ts) */
+const BACKUP_POLL_MS = 3_000;
 /* the line the test changes in the ESR configuration */
 const BEFORE = "  description uplink";
 const AFTER = "  description uplink-e2e";
@@ -67,8 +69,10 @@ class Seen {
   readonly texts: { where: string; text: string }[] = [];
   readonly unread: string[] = [];
   private pending: Promise<void>[] = [];
+  private requests = 0;
 
   watch(page: Page) {
+    page.on("request", () => this.requests++);
     page.on("response", (r) => {
       if (r.status() >= 300 && r.status() < 400) return;
       this.pending.push(this.keep(r));
@@ -91,6 +95,16 @@ class Seen {
       n = this.pending.length;
       await Promise.all(this.pending);
     }
+  }
+
+  /** Settles, then waits until the page sent no request for `ms` (its polls stopped), so a navigation cuts no body short. */
+  async quiet(ms: number): Promise<void> {
+    for (let n = -1; n !== this.requests; ) {
+      n = this.requests;
+      await this.settle();
+      await sleep(ms);
+    }
+    await this.settle();
   }
 
   async page(page: Page, where: string): Promise<void> {
@@ -232,11 +246,18 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   writeFileSync(next, esrConfig.replace(`\n${BEFORE}\n`, `\n${AFTER}\n`));
   renameSync(next, runningConfig("esr"));
 
-  /* Manual backups through the window. */
+  /*
+   * Manual backups through the window. The window polls the backup state until the backup is done: wait for that and
+   * for its polls to stop before leaving, so no poll response is cut short by the navigation.
+   */
   for (const m of Object.keys(MODELS) as Model[]) {
     await goto(`/devices/${ids[m]}?tab=backups`);
     await page.getByRole("button", { name: "Снять бэкап" }).click();
     await expect(panel.getByRole("status")).toHaveText("Бэкап поставлен в очередь");
+    await expect
+      .poll(async () => (await state(ids[m])).last_ok_at !== baseline[m].last_ok_at, { timeout: 2 * 60_000, intervals: [2_000], message: `${m} manual backup` })
+      .toBe(true);
+    await seen.quiet(BACKUP_POLL_MS + 2_000);
   }
 
   /* MES, unchanged: the backup ran (last_ok_at moved) and stored nothing new. */
@@ -258,7 +279,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   expect((await json<{ text: string }>(`/api/devices/${esr}/backups/${v2.id}`)).text).toContain(AFTER.trim());
 
   /* The same diff in the window: A the baseline, B the new version. */
-  await seen.settle();
+  await seen.quiet(BACKUP_POLL_MS + 2_000);
   await page.reload();
   await expect(table.getByRole("row")).toHaveCount(3);
   await expect(table).toContainText("вручную");
