@@ -57,6 +57,8 @@ type Options struct {
 	InfraMirror             []string
 	MgmtSubnets             []string /* management subnets the devices network may reach; at least one */
 	DevicesSubnet           string   /* DefaultDevicesSubnet when empty */
+	CoreSubnet              string   /* DefaultCoreSubnet when empty */
+	XnetSubnet              string   /* DefaultXnetSubnet when empty */
 	AdminUser               string   /* DefaultAdminUser when empty */
 	AdminPasswordFile       string
 	AdminPassword           secret.Secret /* set by the caller after an interactive prompt; else read from AdminPasswordFile */
@@ -122,14 +124,19 @@ func Run(ctx context.Context, o Options, sys System) error {
 	return nil
 }
 
+/* renderInput is what Render and Preflight see of the options, with the subnet defaults applied. */
+func (o Options) renderInput() RenderInput {
+	return RenderInput{
+		PublicHost: strings.ToLower(o.PublicHost), ImageTag: o.ImageTag,
+		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, ExecutorImage: DefaultExecutorImage, Paths: o.paths(),
+		DevicesSubnet: cmp.Or(o.DevicesSubnet, DefaultDevicesSubnet), CoreSubnet: cmp.Or(o.CoreSubnet, DefaultCoreSubnet),
+		XnetSubnet: cmp.Or(o.XnetSubnet, DefaultXnetSubnet),
+	}
+}
+
 func prepareInstall(o Options) (prepared, error) {
-	ps := o.paths()
 	o.PublicHost = strings.ToLower(o.PublicHost)
-	devices := cmp.Or(o.DevicesSubnet, DefaultDevicesSubnet)
-	files, err := Render(RenderInput{
-		PublicHost: o.PublicHost, ImageTag: o.ImageTag,
-		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, ExecutorImage: DefaultExecutorImage, Paths: ps, DevicesSubnet: devices,
-	})
+	files, err := Render(o.renderInput())
 	if err != nil {
 		return prepared{}, fmt.Errorf("install: %w", err)
 	}
@@ -138,9 +145,20 @@ func prepareInstall(o Options) (prepared, error) {
 		return prepared{}, err
 	}
 	files["config/infra.yaml"] = infra
-	eg := Egress{DevicesSubnet: netip.MustParsePrefix(devices)} /* validated by Render */
+	in := o.renderInput()
+	eg := Egress{DevicesSubnet: netip.MustParsePrefix(in.DevicesSubnet)} /* validated by Render */
 	if eg.MgmtSubnets, err = ParseMgmtSubnets(o.MgmtSubnets); err != nil {
 		return prepared{}, fmt.Errorf("install: %w", err)
+	}
+	/* The devices network routes to the management subnets: none may be one of the stack's own networks. */
+	for _, m := range eg.MgmtSubnets {
+		for _, own := range []struct{ flag, subnet string }{
+			{"--core-subnet", in.CoreSubnet}, {"--devices-subnet", in.DevicesSubnet}, {"--xnet-subnet", in.XnetSubnet},
+		} {
+			if m.Overlaps(netip.MustParsePrefix(own.subnet)) {
+				return prepared{}, fmt.Errorf("install: management subnet %s overlaps %s %s", m, own.flag, own.subnet)
+			}
+		}
 	}
 	if files[EgressFile], err = egressYAML(eg); err != nil {
 		return prepared{}, err

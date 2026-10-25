@@ -169,7 +169,7 @@ services:
     environment:
       GOMEMLIMIT: 400MiB
     # The administration socket (nmsctl executor, through docker compose exec) lives here.
-    tmpfs: ["/run/executor:mode=0700,uid=65533,gid=65533"]
+    tmpfs: ["/run/executor:mode=0700,uid=65533,gid=65533,size=1m"]
     secrets: [db_executor_password, executor_sealing_key, domain_write_key, domain_backup_key, ticket_pub, executor_tls_crt, executor_tls_key, ca_crt]
     volumes:
       - executor-state:/var/lib/executor

@@ -1,6 +1,7 @@
 package install
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -93,7 +94,7 @@ func Preflight(o Options, sys System) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("install: %w", err)
 	}
-	return checkHostPorts(o.PortFree)
+	return checkHostPorts(o.PortFree, o.renderInput())
 }
 
 /* hostPort is a host port the stack publishes, with the service that most likely holds it. */
@@ -102,21 +103,24 @@ type hostPort struct {
 	port           int
 }
 
-var hostPorts = []hostPort{
-	{"tcp", "a web server or another proxy", 443},
-	{"tcp", "a web server or another proxy (the executor origin)", DefaultExecutorPort},
-	{"udp", "rsyslog or syslog-ng", 514},
-	{"tcp", "rsyslog or syslog-ng", 514},
-	{"tcp", "rsyslog or syslog-ng (TLS)", 6514},
-	{"udp", "snmptrapd", 162},
+/* hostPorts are the ports compose.yaml publishes for in: the gateway's from the input, eventd's fixed in the template. */
+func hostPorts(in RenderInput) []hostPort {
+	return []hostPort{
+		{"tcp", "a web server or another proxy", cmp.Or(in.HTTPSPort, DefaultHTTPSPort)},
+		{"tcp", "a web server or another proxy (the executor origin)", cmp.Or(in.ExecutorPort, DefaultExecutorPort)},
+		{"udp", "rsyslog or syslog-ng", 514},
+		{"tcp", "rsyslog or syslog-ng", 514},
+		{"tcp", "rsyslog or syslog-ng (TLS)", 6514},
+		{"udp", "snmptrapd", 162},
+	}
 }
 
 /* checkHostPorts fails, before anything is written, when a published port is taken. */
-func checkHostPorts(free func(proto string, port int) error) error {
+func checkHostPorts(free func(proto string, port int) error, in RenderInput) error {
 	if free == nil {
 		return nil
 	}
-	for _, p := range hostPorts {
+	for _, p := range hostPorts(in) {
 		if err := free(p.proto, p.port); err != nil {
 			return fmt.Errorf("%w: %d/%s (%v); stop %s on this host, or free the port, and run install again",
 				ErrPortInUse, p.port, p.proto, err, p.culprit)

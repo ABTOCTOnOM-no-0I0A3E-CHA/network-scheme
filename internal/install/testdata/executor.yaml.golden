@@ -14,6 +14,9 @@ tls_key_file: "/run/secrets/executor_tls_key"
 client_ca_file: "/run/secrets/ca_crt"
 # Only the static address in xnet, never core; the gateway is the only client (mutual TLS).
 listen_xnet: "172.30.2.2:8444"
+# The stack's own networks: no device address may fall into them (the devices subnet is in egress.yaml).
+core_subnet: "172.30.0.0/24"
+xnet_subnet: "172.30.2.0/24"
 panel_origin: "https://nms.example.org"
 executor_origin: "https://nms.example.org:8443"
 state_dir: "/var/lib/executor"

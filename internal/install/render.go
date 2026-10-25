@@ -90,6 +90,9 @@ var (
 	pathRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
 )
 
+/* reservedHosts are compose service names the internal certificates are issued for: never the public host. */
+var reservedHosts = map[string]bool{"executor": true, "gateway": true}
+
 var templates = template.Must(template.New("").Option("missingkey=error").ParseFS(deploy.FS, "templates/*.tmpl"))
 
 /* outputs maps rendered file names (relative to Paths.Etc) to templates. */
@@ -167,6 +170,8 @@ func prepare(in RenderInput) (view, error) {
 	switch {
 	case !hostRe.MatchString(in.PublicHost) || len(in.PublicHost) > 253:
 		return view{}, fmt.Errorf("public host %q is not a valid DNS name or IPv4 address", in.PublicHost)
+	case reservedHosts[in.PublicHost]:
+		return view{}, fmt.Errorf("public host %q is the name of an internal service (the xnet certificates are issued for it)", in.PublicHost)
 	case in.HTTPSPort < 1 || in.HTTPSPort > 65535:
 		return view{}, fmt.Errorf("https port %d out of range", in.HTTPSPort)
 	case in.ExecutorPort < 1 || in.ExecutorPort > 65535:
@@ -199,14 +204,14 @@ func prepare(in RenderInput) (view, error) {
 		return view{}, err
 	}
 	if devs.Overlaps(subnet) {
-		return view{}, fmt.Errorf("devices subnet %s overlaps the core subnet %s", devs, subnet)
+		return view{}, fmt.Errorf("devices subnet %s (--devices-subnet) overlaps the core subnet %s (--core-subnet)", devs, subnet)
 	}
 	xnet, err := parseSubnet("xnet", in.XnetSubnet)
 	if err != nil {
 		return view{}, err
 	}
 	if xnet.Overlaps(subnet) || xnet.Overlaps(devs) {
-		return view{}, fmt.Errorf("xnet subnet %s overlaps the core or devices subnet", xnet)
+		return view{}, fmt.Errorf("xnet subnet %s (--xnet-subnet) overlaps the core subnet %s (--core-subnet) or the devices subnet %s (--devices-subnet)", xnet, subnet, devs)
 	}
 	in.CoreSubnet, in.DevicesSubnet, in.XnetSubnet = subnet.String(), devs.String(), xnet.String()
 	ipRange := netip.PrefixFrom(upperHalf(subnet), subnet.Bits()+1)

@@ -10,3 +10,5 @@ secrets
 **/.env.*
 **/node_modules
 web/app/dist
+.claude
+.superpowers

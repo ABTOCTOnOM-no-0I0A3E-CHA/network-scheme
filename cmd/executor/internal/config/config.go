@@ -10,7 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -39,6 +44,9 @@ type Config struct {
 	ClientCAFile string `yaml:"client_ca_file"`
 	/* ListenXnet is the executor's own address in xnet: a specific IPv4 address, never a wildcard. */
 	ListenXnet netip.AddrPort `yaml:"listen_xnet"`
+	/* CoreSubnet and XnetSubnet are the stack's own networks; ListenXnet lies in XnetSubnet. */
+	CoreSubnet netip.Prefix `yaml:"core_subnet"`
+	XnetSubnet netip.Prefix `yaml:"xnet_subnet"`
 	/* PanelOrigin may frame the executor UI; ExecutorOrigin is the only Origin the executor accepts. */
 	PanelOrigin    string `yaml:"panel_origin"`
 	ExecutorOrigin string `yaml:"executor_origin"`
@@ -76,20 +84,37 @@ func (c *Config) validate() error {
 		return err
 	}
 	for _, f := range []struct{ name, v string }{
-		{"sealing_key_file", c.SealingKeyFile}, {"write_key_file", c.WriteKeyFile}, {"backup_key_file", c.BackupKeyFile},
+		{"db.password_file", c.DB.PasswordFile}, {"sealing_key_file", c.SealingKeyFile}, {"write_key_file", c.WriteKeyFile}, {"backup_key_file", c.BackupKeyFile},
 		{"ticket_pub_key_file", c.TicketPubKeyFile}, {"tls_cert_file", c.TLSCertFile}, {"tls_key_file", c.TLSKeyFile},
 		{"client_ca_file", c.ClientCAFile}, {"state_dir", c.StateDir}, {"policy_file", c.PolicyFile}, {"egress_file", c.EgressFile},
 	} {
 		if f.v == "" {
 			return fmt.Errorf("%s is required", f.name)
 		}
+		/* Container paths; filepath also accepts a native absolute path (tests on Windows). */
+		if (!path.IsAbs(f.v) && !filepath.IsAbs(f.v)) || slices.Contains(strings.Split(filepath.ToSlash(f.v), "/"), "..") {
+			return fmt.Errorf("%s %q must be an absolute path without a .. element", f.name, f.v)
+		}
+	}
+	for _, s := range []struct {
+		name string
+		p    netip.Prefix
+	}{{"core_subnet", c.CoreSubnet}, {"xnet_subnet", c.XnetSubnet}} {
+		if !s.p.IsValid() || !s.p.Addr().Is4() || s.p != s.p.Masked() {
+			return fmt.Errorf("%s is required as an IPv4 network address with prefix", s.name)
+		}
+	}
+	if c.CoreSubnet.Overlaps(c.XnetSubnet) {
+		return errors.New("core_subnet and xnet_subnet overlap")
 	}
 	a := c.ListenXnet.Addr()
 	switch {
 	case !c.ListenXnet.IsValid() || c.ListenXnet.Port() == 0:
 		return errors.New("listen_xnet is required as ipv4:port")
-	case !a.Is4() || a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() || a.IsLinkLocalUnicast():
+	case !a.Is4() || a.IsUnspecified() || a.IsLoopback() || a.IsMulticast() || a.IsLinkLocalUnicast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
 		return fmt.Errorf("listen_xnet %s: must be the executor's own IPv4 address in xnet, not a wildcard", c.ListenXnet)
+	case !c.XnetSubnet.Contains(a) || a == c.XnetSubnet.Addr() || a == lastAddr(c.XnetSubnet):
+		return fmt.Errorf("listen_xnet %s: must be a host address in xnet_subnet %s", c.ListenXnet, c.XnetSubnet)
 	}
 	var err error
 	if c.PanelOrigin, err = httpsOrigin("panel_origin", c.PanelOrigin); err != nil {
@@ -104,7 +129,16 @@ func (c *Config) validate() error {
 	return nil
 }
 
-/* httpsOrigin normalizes an https origin. */
+/* lastAddr is the broadcast address of an IPv4 prefix. */
+func lastAddr(p netip.Prefix) netip.Addr {
+	a := p.Addr().As4()
+	for i := p.Bits(); i < 32; i++ {
+		a[i/8] |= 0x80 >> (i % 8)
+	}
+	return netip.AddrFrom4(a)
+}
+
+/* httpsOrigin normalizes an https origin; a port must be canonical decimal in 1..65535. */
 func httpsOrigin(name, raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%s is required", name)
@@ -115,6 +149,15 @@ func httpsOrigin(name, raw string) (string, error) {
 	}
 	if !strings.HasPrefix(o, "https://") {
 		return "", fmt.Errorf("%s %q must be https", name, raw)
+	}
+	u, err := url.Parse(o)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != p {
+			return "", fmt.Errorf("%s %q: port must be 1..65535", name, raw)
+		}
 	}
 	return o, nil
 }

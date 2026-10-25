@@ -192,6 +192,8 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		"xnet overlaps devs":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.1.0/25" },
 		"xnet ipv6":            func(in *install.RenderInput) { in.XnetSubnet = "fd00::/64" },
 		"xnet host bits":       func(in *install.RenderInput) { in.XnetSubnet = "172.30.2.1/24" },
+		"host executor":        func(in *install.RenderInput) { in.PublicHost = "executor" },
+		"host gateway":         func(in *install.RenderInput) { in.PublicHost = "GATEWAY" },
 		"devices injection":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/24\"\n  x: y" },
 	}
 	for name, mutate := range cases {
@@ -375,7 +377,7 @@ func TestComposeHardening(t *testing.T) {
 	if x.Image != "nms/executor:1.0.0" || x.User != "65533:65533" || len(x.Entrypoint) != 0 || !slices.Equal(x.Healthcheck.Test, []string{"CMD", "/executor", "healthcheck"}) {
 		t.Errorf("executor image/user/entrypoint/healthcheck = %q %q %v %v", x.Image, x.User, x.Entrypoint, x.Healthcheck.Test)
 	}
-	if !slices.Equal(x.Tmpfs, []string{"/run/executor:mode=0700,uid=65533,gid=65533"}) {
+	if !slices.Equal(x.Tmpfs, []string{"/run/executor:mode=0700,uid=65533,gid=65533,size=1m"}) {
 		t.Errorf("executor tmpfs = %v", x.Tmpfs)
 	}
 	if want := []any{"db_executor_password", "executor_sealing_key", "domain_write_key", "domain_backup_key", "ticket_pub", "executor_tls_crt", "executor_tls_key", "ca_crt"}; !slices.Equal(x.Secrets, want) {
@@ -408,10 +410,16 @@ func TestComposeHardening(t *testing.T) {
 			t.Errorf("%s: only the api gets ticket_key", name)
 		}
 	}
-	gw := c.Services["gateway"]
-	for _, want := range []string{"gateway_client_crt", "gateway_client_key", "ca_crt"} {
-		if !slices.ContainsFunc(gw.Secrets, func(s any) bool { m, _ := s.(map[string]any); return m["source"] == want }) {
-			t.Errorf("gateway secrets %v: %s missing", gw.Secrets, want)
+	/* The gateway's client identity towards the executor and its web key exist only in the gateway. */
+	for name, s := range c.Services {
+		for _, sec := range []string{"gateway_client_crt", "gateway_client_key", "web_key", "ca_crt"} {
+			has := slices.ContainsFunc(s.Secrets, func(v any) bool {
+				m, _ := v.(map[string]any)
+				return v == sec || m["source"] == sec
+			})
+			if want := name == "gateway" || (sec == "ca_crt" && name == "executor"); has != want {
+				t.Errorf("%s: secret %s present = %v, want %v", name, sec, has, want)
+			}
 		}
 	}
 

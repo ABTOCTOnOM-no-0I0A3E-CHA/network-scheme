@@ -48,6 +48,8 @@ tls_cert_file: %q
 tls_key_file: %q
 client_ca_file: %q
 listen_xnet: "172.30.2.2:8444"
+core_subnet: "172.30.0.0/24"
+xnet_subnet: "172.30.2.0/24"
 panel_origin: "https://nms.example.org"
 executor_origin: "https://nms.example.org:8443"
 state_dir: %q

@@ -2,6 +2,7 @@ package install_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/install"
@@ -809,5 +812,92 @@ func TestPreflightHostPorts(t *testing.T) {
 	defer func() { _ = l.Close() }()
 	if install.ListenFree("tcp", l.Addr().(*net.TCPAddr).Port) == nil {
 		t.Error("ListenFree accepted a port in use")
+	}
+}
+
+/*
+The stack's own networks may not overlap each other or a management subnet, and the
+public host may not be an internal service name: refused before anything is written,
+naming the flag. Custom core and xnet subnets reach compose.yaml and executor.yaml.
+*/
+func TestRunChecksStackSubnets(t *testing.T) {
+	for name, c := range map[string]struct {
+		mutate func(o *install.Options)
+		want   string
+	}{
+		"xnet overlaps core":    {func(o *install.Options) { o.XnetSubnet = "172.30.0.0/24" }, "--xnet-subnet"},
+		"xnet overlaps devices": {func(o *install.Options) { o.XnetSubnet = "172.30.1.0/25" }, "--xnet-subnet"},
+		"core overlaps devices": {func(o *install.Options) { o.CoreSubnet = "172.30.1.0/24" }, "--core-subnet"},
+		"mgmt overlaps core":    {func(o *install.Options) { o.MgmtSubnets = []string{"10.0.0.0/8", "172.30.0.64/26"} }, "--core-subnet"},
+		"mgmt overlaps devices": {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.1.0/24"} }, "--devices-subnet"},
+		"mgmt overlaps xnet":    {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.2.128/25"} }, "--xnet-subnet"},
+		"mgmt covers all":       {func(o *install.Options) { o.MgmtSubnets = []string{"172.16.0.0/12"} }, "overlaps --core-subnet"},
+		"host executor":         {func(o *install.Options) { o.PublicHost = "executor" }, "internal service"},
+		"host gateway":          {func(o *install.Options) { o.PublicHost = "Gateway" }, "internal service"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o, root, _ := installOptions(t)
+			c.mutate(&o)
+			sys := newFakeSys()
+			err := install.Run(context.Background(), o, sys)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Run = %v, want an error naming %q", err, c.want)
+			}
+			if _, err := os.Stat(filepath.Join(root, "etc", "nms")); !errors.Is(err, os.ErrNotExist) || len(sys.cmds) != 0 {
+				t.Fatalf("wrote or ran something on bad input (%v, %v)", err, sys.cmds)
+			}
+		})
+	}
+
+	o, root, out := installOptions(t)
+	o.CoreSubnet, o.DevicesSubnet, o.XnetSubnet = "10.99.0.0/24", "10.99.1.0/24", "10.99.2.0/24"
+	o.MgmtSubnets = []string{"192.168.50.0/24"}
+	if err := install.Run(context.Background(), o, newFakeSys()); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	etc := filepath.Join(root, "etc", "nms")
+	ex := string(readFile(t, filepath.Join(etc, "config", "executor.yaml")))
+	for _, want := range []string{`core_subnet: "10.99.0.0/24"`, `xnet_subnet: "10.99.2.0/24"`, `listen_xnet: "10.99.2.2:8444"`} {
+		if !strings.Contains(ex, want) {
+			t.Errorf("executor.yaml lacks %s:\n%s", want, ex)
+		}
+	}
+	if cf := string(readFile(t, filepath.Join(etc, "compose.yaml"))); !strings.Contains(cf, `- subnet: "10.99.2.0/24"`) || !strings.Contains(cf, `- subnet: "10.99.0.0/24"`) {
+		t.Error("compose.yaml does not use the given core and xnet subnets")
+	}
+}
+
+/* Preflight checks exactly the host ports the rendered compose.yaml publishes. */
+func TestPreflightChecksEveryPublishedPort(t *testing.T) {
+	o, _, _ := installOptions(t)
+	sys := newFakeSys()
+	var checked []string
+	o.PortFree = func(proto string, port int) error {
+		checked = append(checked, fmt.Sprintf("%d/%s", port, proto))
+		return nil
+	}
+	if err := install.Preflight(o, sys); err != nil {
+		t.Fatal(err)
+	}
+	out, err := install.Render(install.RenderInput{PublicHost: o.PublicHost, ImageTag: o.ImageTag, APIImage: "nms/api", GatewayImage: "nms/gateway"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(out["compose.yaml"], &c); err != nil {
+		t.Fatal(err)
+	}
+	var published []string
+	for _, svc := range c.Services {
+		for _, p := range svc.Ports {
+			host, rest, _ := strings.Cut(p, ":")
+			_, proto, _ := strings.Cut(rest, "/")
+			published = append(published, host+"/"+cmp.Or(proto, "tcp"))
+		}
+	}
+	slices.Sort(checked)
+	slices.Sort(published)
+	if len(published) == 0 || !slices.Equal(checked, published) {
+		t.Errorf("preflight checks %v, compose publishes %v", checked, published)
 	}
 }

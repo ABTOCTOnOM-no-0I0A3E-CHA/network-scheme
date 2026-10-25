@@ -35,6 +35,7 @@ func TestRenderedConfigLoads(t *testing.T) {
 	}
 	if c.DB.User != "nms_executor" || c.DB.Host != "postgres" || c.DB.Port != 5432 || c.DB.PasswordFile != "/run/secrets/db_executor_password" ||
 		c.DB.MaxConns != defaultMaxConns || c.ListenXnet.String() != "172.30.2.2:8444" ||
+		c.CoreSubnet.String() != "172.30.0.0/24" || c.XnetSubnet.String() != "172.30.2.0/24" ||
 		c.PanelOrigin != "https://nms.example.org" || c.ExecutorOrigin != "https://nms.example.org:8443" ||
 		c.SealingKeyFile != "/run/secrets/executor_sealing_key" || c.WriteKeyFile != "/run/secrets/domain_write_key" ||
 		c.BackupKeyFile != "/run/secrets/domain_backup_key" || c.TicketPubKeyFile != "/run/secrets/ticket_pub" ||
@@ -74,6 +75,22 @@ func TestLoadRejects(t *testing.T) {
 		"db unknown field":      strings.Replace(base, `  port: 5432`, "  port: 5432\n  password: x", 1),
 		"listener not an addr":  set("listen_xnet", `"executor:8444"`),
 		"panel origin is a URL": set("panel_origin", `"https://nms.example.org/?a=b"`),
+		"relative key path":     set("write_key_file", `"run/secrets/domain_write_key"`),
+		"dotdot key path":       set("sealing_key_file", `"/run/secrets/../x"`),
+		"relative state dir":    set("state_dir", `"var/lib/executor"`),
+		"relative db password":  strings.Replace(base, `password_file: "/run/secrets/db_executor_password"`, `password_file: "pw"`, 1),
+		"origin port 0":         set("executor_origin", `"https://nms.example.org:0"`),
+		"origin port too big":   set("executor_origin", `"https://nms.example.org:65536"`),
+		"origin port padded":    set("executor_origin", `"https://nms.example.org:08443"`),
+		"broadcast listener":    set("listen_xnet", `"255.255.255.255:8444"`),
+		"xnet broadcast":        set("listen_xnet", `"172.30.2.255:8444"`),
+		"xnet network address":  set("listen_xnet", `"172.30.2.0:8444"`),
+		"listener outside xnet": set("listen_xnet", `"172.30.0.5:8444"`),
+		"no core subnet":        set("core_subnet", `""`),
+		"no xnet subnet":        set("xnet_subnet", `""`),
+		"xnet host bits":        set("xnet_subnet", `"172.30.2.1/24"`),
+		"xnet ipv6":             set("xnet_subnet", `"fd00::/64"`),
+		"subnets overlap":       set("core_subnet", `"172.30.0.0/16"`),
 	} {
 		if _, err := load(t, body); err == nil {
 			t.Errorf("%s: accepted", name)
