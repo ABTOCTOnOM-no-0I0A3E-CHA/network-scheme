@@ -1,0 +1,17 @@
+# Demo only: the simulated devices of the stand, read by devices.sh (inside the host) and seed.ts (through the API).
+# All addresses lie in the default devices subnet 172.30.1.0/24, the stand's management subnet. The topology fixtures name
+# 172.30.1.201-204 in their LLDP tables (test/lab/topology.yaml), so those addresses are fixed.
+#
+# name          address        fixture (test/fixtures/snmp)  SNMPv2c community (= data file name)  ssh  events
+#   ssh:    a model of test/fixtures/configs (mes, esr): sshemud serves that configuration and the show outputs of devices.sh
+#   events: syslog (syslog every few seconds), trap (syslog and a linkDown for ifIndex 2, which this fixture reports down)
+#   "-" is none; a device without a fixture is an address nothing answers on (it shows as down).
+mes-access-1    172.30.1.11    eltex-mes       demo-mes-community-01       mes  syslog
+esr-edge-1      172.30.1.12    eltex-esr       demo-esr-community-01       esr  syslog
+sw-floor-2      172.30.1.13    generic-switch  demo-sw-community-0001      -    trap
+rtr-branch-1    172.30.1.14    generic-router  demo-rtr-community-001      -    -
+topo-a          172.30.1.201   topology-a      e2e-topology-a-community    -    -
+topo-b          172.30.1.202   topology-b      e2e-topology-b-community    -    -
+topo-c          172.30.1.203   topology-c      e2e-topology-c-community    -    -
+topo-d          172.30.1.204   topology-d      e2e-topology-d-community    -    -
+offline-1       172.30.1.250   -               -                           -    -

@@ -26,3 +26,7 @@ coverage.*
 # web app
 web/app/node_modules/
 web/app/dist/
+
+# demo stand (test/demo): generated credentials and binaries
+test/demo/.run/
+test/demo/node_modules/
