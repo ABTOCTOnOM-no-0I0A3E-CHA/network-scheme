@@ -4426,7 +4426,9 @@ export interface paths {
                             w: number;
                             h: number;
                             /** @description At most 2048 bytes; schema by type, see DashboardWidget */
-                            config: Record<string, never>;
+                            config: {
+                                [key: string]: unknown;
+                            };
                         }[];
                     };
                 };
@@ -5296,7 +5298,9 @@ export interface components {
             y: number;
             w: number;
             h: number;
-            config: Record<string, never>;
+            config: {
+                [key: string]: unknown;
+            };
         };
         DashboardDetail: components["schemas"]["Dashboard"] & {
             widgets: components["schemas"]["DashboardWidget"][];

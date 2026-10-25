@@ -51,6 +51,9 @@ const KNOWN = new Set([
   "too_many_templates",
   "too_many_filters",
   "too_many_windows",
+  "too_many_dashboards",
+  "too_many_widgets",
+  "invalid_widget",
   "busy",
   "internal",
 ]);

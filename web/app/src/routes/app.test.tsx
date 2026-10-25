@@ -44,6 +44,7 @@ const server = setupServer(
   http.get("*/api/groups", () => apiError(403, "forbidden")),
   http.get("*/api/problems", () => HttpResponse.json({ items: [], next_cursor: null })),
   http.get("*/api/map/views", () => HttpResponse.json([])),
+  http.get("*/api/dashboards", () => HttpResponse.json([])),
   http.get("*/api/topology", () => HttpResponse.json({ nodes: [], links: [], areas: [] })),
   http.get("*/api/templates", () => HttpResponse.json([])),
   http.get("*/api/maintenance", () => HttpResponse.json([])),
@@ -115,7 +116,8 @@ describe("login flow", () => {
     for (const k of ["dashboards", "devices", "settings"] as const) {
       expect(screen.getAllByText(ru.nav[k]).length).toBeGreaterThan(0);
     }
-    expect(screen.getByText(ru.placeholder.soon)).toBeInTheDocument();
+    /* the home page is the dashboards section */
+    expect(await screen.findByText(ru.dashboards.none)).toBeInTheDocument();
     /* the panel CSP forbids runtime <style> elements */
     expect(document.querySelectorAll("style")).toHaveLength(0);
   });

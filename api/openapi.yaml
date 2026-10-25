@@ -2363,7 +2363,7 @@ paths:
                       y: { type: integer, minimum: 0, maximum: 1000 }
                       w: { type: integer, minimum: 1, maximum: 12 }
                       h: { type: integer, minimum: 1, maximum: 48 }
-                      config: { type: object, description: "At most 2048 bytes; schema by type, see DashboardWidget" }
+                      config: { type: object, additionalProperties: true, description: "At most 2048 bytes; schema by type, see DashboardWidget" }
       responses:
         "200":
           description: The stored dashboard
@@ -3140,7 +3140,7 @@ components:
         y: { type: integer }
         w: { type: integer }
         h: { type: integer }
-        config: { type: object }
+        config: { type: object, additionalProperties: true }
     DashboardDetail:
       allOf:
         - $ref: "#/components/schemas/Dashboard"

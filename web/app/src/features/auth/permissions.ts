@@ -70,3 +70,8 @@ export function canShowDevices(session: Session | null | undefined): boolean {
 export function canBackupDevices(session: Session | null | undefined): boolean {
   return !!session?.roles.some((r) => r.role === "operator" || r.role === "admin");
 }
+
+/** UI hint only: dashboards.manage (shared dashboards, role defaults) is not group-scoped, so only a global admin binding holds it. */
+export function canManageDashboards(session: Session | null | undefined): boolean {
+  return !!session?.roles.some((r) => r.role === "admin" && r.group_id === null);
+}
