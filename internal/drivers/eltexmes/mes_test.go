@@ -2,6 +2,7 @@ package eltexmes_test
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"regexp"
 	"strings"
@@ -73,7 +74,7 @@ func TestMESCollectResources(t *testing.T) {
 	if m.PSUOk == nil || !*m.PSUOk {
 		t.Errorf("PSUOk = %v, want true (main normal, redundant notPresent)", m.PSUOk)
 	}
-	if len(s.Interfaces) != 2 || !s.Interfaces[0].HC || s.Interfaces[0].InOctets != 1000 {
+	if len(s.Interfaces) != 28 || !s.Interfaces[0].HC || s.Interfaces[0].InOctets != 1000 {
 		t.Errorf("interfaces from the embedded generic driver: %+v", s.Interfaces)
 	}
 }
@@ -134,7 +135,24 @@ func TestMESPortKinds(t *testing.T) {
 	for _, i := range inv.Interfaces {
 		got[i.Name] = i.PortKind
 	}
-	if want := map[string]drivers.PortKind{"gi1/0/1": drivers.PortRJ45, "te1/0/1": drivers.PortSFP}; !maps.Equal(got, want) {
+	want := map[string]drivers.PortKind{}
+	for n := 1; n <= 24; n++ {
+		want[fmt.Sprintf("gi1/0/%d", n)] = drivers.PortRJ45
+	}
+	for n := 1; n <= 4; n++ {
+		want[fmt.Sprintf("te1/0/%d", n)] = drivers.PortSFP
+	}
+	if !maps.Equal(got, want) {
 		t.Fatalf("port kinds %v, want %v", got, want)
+	}
+}
+
+func TestMESIdentify(t *testing.T) {
+	id, err := eltexmes.New().Identify(ctx(t), reader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Model != "MES2324" || id.Firmware != "6.6.2" || id.Serial != "ES5D000137" || id.Role != drivers.RoleL3Switch {
+		t.Fatalf("identity %+v", id)
 	}
 }

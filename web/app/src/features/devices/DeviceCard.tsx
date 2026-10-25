@@ -141,6 +141,7 @@ function Header({ device, canPoll, canManage, canListGroups }: { device: DeviceD
     [t("devices.col.group"), groupName],
     [t("devices.col.model"), device.model],
     [t("devices.col.firmware"), device.firmware],
+    [t("devices.col.role"), device.role ? t(`devices.role.${device.role}`) : ""],
     [t("devices.col.driver"), device.driver],
   ];
   const parentId = device.parent_id ?? null;

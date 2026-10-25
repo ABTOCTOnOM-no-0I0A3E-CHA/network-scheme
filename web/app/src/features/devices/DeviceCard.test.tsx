@@ -21,6 +21,9 @@ const detail = (over: Record<string, unknown> = {}) => ({
   driver: "eltex-mes",
   model: "MES2324",
   firmware: "4.0.1",
+  role: "l3switch",
+  role_manual: null,
+  role_auto: "l3switch",
   insecure_protocols: false,
   state: "up",
   state_since: "2026-10-01T10:00:00Z",
@@ -184,6 +187,7 @@ describe("DeviceCard", () => {
     expect(await screen.findByRole("heading", { name: "core-sw" })).toBeInTheDocument();
     expect(screen.getByText("MES2324")).toBeInTheDocument();
     expect(screen.getByText("4.0.1")).toBeInTheDocument();
+    expect(screen.getByText(ru.devices.role.l3switch)).toBeInTheDocument();
     expect(screen.getByText("eltex-mes")).toBeInTheDocument();
     expect(screen.getByText("192.0.2.10:161")).toBeInTheDocument();
     expect(screen.getByText("#1")).toBeInTheDocument();
@@ -334,5 +338,30 @@ describe("DeviceCard", () => {
     await userEvent.type(name, "renamed");
     await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
     await waitFor(() => expect(patched).toEqual({ name: "renamed" }));
+  });
+
+  it("sets a role by hand and returns it to automatic", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(false, true);
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    let form = screen.getByRole("form", { name: ru.card.edit.title });
+    let role = within(form).getByLabelText(ru.card.edit.role) as HTMLSelectElement;
+    expect(role.value).toBe("");
+    expect(role.options[0].text).toBe(`${ru.card.edit.roleAuto} (${ru.devices.role.l3switch})`);
+    await userEvent.selectOptions(role, "router");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(patched).toEqual({ role: "router" }));
+
+    cleanup();
+    patched = undefined;
+    deviceFn = () => HttpResponse.json(detail({ role: "router", role_manual: "router" }));
+    setup(false, true);
+    await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
+    form = screen.getByRole("form", { name: ru.card.edit.title });
+    role = within(form).getByLabelText(ru.card.edit.role) as HTMLSelectElement;
+    expect(role.value).toBe("router");
+    await userEvent.selectOptions(role, "");
+    await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
+    await waitFor(() => expect(patched).toEqual({ role: null }));
   });
 });

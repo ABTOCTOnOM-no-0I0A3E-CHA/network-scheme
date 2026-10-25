@@ -29,7 +29,7 @@ type Driver interface {
 	Match(sysObjectID, sysDescr string) bool
 	/* Dialect is the SSH read dialect; the zero value means the driver needs no SSH. */
 	Dialect() ssh.Dialect
-	/* Identify reads model, firmware and serial number. */
+	/* Identify reads model, firmware, serial number and the role of the device. */
 	Identify(ctx context.Context, r snmp.Reader) (Identity, error)
 	/* Collect reads interface counters and system resources. */
 	Collect(ctx context.Context, r snmp.Reader) (Sample, error)
@@ -85,7 +85,7 @@ type ShowRunner interface {
 	Run(ctx context.Context, cmd ssh.ShowCommand) (string, error)
 }
 
-/* Identity describes a device. Empty strings mean "not reported". */
+/* Identity describes a device. Empty strings mean "not reported"; Role is derived by the driver. */
 type Identity struct {
 	SysObjectID string
 	SysDescr    string
@@ -93,6 +93,7 @@ type Identity struct {
 	Model       string
 	Firmware    string
 	Serial      string
+	Role        Role
 }
 
 /*
