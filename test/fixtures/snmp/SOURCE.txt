@@ -29,7 +29,9 @@ eltex-mes.snmprec
   sysObjectID 1.3.6.1.4.1.35265.1.65535 is a placeholder under elHardware
   (ELTEX-SMI-ACTUAL); no real MES model OID is documented or implied. sysDescr
   follows the LLDP example in the MES23xx/33xx/35xx/5324 user manual 4.0.22.
-  One temperature row (500) is deliberately out of range.
+  One temperature row (500) is deliberately out of range. Port 1 is a gigabit
+  RJ-45 port (gi1/0/1), port 2 an unused 10G SFP+ uplink (te1/0/1, ifSpeed
+  saturated, ifHighSpeed 10000), both ifType ethernetCsmacd(6).
   NOT captured from hardware; values not verified on a real device.
 
 eltex-esr.snmprec
@@ -39,7 +41,8 @@ eltex-esr.snmprec
   cpmCPUTotal1min per core (one out-of-range core), CISCO-MEMORY-POOL-MIB
   ciscoMemoryPoolValid/Used/Free (one invalid pool), rlPhdUnitEnvParamTable
   temperature value/status
-  pairs (one sensor not ok), plus IF-MIB counters and IP-FORWARD-MIB
+  pairs (one sensor not ok), plus IF-MIB counters (gi1/0/1 RJ-45 and the 10G SFP+
+  te1/0/1, as for eltex-mes) and IP-FORWARD-MIB
   inetCidrRouteTable. sysObjectID 1.3.6.1.4.1.35265.1.65534 is a placeholder
   under elHardware (ELTEX-SMI-ACTUAL); no real ESR model OID is documented or
   implied. Addresses are documentation ranges (RFC 5737).

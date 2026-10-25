@@ -296,6 +296,37 @@ jobs:
             [ "$got" = "$addr" ]
           done
           [ "$(docker ps -q --filter name=nms-e2e-topology- | wc -l)" -eq "$(grep -c '^    fixture:' test/lab/topology.yaml)" ]
+      - name: Start the backup devices on the devices network
+        run: |
+          # The devices of backups.spec.ts: one container of the simulator image per Eltex model, answering SNMPv2c from
+          # test/fixtures/snmp/eltex-<model>.snmprec (the community is the data file name) and SSH on port 22 of the same
+          # address: sshemud (test/sim/sshemu/sshemud) with the test's read account. Its command outputs are files of
+          # test/e2e/.auth/sshemu-<model>/ named by the command line, mounted read-only and read at every command; the
+          # running configuration starts as the fixture with known secrets (test/fixtures/configs/<model>-secrets.txt)
+          # and the test rewrites it to change the device's configuration.
+          CGO_ENABLED=0 go build -trimpath -o /tmp/nms-e2e-sshemud ./test/sim/sshemu/sshemud
+          mkdir -p test/e2e/.auth
+          for model in mes esr; do
+            dir="test/e2e/.auth/sshemu-$model" name="nms-e2e-$model"
+            mkdir -p "$dir"
+            cp "test/fixtures/configs/$model-secrets.txt" "$dir/show running-config"
+            : > "$dir/terminal datadump"
+            printf 'Model: e2e-%s\nSoftware version: e2e-show-version-output\n' "$model" > "$dir/show version"
+            # test values of the read account, the same as in backups.spec.ts
+            docker run -d --name "$name" --network nms_devices -e PROMPT="e2e-$model#" \
+              -v "$PWD/test/fixtures/snmp/eltex-$model.snmprec:/data/e2e-backup-community-$model.snmprec:ro" \
+              -v "$PWD/$dir:/ssh:ro" -v /tmp/nms-e2e-sshemud:/sshemud:ro nms-snmpsim:ci \
+              sh -c '/sshemud -prompt "$PROMPT" -user e2e-backup -password e2e-backup-read-pw -dir /ssh &
+                mkdir -p /tmp/idx && chmod 777 /tmp/idx && exec snmpsim-command-responder \
+                --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data \
+                --agent-udpv4-endpoint=0.0.0.0:161'
+            ready() { logs="$(docker logs "$name" 2>&1)"; grep -q 'Listening at UDP/IPv4 endpoint' <<<"$logs" && grep -q 'sshemud listening' <<<"$logs"; }
+            for _ in $(seq 1 60); do ready && break; sleep 1; done
+            ready || { docker logs "$name"; exit 1; }
+            addr="$(docker inspect -f '{{(index .NetworkSettings.Networks "nms_devices").IPAddress}}' "$name")"
+            echo "$model at $addr"
+            echo "NMS_E2E_$(echo "$model" | tr a-z A-Z)=$addr" >> "$GITHUB_ENV"
+          done
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -303,9 +334,20 @@ jobs:
         run: >-
           docker run --rm --init --ipc=host --network host
           -v "$PWD/test/e2e:/e2e" -v "$PWD/test/lab:/lab:ro" -v "$E2E_DIR:/creds:ro" -e NMS_E2E_DIR=/creds -e NMS_E2E_LAB=/lab -e NMS_E2E_SNMPSIM
-          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -e NMS_E2E_EVENT_PROBE -e NMS_E2E_PROBE_DEAD -w /e2e
+          -e NMS_E2E_EVENT_SRC -e NMS_E2E_EVENT_ROGUE -e NMS_E2E_EVENT_NETNS -e NMS_E2E_EVENT_PROBE -e NMS_E2E_PROBE_DEAD
+          -v "$PWD/test/fixtures/configs:/configs:ro" -e NMS_E2E_CONFIGS=/configs -e NMS_E2E_MES -e NMS_E2E_ESR -w /e2e
           mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
           node node_modules/@playwright/test/cli.js test
+      - name: The backup devices saw only the commands they serve
+        run: |
+          # sshemud logs every command line it receives; backups.spec.ts makes the poller send the pager command,
+          # the running configuration and one allowlisted show, which are exactly the files it serves.
+          for name in nms-e2e-mes nms-e2e-esr; do
+            cmds="$(docker logs "$name" 2>/dev/null | grep ' msg=command ' || true)"
+            echo "$name:"; sort <<<"$cmds" | uniq -c
+            grep -q ' cmd="show running-config" known=true$' <<<"$cmds"
+            if grep -v 'known=true$' <<<"$cmds"; then echo "$name received a command it does not serve"; exit 1; fi
+          done
       - name: The trap, not the API, queued the poll
         run: |
           # poll_now is queued by the API (POST /poll, not used by events.spec.ts) or by eventd: a job row for the device
@@ -380,4 +422,6 @@ jobs:
           docker logs --tail 100 "$SNMPSIM" || true
           docker logs --tail 100 nms-e2e-evsrc || true
           docker logs --tail 100 nms-e2e-evprob || true
+          docker logs --tail 100 nms-e2e-mes || true
+          docker logs --tail 100 nms-e2e-esr || true
           cat /tmp/nms-ev-mgmt.log /tmp/nms-ev-rogue.log || true

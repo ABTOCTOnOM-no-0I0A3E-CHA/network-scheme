@@ -21,13 +21,14 @@ import (
 
 // Config describes the emulated device.
 type Config struct {
-	HostKey       gossh.Signer      /* required */
-	Prompt        string            /* initial prompt, e.g. "sw1#" */
-	Responses     map[string]string /* exact command line -> output ("\n" is sent as "\r\n") */
-	PromptAfter   map[string]string /* command line -> prompt shown from then on */
-	Username      string            /* accepted user; empty accepts any */
-	Password      string            /* accepted password; empty disables password auth */
-	AuthorizedKey gossh.PublicKey   /* accepted client key; nil disables public key auth */
+	HostKey       gossh.Signer                    /* required */
+	Prompt        string                          /* initial prompt, e.g. "sw1#" */
+	Responses     map[string]string               /* exact command line -> output ("\n" is sent as "\r\n") */
+	Lookup        func(cmd string) (string, bool) /* consulted when Responses has no entry; nil: none */
+	PromptAfter   map[string]string               /* command line -> prompt shown from then on */
+	Username      string                          /* accepted user; empty accepts any */
+	Password      string                          /* accepted password; empty disables password auth */
+	AuthorizedKey gossh.PublicKey                 /* accepted client key; nil disables public key auth */
 }
 
 // Log records what clients sent to the emulator.
@@ -78,31 +79,7 @@ func NewHostKey(t testing.TB) gossh.Signer {
 func Start(t testing.TB, cfg Config) (netip.AddrPort, *Log) {
 	t.Helper()
 	log := &Log{}
-	sc := &gossh.ServerConfig{
-		AuthLogCallback: func(_ gossh.ConnMetadata, method string, _ error) {
-			if method != "password" { /* passwords are logged with their value below */
-				log.add(&log.auths, method)
-			}
-		},
-	}
-	if cfg.Password != "" {
-		sc.PasswordCallback = func(m gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
-			log.add(&log.auths, "password:"+string(pw))
-			if (cfg.Username == "" || m.User() == cfg.Username) && string(pw) == cfg.Password {
-				return nil, nil
-			}
-			return nil, errors.New("denied")
-		}
-	}
-	if cfg.AuthorizedKey != nil {
-		sc.PublicKeyCallback = func(m gossh.ConnMetadata, k gossh.PublicKey) (*gossh.Permissions, error) {
-			if (cfg.Username == "" || m.User() == cfg.Username) && string(k.Marshal()) == string(cfg.AuthorizedKey.Marshal()) {
-				return nil, nil
-			}
-			return nil, errors.New("denied")
-		}
-	}
-	sc.AddHostKey(cfg.HostKey)
+	sc := serverConfig(cfg, log)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -141,6 +118,53 @@ func Start(t testing.TB, cfg Config) (netip.AddrPort, *Log) {
 		}
 	}()
 	return netip.MustParseAddrPort(ln.Addr().String()), log
+}
+
+/*
+Serve runs the emulator on ln until ln is closed (the standalone emulator of
+the e2e stack, sshemud). log may be nil.
+*/
+func Serve(ln net.Listener, cfg Config, log *Log) error {
+	if log == nil {
+		log = &Log{}
+	}
+	sc := serverConfig(cfg, log)
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		go serve(c, sc, cfg, log)
+	}
+}
+
+func serverConfig(cfg Config, log *Log) *gossh.ServerConfig {
+	sc := &gossh.ServerConfig{
+		AuthLogCallback: func(_ gossh.ConnMetadata, method string, _ error) {
+			if method != "password" { /* passwords are logged with their value below */
+				log.add(&log.auths, method)
+			}
+		},
+	}
+	if cfg.Password != "" {
+		sc.PasswordCallback = func(m gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
+			log.add(&log.auths, "password:"+string(pw))
+			if (cfg.Username == "" || m.User() == cfg.Username) && string(pw) == cfg.Password {
+				return nil, nil
+			}
+			return nil, errors.New("denied")
+		}
+	}
+	if cfg.AuthorizedKey != nil {
+		sc.PublicKeyCallback = func(m gossh.ConnMetadata, k gossh.PublicKey) (*gossh.Permissions, error) {
+			if (cfg.Username == "" || m.User() == cfg.Username) && string(k.Marshal()) == string(cfg.AuthorizedKey.Marshal()) {
+				return nil, nil
+			}
+			return nil, errors.New("denied")
+		}
+	}
+	sc.AddHostKey(cfg.HostKey)
+	return sc
 }
 
 func serve(c net.Conn, sc *gossh.ServerConfig, cfg Config, log *Log) {
@@ -206,6 +230,9 @@ func shell(ch gossh.Channel, cfg Config, log *Log) {
 			}
 			log.add(&log.commands, cmd)
 			out, ok := cfg.Responses[cmd]
+			if !ok && cfg.Lookup != nil {
+				out, ok = cfg.Lookup(cmd)
+			}
 			if !ok {
 				out = "% Unrecognized command"
 			}

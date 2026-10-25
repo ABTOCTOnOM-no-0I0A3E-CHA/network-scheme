@@ -21,7 +21,7 @@ test("admin logs in with password + TOTP and sees shell", async ({ page, context
   await page.goto("/");
   await expectShell(page);
   await expect(page).toHaveURL(`${ORIGIN}/`);
-  await expect(page.getByText("Будет в следующих версиях")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Дашборды", level: 1 })).toBeVisible();
   const cookie = (await context.cookies()).find((c) => c.name === "__Host-nms_session");
   expect(cookie).toMatchObject({ secure: true, httpOnly: true, sameSite: "Strict", path: "/" });
 });

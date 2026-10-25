@@ -2,6 +2,7 @@ package eltexesr_test
 
 import (
 	"context"
+	"maps"
 	"net/netip"
 	"reflect"
 	"regexp"
@@ -145,5 +146,19 @@ func TestDialectAllowlistReadOnly(t *testing.T) {
 func TestVerifiedFlag(t *testing.T) {
 	if eltexesr.Verified || eltexesr.New().Verified() {
 		t.Fatal("ESR driver must stay unverified until checked on hardware")
+	}
+}
+
+func TestESRPortKinds(t *testing.T) {
+	inv, err := eltexesr.New().Inventory(ctx(t), reader(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]drivers.PortKind{}
+	for _, i := range inv.Interfaces {
+		got[i.Name] = i.PortKind
+	}
+	if want := map[string]drivers.PortKind{"gi1/0/1": drivers.PortRJ45, "te1/0/1": drivers.PortSFP}; !maps.Equal(got, want) {
+		t.Fatalf("port kinds %v, want %v", got, want)
 	}
 }

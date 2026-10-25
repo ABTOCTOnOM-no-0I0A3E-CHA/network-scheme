@@ -2,6 +2,12 @@ import { z } from "zod";
 
 /* Pieces of the widget config schemas, mirroring internal/httpapi/dashboards_handlers.go. */
 
+/*
+ * The CSP forbids eval. Without jitless, the first object schema makes zod probe `new Function`, which the browser reports
+ * as a securitypolicyviolation even though zod catches the error. Every widget imports this module before building its schema.
+ */
+z.config({ jitless: true });
+
 /* eslint-disable-next-line no-control-regex */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
