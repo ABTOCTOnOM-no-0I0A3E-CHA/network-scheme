@@ -22,7 +22,7 @@ const PEER = { name: "e2e-dashboard", address: "192.0.2.77" };
 const PROBE = { name: "e2e-dashboard-probe", address: process.env.NMS_E2E_EVENT_PROBE ?? "" };
 const COMMUNITY = "e2e-events-community-01";
 const CONTROL = ".auth/trap-control";
-const MARKER = "e2eprob"; /* the probe sender's syslog marker */
+const MARKER = "e2eprob"; /* the probe sender's syslog marker: its messages read e2eprobudp and e2eprobtcp (event search matches whole words) */
 const PREFIX = "e2e-dashboard-";
 
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
@@ -119,7 +119,7 @@ test("dashboard with every widget is saved, restored and shows data", async ({ p
 
     /* Syslog of the probe, its CPU and memory, and the load of its interfaces are stored. */
     const has = async (path: string) => (await getJSON<{ items: { device_id: number }[] }>(api, path)).items.some((i) => i.device_id === probe);
-    for (const path of [`/api/events?kind=syslog&device_id=${probe}&q=${MARKER}`, "/api/stats/top-devices?metric=cpu&limit=50", "/api/stats/top-devices?metric=mem&limit=50", "/api/stats/top-interfaces?limit=50"]) {
+    for (const path of [`/api/events?kind=syslog&device_id=${probe}&q=${MARKER}udp`, "/api/stats/top-devices?metric=cpu&limit=50", "/api/stats/top-devices?metric=mem&limit=50", "/api/stats/top-interfaces?limit=50"]) {
       await expect.poll(() => has(path), { timeout: 3 * 60_000, intervals: [3_000], message: path }).toBe(true);
     }
 

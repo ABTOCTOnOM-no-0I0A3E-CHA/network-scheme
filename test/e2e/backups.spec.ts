@@ -298,6 +298,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   /* Not one known secret anywhere the test looked. */
   expect(await seen.leaks()).toEqual([]);
 
-  /* The devices are the test's own (dashboards.spec.ts adds its own device). */
+  /* The devices are the test's own (dashboards.spec.ts adds its own device). Deleting needs a step-up: the first one has expired by now. */
+  await stepUp(page);
   for (const id of Object.values(ids)) expect((await call("delete", `/api/devices/${id}`)).status()).toBe(204);
 });
