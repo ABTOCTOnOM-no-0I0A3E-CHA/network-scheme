@@ -46,8 +46,11 @@ type Props = {
 
 /** Device card: summary header with poll-now, edit form and inventory tabs. Every device-reported string is rendered as text. */
 export function DeviceCard(props: Props) {
-  /* keyed by device and requested tab so tab, chart selection, paging and an open edit form never carry over to another device or link */
-  return <DeviceCardBody key={`${props.id}:${props.tab ?? ""}:${props.ifIndex ?? ""}`} {...props} />;
+  /*
+   * keyed by device and requested tab so tab, chart selection, paging and an open edit form never carry over to another device or link;
+   * a requested CLI tab also keys on canShow, so the tab resolves again once the session (and its devices.show hint) has loaded
+   */
+  return <DeviceCardBody key={`${props.id}:${props.tab ?? ""}:${props.ifIndex ?? ""}:${props.tab === "cli" && !!props.canShow}`} {...props} />;
 }
 
 function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false, canShow = false, canBackup = false, tab: initialTab, ifIndex }: Props) {

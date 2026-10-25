@@ -57,21 +57,39 @@ async function seal(readKey: string, owner: string, kind: string, secret: object
   return b64(sodium.crypto_box_seal(sodium.from_string(payload), Buffer.from(readKey, "base64")));
 }
 
-/** Every text the test saw: JSON and text responses of the page and of the API client, and the visible page text. */
+/**
+ * Every text the test saw: JSON and text responses of the page and of the API client, and the visible page text. Page
+ * bodies are read as soon as each response arrives and settled before every navigation (a navigation discards them).
+ * Only a redirect or an aborted request (the browser never got a body either) is skipped; any other unreadable body is
+ * counted and fails the test.
+ */
 class Seen {
   readonly texts: { where: string; text: string }[] = [];
+  readonly unread: string[] = [];
   private pending: Promise<void>[] = [];
 
   watch(page: Page) {
-    page.on("response", (r) => this.pending.push(this.keep(r)));
+    page.on("response", (r) => {
+      if (r.status() >= 300 && r.status() < 400) return;
+      this.pending.push(this.keep(r));
+    });
   }
 
   async keep(r: Response | APIResponse): Promise<void> {
     if (!/json|text\/(plain|html)/.test(r.headers()["content-type"] ?? "")) return;
     try {
       this.texts.push({ where: r.url(), text: await r.text() });
-    } catch {
-      /* redirects and aborted requests have no body */
+    } catch (err) {
+      if ("finished" in r && (await r.finished()) !== null) return; /* aborted: no body reached the page */
+      this.unread.push(`${r.url()}: ${String(err)}`);
+    }
+  }
+
+  /** Waits for every body read started so far, including reads started while waiting. */
+  async settle(): Promise<void> {
+    for (let n = 0; n !== this.pending.length; ) {
+      n = this.pending.length;
+      await Promise.all(this.pending);
     }
   }
 
@@ -80,7 +98,8 @@ class Seen {
   }
 
   async leaks(): Promise<string[]> {
-    await Promise.all(this.pending);
+    await this.settle();
+    expect(this.unread, "response bodies the secret scan could not read").toEqual([]);
     return this.texts.flatMap(({ where, text }) => secrets.filter((s) => text.includes(s)).map((s) => `${s} in ${where}`));
   }
 }
@@ -102,6 +121,11 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
     const r = await call("get", path);
     expect(r.status(), path).toBe(200);
     return (await r.json()) as T;
+  };
+  /* a navigation discards the bodies of the old page: read them all first */
+  const goto = async (url: string) => {
+    await seen.settle();
+    await page.goto(url);
   };
   const versions = async (id: number) => (await json<{ items: Version[] }>(`/api/devices/${id}/backups`)).items;
   const state = (id: number) => json<State>(`/api/devices/${id}/backup-state`);
@@ -167,7 +191,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
       intervals: [3_000],
     })
     .toEqual(["gi1/0/1 rj45", "te1/0/1 sfp"]);
-  await page.goto(`/devices/${mes}`);
+  await goto(`/devices/${mes}`);
   await expect(page.getByRole("heading", { name: "e2e-mes" })).toBeVisible();
   await page.getByRole("tab", { name: "Физика" }).click();
   await expect(page.getByRole("group", { name: "RJ-45: 1" }).getByRole("button", { name: /^Порт gi1\/0\/1:/ })).toBeVisible();
@@ -210,7 +234,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
 
   /* Manual backups through the window. */
   for (const m of Object.keys(MODELS) as Model[]) {
-    await page.goto(`/devices/${ids[m]}?tab=backups`);
+    await goto(`/devices/${ids[m]}?tab=backups`);
     await page.getByRole("button", { name: "Снять бэкап" }).click();
     await expect(panel.getByRole("status")).toHaveText("Бэкап поставлен в очередь");
   }
@@ -234,6 +258,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   expect((await json<{ text: string }>(`/api/devices/${esr}/backups/${v2.id}`)).text).toContain(AFTER.trim());
 
   /* The same diff in the window: A the baseline, B the new version. */
+  await seen.settle();
   await page.reload();
   await expect(table.getByRole("row")).toHaveCount(3);
   await expect(table).toContainText("вручную");
@@ -251,4 +276,7 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
 
   /* Not one known secret anywhere the test looked. */
   expect(await seen.leaks()).toEqual([]);
+
+  /* The devices are the test's own (dashboards.spec.ts adds its own device). */
+  for (const id of Object.values(ids)) expect((await call("delete", `/api/devices/${id}`)).status()).toBe(204);
 });

@@ -5,7 +5,7 @@ import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
-import { downloadUrl, useBackupDiff, useBackupNow, useBackups, useBackupState, type BackupVersion } from "./backups";
+import { BACKUP_WATCH_MS, downloadUrl, useBackupDiff, useBackupNow, useBackups, useBackupState, type BackupVersion, type BackupWatch } from "./backups";
 import { NeedsWrite, queryError } from "./ConfigTab";
 
 const LINE_TONE = (l: string) =>
@@ -17,6 +17,22 @@ const LINE_TONE = (l: string) =>
         ? "text-sky-700 dark:text-sky-300"
         : "";
 
+/* The fixed English texts of backup_state.last_error (internal/poller/backup.go) and their i18n keys; anything else is shown generically. */
+const BACKUP_ERRORS: Record<string, string> = {
+  "configuration backups are not configured on the poller": "noBackupKey",
+  "reading the configuration of this model needs a write account; not backed up before phase 4": "needsWrite",
+  "the driver cannot read the configuration": "noReader",
+  "no usable SSH read credential": "noSSHProfile",
+  "SSH connection failed": "sshFailed",
+  "device identification failed": "identify",
+  "configuration fetch failed": "fetchFailed",
+  "configuration exceeds the 4 MiB limit": "tooLarge",
+  "encryption of the configuration failed": "sealFailed",
+  "storing the configuration failed": "storeFailed",
+  "configuration backup timed out": "timeout",
+  "the poller is busy with other backups; try again later": "busy",
+};
+
 /** Drift badge of a version (a change made outside a change session of the panel). */
 export function DriftBadge() {
   const { t } = useTranslation();
@@ -26,7 +42,8 @@ export function DriftBadge() {
 /** "Бэкапы" tab: backup state, manual backup, the version list, a server-side diff of any two versions and the masked copy as a file. */
 export function BackupsTab({ deviceId, canBackup }: { deviceId: number; canBackup: boolean }) {
   const { t, i18n } = useTranslation();
-  const state = useBackupState(deviceId);
+  const [watch, setWatch] = useState<BackupWatch | undefined>();
+  const state = useBackupState(deviceId, watch);
   const versions = useBackups(deviceId);
   const now = useBackupNow(deviceId);
   const [note, setNote] = useState<{ ok: boolean; text: string } | undefined>();
@@ -38,8 +55,10 @@ export function BackupsTab({ deviceId, canBackup }: { deviceId: number; canBacku
 
   const backupNow = async () => {
     setNote(undefined);
+    const before = { ok: state.data?.last_ok_at ?? null, err: state.data?.last_error ?? null };
     try {
       const n = await now.mutateAsync();
+      if (!n) setWatch({ ...before, until: Date.now() + BACKUP_WATCH_MS });
       setNote({ ok: true, text: t(n ? "backup.recent" : "backup.queued") });
     } catch (err) {
       if (err instanceof StepUpCancelled) return;
@@ -68,7 +87,7 @@ export function BackupsTab({ deviceId, canBackup }: { deviceId: number; canBacku
           {s?.last_error && (
             <div>
               <dt className="text-xs text-muted-foreground">{t("backup.lastError")}</dt>
-              <dd className="text-destructive">{safeText(s.last_error)}</dd>
+              <dd className="text-destructive">{t(`backup.error.${Object.hasOwn(BACKUP_ERRORS, s.last_error) ? BACKUP_ERRORS[s.last_error] : "other"}`)}</dd>
             </div>
           )}
           {s?.latest_version?.drift && (

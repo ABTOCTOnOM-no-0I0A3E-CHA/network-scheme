@@ -30,6 +30,7 @@ export function WidgetFrame({ item, editing, onSettings, onRemove }: { item: Gri
 
   let body;
   if (!def) body = <p className="text-sm text-muted-foreground">{t("widgets.unknown.body", { type: safeText(item.type) })}</p>;
+  else if (!config && editing) body = <p className="text-sm text-muted-foreground">{t("widgets.configure")}</p>;
   else if (!config) body = <p role="alert" className="text-sm text-destructive">{t("widgets.invalidConfig")}</p>;
   else if (!dq) body = def.render(undefined, config);
   else if (q.error) body = <p role="alert" className="text-sm text-destructive">{errText(t, q.error)}</p>;

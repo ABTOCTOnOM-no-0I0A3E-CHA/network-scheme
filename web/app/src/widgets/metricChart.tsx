@@ -81,7 +81,8 @@ export const metricChartWidget: WidgetDef<Config> = {
   title: "widgets.metricChart.title",
   description: "widgets.metricChart.description",
   configSchema: schema,
-  defaultConfig: { device_id: 1, metric: "cpu", range: "24h" },
+  /* no device: the user picks one in the settings before the dashboard can be saved (the server requires device_id) */
+  defaultConfig: { metric: "cpu", range: "24h" },
   size: { w: 6, h: 6, minW: 3, minH: 4 },
   fields: [
     titleField(),

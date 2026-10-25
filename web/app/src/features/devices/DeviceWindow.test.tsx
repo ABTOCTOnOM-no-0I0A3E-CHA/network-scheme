@@ -122,7 +122,11 @@ describe("hostile device text", () => {
   it("CLI output renders as text only; args are typed from the inventory", async () => {
     ifaces = MES_INTERFACES;
     wrap(<CliTab deviceId={7} />);
-    await userEvent.selectOptions(await screen.findByLabelText(ru.cli.command), "interface_status");
+    const picker = await screen.findByLabelText(ru.cli.command);
+    /* a known key gets its label, an unknown one falls back to the key */
+    expect(within(picker).getByRole("option", { name: ru.cli.cmd.interface_status })).toHaveValue("interface_status");
+    expect(within(picker).getByRole("option", { name: "vlan" })).toHaveValue("vlan");
+    await userEvent.selectOptions(picker, "interface_status");
     await userEvent.selectOptions(screen.getByLabelText(ru.cli.interface), "gi1/0/2");
     await userEvent.click(screen.getByRole("button", { name: ru.cli.run }));
     const out = await screen.findByTestId("cli-output");
@@ -167,6 +171,17 @@ describe("Бэкапы", () => {
     expect(await screen.findByText(ru.backup.needsWrite)).toBeInTheDocument();
   });
 
+  it("shows the fixed last_error texts in Russian and anything else generically", async () => {
+    stateFn = () => HttpResponse.json(stateBody({ last_error: "SSH connection failed" }));
+    wrap(<BackupsTab deviceId={7} canBackup={false} />);
+    expect(await screen.findByText(ru.backup.error.sshFailed)).toBeInTheDocument();
+    cleanup();
+    stateFn = () => HttpResponse.json(stateBody({ last_error: "something new" }));
+    wrap(<BackupsTab deviceId={7} canBackup={false} />);
+    expect(await screen.findByText(ru.backup.error.other)).toBeInTheDocument();
+    expect(screen.queryByText("something new")).toBeNull();
+  });
+
   it("lists versions with drift and a same-origin masked download link", async () => {
     stateFn = () => HttpResponse.json(stateBody());
     wrap(<BackupsTab deviceId={7} canBackup={false} />);
@@ -188,6 +203,21 @@ describe("device window tabs", () => {
     cleanup();
     wrap(<DeviceCard id={7} canPoll canManage={false} canShow />);
     expect(await screen.findByRole("tab", { name: ru.card.tab.cli })).toBeInTheDocument();
+  });
+
+  it("opens a requested CLI tab once devices.show is known", async () => {
+    ifaces = [];
+    stateFn = () => HttpResponse.json(stateBody());
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const card = (canShow: boolean) => (
+      <QueryClientProvider client={qc}>
+        <DeviceCard id={7} canPoll={false} canManage={false} canShow={canShow} tab="cli" />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(card(false));
+    expect(await screen.findByRole("tab", { name: ru.card.tab.interfaces })).toHaveAttribute("aria-selected", "true");
+    rerender(card(true));
+    expect(await screen.findByRole("tab", { name: ru.card.tab.cli })).toHaveAttribute("aria-selected", "true");
   });
 
   it("Данные: search filters the page and CSV exports the whole table with formulas neutralized", async () => {

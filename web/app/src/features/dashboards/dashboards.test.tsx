@@ -132,6 +132,21 @@ describe("dashboard page", () => {
     ]);
   });
 
+  it("does not save a metric chart until a device is picked; it shows a hint to configure it", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    list = [dash(1)];
+    stored[1] = { ...list[0], widgets: [status] };
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: ru.dashboards.edit }));
+    const catalog = screen.getByRole("region", { name: ru.dashboards.catalog });
+    await user.click(within(catalog).getByRole("button", { name: `Добавить виджет «${ru.widgets.metricChart.title}»` }));
+    expect(screen.getByText(ru.widgets.configure)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: ru.dashboards.save }));
+    expect(await screen.findByText(ru.dashboards.unconfigured)).toBeInTheDocument();
+    expect(puts).toHaveLength(0);
+  });
+
   it("removes a widget in edit mode and saves the smaller set", async () => {
     list = [dash(1)];
     stored[1] = { ...list[0], widgets: [status] };

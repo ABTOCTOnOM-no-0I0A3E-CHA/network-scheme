@@ -142,10 +142,11 @@ function PortHint({ deviceId, port, vlans }: { deviceId: number; port: Iface; vl
   const { t } = useTranslation();
   const speed = useSpeed();
   const [range] = useState(() => {
-    const to = new Date();
+    /* whole minutes, so hovering the port again within a minute reuses the cached read */
+    const to = new Date(Math.floor(Date.now() / 60_000) * 60_000);
     return { from: new Date(to.getTime() - TRAFFIC_WINDOW_MS), to };
   });
-  const m = useIfMetrics(deviceId, port.if_index, range);
+  const m = useIfMetrics(deviceId, port.if_index, range, 60_000);
   const last = m.data?.points.at(-1);
   return (
     <span className="flex flex-wrap gap-x-4 gap-y-1">

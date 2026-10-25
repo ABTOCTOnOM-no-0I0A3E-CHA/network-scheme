@@ -27,7 +27,11 @@ export type WidgetDef<C, D = undefined> = {
   title: string;
   description: string;
   configSchema: z.ZodType<C>;
-  defaultConfig: C;
+  /**
+   * Config of a newly added widget. It passes `configSchema` unless the widget needs a choice first (a device): such a
+   * widget shows a hint to open its settings, and the dashboard cannot be saved until it is configured.
+   */
+  defaultConfig: Partial<C>;
   /** Size on the 12-column grid when added; min* bound resizing. */
   size: { w: number; h: number; minW?: number; minH?: number };
   fields?: WidgetField[];

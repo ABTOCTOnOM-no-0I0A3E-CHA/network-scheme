@@ -1,18 +1,39 @@
+import type { APIRequestContext } from "@playwright/test";
 import { expect, test } from "./guard";
 
 /*
  * Dashboards end to end: a new personal dashboard gets every FR-DASH-3 widget from the catalog, each one is configured in
  * its settings dialog, the dashboard is saved, and after a reload every widget renders again with its stored settings.
- * The metric chart needs a device: backups.spec.ts (run before, in file order) leaves its devices in place.
+ * The metric chart needs a device: the test adds its own (no credentials, a documentation address that is never routed,
+ * so the chart shows its empty state), reusing one left by an interrupted run, and deletes it at the end.
  */
 type Widget = { type: string; name: string; config: Record<string, unknown>; fill: Record<string, string> };
+const GROUP = "dashboards-e2e";
+const DEVICE = { name: "e2e-dashboard", address: "192.0.2.77" };
+
+const csrf = async (api: APIRequestContext) => ({ "X-CSRF-Token": ((await (await api.get("/api/auth/me")).json()) as { csrf_token: string }).csrf_token });
+
+/** The test's device: the one left by an earlier run, or a new one in the test's group. */
+async function ownDevice(api: APIRequestContext): Promise<{ id: number; name: string }> {
+  const left = ((await (await api.get("/api/devices")).json()) as { id: number; name: string }[]).find((d) => d.name === DEVICE.name);
+  if (left) return left;
+  const groups = (await (await api.get("/api/groups")).json()) as { id: number; name: string }[];
+  let group = groups.find((g) => g.name === GROUP)?.id;
+  if (group === undefined) {
+    const r = await api.post("/api/groups", { headers: await csrf(api), data: { name: GROUP } });
+    expect(r.status()).toBe(201);
+    group = ((await r.json()) as { id: number }).id;
+  }
+  const r = await api.post("/api/devices", { headers: await csrf(api), data: { ...DEVICE, group_id: group } });
+  expect(r.status()).toBe(201);
+  return { id: ((await r.json()) as { id: number }).id, name: DEVICE.name };
+}
 
 test("dashboard with every widget is saved and restored", async ({ page }) => {
   test.setTimeout(5 * 60_000);
   const api = page.request;
+  const device = await ownDevice(api);
   const devices = (await (await api.get("/api/devices")).json()) as { id: number; name: string }[];
-  expect(devices.length, "a device for the metric chart").toBeGreaterThan(0);
-  const device = devices[0];
   const title = (type: string) => `e2e ${type}`;
 
   /* Catalog name, the settings the test sets (field label -> value) and the config the server must store. */
@@ -71,18 +92,24 @@ test("dashboard with every widget is saved and restored", async ({ page }) => {
     widgets.map((w) => ({ type: w.type, config: { title: title(w.type), ...w.config } })).sort(byType),
   );
 
-  /* After a reload the dashboard is restored and every widget renders its data (or its empty state), without errors. */
+  /*
+   * After a reload the dashboard is restored and every widget renders its data (or its empty state), without errors:
+   * first every widget has finished loading (no skeleton, no "loading" text), then none shows an alert.
+   */
   await page.reload();
   await expect(page.getByLabel("Дашборд", { exact: true })).toHaveValue(String(id));
   for (const w of widgets) {
     const section = page.locator(`section[data-widget="${w.type}"]`);
     await expect(section).toHaveAttribute("aria-label", title(w.type));
-    await expect(section.getByRole("alert")).toHaveCount(0);
     if (w.type !== "mini_map") await expect(section.locator('[data-slot="skeleton"]')).toHaveCount(0, { timeout: 30_000 });
+    await expect(section.getByText(/^Загрузка( графика| списка)?…$/)).toHaveCount(0, { timeout: 30_000 });
   }
+  for (const w of widgets) await expect(page.locator(`section[data-widget="${w.type}"]`).getByRole("alert"), w.type).toHaveCount(0);
   const widget = (type: string) => page.locator(`section[data-widget="${type}"]`);
   await expect(widget("device_status").getByTestId("device-total")).toHaveText(`${devices.length} всего`);
   await expect(widget("metric_chart").locator("canvas").or(widget("metric_chart").getByText("За период данных нет")).first()).toBeVisible();
   await expect(widget("mini_map").getByRole("button", { name: "Открыть" })).toBeVisible();
   await expect(widget("mini_map").locator('[data-testid="mini-map-box"]')).toBeVisible();
+
+  expect((await api.delete(`/api/devices/${device.id}`, { headers: await csrf(api) })).status()).toBe(204);
 });

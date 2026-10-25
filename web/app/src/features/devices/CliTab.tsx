@@ -69,7 +69,7 @@ export function CliTab({ deviceId }: { deviceId: number }) {
             <option value="">{t("cli.pick")}</option>
             {commands.data.map((c) => (
               <option key={c.key} value={c.key}>
-                {safeText(c.key)}
+                {t(`cli.cmd.${c.key}`, { defaultValue: safeText(c.key) })}
               </option>
             ))}
           </select>

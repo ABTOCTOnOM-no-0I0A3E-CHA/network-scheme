@@ -126,6 +126,7 @@ export const useDeleteBackground = () =>
 
 /** Uploads an image; resolves to the new background id. */
 export function useUploadBackground() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (file: File) =>
       withStepUp(async () => {
@@ -142,5 +143,6 @@ export function useUploadBackground() {
         );
         return r.id;
       }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: topologyKeys.backgrounds }),
   });
 }

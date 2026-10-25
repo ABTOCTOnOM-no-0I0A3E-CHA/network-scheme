@@ -7,6 +7,8 @@ import { DRAG_HANDLE, WidgetFrame, type GridItem } from "./WidgetFrame";
 /** Grid of the server (internal/httpapi/dashboards_handlers.go): 12 columns. */
 export const COLS = 12;
 const ROW_HEIGHT = 40;
+/* gap between grid cells, both axes */
+const MARGIN = 12;
 /* below this width the grid is unusable: widgets are stacked in reading order and the dashboard is not editable */
 export const STACK_BELOW = 768;
 
@@ -39,7 +41,7 @@ export function DashboardGrid({ items, editing, onLayout, onSettings, onRemove }
           {[...items]
             .sort((a, b) => a.y - b.y || a.x - b.x)
             .map((it) => (
-              <div key={it.key} style={{ height: it.h * ROW_HEIGHT }}>
+              <div key={it.key} style={{ height: it.h * ROW_HEIGHT + (it.h - 1) * MARGIN }}>
                 {frame(it)}
               </div>
             ))}
@@ -48,7 +50,7 @@ export function DashboardGrid({ items, editing, onLayout, onSettings, onRemove }
         <ReactGridLayout
           width={Math.max(width, STACK_BELOW)}
           layout={layout}
-          gridConfig={{ cols: COLS, rowHeight: ROW_HEIGHT, margin: [12, 12], containerPadding: [0, 0], maxRows: 1000 }}
+          gridConfig={{ cols: COLS, rowHeight: ROW_HEIGHT, margin: [MARGIN, MARGIN], containerPadding: [0, 0], maxRows: 1000 }}
           dragConfig={{ enabled: editing, handle: `.${DRAG_HANDLE}`, bounded: true }}
           resizeConfig={{ enabled: editing }}
           onLayoutChange={(l) => editing && onLayout(l)}

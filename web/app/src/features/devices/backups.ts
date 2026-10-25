@@ -13,6 +13,12 @@ export type ShowArgs = { interface?: string; vlan?: number };
 const CSRF = { header: { "X-CSRF-Token": "" } };
 /* how often a queued or running show result is re-read */
 const SHOW_POLL_MS = 1000;
+/* after a manual backup the state is re-read this often, for at most this long, until it changes */
+const BACKUP_POLL_MS = 3000;
+export const BACKUP_WATCH_MS = 2 * 60_000;
+
+/** The backup state seen when a manual backup was queued, and when to stop waiting for it to change. */
+export type BackupWatch = { ok: string | null; err: string | null; until: number };
 
 export const backupKeys = {
   all: (id: number) => ["devices", "backups", id] as const,
@@ -35,9 +41,27 @@ export function useBackups(id: number) {
   });
 }
 
-/** State of the last backup (needs_write, last error, newest version). */
-export function useBackupState(id: number) {
-  return useQuery({ queryKey: backupKeys.state(id), retry: false, queryFn: async () => unwrap(await api.GET("/api/devices/{id}/backup-state", { params: { path: { id } } })) });
+/**
+ * State of the last backup (needs_write, last error, newest version); re-read while `watch` waits for a manual backup.
+ * When a backup finished since the last read (last_ok_at or last_error changed), the version list is re-read too.
+ */
+export function useBackupState(id: number, watch?: BackupWatch) {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: backupKeys.state(id),
+    retry: false,
+    queryFn: async () => {
+      const prev = qc.getQueryData<{ last_ok_at: string | null; last_error: string | null }>(backupKeys.state(id));
+      const next = unwrap(await api.GET("/api/devices/{id}/backup-state", { params: { path: { id } } }));
+      if (prev && (prev.last_ok_at !== next.last_ok_at || prev.last_error !== next.last_error)) void qc.invalidateQueries({ queryKey: backupKeys.list(id) });
+      return next;
+    },
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      if (!watch || q.state.error || Date.now() >= watch.until) return false;
+      return d && ((d.last_ok_at ?? null) !== watch.ok || (d.last_error ?? null) !== watch.err) ? false : BACKUP_POLL_MS;
+    },
+  });
 }
 
 /** One version with its masked text (device data: render as text only). */

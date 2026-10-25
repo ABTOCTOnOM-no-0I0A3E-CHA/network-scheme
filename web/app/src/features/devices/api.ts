@@ -113,12 +113,13 @@ export type MetricsRange = { from: Date; to: Date; step?: number };
  * picked to stay under the point limit; on `too_many_points` the step is
  * doubled and the request repeated once.
  */
-export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange) {
+export function useIfMetrics(id: number, ifIndex: number, range: MetricsRange, staleTime = 0) {
   const from = range.from.toISOString();
   const to = range.to.toISOString();
   return useQuery({
     queryKey: deviceKeys.metrics(id, ifIndex, from, to, range.step),
     retry: false,
+    staleTime,
     queryFn: async () => {
       const fetchOnce = async (step: number) =>
         unwrap(await api.GET("/api/devices/{id}/metrics/if", { params: { path: { id }, query: { if_index: ifIndex, from, to, step } } }));

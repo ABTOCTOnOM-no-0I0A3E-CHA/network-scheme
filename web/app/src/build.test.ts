@@ -46,19 +46,22 @@ describe("production build", () => {
       "http://www.eclipse.org/",
       "http:///org/eclipse/",
       "https://rolldown.rs/",
-      /* zod (widget config schemas): JSON Schema dialect identifiers and the base its IPv6 check parses with */
+      /* zod (widget config schemas): JSON Schema dialect identifiers (its IPv6 check is allowed separately below) */
       "http://json-schema.org/",
       "https://json-schema.org/",
-      "http://[",
       /* links inside warning messages of prop-types and react-draggable (dashboard grid) */
       "http://fb.me/",
       "https://github.com/react-grid-layout/",
     ];
+    /* zod's IPv6 check parses `http://[${address}]` with URL: exactly that template literal, nothing else under "http://[" */
+    const zodIPv6 = /^http:\/\/\[\$\{[\w$]+\}\]$/;
     const offenders: string[] = [];
     for (const f of walk(out)) {
       if (/\.(woff2?|png|ico)$/.test(f)) continue;
       const text = readFileSync(f, "utf8");
       for (const m of text.matchAll(/https?:\/\/[^\s"'`)\\<>]+/g)) {
+        const i = m.index;
+        if (zodIPv6.test(m[0]) && text[i - 1] === "`" && text[i + m[0].length] === "`") continue;
         if (!allowed.some((a) => m[0].startsWith(a))) offenders.push(`${path.relative(out, f)}: ${m[0]}`);
       }
     }
@@ -94,11 +97,17 @@ describe("production build", () => {
     expect(html).toMatch(/<link[^>]+rel="stylesheet"/);
   });
 
-  it("map: no eval or new Function anywhere, Cytoscape runtime <style> disarmed, ELK worker is a bundled file under /assets/", () => {
+  it("map: no eval, new Function or unknown bare Function() anywhere, Cytoscape runtime <style> disarmed, ELK worker is a bundled file under /assets/", () => {
     const files = walk(out).filter((p) => p.endsWith(".js"));
+    /*
+     * Bare Function() is eval too. Known inert shapes only: zod's CSP probe Function(``) (never reached: zod runs jitless)
+     * and the global-object fallback Function(`return this`) (after typeof global/self checks).
+     */
+    const knownFunction = /(?<![\w$.])Function\((?:``|`return this`)\)/g;
     for (const f of files) {
       const text = readFileSync(f, "utf8");
       expect(text, path.basename(f)).not.toMatch(/\bnew Function\s*\(|[^\w.$]eval\s*\(|createObjectURL|importScripts\s*\(/);
+      expect(text.replace(knownFunction, "").match(/(?<![\w$.])Function\s*\(.{0,40}/g) ?? [], path.basename(f)).toEqual([]);
     }
     /* Cytoscape skips its style element when an element with this id exists */
     expect(html).toMatch(/<meta\s+id="__________cytoscape_stylesheet"/);

@@ -17,7 +17,9 @@ describe("built-in widgets", () => {
   it("register exactly the types the server accepts, each with a valid default config, size and translated texts", () => {
     expect(listWidgets().map((w) => w.type)).toEqual(SERVER_TYPES);
     for (const w of listWidgets()) {
-      expect(w.configSchema.safeParse(w.defaultConfig).success, w.type).toBe(true);
+      /* the metric chart starts without a device; the user picks one before saving */
+      const config = w.type === "metric_chart" ? { ...w.defaultConfig, device_id: 1 } : w.defaultConfig;
+      expect(w.configSchema.safeParse(config).success, w.type).toBe(true);
       expect(w.size.w).toBeLessThanOrEqual(12);
       expect(i18n.exists(w.title) && i18n.exists(w.description), w.type).toBe(true);
       for (const f of w.fields ?? []) expect(i18n.exists(f.label), `${w.type}.${f.key}`).toBe(true);

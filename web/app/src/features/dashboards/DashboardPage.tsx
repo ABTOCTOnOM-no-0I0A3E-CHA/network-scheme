@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
 import { Pencil, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { Layout } from "react-grid-layout";
+import { useContainerWidth, type Layout } from "react-grid-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +14,7 @@ import { errText } from "@/features/common/errText";
 import "@/widgets/builtin";
 import { getWidget, listWidgets } from "@/widgets/registry";
 import { pickDashboard, useCreateDashboard, useDashboard, useDashboards, useDeleteDashboard, useSaveWidgets, useUpdateDashboard, type DashboardDetail, type Role } from "./api";
-import { COLS, DashboardGrid } from "./DashboardGrid";
+import { COLS, DashboardGrid, STACK_BELOW } from "./DashboardGrid";
 import type { GridItem } from "./WidgetFrame";
 import { WidgetSettings } from "./WidgetSettings";
 
@@ -125,6 +125,7 @@ function Editor({ dashboard, canManage, onDone }: { dashboard: DashboardDetail; 
     setError(undefined);
     const trimmed = name.trim();
     if (!trimmed) return setError(t("dashboards.create.required"));
+    if (items.some((it) => !getWidget(it.type)?.configSchema.safeParse(it.config).success)) return setError(t("dashboards.unconfigured"));
     try {
       const patch: { name?: string; default_for_role?: Role | null } = {};
       if (trimmed !== dashboard.name) patch.name = trimmed;
@@ -238,11 +239,14 @@ export function DashboardPage({ requested }: { requested?: number }) {
   const detail = useDashboard(current?.id);
   const [editing, setEditing] = useState<number>();
   const [creating, setCreating] = useState(false);
+  /* the header row is as wide as the grid: when the grid stacks, the dashboard is not editable */
+  const { width, containerRef } = useContainerWidth();
+  const stacked = width > 0 && width < STACK_BELOW;
 
   const err = list.error ?? detail.error;
   return (
     <section className="grid gap-4" aria-label={t("nav.dashboards")}>
-      <div className="flex flex-wrap items-center gap-3">
+      <div ref={containerRef} className="flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold">{t("nav.dashboards")}</h1>
         {list.data && list.data.length > 0 && (
           <select
@@ -262,7 +266,7 @@ export function DashboardPage({ requested }: { requested?: number }) {
           </select>
         )}
         <div className="ml-auto flex gap-2">
-          {detail.data?.editable && editing !== detail.data.id && (
+          {detail.data?.editable && !stacked && editing !== detail.data.id && (
             <Button variant="outline" onClick={() => setEditing(detail.data?.id)}>
               <Pencil />
               {t("dashboards.edit")}
