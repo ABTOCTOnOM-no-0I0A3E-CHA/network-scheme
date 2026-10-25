@@ -55,6 +55,7 @@ const KNOWN = new Set([
   "too_many_widgets",
   "invalid_widget",
   "busy",
+  "query_timeout",
   "internal",
 ]);
 

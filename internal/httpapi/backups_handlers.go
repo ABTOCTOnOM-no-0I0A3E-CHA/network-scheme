@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/beekamai/network-scheme/internal/audit"
+	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/rbac"
 	"github.com/beekamai/network-scheme/internal/textdiff"
 )
@@ -22,17 +23,21 @@ import (
 const (
 	defaultBackupPage  = 50
 	maxBackupPage      = 100
-	maxDiffText        = 2 << 20 /* each masked text and the rendered diff, bytes */
+	maxDiffText        = 1 << 20 /* each masked text and the rendered diff, bytes (masked copies may reach 4 MiB: larger ones are not compared) */
 	maxDiffEdits       = 2500    /* inserted plus deleted lines the diff computes */
 	diffContext        = 3
 	diffSlots          = 2
-	backupsPerMinute   = 10 /* manual backups per user */
+	diffWait           = 2 * time.Second /* how long a diff waits for a slot before answering 503 */
+	backupsPerMinute   = 10              /* manual backups per user */
 	backupGap          = 5 * time.Minute
 	shaPrefixLen       = 12 /* hex characters of the hash shown */
 	maxDownloadNameLen = 60
 )
 
-var errDiffTooLarge = apiError{http.StatusRequestEntityTooLarge, "too_large", "Тексты слишком велики или слишком сильно различаются для сравнения"}
+var (
+	errDiffTooLarge = apiError{http.StatusRequestEntityTooLarge, "too_large", "Тексты слишком велики или слишком сильно различаются для сравнения"}
+	errDiffBusy     = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят сравнением конфигураций, повторите позже"}
+)
 
 /* userLimiter allows n events per user in any sliding minute. */
 type userLimiter struct {
@@ -61,6 +66,19 @@ func (l *userLimiter) allow(uid int64, now time.Time, n int) bool {
 	}
 	l.seen[uid] = append(ts, now)
 	return true
+}
+
+/* refund forgets the event allow admitted at now (for an action that did not happen after all). */
+func (l *userLimiter) refund(uid int64, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ts := l.seen[uid]
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Equal(now) {
+			l.seen[uid] = append(ts[:i:i], ts[i+1:]...)
+			return
+		}
+	}
 }
 
 type backupVersion struct {
@@ -225,7 +243,11 @@ func downloadName(device string, taken time.Time) string {
 	return name + "-" + taken.UTC().Format("20060102T150405Z") + ".txt"
 }
 
-/* downloadBackup serves the masked text as a plain-text attachment. */
+/*
+downloadBackup serves the masked text as a plain-text attachment. Downloads
+are audited, at most one record per user a minute: repeated downloads must not
+become a flood of audit records.
+*/
 func (s *server) downloadBackup(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -249,6 +271,13 @@ func (s *server) downloadBackup(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	sc, _ := sessionFrom(r.Context())
+	if s.downloadAuditRL.allow(sc.sess.UserID, s.now(), 1) {
+		ev := audit.Event{Action: "devices.backup_download", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10), Details: map[string]any{"version_id": vid}}
+		if !s.change(w, r, ev, func(pgx.Tx, *audit.Event) error { return nil }) {
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+downloadName(d.Name, v.TakenAt)+`"`)
 	w.Header().Set("Cache-Control", "no-store")
@@ -263,8 +292,11 @@ type diffSide struct {
 
 /*
 diffBackups returns the unified diff of the masked texts of two versions of
-one device (a: before, b: after). Texts over 2 MiB, a diff over 2 MiB or one
-with too many changed lines answer 413 too_large.
+one device (a: before, b: after). Texts over 1 MiB or textdiff.MaxLines
+lines, a diff over 1 MiB or one with too many changed lines answer 413
+too_large; with every diff slot taken for diffWait the answer is 503 busy.
+The slot is taken before the texts are loaded, so at most diffSlots pairs
+are held in memory.
 */
 func (s *server) diffBackups(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -287,8 +319,8 @@ func (s *server) diffBackups(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	/* Sizes first, so that an oversized text is never loaded. */
-	rows, err := s.pool.Query(r.Context(), `SELECT v.id, octet_length(v.masked)
+	/* Sizes and line counts first, so that an oversized text is never loaded. */
+	rows, err := s.pool.Query(r.Context(), `SELECT v.id, octet_length(v.masked), octet_length(v.masked) - octet_length(replace(v.masked, chr(10), ''))
 FROM backups.config_version v JOIN core.device d ON d.id = v.device_id
 WHERE v.device_id = $1 AND v.id = ANY($2)`, id, []int64{a, b})
 	if err != nil {
@@ -296,15 +328,18 @@ WHERE v.device_id = $1 AND v.id = ANY($2)`, id, []int64{a, b})
 		return
 	}
 	sizes := map[int64]int{}
+	tooLarge := false
 	for rows.Next() {
 		var vid int64
-		var n int
-		if err := rows.Scan(&vid, &n); err != nil {
+		var n, newlines int
+		if err := rows.Scan(&vid, &n, &newlines); err != nil {
 			rows.Close()
 			s.fail(w, r, err)
 			return
 		}
 		sizes[vid] = n
+		/* a last line without a newline is one more: textdiff refuses that case itself after loading */
+		tooLarge = tooLarge || n > maxDiffText || newlines > textdiff.MaxLines
 	}
 	if err := rows.Err(); err != nil {
 		s.fail(w, r, err)
@@ -318,8 +353,18 @@ WHERE v.device_id = $1 AND v.id = ANY($2)`, id, []int64{a, b})
 		writeError(w, errNotFound)
 		return
 	}
-	if sizes[a] > maxDiffText || sizes[b] > maxDiffText {
+	if tooLarge {
 		writeError(w, errDiffTooLarge)
+		return
+	}
+	select {
+	case s.diffSem <- struct{}{}:
+		defer func() { <-s.diffSem }()
+	case <-time.After(diffWait):
+		w.Header().Set("Retry-After", "1")
+		writeError(w, errDiffBusy)
+		return
+	case <-r.Context().Done():
 		return
 	}
 	va, ta, err := s.maskedVersion(r.Context(), id, a)
@@ -339,12 +384,6 @@ WHERE v.device_id = $1 AND v.id = ANY($2)`, id, []int64{a, b})
 }
 
 func (s *server) writeDiff(w http.ResponseWriter, r *http.Request, va, vb backupVersion, ta, tb string) {
-	select {
-	case s.diffSem <- struct{}{}:
-		defer func() { <-s.diffSem }()
-	case <-r.Context().Done():
-		return
-	}
 	label := func(v backupVersion) string {
 		return "version " + strconv.FormatInt(v.ID, 10) + " " + v.TakenAt.UTC().Format(time.RFC3339)
 	}
@@ -379,7 +418,14 @@ func (s *server) backupNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc, _ := sessionFrom(r.Context())
-	if !s.backupRL.allow(sc.sess.UserID, s.now(), backupsPerMinute) {
+	uid, at := sc.sess.UserID, s.now()
+	if !s.backupRL.allow(uid, at, backupsPerMinute) {
+		/* Audited, but at most once a minute per user, like refused show requests. */
+		if s.backupAuditRL.allow(uid, at, 1) {
+			ev := audit.Event{Action: "devices.backup_now", ObjectType: "device", ObjectID: strconv.FormatInt(id, 10), Details: map[string]any{}}
+			s.change(w, r, ev, func(pgx.Tx, *audit.Event) error { return auth.ErrRateLimited })
+			return
+		}
 		writeError(w, errRateLimited)
 		return
 	}
@@ -393,6 +439,8 @@ func (s *server) backupNow(w http.ResponseWriter, r *http.Request) {
 	if !s.change(w, r, ev, func(tx pgx.Tx, _ *audit.Event) error {
 		return s.jobs.EnqueueBackupNow(r.Context(), tx, id, "manual")
 	}) {
+		/* nothing was queued (the transaction rolled back): the attempt does not count */
+		s.backupRL.refund(uid, at)
 		return
 	}
 	resp := struct {

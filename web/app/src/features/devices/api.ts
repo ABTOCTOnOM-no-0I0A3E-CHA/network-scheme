@@ -94,18 +94,6 @@ export function useDeviceTable<T extends DeviceTable>(id: number, table: T, page
   });
 }
 
-/** Every row of an inventory table, page by page, stopping after `cap` rows (for exports). */
-export async function fetchAllRows<T extends DeviceTable>(id: number, table: T, cap: number): Promise<{ rows: TableRows[T][]; capped: boolean }> {
-  const rows: TableRows[T][] = [];
-  let offset: number | null = 0;
-  while (offset !== null && rows.length < cap) {
-    const page = (await TABLE_FETCH[table](id, { limit: 1000, offset })) as TablePage<TableRows[T]>;
-    rows.push(...page.items);
-    offset = page.next_offset;
-  }
-  return { rows: rows.slice(0, cap), capped: offset !== null || rows.length > cap };
-}
-
 export type MetricsRange = { from: Date; to: Date; step?: number };
 
 /**

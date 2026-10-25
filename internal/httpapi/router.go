@@ -101,6 +101,10 @@ type server struct {
 	showRL      userLimiter   /* show requests per user */
 	showAuditRL userLimiter   /* audit records of refused show requests, one per user a minute */
 
+	backupAuditRL   userLimiter /* audit records of refused manual backups, one per user a minute */
+	downloadAuditRL userLimiter /* audit records of config downloads, one per user a minute */
+	topIf           topIfCache  /* recent interface load rankings */
+
 	hub         *notify.Hub
 	wsConns     wsConns
 	wsRecheck   time.Duration
@@ -161,6 +165,7 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPost, "/api/auth/stepup", self, s.stepUp)
 	s.route(r, http.MethodPost, "/api/auth/logout", self, s.logout)
 	s.route(r, http.MethodGet, "/api/auth/me", self, s.me)
+	s.route(r, http.MethodGet, "/api/auth/stepup-status", Policy{Perm: rbac.PermSelf, StepUp: true}, s.stepUpStatus)
 
 	/* Phase 0 permissions are global: Can(perm, nil, nil). */
 	users := Policy{Perm: rbac.PermUsersManage}
@@ -202,6 +207,8 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/devices/{id}/lldp", read, inventoryList(s, (*inventory.Store).LLDP))
 	s.route(r, http.MethodGet, "/api/devices/{id}/entities", read, inventoryList(s, (*inventory.Store).Entities))
 	s.route(r, http.MethodGet, "/api/devices/{id}/routes", read, inventoryList(s, (*inventory.Store).Routes))
+	/* A table export is a bulk read: it needs a fresh step-up and is audited (security.md §9, §11). */
+	s.route(r, http.MethodGet, "/api/devices/{id}/export/{table}", Policy{Perm: rbac.PermDevicesRead, StepUp: true, Scoped: true}, s.exportInventory)
 	s.route(r, http.MethodGet, "/api/search", read, s.search)
 	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/if", read, s.ifMetrics)
 	s.route(r, http.MethodGet, "/api/devices/{id}/metrics/sys", read, s.sysMetrics)

@@ -15,7 +15,20 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/drivers/mask"
 	"github.com/beekamai/network-scheme/internal/rbac"
+	"github.com/beekamai/network-scheme/internal/textdiff"
 )
+
+/* auditCount counts the audit records of action with result (success or failure) made by user uid. */
+func auditCount(t *testing.T, f *fixture, action, result string, uid int64) int {
+	t.Helper()
+	var n int
+	if err := f.env.Pool("postgres").QueryRow(context.Background(),
+		`SELECT count(*) FROM audit.event WHERE action = $1 AND convert_from(payload, 'UTF8')::jsonb->>'result' = $2
+		 AND (convert_from(payload, 'UTF8')::jsonb->>'user_id')::bigint = $3`, action, result, uid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
 
 const configFixtures = "../../test/fixtures/configs"
 
@@ -230,6 +243,16 @@ func TestBackupGetDownloadAndState(t *testing.T) {
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("download lacks nosniff")
 	}
+	/* Downloads are audited, one record per user a minute. */
+	wantStatus(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s/backups/%d/download", base, v)})), http.StatusOK)
+	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 1 {
+		t.Errorf("%d download audit records in a minute, want 1", n)
+	}
+	f.clk.Advance(61 * time.Second)
+	wantStatus(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s/backups/%d/download", base, v)})), http.StatusOK)
+	if n := auditCount(t, f, "devices.backup_download", "success", u.uid); n != 2 {
+		t.Errorf("%d download audit records after a minute, want 2", n)
+	}
 	state := decode[struct {
 		LastOKAt   *time.Time   `json:"last_ok_at"`
 		LastError  *string      `json:"last_error"`
@@ -283,11 +306,14 @@ func TestBackupDiffSizeCaps(t *testing.T) {
 	base := fmt.Sprintf("/api/devices/%d/backups/diff", dev)
 	t0 := time.Now().UTC().Add(-time.Hour)
 	small := f.newVersion(dev, "a\n", "schedule", false, t0)
-	/* A masked text over 2 MiB is refused before it is loaded. */
-	huge := f.newVersion(dev, strings.Repeat("0123456789abcdef\n", (2<<20)/17+10), "schedule", false, t0.Add(time.Second))
+	/* A masked text over 1 MiB is refused before it is loaded. */
+	huge := f.newVersion(dev, strings.Repeat("0123456789abcdef\n", (1<<20)/17+10), "schedule", false, t0.Add(time.Second))
 	wantError(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s?a=%d&b=%d", base, small, huge)})), http.StatusRequestEntityTooLarge, "too_large")
 	wantError(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s?a=%d&b=%d", base, huge, small)})), http.StatusRequestEntityTooLarge, "too_large")
-	/* Under 2 MiB each, but too many differing lines. */
+	/* Small in bytes, but more lines than textdiff.MaxLines. */
+	blank := f.newVersion(dev, strings.Repeat("\n", textdiff.MaxLines+1), "schedule", false, t0.Add(1500*time.Millisecond))
+	wantError(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s?a=%d&b=%d", base, small, blank)})), http.StatusRequestEntityTooLarge, "too_large")
+	/* Under 1 MiB each, but too many differing lines. */
 	var x, y strings.Builder
 	for i := 0; i < 6000; i++ {
 		fmt.Fprintf(&x, "left %d\n", i)
@@ -297,7 +323,7 @@ func TestBackupDiffSizeCaps(t *testing.T) {
 	vy := f.newVersion(dev, y.String(), "schedule", false, t0.Add(3*time.Second))
 	wantError(t, f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s?a=%d&b=%d", base, vx, vy)})), http.StatusRequestEntityTooLarge, "too_large")
 	/* A large text with a small change is fine. */
-	big := strings.Repeat("some configuration line\n", 60000)
+	big := strings.Repeat("some configuration line\n", 40000)
 	v1 := f.newVersion(dev, big, "schedule", false, t0.Add(4*time.Second))
 	v2 := f.newVersion(dev, big+"one more\n", "schedule", false, t0.Add(5*time.Second))
 	resp := f.do(u.authed(req{method: "GET", path: fmt.Sprintf("%s?a=%d&b=%d", base, v1, v2)}))
@@ -414,6 +440,10 @@ func TestBackupNowAuditRateLimitAndNote(t *testing.T) {
 		}
 	}
 	wantError(t, f.do(op.authed(req{method: "POST", path: path})), http.StatusTooManyRequests, "rate_limited")
+	wantError(t, f.do(op.authed(req{method: "POST", path: path})), http.StatusTooManyRequests, "rate_limited")
+	if n := auditCount(t, f, "devices.backup_now", "failure", op.uid); n != 1 {
+		t.Errorf("%d audit records of refused backups in a minute, want 1", n)
+	}
 	other := f.login(false, rbac.Binding{Role: rbac.RoleOperator, GroupID: &g})
 	if r := f.do(other.authed(req{method: "POST", path: path})); r.StatusCode != http.StatusAccepted {
 		t.Fatalf("other user: %d", r.StatusCode)
@@ -422,7 +452,14 @@ func TestBackupNowAuditRateLimitAndNote(t *testing.T) {
 	if r := f.do(op.authed(req{method: "POST", path: path})); r.StatusCode != http.StatusAccepted {
 		t.Fatalf("after a minute: %d", r.StatusCode)
 	}
-	/* A failed enqueue answers 500. */
+	/* A failed enqueue answers 500 and does not use up the user's limit. */
+	third := f.login(false, rbac.Binding{Role: rbac.RoleOperator, GroupID: &g})
 	f.jobs.fail = true
-	wantError(t, f.do(other.authed(req{method: "POST", path: path})), http.StatusInternalServerError, "internal")
+	for i := 0; i < 10; i++ {
+		wantError(t, f.do(third.authed(req{method: "POST", path: path})), http.StatusInternalServerError, "internal")
+	}
+	f.jobs.fail = false
+	if r := f.do(third.authed(req{method: "POST", path: path})); r.StatusCode != http.StatusAccepted {
+		t.Fatalf("after failed enqueues: %d", r.StatusCode)
+	}
 }

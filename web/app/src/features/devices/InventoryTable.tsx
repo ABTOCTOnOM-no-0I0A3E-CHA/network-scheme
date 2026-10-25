@@ -3,14 +3,21 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { errorKey } from "@/features/auth/errors";
-import { ApiError } from "@/features/common/stepup";
+import { ApiError, StepUpCancelled, unwrap, withStepUp } from "@/features/common/stepup";
+import { api } from "@/lib/api";
 import { safeText } from "@/lib/text";
-import { fetchAllRows, useDeviceTable, type DeviceTable, type TableRows } from "./api";
-import { saveText, toCsv } from "./csv";
+import { useDeviceTable, type DeviceTable, type TableRows } from "./api";
 
 export const PAGE_SIZE = 50;
-/* rows a CSV export reads at most */
-export const EXPORT_CAP = 20000;
+
+/** Same-origin URL of the server-side CSV export of a table, with the search and the named filter of the view. */
+function exportUrl(deviceId: number, table: DeviceTable, search: string, filterId: string): string {
+  const q = new URLSearchParams();
+  if (search) q.set("q", search);
+  if (filterId) q.set("filter", filterId);
+  const qs = q.toString();
+  return `/api/devices/${deviceId}/export/${table}${qs ? `?${qs}` : ""}`;
+}
 
 /** A named row filter offered next to the search box. */
 export type RowFilter<R> = { id: string; label: string; test: (row: R) => boolean };
@@ -40,12 +47,18 @@ type Props<T extends DeviceTable> = {
   filters?: RowFilter<TableRows[T]>[];
 };
 
-/** One inventory table with next/previous paging over `next_offset`, search and filters over the page, and a CSV export of the whole table. */
+/**
+ * One inventory table with next/previous paging over `next_offset`, search and
+ * filters over the page, and a CSV export of the whole table (same search and
+ * filter) built, capped and audited by the server. The export needs a fresh
+ * step-up: the shared step-up prompt is shown first, then the browser
+ * downloads the file through a same-origin link.
+ */
 export function InventoryTable<T extends DeviceTable>({ deviceId, table, columns, seenAt, filters = [] }: Props<T>) {
   const { t, i18n } = useTranslation();
   const [search, setSearch] = useState("");
   const [filterId, setFilterId] = useState("");
-  const [exportNote, setExportNote] = useState<{ ok: boolean; text: string } | undefined>();
+  const [exportError, setExportError] = useState<string | undefined>();
   const [exporting, setExporting] = useState(false);
   const q0 = search.trim().toLowerCase();
   const filter = filters.find((f) => f.id === filterId);
@@ -59,17 +72,18 @@ export function InventoryTable<T extends DeviceTable>({ deviceId, table, columns
   const visible = q.data?.items.filter(keep);
 
   const exportCsv = async () => {
-    setExportNote(undefined);
+    setExportError(undefined);
     setExporting(true);
     try {
-      const { rows, capped } = await fetchAllRows(deviceId, table, EXPORT_CAP);
-      const kept = rows.filter(keep);
-      /* the raw API fields, so the file holds the values rather than their rendering */
-      const keys = kept.length ? (Object.keys(kept[0]) as (keyof TableRows[T] & string)[]) : [];
-      saveText(toCsv(keys, kept), `${table}-device-${deviceId}.csv`);
-      setExportNote({ ok: true, text: t(capped ? "data.exportCapped" : "data.exported", { count: kept.length, cap: EXPORT_CAP }) });
+      await withStepUp(async () => unwrap(await api.GET("/api/auth/stepup-status")));
+      const a = document.createElement("a");
+      a.href = exportUrl(deviceId, table, search.trim(), filterId);
+      a.download = "";
+      document.body.append(a);
+      a.click();
+      a.remove();
     } catch (e) {
-      setExportNote({ ok: false, text: t(e instanceof ApiError ? errorKey({ error: { code: e.code } }) : "errors.unknown") });
+      if (!(e instanceof StepUpCancelled)) setExportError(t(e instanceof ApiError ? errorKey({ error: { code: e.code } }) : "errors.unknown"));
     } finally {
       setExporting(false);
     }
@@ -103,9 +117,9 @@ export function InventoryTable<T extends DeviceTable>({ deviceId, table, columns
           {t("data.csv")}
         </Button>
       </div>
-      {exportNote && (
-        <p role={exportNote.ok ? "status" : "alert"} className={exportNote.ok ? "text-xs text-muted-foreground" : "text-sm text-destructive"}>
-          {exportNote.text}
+      {exportError && (
+        <p role="alert" className="text-sm text-destructive">
+          {exportError}
         </p>
       )}
       {error && (

@@ -409,3 +409,26 @@ func TestWidgetDataScope(t *testing.T) {
 		wantError(t, f.do(viewerA.authed(req{method: "GET", path: p})), http.StatusBadRequest, "bad_request")
 	}
 }
+
+/* TestConfigDriftNewestOnly: a device is listed once, by its newest version, and only while that version is drift. */
+func TestConfigDriftNewestOnly(t *testing.T) {
+	f := newFixture(t, nil)
+	g := f.newGroup()
+	twice, fixed, once := f.newDevice(g), f.newDevice(g), f.newDevice(g)
+	t0 := time.Now().Add(-time.Hour)
+	f.newVersion(twice, "a\n", "event", true, t0)
+	newest := f.newVersion(twice, "b\n", "event", true, t0.Add(time.Minute))
+	f.newVersion(fixed, "a\n", "event", true, t0.Add(2*time.Minute))
+	f.newVersion(fixed, "b\n", "schedule", false, t0.Add(3*time.Minute))
+	onlyOne := f.newVersion(once, "a\n", "event", true, t0.Add(4*time.Minute))
+	u := f.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &g})
+	got := decode[struct {
+		Items []struct {
+			VersionID int64 `json:"version_id"`
+			DeviceID  int64 `json:"device_id"`
+		} `json:"items"`
+	}](t, f.do(u.authed(req{method: "GET", path: "/api/stats/config-drift"})))
+	if len(got.Items) != 2 || got.Items[0].VersionID != onlyOne || got.Items[1].VersionID != newest || got.Items[1].DeviceID != twice {
+		t.Fatalf("drift items %+v, want versions %d then %d", got.Items, onlyOne, newest)
+	}
+}

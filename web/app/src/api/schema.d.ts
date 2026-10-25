@@ -320,6 +320,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/stepup-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether the session holds a fresh step-up
+         * @description 204 while a step-up TOTP was given within the last 5 minutes, else 403
+         *     stepup_required. The web client asks for the code before it starts a
+         *     download that needs step-up (the browser fetches it, not the client).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Step-up is fresh */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users": {
         parameters: {
             query?: never;
@@ -1113,7 +1154,9 @@ export interface paths {
         put?: never;
         /**
          * Queue a manual configuration backup
-         * @description Audited and limited to 10 a minute per user. The poller keeps its own gap
+         * @description Audited and limited to 10 a minute per user; refusals over the limit are
+         *     audited too, one record per user a minute. An attempt whose job could
+         *     not be queued does not count. The poller keeps its own gap
          *     of 5 minutes per device: when the last successful backup is younger, the
          *     job completes without fetching and the answer carries
          *     note "recent backup exists".
@@ -1165,8 +1208,11 @@ export interface paths {
         /**
          * Unified diff of the masked texts of two versions of the device
          * @description a is the earlier text, b the later one; both must belong to the device
-         *     (else 404). Computed on the server. Masked texts over 2 MiB, a diff over
-         *     2 MiB or one with too many changed lines answer 413 too_large. The text
+         *     (else 404). Computed on the server. Masked texts over 1 MiB or over
+         *     200 000 lines, a diff over 1 MiB or one with too many changed lines
+         *     answer 413 too_large; while every diff slot stays taken for 2 seconds the
+         *     answer is 503 busy (with Retry-After). A missing final newline is shown
+         *     as a change followed by the line "\ No newline at end of file". The text
          *     comes from devices: render it as text only.
          */
         get: {
@@ -1201,6 +1247,7 @@ export interface paths {
                 403: components["responses"]["Error"];
                 404: components["responses"]["Error"];
                 413: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -1268,6 +1315,7 @@ export interface paths {
         /**
          * The masked text of one version as a plain-text attachment
          * @description File name is "<device name, unsafe characters replaced by _>-<taken_at UTC>.txt".
+         *     Downloads are audited (devices.backup_download), one record per user a minute.
          */
         get: {
             parameters: {
@@ -1889,6 +1937,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/devices/{id}/export/{table}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One inventory table of the device as a CSV attachment
+         * @description A bulk export: needs a fresh step-up and is audited (inventory.export with
+         *     the table, the row count and the filters). Columns are the API fields of
+         *     the table's rows, in order; a header row comes first, records end with
+         *     CRLF and every field is quoted (RFC 4180), after a UTF-8 BOM. A text cell
+         *     whose first character other than white space (NBSP included) is =, +, -
+         *     or @, or that starts with a tab or a carriage return, gets a leading
+         *     apostrophe so that spreadsheets do not run it as a formula. q keeps the
+         *     rows with a field containing it (case-insensitive); filter applies a named
+         *     filter of the table (interfaces only: up, down). At most 20 000 rows are
+         *     written, after at most 200 000 read; X-Export-Capped tells whether rows
+         *     were left out. Values come from the device: treat them as text.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    filter?: "up" | "down";
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                    table: "interfaces" | "arp" | "mac" | "vlans" | "lldp" | "entities" | "routes";
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The CSV file */
+                200: {
+                    headers: {
+                        /** @description true when rows were left out */
+                        "X-Export-Capped"?: "true" | "false";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/search": {
         parameters: {
             query?: never;
@@ -1904,7 +2013,8 @@ export interface paths {
          *     MAC) and ports by name or alias (substring, from 3 characters). Only devices in the caller's devices.read
          *     scope are searched; each type returns at most 50 items, "more" tells that there were more.
          *     LIKE wildcards in q match literally. An absent, empty or shorter than 2 characters (after
-         *     trimming) q answers empty results. Panel sections are matched by the web client. Names,
+         *     trimming) q answers empty results. Each query is limited to 2 seconds; a slower one
+         *     answers 503 query_timeout. Panel sections are matched by the web client. Names,
          *     aliases and port names are device data: render as text only.
          */
         get: {
@@ -1982,6 +2092,7 @@ export interface paths {
                 400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -4615,7 +4726,8 @@ export interface paths {
          * Visible devices ranked by CPU, RAM or uptime
          * @description cpu and mem rank by the latest sample of the last 15 minutes (value in percent, at the
          *     sample time); uptime ranks the devices that are up by how long they have been
-         *     continuously available (value in seconds, at the start), longest first.
+         *     continuously available (value in seconds, at the start), longest first. The ranking
+         *     query is limited to 2 seconds; a slower one answers 503 query_timeout.
          */
         get: {
             parameters: {
@@ -4650,6 +4762,7 @@ export interface paths {
                 400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -4669,8 +4782,10 @@ export interface paths {
         };
         /**
          * Interfaces of visible devices ranked by load
-         * @description Average rates of the last 10 minutes; util_pct is the busier direction against the
-         *     reported speed. Interfaces without a speed are skipped. The port name is device data:
+         * @description Rates of each interface's latest sample of the last 10 minutes; util_pct is the busier
+         *     direction against the reported speed. Interfaces without a speed are skipped. A ranking
+         *     is reused for 30 seconds for the same visible devices and limit. The query is limited
+         *     to 2 seconds; a slower one answers 503 query_timeout. The port name is device data:
          *     render as text only.
          */
         get: {
@@ -4709,6 +4824,7 @@ export interface paths {
                 400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -4727,8 +4843,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Latest configuration versions of visible devices marked as drift
-         * @description Newest first. Together with GET /api/topology/changes it makes the recent changes widget.
+         * Visible devices whose newest configuration version is marked as drift
+         * @description One item per device (its newest version, when that is drift), newest first. Together
+         *     with GET /api/topology/changes it makes the recent changes widget. The query is limited
+         *     to 2 seconds; a slower one answers 503 query_timeout.
          */
         get: {
             parameters: {
@@ -4763,6 +4881,7 @@ export interface paths {
                 400: components["responses"]["Error"];
                 401: components["responses"]["Error"];
                 403: components["responses"]["Error"];
+                503: components["responses"]["Error"];
             };
         };
         put?: never;
@@ -5411,7 +5530,7 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_dashboards" | "too_many_widgets" | "invalid_widget" | "too_many_points" | "locked" | "rate_limited" | "busy" | "internal" | "gateway_error";
+                code: "bad_request" | "unauthenticated" | "invalid_credentials" | "challenge_expired" | "session_expired" | "csrf" | "forbidden" | "stepup_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "too_large" | "invalid_show" | "device_busy" | "unsupported_media_type" | "user_exists" | "group_exists" | "group_not_empty" | "group_cycle" | "last_admin" | "invalid_username" | "weak_password" | "invalid_role" | "address_exists" | "not_pending" | "stale_key" | "cidr_too_wide" | "trap_rule_exists" | "problem_resolved" | "template_exists" | "invalid_trigger" | "invalid_window" | "parent_cycle" | "parent_too_deep" | "link_exists" | "too_many_links" | "too_many_views" | "too_many_areas" | "area_cycle" | "area_too_deep" | "area_other_view" | "unsupported_media" | "invalid_image" | "too_many_backgrounds" | "too_many_triggers" | "too_many_templates" | "too_many_filters" | "too_many_windows" | "too_many_dashboards" | "too_many_widgets" | "invalid_widget" | "too_many_points" | "locked" | "rate_limited" | "busy" | "query_timeout" | "internal" | "gateway_error";
                 /** @description Human-readable, Russian */
                 message: string;
             };

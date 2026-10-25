@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /*
@@ -356,7 +358,7 @@ var sysTopColumns = map[string]string{"cpu": "cpu_pct", "mem": "mem_used_pct"}
 /*
 TopSys returns the devices with the highest latest value of metric ("cpu" or
 "mem") among the raw samples newer than since of deviceIDs, highest first,
-at most limit.
+at most limit. The query runs under store.QueryTimeout (store.ErrTimeout).
 */
 func (s *Store) TopSys(ctx context.Context, metric string, deviceIDs []int64, since time.Time, limit int) ([]SysLatest, error) {
 	col, ok := sysTopColumns[metric]
@@ -372,18 +374,22 @@ func (s *Store) TopSys(ctx context.Context, metric string, deviceIDs []int64, si
 	        WHERE ts > $1 AND ` + col + ` IS NOT NULL AND device_id = ANY($2)
 	        ORDER BY device_id, ts DESC) t
 	      ORDER BY v DESC, device_id LIMIT $3`
-	rows, err := s.pool.Query(ctx, q, since, deviceIDs, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query top system metrics: %w", err)
-	}
-	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[SysLatest])
+	var out []SysLatest
+	err := store.BoundedRead(ctx, s.pool, store.QueryTimeout, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, since, deviceIDs, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[SysLatest])
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("query top system metrics: %w", err)
 	}
 	return out, nil
 }
 
-// IfLoad is the average load of one interface over a window.
+// IfLoad is the load of one interface in its latest sample.
 type IfLoad struct {
 	DeviceID      int64
 	IfIndex       int
@@ -393,26 +399,33 @@ type IfLoad struct {
 }
 
 /*
-TopIfLoad returns the interfaces with the highest average utilization (the
-busier direction against the reported speed) over the raw samples newer than
-since of deviceIDs, busiest first, at most limit. Interfaces without a speed
-are skipped.
+TopIfLoad returns the interfaces of deviceIDs with the highest utilization
+(the busier direction against the reported speed) in their latest raw sample
+newer than since, busiest first, at most limit. Interfaces without a speed
+are skipped. Taking the latest sample walks the (device_id, if_index, ts)
+index in order instead of aggregating every sample of the window; the query
+runs under store.QueryTimeout (store.ErrTimeout).
 */
 func (s *Store) TopIfLoad(ctx context.Context, deviceIDs []int64, since time.Time, limit int) ([]IfLoad, error) {
 	if len(deviceIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT device_id, if_index, in_bps, out_bps, speed_bps,
-	        greatest(in_bps, out_bps) * 100 / speed_bps AS util FROM (
-	          SELECT device_id, if_index, avg(in_bps) AS in_bps, avg(out_bps) AS out_bps, max(speed_bps) AS speed_bps
-	          FROM metrics.if_metrics
-	          WHERE ts > $1 AND speed_bps > 0 AND device_id = ANY($2)
-	          GROUP BY device_id, if_index) t
-	      ORDER BY util DESC, device_id, if_index LIMIT $3`, since, deviceIDs, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query top interface load: %w", err)
-	}
-	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[IfLoad])
+	var out []IfLoad
+	err := store.BoundedRead(ctx, s.pool, store.QueryTimeout, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT device_id, if_index, in_bps, out_bps, speed_bps,
+		        greatest(in_bps, out_bps) * 100 / speed_bps AS util FROM (
+		          SELECT DISTINCT ON (device_id, if_index) device_id, if_index, in_bps, out_bps, speed_bps
+		          FROM metrics.if_metrics
+		          WHERE ts > $1 AND device_id = ANY($2)
+		          ORDER BY device_id, if_index, ts DESC) t
+		      WHERE speed_bps > 0
+		      ORDER BY util DESC, device_id, if_index LIMIT $3`, since, deviceIDs, limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[IfLoad])
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("query top interface load: %w", err)
 	}

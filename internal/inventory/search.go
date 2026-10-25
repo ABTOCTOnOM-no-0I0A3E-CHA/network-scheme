@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/beekamai/network-scheme/internal/devices"
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /* SearchLimit is the most results of one type a search returns. */
@@ -133,9 +134,6 @@ func MACRange(q string) (lo, hi string, ok bool) {
 	return h + strings.Repeat("0", 12-len(h)), h + strings.Repeat("f", 12-len(h)), true
 }
 
-/* scopeSQL selects the devices d of the filter ($1 all, $2 group ids). */
-const scopeSQL = `($1::bool OR d.group_id = ANY($2::bigint[]))`
-
 /*
 Search finds, among the devices f selects and at most SearchLimit of each
 type: devices whose name contains q or whose address starts with it, ARP
@@ -143,74 +141,109 @@ entries by address prefix (IPPrefix), FDB and ARP entries by MAC prefix
 (MACRange) and ports whose name or alias contains q (from minPortLen
 characters). Substrings match case-insensitively and LIKE wildcards in q
 literally. q is trimmed and bounded by the caller. Every query is
-parameterized and bounded by an index range or by a LIMIT.
+parameterized and bounded by an index range or by a LIMIT, and all of them
+run in one read-only transaction under store.QueryTimeout per statement
+(a slow one is store.ErrTimeout). A group scope is first resolved to its
+device ids, so that the inventory tables are read by device.
 */
 func (s *Store) Search(ctx context.Context, f devices.Filter, q string) (SearchResults, error) {
 	out := EmptySearch()
 	if !f.All && len(f.GroupIDs) == 0 {
 		return out, nil
 	}
-	var err error
 	sub := "%" + likeEscape(q) + "%"
 	prefix := likeEscape(strings.ToLower(q)) + "%"
-	if out.Devices, err = search[DeviceHit](ctx, s, `
-		SELECT d.id, d.name, host(d.address) FROM core.device d
-		WHERE `+scopeSQL+` AND (d.name ILIKE $3 OR host(d.address) LIKE $4)
-		ORDER BY d.name, d.id LIMIT $5`, f, sub, prefix); err != nil {
-		return out, err
-	}
-	if utf8.RuneCountInString(q) >= minPortLen {
-		if out.Ports, err = search[PortHit](ctx, s, `
-			SELECT device_id, device_name, if_index, name, alias FROM (
-				SELECT i.device_id, d.name AS device_name, i.if_index, i.name, i.alias
-				FROM inventory.interface i JOIN core.device d ON d.id = i.device_id
-				WHERE `+scopeSQL+` AND (i.name ILIKE $3 OR i.alias ILIKE $3)
-				LIMIT `+fmt.Sprint(portCandidates)+`) c
-			ORDER BY device_name, device_id, if_index LIMIT $4`, f, sub); err != nil {
-			return out, err
+	err := store.BoundedRead(ctx, s.pool, store.QueryTimeout, func(tx pgx.Tx) error {
+		var ids []int64
+		if !f.All {
+			rows, err := tx.Query(ctx, `SELECT id FROM core.device WHERE group_id = ANY($1)`, f.GroupIDs)
+			if err != nil {
+				return err
+			}
+			if ids, err = pgx.CollectRows(rows, pgx.RowTo[int64]); err != nil {
+				return err
+			}
+			if len(ids) == 0 {
+				return nil
+			}
 		}
-	}
-	if lo, hi, ok := IPPrefix(q); ok {
-		if out.IPs, err = search[IPHit](ctx, s, `
-			SELECT a.device_id, d.name, host(a.ip), a.mac::text, a.if_index, coalesce(i.name, '')
-			FROM inventory.arp_entry a JOIN core.device d ON d.id = a.device_id
-			LEFT JOIN inventory.interface i ON i.device_id = a.device_id AND i.if_index = a.if_index
-			WHERE `+scopeSQL+` AND host(a.ip) COLLATE "C" >= $3 AND host(a.ip) COLLATE "C" < $4
-			ORDER BY host(a.ip) COLLATE "C", a.device_id, a.if_index LIMIT $5`, f, lo, hi); err != nil {
-			return out, err
+		/* in tells the scope as a condition on col; with every device visible there is none */
+		in := func(col string) string {
+			if f.All {
+				return "true"
+			}
+			return col + " = ANY(@ids::bigint[])"
 		}
-	}
-	if lo, hi, ok := MACRange(q); ok {
-		if out.MACs, err = search[MACHit](ctx, s, `
-			SELECT * FROM (
-				(SELECT e.device_id, d.name, e.mac::text AS mac, 'fdb' AS source, e.vlan, NULL::text AS ip, e.if_index, coalesce(i.name, '')
-				 FROM inventory.mac_entry e JOIN core.device d ON d.id = e.device_id
-				 LEFT JOIN inventory.interface i ON i.device_id = e.device_id AND i.if_index = e.if_index
-				 WHERE `+scopeSQL+` AND e.mac BETWEEN $3::macaddr AND $4::macaddr
-				 ORDER BY e.mac, e.device_id, e.vlan LIMIT $5)
-				UNION ALL
-				(SELECT a.device_id, d.name, a.mac::text, 'arp', NULL::int, host(a.ip), a.if_index, coalesce(i.name, '')
-				 FROM inventory.arp_entry a JOIN core.device d ON d.id = a.device_id
-				 LEFT JOIN inventory.interface i ON i.device_id = a.device_id AND i.if_index = a.if_index
-				 WHERE `+scopeSQL+` AND a.mac BETWEEN $3::macaddr AND $4::macaddr
-				 ORDER BY a.mac, a.device_id, a.ip LIMIT $5)
-			) m ORDER BY mac, source, device_id, vlan, ip LIMIT $5`, f, lo, hi); err != nil {
-			return out, err
+		args := func(a pgx.NamedArgs) pgx.NamedArgs {
+			a["limit"] = SearchLimit + 1
+			if !f.All {
+				a["ids"] = ids
+			}
+			return a
 		}
+		var err error
+		if out.Devices, err = search[DeviceHit](ctx, tx, `
+			SELECT d.id, d.name, host(d.address) FROM core.device d
+			WHERE `+in("d.id")+` AND (d.name ILIKE @sub OR host(d.address) LIKE @prefix)
+			ORDER BY d.name, d.id LIMIT @limit`, args(pgx.NamedArgs{"sub": sub, "prefix": prefix})); err != nil {
+			return err
+		}
+		if utf8.RuneCountInString(q) >= minPortLen {
+			if out.Ports, err = search[PortHit](ctx, tx, `
+				SELECT device_id, device_name, if_index, name, alias FROM (
+					SELECT i.device_id, d.name AS device_name, i.if_index, i.name, i.alias
+					FROM inventory.interface i JOIN core.device d ON d.id = i.device_id
+					WHERE `+in("i.device_id")+` AND (i.name ILIKE @sub OR i.alias ILIKE @sub)
+					LIMIT `+fmt.Sprint(portCandidates)+`) c
+				ORDER BY device_name, device_id, if_index LIMIT @limit`, args(pgx.NamedArgs{"sub": sub})); err != nil {
+				return err
+			}
+		}
+		if lo, hi, ok := IPPrefix(q); ok {
+			if out.IPs, err = search[IPHit](ctx, tx, `
+				SELECT a.device_id, d.name, host(a.ip), a.mac::text, a.if_index, coalesce(i.name, '')
+				FROM inventory.arp_entry a JOIN core.device d ON d.id = a.device_id
+				LEFT JOIN inventory.interface i ON i.device_id = a.device_id AND i.if_index = a.if_index
+				WHERE `+in("a.device_id")+` AND host(a.ip) COLLATE "C" >= @lo AND host(a.ip) COLLATE "C" < @hi
+				ORDER BY host(a.ip) COLLATE "C", a.device_id, a.if_index LIMIT @limit`, args(pgx.NamedArgs{"lo": lo, "hi": hi})); err != nil {
+				return err
+			}
+		}
+		if lo, hi, ok := MACRange(q); ok {
+			if out.MACs, err = search[MACHit](ctx, tx, `
+				SELECT * FROM (
+					(SELECT e.device_id, d.name, e.mac::text AS mac, 'fdb' AS source, e.vlan, NULL::text AS ip, e.if_index, coalesce(i.name, '')
+					 FROM inventory.mac_entry e JOIN core.device d ON d.id = e.device_id
+					 LEFT JOIN inventory.interface i ON i.device_id = e.device_id AND i.if_index = e.if_index
+					 WHERE `+in("e.device_id")+` AND e.mac BETWEEN @lo::macaddr AND @hi::macaddr
+					 ORDER BY e.mac, e.device_id, e.vlan LIMIT @limit)
+					UNION ALL
+					(SELECT a.device_id, d.name, a.mac::text, 'arp', NULL::int, host(a.ip), a.if_index, coalesce(i.name, '')
+					 FROM inventory.arp_entry a JOIN core.device d ON d.id = a.device_id
+					 LEFT JOIN inventory.interface i ON i.device_id = a.device_id AND i.if_index = a.if_index
+					 WHERE `+in("a.device_id")+` AND a.mac BETWEEN @lo::macaddr AND @hi::macaddr
+					 ORDER BY a.mac, a.device_id, a.ip LIMIT @limit)
+				) m ORDER BY mac, source, device_id, vlan, ip LIMIT @limit`, args(pgx.NamedArgs{"lo": lo, "hi": hi})); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return EmptySearch(), fmt.Errorf("inventory: search: %w", err)
 	}
 	return out, nil
 }
 
-/* search runs q with the filter as $1, $2, then args, and the limit (one extra row tells More) as the last parameter. */
-func search[T any](ctx context.Context, s *Store, q string, f devices.Filter, args ...any) (SearchGroup[T], error) {
-	params := append([]any{f.All, f.GroupIDs}, args...)
-	rows, err := s.pool.Query(ctx, q, append(params, SearchLimit+1)...)
+/* search runs q with args; the limit is one more than SearchLimit, and the extra row tells More. */
+func search[T any](ctx context.Context, tx pgx.Tx, q string, args pgx.NamedArgs) (SearchGroup[T], error) {
+	rows, err := tx.Query(ctx, q, args)
 	if err != nil {
-		return SearchGroup[T]{}, fmt.Errorf("inventory: search: %w", err)
+		return SearchGroup[T]{}, err
 	}
 	items, err := pgx.CollectRows(rows, pgx.RowToStructByPos[T])
 	if err != nil {
-		return SearchGroup[T]{}, fmt.Errorf("inventory: search: %w", err)
+		return SearchGroup[T]{}, err
 	}
 	g := SearchGroup[T]{Items: items, More: len(items) > SearchLimit}
 	if g.More {

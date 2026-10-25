@@ -39,6 +39,7 @@ var matrix = map[string]map[string]int{
 	"POST /api/auth/stepup":        {"anon": 401, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
 	"POST /api/auth/logout":        {"anon": 401, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
 	"GET /api/auth/me":             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"GET /api/auth/stepup-status":  {"anon": 401, "viewer": 204, "viewerA": 204, "operator": 204, "operatorA": 204, "auditor": 204, "admin": 204, "adminA": 204},
 	"GET /api/users":               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
 	"POST /api/users":              {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 201, "adminA": 403},
 	"PATCH /api/users/{id}":        {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 403},
@@ -60,6 +61,7 @@ var matrix = map[string]map[string]int{
 	"DELETE /api/devices/{id}/profiles/{kind}":                {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 204, "adminA": 204},
 	"POST /api/devices/{id}/poll":                             {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 202, "operatorA": 202, "auditor": 403, "admin": 202, "adminA": 202},
 	"GET /api/devices/{id}/interfaces":                        {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/devices/{id}/export/{table}":                    {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/arp":                               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/mac":                               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/devices/{id}/vlans":                             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
@@ -155,6 +157,7 @@ var foreignMatrix = map[string]map[string]int{
 	"DELETE /api/devices/{id}/profiles/{kind}":                {"viewerA": 403, "operatorA": 403, "adminA": 404},
 	"POST /api/devices/{id}/poll":                             {"viewerA": 403, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/interfaces":                        {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/devices/{id}/export/{table}":                    {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/arp":                               {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/mac":                               {"viewerA": 404, "operatorA": 404, "adminA": 404},
 	"GET /api/devices/{id}/vlans":                             {"viewerA": 404, "operatorA": 404, "adminA": 404},
@@ -363,6 +366,8 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 		return req{method: "POST", path: "/api/auth/logout"}
 	case "GET /api/auth/me":
 		return req{method: "GET", path: "/api/auth/me"}
+	case "GET /api/auth/stepup-status":
+		return req{method: "GET", path: "/api/auth/stepup-status"}
 	case "GET /api/users":
 		return req{method: "GET", path: "/api/users"}
 	case "POST /api/users":
@@ -439,6 +444,8 @@ func (m *matrixEnv) deviceRequest(key string) (req, bool) {
 	case "GET /api/devices/{id}/interfaces", "GET /api/devices/{id}/arp", "GET /api/devices/{id}/mac", "GET /api/devices/{id}/vlans",
 		"GET /api/devices/{id}/lldp", "GET /api/devices/{id}/entities", "GET /api/devices/{id}/routes":
 		return req{method: "GET", path: dev("/api/devices/%d/" + strings.TrimPrefix(key, "GET /api/devices/{id}/") + "?limit=10")}, true
+	case "GET /api/devices/{id}/export/{table}":
+		return req{method: "GET", path: dev("/api/devices/%d/export/interfaces")}, true
 	case "GET /api/search":
 		return req{method: "GET", path: "/api/search?q=" + url.QueryEscape(nextAddr().String())}, true
 	case "GET /api/devices/{id}/metrics/if":

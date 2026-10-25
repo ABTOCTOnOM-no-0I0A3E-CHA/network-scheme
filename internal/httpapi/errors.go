@@ -9,6 +9,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/auth"
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/rbac"
+	"github.com/beekamai/network-scheme/internal/store"
 )
 
 /* apiError is a client-facing error: a stable snake_case code and a Russian message. */
@@ -73,6 +74,7 @@ var (
 	errLocked             = apiError{http.StatusLocked, "locked", "Учётная запись временно заблокирована"}
 	errRateLimited        = apiError{http.StatusTooManyRequests, "rate_limited", "Слишком много запросов, повторите позже"}
 	errBusy               = apiError{http.StatusServiceUnavailable, "busy", "Сервер занят отдачей подложек, повторите позже"}
+	errQueryTimeout       = apiError{http.StatusServiceUnavailable, "query_timeout", "Запрос выполнялся слишком долго: уточните условия или повторите позже"}
 	errInternal           = apiError{http.StatusInternalServerError, "internal", "Внутренняя ошибка сервера"}
 )
 
@@ -156,6 +158,7 @@ var knownErrors = []struct {
 	{errCapDashboards, errTooManyDashboards},
 	{errCapWidgets, errTooManyWidgets},
 	{errShowBusy, apiShowBusy},
+	{store.ErrTimeout, errQueryTimeout},
 }
 
 /* knownError reports the client-facing form of err, if it is a known outcome. */

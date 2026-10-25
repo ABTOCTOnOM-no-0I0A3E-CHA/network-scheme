@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -220,11 +220,18 @@ describe("device window tabs", () => {
     expect(await screen.findByRole("tab", { name: ru.card.tab.cli })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("Данные: search filters the page and CSV exports the whole table with formulas neutralized", async () => {
+  it("Данные: search filters the page; CSV is exported by the server after a step-up check, with the same search and filter", async () => {
     ifaces = [...GENERIC_INTERFACES, { ...GENERIC_INTERFACES[0], if_index: 9, name: "=HYPERLINK(1)", port_kind: "other" }];
-    let href = "";
+    let probes = 0;
+    server.use(
+      http.get("*/api/auth/stepup-status", () => {
+        probes++;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    let link: { href: string; download: string } | undefined;
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-      href = this.href;
+      link = { href: this.getAttribute("href") ?? "", download: this.download };
     });
     wrap(<DeviceCard id={7} canPoll={false} canManage={false} />);
     const table = await screen.findByRole("table", { name: ru.card.tab.interfaces });
@@ -235,13 +242,11 @@ describe("device window tabs", () => {
     await userEvent.clear(screen.getByLabelText(ru.data.search));
     await userEvent.selectOptions(screen.getByLabelText(ru.data.filter), ru.card.down);
     expect(within(table).queryByText("Gi1/0/1")).toBeNull();
-    await userEvent.selectOptions(screen.getByLabelText(ru.data.filter), ru.data.all);
+    await userEvent.type(screen.getByLabelText(ru.data.search), " gi ");
     await userEvent.click(screen.getByRole("button", { name: ru.data.csv }));
-    expect(await screen.findByText(ru.data.exported.replace("{{count}}", "4"))).toBeInTheDocument();
+    await waitFor(() => expect(link).toBeDefined());
     click.mockRestore();
-    expect(href.startsWith("data:text/csv;charset=utf-8,")).toBe(true);
-    const csv = decodeURIComponent(href.slice(href.indexOf(",") + 1));
-    expect(csv).toContain(`"'=HYPERLINK(1)"`);
-    expect(csv.split(String.fromCharCode(13, 10))[0]).toContain(`"if_index","name"`);
+    expect(probes).toBe(1);
+    expect(link).toEqual({ href: "/api/devices/7/export/interfaces?q=gi&filter=down", download: "" });
   });
 });
