@@ -21,8 +21,8 @@ import { PhysicalTab } from "./PhysicalTab";
 import { ProfileForm } from "./ProfileForm";
 import { useProfiles } from "./profiles";
 
-type TabId = DeviceTable | "physical" | "config" | "cli" | "graphs" | "backups" | "profiles" | "journal" | "problems";
-const TABS: TabId[] = ["physical", "config", "cli", "interfaces", "arp", "mac", "vlans", "lldp", "entities", "routes", "graphs", "backups", "problems", "journal", "profiles"];
+export type TabId = DeviceTable | "physical" | "config" | "cli" | "graphs" | "backups" | "profiles" | "journal" | "problems";
+export const TABS: TabId[] = ["physical", "config", "cli", "interfaces", "arp", "mac", "vlans", "lldp", "entities", "routes", "graphs", "backups", "problems", "journal", "profiles"];
 const KINDS: CredKind[] = ["snmp2c", "snmp3", "ssh_read"];
 
 type Props = {
@@ -38,19 +38,23 @@ type Props = {
   canBackup?: boolean;
   /** Whether group names can be fetched (global admin). */
   canListGroups?: boolean;
+  /** Tab to open (from the URL); the interfaces tab by default. */
+  tab?: TabId;
+  /** Interface the graphs tab opens on. */
+  ifIndex?: number;
 };
 
 /** Device card: summary header with poll-now, edit form and inventory tabs. Every device-reported string is rendered as text. */
 export function DeviceCard(props: Props) {
-  /* keyed by device so tab, chart selection, paging and an open edit form never carry over to another device */
-  return <DeviceCardBody key={props.id} {...props} />;
+  /* keyed by device and requested tab so tab, chart selection, paging and an open edit form never carry over to another device or link */
+  return <DeviceCardBody key={`${props.id}:${props.tab ?? ""}:${props.ifIndex ?? ""}`} {...props} />;
 }
 
-function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false, canShow = false, canBackup = false }: Props) {
+function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups = false, canShow = false, canBackup = false, tab: initialTab, ifIndex }: Props) {
   const { t } = useTranslation();
   const device = useDevice(id);
-  const [tab, setTab] = useState<TabId>("interfaces");
-  const [chartIf, setChartIf] = useState<number | undefined>();
+  const [tab, setTab] = useState<TabId>(initialTab && (initialTab !== "cli" || canShow) ? initialTab : "interfaces");
+  const [chartIf, setChartIf] = useState<number | undefined>(ifIndex);
 
   if (device.isPending) return <p className="text-sm text-muted-foreground">{t("card.loading")}</p>;
   if (device.error) {

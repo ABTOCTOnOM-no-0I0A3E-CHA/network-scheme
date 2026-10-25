@@ -1889,6 +1889,109 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Global search over the visible devices
+         * @description Devices by name (substring) or address (prefix), ARP entries by IP address (prefix),
+         *     MACs from the forwarding databases and ARP tables (prefix of at least four hex digits,
+         *     any separators ":", "-", "." or none, any case; a dotted decimal query is not taken as a
+         *     MAC) and ports by name or alias (substring, from 3 characters). Only devices in the caller's devices.read
+         *     scope are searched; each type returns at most 50 items, "more" tells that there were more.
+         *     LIKE wildcards in q match literally. An absent, empty or shorter than 2 characters (after
+         *     trimming) q answers empty results. Panel sections are matched by the web client. Names,
+         *     aliases and port names are device data: render as text only.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Results by type */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            devices: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    id: number;
+                                    name: string;
+                                    address: string;
+                                }[];
+                            };
+                            ips: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    ip: string;
+                                    mac: string;
+                                    if_index: number;
+                                    /** @description Empty when the interface is unknown */
+                                    port_name: string;
+                                }[];
+                            };
+                            macs: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    mac: string;
+                                    /** @enum {string} */
+                                    source: "fdb" | "arp";
+                                    /** @description Set for source fdb; 0 is unknown */
+                                    vlan: number | null;
+                                    /** @description Set for source arp */
+                                    ip: string | null;
+                                    if_index: number;
+                                    /** @description Empty when the interface is unknown */
+                                    port_name: string;
+                                }[];
+                            };
+                            ports: {
+                                more: boolean;
+                                items: {
+                                    /** Format: int64 */
+                                    device_id: number;
+                                    device_name: string;
+                                    if_index: number;
+                                    name: string;
+                                    alias: string;
+                                }[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices/{id}/metrics/if": {
         parameters: {
             query?: never;

@@ -21,6 +21,23 @@ const inventory = [
   { id: 2, name: "edge-rtr", address: "198.51.100.7", group_id: 1, driver: "generic-snmp", model: "", firmware: "", insecure_protocols: false, state: "down", state_since: null },
 ];
 
+/* GET /api/search: devices from the inventory, the other types for fixed queries ("multi" hits every type) */
+let searchQs: string[] = [];
+const none = { items: [], more: false };
+const ipHit = { device_id: 2, device_name: "edge-rtr", ip: "10.0.0.5", mac: "02:aa:bb:cc:dd:ee", if_index: 7, port_name: "ge-0/0/7" };
+const macHit = { device_id: 2, device_name: "edge-rtr", mac: "02:aa:bb:cc:dd:ee", source: "fdb", vlan: 30, ip: null, if_index: 7, port_name: "ge-0/0/7" };
+const portHit = { device_id: 2, device_name: "edge-rtr", if_index: 7, name: "ge-0/0/7", alias: "<img src=x onerror=alert(1)> uplink" };
+function searchFor(q: string) {
+  const all = q === "multi";
+  const devices = inventory.filter((d) => all ? d.id === 2 : d.name.includes(q) || d.address.startsWith(q)).map(({ id, name, address }) => ({ id, name, address }));
+  return {
+    devices: { items: devices, more: false },
+    ips: all || q.startsWith("10.") ? { items: [ipHit], more: false } : none,
+    macs: all || q.startsWith("02:") ? { items: [macHit], more: true } : none,
+    ports: all || q.includes("uplink") ? { items: [portHit], more: false } : none,
+  };
+}
+
 const apiError = (status: number, code: string) =>
   HttpResponse.json({ error: { code, message: "RAW SERVER MESSAGE" } }, { status });
 
@@ -41,6 +58,14 @@ const server = setupServer(
   http.get("*/api/devices", () => HttpResponse.json(inventory)),
   http.get("*/api/devices/2", () => HttpResponse.json({ ...inventory[1], snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null })),
   http.get("*/api/devices/2/interfaces", () => HttpResponse.json({ items: [], next_offset: null })),
+  http.get("*/api/devices/2/arp", () => HttpResponse.json({ items: [], next_offset: null })),
+  http.get("*/api/devices/2/mac", () => HttpResponse.json({ items: [], next_offset: null })),
+  http.get("*/api/devices/2/metrics/if", () => HttpResponse.json({ step_s: 0, points: [] })),
+  http.get("*/api/search", ({ request }) => {
+    const q = new URL(request.url).searchParams.get("q") ?? "";
+    searchQs.push(q);
+    return HttpResponse.json(searchFor(q));
+  }),
   http.get("*/api/groups", () => apiError(403, "forbidden")),
   http.get("*/api/problems", () => HttpResponse.json({ items: [], next_cursor: null })),
   http.get("*/api/map/views", () => HttpResponse.json([])),
@@ -80,6 +105,7 @@ afterAll(() => server.close());
 beforeEach(() => {
   loggedIn = false;
   roles = [];
+  searchQs = [];
   loginResponse = () => HttpResponse.json({ stage: "totp", challenge: "ch1" });
   putImageData.mockClear();
 });
@@ -252,6 +278,7 @@ describe("shell", () => {
   });
 
   it("palette finds a device by name or by address and opens the list on it", async () => {
+    roles = [{ role: "viewer", group_id: null }];
     const user = userEvent.setup();
     const router = renderApp("/");
     await screen.findByRole("navigation", { name: ru.nav.label });
@@ -264,6 +291,80 @@ describe("shell", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "core");
     expect(await screen.findByRole("option", { name: /core-sw/ })).toBeInTheDocument();
+  });
+
+  it("palette debounces the query: one search for a typed word, none for one character", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    const user = userEvent.setup();
+    renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    await user.keyboard("{Control>}k{/Control}");
+    const input = screen.getByPlaceholderText(ru.palette.placeholder);
+    await user.type(input, "e");
+    await new Promise((r) => setTimeout(r, 400));
+    expect(searchQs).toEqual([]);
+    await user.type(input, "dge");
+    expect(await screen.findByRole("option", { name: /edge-rtr/ })).toBeInTheDocument();
+    expect(searchQs).toEqual(["edge"]);
+    expect(input).toHaveAttribute("maxlength", "100");
+    /* the earlier results do not linger under a query too short to search */
+    await user.clear(input);
+    await user.type(input, "e");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+  });
+
+  it("palette groups results by type and opens the chosen one from the keyboard", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    const user = userEvent.setup();
+    const router = renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "multi");
+    await screen.findByRole("option", { name: /10\.0\.0\.5/ });
+    const headings = [...document.querySelectorAll("[cmdk-group-heading]")].map((h) => h.textContent);
+    expect(headings).toEqual([ru.palette.devices, ru.palette.ips, ru.palette.macs, ru.palette.ports]);
+    expect(screen.getByText(ru.palette.more)).toBeInTheDocument(); /* the MAC type had more results */
+    /* device-reported strings are text: the alias markup is shown, never parsed */
+    expect(screen.getByRole("option", { name: /<img src=x onerror=alert\(1\)> uplink/ })).toBeInTheDocument();
+    expect(document.querySelector("dialog img")).toBeNull();
+    /* the first item is selected; three steps down is the port */
+    await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{Enter}");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/devices/2"));
+    expect(router.state.location.search).toEqual({ tab: "graphs", if: 7 });
+    expect(await screen.findByRole("tab", { name: ru.card.tab.graphs })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByPlaceholderText(ru.palette.placeholder)).not.toBeInTheDocument();
+  });
+
+  it("palette opens the ARP and FDB tabs for IP and MAC results", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    const user = userEvent.setup();
+    const router = renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    for (const [q, name, tab] of [["10.0.0", /10\.0\.0\.5/, "arp"], ["02:aa", /FDB · VLAN 30/, "mac"]] as const) {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.type(screen.getByPlaceholderText(ru.palette.placeholder), q);
+      await user.click(await screen.findByRole("option", { name }));
+      await waitFor(() => expect(router.state.location.search).toEqual({ tab }));
+      expect(await screen.findByRole("tab", { name: ru.card.tab[tab] })).toHaveAttribute("aria-selected", "true");
+    }
+  });
+
+  it("palette finds panel sections the user may open", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    const user = userEvent.setup();
+    const router = renderApp("/");
+    await screen.findByRole("navigation", { name: ru.nav.label });
+    await user.keyboard("{Control>}k{/Control}");
+    const input = screen.getByPlaceholderText(ru.palette.placeholder);
+    /* the system health section is not offered to a viewer */
+    await user.type(input, ru.nav.health.slice(0, 5));
+    expect(await screen.findByText(ru.palette.empty)).toBeInTheDocument();
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    await user.clear(input);
+    await user.type(input, ru.nav.map.slice(0, 3).toLowerCase());
+    expect(await screen.findByRole("option", { name: ru.nav.map })).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/map"));
   });
 
   it("problems, templates and maintenance are real screens reachable from the menu", async () => {

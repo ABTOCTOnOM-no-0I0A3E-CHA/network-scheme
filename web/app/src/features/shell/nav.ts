@@ -1,3 +1,5 @@
+import type { Session } from "@/features/auth/useSession";
+import { canManageMaintenance, canManageTriggers, canReadSystem } from "@/features/auth/permissions";
 import { Activity, AlertTriangle, DatabaseBackup, FileClock, GitPullRequestArrow, LayoutDashboard, ListChecks, Map, Radar, ScrollText, Server, Settings, Wrench, type LucideIcon } from "lucide-react";
 
 export type NavItem = { key: string; path: string; icon: LucideIcon };
@@ -18,3 +20,11 @@ export const NAV: NavItem[] = [
   { key: "health", path: "/health", icon: Activity },
   { key: "settings", path: "/settings", icon: Settings },
 ];
+
+/** Whether a section is offered to the user (sidebar, command palette). UI hint only: the API decides. */
+export function navVisible(key: string, session: Session | null | undefined): boolean {
+  if (key === "health") return canReadSystem(session);
+  if (key === "templates") return canManageTriggers(session);
+  if (key === "maintenance") return canManageMaintenance(session);
+  return true;
+}

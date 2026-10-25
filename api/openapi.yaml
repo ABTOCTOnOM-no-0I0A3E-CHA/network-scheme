@@ -973,6 +973,106 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/search:
+    get:
+      summary: Global search over the visible devices
+      description: |
+        Devices by name (substring) or address (prefix), ARP entries by IP address (prefix),
+        MACs from the forwarding databases and ARP tables (prefix of at least four hex digits,
+        any separators ":", "-", "." or none, any case; a dotted decimal query is not taken as a
+        MAC) and ports by name or alias (substring, from 3 characters). Only devices in the caller's devices.read
+        scope are searched; each type returns at most 50 items, "more" tells that there were more.
+        LIKE wildcards in q match literally. An absent, empty or shorter than 2 characters (after
+        trimming) q answers empty results. Panel sections are matched by the web client. Names,
+        aliases and port names are device data: render as text only.
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: Results by type
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices, ips, macs, ports]
+                properties:
+                  devices:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [id, name, address]
+                          properties:
+                            id: { type: integer, format: int64 }
+                            name: { type: string }
+                            address: { type: string }
+                  ips:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, ip, mac, if_index, port_name]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            ip: { type: string }
+                            mac: { type: string }
+                            if_index: { type: integer }
+                            port_name: { type: string, description: Empty when the interface is unknown }
+                  macs:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, mac, source, vlan, ip, if_index, port_name]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            mac: { type: string }
+                            source: { type: string, enum: [fdb, arp] }
+                            vlan: { type: [integer, "null"], description: "Set for source fdb; 0 is unknown" }
+                            ip: { type: [string, "null"], description: Set for source arp }
+                            if_index: { type: integer }
+                            port_name: { type: string, description: Empty when the interface is unknown }
+                  ports:
+                    type: object
+                    required: [items, more]
+                    properties:
+                      more: { type: boolean }
+                      items:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          required: [device_id, device_name, if_index, name, alias]
+                          properties:
+                            device_id: { type: integer, format: int64 }
+                            device_name: { type: string }
+                            if_index: { type: integer }
+                            name: { type: string }
+                            alias: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /api/devices/{id}/metrics/if:
     get:
       summary: Rate series of one interface, oldest first
