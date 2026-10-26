@@ -145,14 +145,14 @@ func TestExecutorRoleGrants(t *testing.T) {
 	const dml = "SELECT INSERT UPDATE DELETE"
 	want := map[string]string{
 		"exec.registry_counter": dml, "exec.write_device": dml, "exec.write_grant": dml, "exec.change_totp": dml,
-		"exec.exec_state": dml, "exec.model_profile": dml, "exec.write_credential": dml,
+		"exec.exec_state": "SELECT INSERT UPDATE", "exec.model_profile": dml, "exec.write_credential": dml,
 		"exec.audit_head":        "SELECT UPDATE",
 		"execpub.freeze_request": "SELECT DELETE",
 		"execpub.alert":          dml, "execpub.device_busy": dml, "execpub.session_summary": dml, "execpub.status": dml,
 		"core.device":            "SELECT(address,driver,firmware,group_id,id,model,name)",
 		`core."user"`:            "SELECT(disabled,id,username)",
 		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
-		"backups.backup_state":   dml,
+		"backups.backup_state":   "SELECT INSERT UPDATE",
 	}
 	for _, rel := range execImmutable {
 		want[rel] = "SELECT INSERT"
@@ -255,13 +255,22 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 	}
 
 	api, exe := env.Pool("nms_api"), env.Pool("nms_executor")
-	if _, err := api.Exec(ctx, `INSERT INTO execpub.freeze_request (requested_by) VALUES (7)`); err != nil {
-		t.Fatalf("api freeze request: %v", err)
+	/*
+		A pending request stays one row: repeated requests (a flood) succeed
+		without growing it. The api uses ON CONFLICT without a target (a target
+		needs SELECT on it, which the api does not get).
+	*/
+	for i := range 3 {
+		if _, err := api.Exec(ctx, `INSERT INTO execpub.freeze_request (requested_by) VALUES ($1) ON CONFLICT DO NOTHING`, 7+i); err != nil {
+			t.Fatalf("api freeze request %d: %v", i, err)
+		}
 	}
 	for _, sql := range []string{
-		`INSERT INTO execpub.freeze_request (requested_by, at) VALUES (7, '2000-01-01')`,
-		`INSERT INTO execpub.freeze_request (id, requested_by) OVERRIDING SYSTEM VALUE VALUES (1000000, 7)`,
-		`INSERT INTO execpub.freeze_request (requested_by) VALUES (7) RETURNING id`,
+		`INSERT INTO execpub.freeze_request (requested_by) VALUES (8) ON CONFLICT (singleton) DO NOTHING`,
+		`INSERT INTO execpub.freeze_request (requested_by, at) VALUES (7, '2000-01-01') ON CONFLICT DO NOTHING`,
+		`INSERT INTO execpub.freeze_request (singleton, requested_by) VALUES (true, 7) ON CONFLICT DO NOTHING`,
+		`INSERT INTO execpub.freeze_request (requested_by) VALUES (7) ON CONFLICT (singleton) DO UPDATE SET requested_by = 7`,
+		`INSERT INTO execpub.freeze_request (requested_by) VALUES (7) ON CONFLICT DO NOTHING RETURNING at`,
 		`SELECT 1 FROM execpub.freeze_request`,
 		`INSERT INTO execpub.alert (kind, severity, text) VALUES ('x', 'info', 'x')`,
 		`INSERT INTO execpub.status (enabled, frozen) VALUES (false, false)`,
@@ -292,7 +301,14 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 	/* The executor consumes requests (read, delete) and publishes everything else. */
 	var n int
 	if err := exe.QueryRow(ctx, `WITH d AS (DELETE FROM execpub.freeze_request WHERE requested_by = 7 RETURNING 1) SELECT count(*) FROM d`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("executor consumes freeze requests: n %d, err %v", n, err)
+		t.Errorf("executor consumes the single freeze request: n %d, err %v", n, err)
+	}
+	/* Once consumed, the api can ask again. */
+	if _, err := api.Exec(ctx, `INSERT INTO execpub.freeze_request (requested_by) VALUES (9) ON CONFLICT DO NOTHING`); err != nil {
+		t.Errorf("api freeze request after consumption: %v", err)
+	}
+	if err := exe.QueryRow(ctx, `WITH d AS (DELETE FROM execpub.freeze_request WHERE requested_by = 9 RETURNING 1) SELECT count(*) FROM d`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("second freeze request: n %d, err %v", n, err)
 	}
 	requireDenied(t, "nms_executor", `INSERT INTO execpub.freeze_request (requested_by) VALUES (1)`)
 	requireDenied(t, "nms_executor", `UPDATE execpub.freeze_request SET requested_by = 1`)
@@ -391,10 +407,18 @@ func TestExecImmutableTablesRejectModificationForEveryRole(t *testing.T) {
 	if err := env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM exec.audit_head`).Scan(&rows); err != nil || rows != 1 {
 		t.Errorf("audit_head rows = %d, err %v", rows, err)
 	}
-	/* audit_event ids come from the identity only. */
+	/*
+		audit_event ids come from the identity only: a plain explicit id is refused
+		by GENERATED ALWAYS, one with OVERRIDING SYSTEM VALUE by the id guard.
+	*/
 	_, err = exe.Exec(ctx, `INSERT INTO exec.audit_event (id, ts, action, result, payload, prev_hash, hash)
 		VALUES (1, now(), 'x', 'ok', '\x00', `+mac32+`, `+mac32+`)`)
 	requireCode(t, err, "428C9", "explicit audit_event id")
+	for _, role := range []string{"nms_executor", "nms_migrator"} {
+		_, err = env.Pool(role).Exec(ctx, `INSERT INTO exec.audit_event (id, ts, action, result, payload, prev_hash, hash)
+			OVERRIDING SYSTEM VALUE VALUES (1000000, now(), 'x', 'ok', '\x00', `+mac32+`, `+mac32+`)`)
+		requireCode(t, err, "42501", role+": audit_event id with OVERRIDING SYSTEM VALUE")
+	}
 
 	/* Registry rows are the executor's to change, but never by TRUNCATE. */
 	for _, sql := range []string{
@@ -478,7 +502,7 @@ func TestExecChecks(t *testing.T) {
 		"credential nonce 15":    `INSERT INTO exec.write_credential (device_id, kind, ciphertext, created_at, nonce, version, mac) VALUES (920002, 'ssh_write', '\x01', now(), decode(repeat('00', 15), 'hex'), 1, M)`,
 		"state not singleton":    `INSERT INTO exec.exec_state (singleton, "freeze", version, mac) VALUES (false, true, 1, M)`,
 		"counter not singleton":  `INSERT INTO exec.registry_counter (singleton, seq, mac) VALUES (false, 0, M)`,
-		"counter negative":       `INSERT INTO exec.registry_counter (singleton, seq, mac) VALUES (false, -1, M)`,
+		"counter negative":       `INSERT INTO exec.registry_counter (singleton, seq, mac) VALUES (true, -1, M)`,
 		"profile array":          `INSERT INTO exec.model_profile (write_driver, model_re, firmware_re, strategies, note, version, mac) VALUES ('esr', 'a', 'b', '[]', 'n', 1, M)`,
 		"profile empty note":     `INSERT INTO exec.model_profile (write_driver, model_re, firmware_re, note, version, mac) VALUES ('esr', 'a', 'b', '', 1, M)`,
 		"profile model_re 257":   `INSERT INTO exec.model_profile (write_driver, model_re, firmware_re, note, version, mac) VALUES ('esr', repeat('a', 257), 'b', 'n', 1, M)`,
@@ -506,7 +530,6 @@ func TestExecChecks(t *testing.T) {
 		"summary post sha 31":    `INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status, post_sha256) VALUES (gen_random_uuid(), 1, 1, now(), 'closed', decode(repeat('00', 31), 'hex'))`,
 		"status not singleton":   `INSERT INTO execpub.status (singleton, enabled, frozen) VALUES (false, false, false)`,
 		"busy device 0":          `INSERT INTO execpub.device_busy (device_id, session_id) VALUES (0, gen_random_uuid())`,
-		"config source":          `INSERT INTO backups.config_version (device_id, source, sha256, size, masked, full_ct, full_dek_ct) VALUES (1, 'auto', M, 0, '', '\x00', '\x00')`,
 	}
 	for name, sql := range bad {
 		_, err := exe.Exec(ctx, strings.ReplaceAll(strings.ReplaceAll(sql, " M)", " "+mac32+")"), " M,", " "+mac32+","))
@@ -518,13 +541,80 @@ func TestExecChecks(t *testing.T) {
 	requireCode(t, err, "23514", "freeze request by user 0")
 	_, err = exe.Exec(ctx, `INSERT INTO exec.recording_chunk (session_id, device_id, n, ct, dek_ct, mac) VALUES ('`+sid+`', 920099, 5, '\x01', '\x01', `+mac32+`)`)
 	requireCode(t, err, "23503", "chunk of a device outside the session")
+}
 
-	/* The new backup sources are accepted, for the executor's own versions. */
+/* Session and executor-scheduler versions come from the executor alone, and the executor writes nothing else. */
+func TestConfigVersionSourcesByWriter(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
 	dev, _ := backupFixture(t, "10.31.0")
-	for _, source := range []string{"post_session", "executor", "pre_session"} {
-		if _, err := exe.Exec(ctx, insertVersion, dev, source, make([]byte, 32), 1, "x", []byte("c"), []byte("d")); err != nil {
-			t.Errorf("executor config_version source %s: %v", source, err)
+	insert := func(role, source string) error {
+		_, err := env.Pool(role).Exec(ctx, insertVersion, dev, source, make([]byte, 32), 1, "x", []byte("c"), []byte("d"))
+		return err
+	}
+	executorSources, pollerSources := []string{"pre_session", "post_session", "executor"}, []string{"schedule", "event", "manual"}
+	for _, source := range executorSources {
+		if err := insert("nms_executor", source); err != nil {
+			t.Errorf("executor source %s: %v", source, err)
 		}
+		requireCode(t, insert("nms_poller", source), "42501", "poller source "+source)
+		requireCode(t, insert("nms_migrator", source), "42501", "owner source "+source)
+	}
+	for _, source := range pollerSources {
+		if err := insert("nms_poller", source); err != nil {
+			t.Errorf("poller source %s: %v", source, err)
+		}
+		requireCode(t, insert("nms_executor", source), "42501", "executor source "+source)
+	}
+	requireCode(t, insert("nms_poller", "auto"), "23514", "unknown source")
+	var n int
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM backups.config_version WHERE device_id = $1`, dev).Scan(&n); err != nil || n != 6 {
+		t.Errorf("stored versions = %d, want 6 (err %v)", n, err)
+	}
+}
+
+/* The executor cannot switch off the guards, and nothing in exec/execpub has another owner or default privileges. */
+func TestExecSchemaOwnershipAndTriggerBypass(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	for _, sql := range []string{
+		`ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only`,
+		`ALTER TABLE exec.session DISABLE TRIGGER ALL`,
+		`ALTER TABLE backups.config_version DISABLE TRIGGER config_version_check_source`,
+		`SET session_replication_role = replica`,
+	} {
+		requireDenied(t, "nms_executor", sql)
+	}
+	root := env.Pool("postgres")
+	rows, err := root.Query(ctx, `
+		SELECT format('%I.%I %s', n.nspname, c.relname, r.rolname) FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner
+		WHERE n.nspname IN ('exec', 'execpub') AND r.rolname <> 'nms_migrator'
+		UNION ALL
+		SELECT format('schema %I %s', n.nspname, r.rolname) FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+		WHERE n.nspname IN ('exec', 'execpub') AND r.rolname <> 'nms_migrator'
+		UNION ALL
+		SELECT format('function %I.%I %s', n.nspname, p.proname, r.rolname) FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner
+		WHERE n.nspname IN ('exec', 'execpub') AND r.rolname <> 'nms_migrator'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(foreign) > 0 {
+		t.Errorf("not owned by nms_migrator: %v", foreign)
+	}
+	var owned, acls int
+	if err := root.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname IN ('exec', 'execpub')`).Scan(&owned); err != nil || owned < 20 {
+		t.Errorf("exec/execpub relations = %d: the enumeration is broken (err %v)", owned, err)
+	}
+	if err := root.QueryRow(ctx, `SELECT count(*) FROM pg_default_acl d JOIN pg_namespace n ON n.oid = d.defaclnamespace
+		WHERE n.nspname IN ('exec', 'execpub')`).Scan(&acls); err != nil || acls != 0 {
+		t.Errorf("default privileges in exec/execpub = %d (err %v)", acls, err)
 	}
 }
 

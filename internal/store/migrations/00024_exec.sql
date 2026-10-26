@@ -15,7 +15,9 @@
 -- reads device_busy and session_summary.
 --
 -- No foreign keys into core: the api owns core, and a cascade or a restriction
--- would let it delete or pin executor rows. Device and user ids are never reused.
+-- would let it delete or pin executor rows. The executor never treats a
+-- core.user id as a stable identity: what binds a user are the AAD of the
+-- change TOTP secret and the username snapshot (deny-only, security.md 5.1a).
 
 CREATE SCHEMA exec AUTHORIZATION nms_migrator;
 CREATE SCHEMA execpub AUTHORIZATION nms_migrator;
@@ -223,10 +225,17 @@ CREATE TRIGGER audit_event_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON ex
 CREATE TRIGGER audit_head_keep_row BEFORE DELETE OR TRUNCATE ON exec.audit_head
     FOR EACH STATEMENT EXECUTE FUNCTION exec.reject_modification();
 
+-- audit_event ids come from the identity only, even with OVERRIDING SYSTEM VALUE.
+CREATE TRIGGER audit_event_guard_id_insert BEFORE INSERT ON exec.audit_event
+    FOR EACH ROW EXECUTE FUNCTION core.guard_identity_id();
+
 -- execpub: executor -> panel, and the panel's single "freeze on" request.
 
+-- At most one pending request: the api inserts with ON CONFLICT DO NOTHING (an
+-- existing row already means "freeze pending"), the executor deletes it once
+-- frozen. Flooding cannot grow the table.
 CREATE TABLE execpub.freeze_request (
-    id           bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    singleton    boolean     PRIMARY KEY DEFAULT true CHECK (singleton),
     requested_by bigint      NOT NULL CHECK (requested_by > 0),
     at           timestamptz NOT NULL DEFAULT now()
 );
@@ -277,13 +286,33 @@ ALTER TABLE backups.config_version
         CHECK (source IN ('schedule', 'event', 'manual', 'pre_session', 'post_session', 'executor')) NOT VALID;
 ALTER TABLE backups.config_version VALIDATE CONSTRAINT config_version_source_check;
 
+-- Sources by writer: the session and executor-scheduler sources belong to the
+-- executor alone, and the executor writes nothing else (it cannot pass for the
+-- poller). Runs with the caller's rights, so current_user is the inserting role.
+-- +goose StatementBegin
+CREATE FUNCTION backups.config_version_check_source() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF (NEW.source IN ('pre_session', 'post_session', 'executor')) IS DISTINCT FROM (current_user = 'nms_executor') THEN
+        RAISE EXCEPTION 'config_version source % is not allowed for %', NEW.source, current_user
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END $$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION backups.config_version_check_source() FROM PUBLIC;
+CREATE TRIGGER config_version_check_source BEFORE INSERT ON backups.config_version
+    FOR EACH ROW EXECUTE FUNCTION backups.config_version_check_source();
+
 REVOKE ALL ON ALL TABLES IN SCHEMA exec, execpub FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA exec, execpub FROM PUBLIC;
 
 -- nms_executor
 GRANT USAGE ON SCHEMA exec, execpub, core, backups TO nms_executor;
 GRANT SELECT, INSERT, UPDATE, DELETE ON exec.registry_counter, exec.write_device, exec.write_grant,
-    exec.change_totp, exec.exec_state, exec.model_profile, exec.write_credential TO nms_executor;
+    exec.change_totp, exec.model_profile, exec.write_credential TO nms_executor;
+-- exec_state is never deleted (its absence means frozen anyway).
+GRANT SELECT, INSERT, UPDATE ON exec.exec_state TO nms_executor;
 GRANT SELECT, INSERT ON exec.session, exec.session_device, exec.session_event, exec.recording_chunk,
     exec.recording_manifest, exec.audit_event TO nms_executor;
 GRANT SELECT, UPDATE ON exec.audit_head TO nms_executor;
@@ -300,13 +329,12 @@ GRANT SELECT ON backups.config_version TO nms_executor;
 GRANT INSERT (device_id, source, sha256, size, masked, full_ct, full_dek_ct, drift, taken_by_job)
     ON backups.config_version TO nms_executor;
 GRANT USAGE ON SEQUENCE backups.config_version_id_seq TO nms_executor;
-GRANT SELECT, INSERT, UPDATE, DELETE ON backups.backup_state TO nms_executor;
+GRANT SELECT, INSERT, UPDATE ON backups.backup_state TO nms_executor;
 
 -- nms_api: reads the channel, asks for "freeze on" and nothing else.
 GRANT USAGE ON SCHEMA execpub TO nms_api;
 GRANT SELECT ON execpub.alert, execpub.device_busy, execpub.session_summary, execpub.status TO nms_api;
 GRANT INSERT (requested_by) ON execpub.freeze_request TO nms_api;
-GRANT USAGE ON SEQUENCE execpub.freeze_request_id_seq TO nms_api;
 
 -- nms_poller: skips busy devices and drift right after a session.
 GRANT USAGE ON SCHEMA execpub TO nms_poller;

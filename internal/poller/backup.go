@@ -54,7 +54,6 @@ const (
 	sourceSchedule = "schedule"
 	sourceEvent    = "event"
 	sourceManual   = "manual"
-	sourcePreSess  = "pre_session"
 )
 
 /* numIntervals counts the interval settings of a device: the poll classes and the backup interval, which has no poll class. */
@@ -167,12 +166,11 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 		return fail(errSealFailed, err)
 	}
 	/*
-		Drift: a change with an earlier version on record, unless it was taken
-		right before a change session of the panel (source pre_session, which
-		phase 3 never produces: every change is drift). The first version of a
-		device is the baseline, not drift.
+		Drift: a change with an earlier version on record (pre- and post-session
+		versions are the executor's, the database refuses them from the poller).
+		The first version of a device is the baseline, not drift.
 	*/
-	drift := last != nil && source != sourcePreSess
+	drift := last != nil
 	if err := p.storeVersion(ctx, d.ID, source, sum, len(raw), masked, ct, dekCT, drift, jobID); err != nil {
 		return fail(errStoreFailed, err)
 	}
