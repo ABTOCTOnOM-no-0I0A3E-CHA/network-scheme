@@ -15,10 +15,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/store"
 )
@@ -61,8 +65,9 @@ func run(ctx context.Context, args []string) error {
 
 /*
 serve checks that every file the executor needs is present and well-formed,
-opens the database and stays up until SIGTERM/SIGINT. It listens nowhere yet
-and touches no device.
+opens the database, verifies the registry (bootstrapping a fresh install,
+freezing on tampering) and keeps verifying it every 30 s until
+SIGTERM/SIGINT. It listens nowhere yet and touches no device.
 */
 func serve(ctx context.Context, cfg config.Config) error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -79,8 +84,18 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer pool.Close()
-	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()))
-	<-ctx.Done()
+	keys, err := seal.Load(cfg.SealingKeyFile)
+	if err != nil {
+		return err
+	}
+	defer keys.Wipe()
+	guard := freeze.New(registry.New(pool, keys, filepath.Join(cfg.StateDir, "state")), pool, log)
+	if err := guard.Start(ctx); err != nil {
+		return err
+	}
+	frozen, _ := guard.Frozen()
+	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()), slog.Bool("frozen", frozen))
+	guard.Run(ctx)
 	log.Info("shutting down")
 	return nil
 }

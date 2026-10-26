@@ -66,7 +66,7 @@ egress_file: %q
 	return cfgPath, secrets
 }
 
-/* run connects as nms_executor with the installer's secrets, is healthy while up and stops on cancel. */
+/* run connects as nms_executor with the installer's secrets, bootstraps the registry, is healthy while up and stops on cancel. */
 func TestRunStaysUpAndIsHealthy(t *testing.T) {
 	cfgPath, _ := writeConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,6 +79,9 @@ func TestRunStaysUpAndIsHealthy(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("run returned while up: %v", err)
 	case <-time.After(2 * time.Second):
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cfgPath), "state", "state")); err != nil {
+		t.Fatalf("state file: %v", err)
 	}
 	cancel()
 	select {
