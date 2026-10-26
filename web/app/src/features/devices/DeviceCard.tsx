@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { LineChart } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -58,6 +58,8 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
   const device = useDevice(id);
   const [tab, setTab] = useState<TabId>(initialTab && (initialTab !== "cli" || canShow) ? initialTab : "interfaces");
   const [chartIf, setChartIf] = useState<number | undefined>(ifIndex);
+  /* several cards can be open at once (device windows): element ids are per card */
+  const uid = useId();
 
   if (device.isPending) return <p className="text-sm text-muted-foreground">{t("card.loading")}</p>;
   if (device.error) {
@@ -85,9 +87,9 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
             key={k}
             type="button"
             role="tab"
-            id={`tab-${k}`}
+            id={`${uid}tab-${k}`}
             aria-selected={tab === k}
-            aria-controls="tab-panel"
+            aria-controls={`${uid}tab-panel`}
             className={cn("rounded-t-md px-3 py-2 text-sm", tab === k ? "border-b-2 border-primary font-medium" : "text-muted-foreground hover:text-foreground")}
             onClick={() => setTab(k)}
           >
@@ -95,7 +97,7 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
           </button>
         ))}
       </div>
-      <div role="tabpanel" id="tab-panel" aria-labelledby={`tab-${tab}`}>
+      <div role="tabpanel" id={`${uid}tab-panel`} aria-labelledby={`${uid}tab-${tab}`}>
         {/* keyed by tab so paging state never carries over between tables */}
         <TabBody
           key={tab}
