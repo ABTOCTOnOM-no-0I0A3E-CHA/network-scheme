@@ -5,8 +5,9 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errText } from "@/features/common/errText";
+import { useDeviceWindows } from "@/features/devices/DeviceWindows";
 import { NetworkMap } from "@/features/map/NetworkMap";
-import { useOpenProblemSeverity, useTopology, useViews } from "@/features/map/useTopology";
+import { useOpenProblems, useTopology, useViews } from "@/features/map/useTopology";
 
 const QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -35,11 +36,12 @@ export function MiniMap({ viewId, className = "", fill = false }: { viewId?: num
   const { t } = useTranslation();
   const navigate = useNavigate();
   const reduced = useReducedMotion();
+  const windows = useDeviceWindows();
   const views = useViews();
   const id = viewId ?? views.data?.[0]?.id;
   const view = views.data?.find((v) => v.id === id);
   const topo = useTopology(id, views.isSuccess);
-  const severity = useOpenProblemSeverity(false);
+  const problems = useOpenProblems(false);
   const err = views.error ?? topo.error;
 
   return (
@@ -65,9 +67,10 @@ export function MiniMap({ viewId, className = "", fill = false }: { viewId?: num
             compact
             key={id ?? 0}
             topology={topo.data}
-            severity={severity}
+            severity={problems.severity}
+            problems={problems.counts}
             backgroundUrl={view?.background_id != null ? `/api/map/backgrounds/${view.background_id}` : undefined}
-            onOpenDevice={(d) => void navigate({ to: "/devices/$id", params: { id: String(d) } })}
+            onOpenDevice={(d, name) => (windows ? windows.open(d, name) : void navigate({ to: "/devices/$id", params: { id: String(d) } }))}
           />
         )}
       </div>

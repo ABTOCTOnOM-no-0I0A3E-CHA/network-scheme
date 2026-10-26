@@ -4,6 +4,8 @@ import type { MapModel, ModelNode } from "./semanticZoom";
 export type SyncOptions = {
   /** Devices may be dragged (map.manage and a view to store the positions in). */
   canDrag: boolean;
+  /** Nodes the user is moving right now (devices carried with a zone): a refresh must not move them; nor a grabbed one. */
+  moving?: ReadonlySet<string>;
 };
 
 /* distance (px) below which a position is considered unchanged */
@@ -42,20 +44,17 @@ export function syncElements(cy: Core, model: MapModel, o: SyncOptions): string[
         const pos = n.pos ?? { x: (placed % cols) * 60, y: Math.floor(placed / cols) * 60 };
         if (!n.pos) placed++;
         if (!n.pos && n.kind === "device") needLayout.push(n.id);
-        add.push({ group: "nodes", data: { id: n.id, kind: n.kind, ...n.data, ...(n.parent ? { parent: n.parent } : {}) }, position: pos, grabbable: o.canDrag && n.kind === "device" });
+        add.push({ group: "nodes", data: { id: n.id, kind: n.kind, ...n.data }, position: pos, grabbable: o.canDrag && n.kind === "device" });
         continue;
       }
       existing.push(n);
     }
-    /* new nodes first: an existing device may move into a new area */
     cy.add(add);
     for (const n of existing) {
       const node = cy.getElementById(n.id) as NodeSingular;
       const d = changed(node, n.data);
       if (d) node.data(d);
-      const parent = node.data("parent") as string | undefined;
-      if (parent !== n.parent) node.move({ parent: n.parent ?? null });
-      if (n.pos) {
+      if (n.pos && !node.grabbed() && !o.moving?.has(n.id)) {
         const p = node.position();
         if (Math.abs(p.x - n.pos.x) > EPS || Math.abs(p.y - n.pos.y) > EPS) node.position(n.pos);
       }

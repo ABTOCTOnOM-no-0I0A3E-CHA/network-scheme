@@ -1,9 +1,12 @@
 import ELK, { type ElkNode } from "elkjs/lib/elk-api";
 import { deviceEid, type Topology } from "./semanticZoom";
+import { LABEL_H, LABEL_W, NODE_H } from "./style";
 
 export type Pos = { x: number; y: number };
 
-const NODE = 40;
+/* the box a device takes in the layout: the pictogram with its two-line label below; a position is the pictogram centre */
+const BOX_W = LABEL_W;
+const BOX_H = NODE_H + LABEL_H;
 /*
  * Measured with ELK 0.12: cheap layered options take ~6 s for 1500 devices and ~110 s for 5000 (force: minutes already for
  * 1200). Above this many devices the devices are only packed into a grid; the admin pins what matters.
@@ -29,8 +32,8 @@ export function buildElkGraph(topo: Topology): ElkNode {
     ? {
         "elk.algorithm": "layered",
         "elk.direction": "DOWN",
-        "elk.spacing.nodeNode": "40",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "60",
+        "elk.spacing.nodeNode": "28",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "44",
         "elk.layered.nodePlacement.strategy": "SIMPLE",
         "elk.layered.cycleBreaking.strategy": "GREEDY",
         "elk.layered.layering.strategy": "LONGEST_PATH",
@@ -38,7 +41,7 @@ export function buildElkGraph(topo: Topology): ElkNode {
         "elk.layered.crossingMinimization.strategy": "INTERACTIVE",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]",
       }
-    : { "elk.algorithm": "org.eclipse.elk.box", "elk.spacing.nodeNode": "40", "elk.padding": "[top=0,left=0,bottom=0,right=0]" };
+    : { "elk.algorithm": "org.eclipse.elk.box", "elk.spacing.nodeNode": "28", "elk.padding": "[top=0,left=0,bottom=0,right=0]" };
   const known = new Set(topo.areas.map((a) => a.id));
   const keyOf = (n: Topology["nodes"][number]) => (n.area_id !== undefined && known.has(n.area_id) ? n.area_id : OUTSIDE);
   const groups = new Map<number, ElkNode>();
@@ -51,7 +54,7 @@ export function buildElkGraph(topo: Topology): ElkNode {
   for (const n of topo.nodes) {
     const key = keyOf(n);
     where.set(n.device_id, key);
-    group(key).children!.push({ id: deviceEid(n.device_id), width: NODE, height: NODE });
+    group(key).children!.push({ id: deviceEid(n.device_id), width: BOX_W, height: BOX_H });
   }
   /* links between groups do not take part: they would only pull the groups apart inside their rectangles */
   for (const l of topo.links) {
@@ -88,13 +91,13 @@ export function placeDevices(laid: ElkNode, topo: Topology, fixed?: ReadonlyMap<
   let right = topo.areas.reduce((m, a) => Math.max(m, a.x + a.w), -Infinity);
   let top = topo.areas.reduce((m, a) => Math.min(m, a.y), Infinity);
   for (const p of fixed?.values() ?? []) {
-    right = Math.max(right, p.x + NODE / 2);
-    top = Math.min(top, p.y - NODE / 2);
+    right = Math.max(right, p.x + BOX_W / 2);
+    top = Math.min(top, p.y - NODE_H / 2);
   }
 
   for (const g of laid.children ?? []) {
     const key = Number(g.id.slice(1));
-    const kids = (g.children ?? []).map((c) => ({ id: c.id, x: (c.x ?? 0) + (c.width ?? NODE) / 2, y: (c.y ?? 0) + (c.height ?? NODE) / 2 }));
+    const kids = (g.children ?? []).map((c) => ({ id: c.id, x: (c.x ?? 0) + (c.width ?? BOX_W) / 2, y: (c.y ?? 0) + NODE_H / 2 }));
     if (kids.length === 0) continue;
     const minX = Math.min(...kids.map((k) => k.x));
     const minY = Math.min(...kids.map((k) => k.y));
@@ -112,8 +115,8 @@ export function placeDevices(laid: ElkNode, topo: Topology, fixed?: ReadonlyMap<
 
     const ex = Math.max(...kids.map((k) => k.x)) - minX;
     const ey = Math.max(...kids.map((k) => k.y)) - minY;
-    const mx = Math.min(NODE / 2 + 5, area.w / 4);
-    const my = Math.min(NODE / 2 + 5, area.h / 4);
+    const mx = Math.min(BOX_W / 2 + 4, area.w / 4);
+    const my = Math.min(NODE_H / 2 + LABEL_H, area.h / 4);
     const sw = area.w - 2 * mx;
     const sh = area.h - 2 * my;
     const sc = Math.min(1, ex > 0 ? sw / ex : 1, ey > 0 ? sh / ey : 1);
@@ -130,8 +133,8 @@ export function placeDevices(laid: ElkNode, topo: Topology, fixed?: ReadonlyMap<
         continue;
       }
       if (!free) {
-        const cols = Math.min(40, Math.ceil(sw / NODE) + 1);
-        const rows = Math.min(40, Math.ceil(sh / NODE) + 1);
+        const cols = Math.min(40, Math.ceil(sw / BOX_W) + 1);
+        const rows = Math.min(40, Math.ceil(sh / BOX_H) + 1);
         free = [];
         for (let i = 0; i < cols; i++)
           for (let j = 0; j < rows; j++) {

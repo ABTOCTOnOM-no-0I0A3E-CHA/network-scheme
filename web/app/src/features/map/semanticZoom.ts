@@ -1,7 +1,8 @@
 import type { components } from "@/api/schema";
 import type { EventSeverity } from "@/features/problems/api";
 import { safeText } from "@/lib/text";
-import { iconKey, iconUri, linkStyle, SEVERITY_COLOR, STATE_COLOR, worseState, type NodeState } from "./style";
+import { AREA_ICON, BLANK, haloIcon, lampIcon, PIN_ICON, roleIcon } from "./icons";
+import { linkStyle, STATE_COLOR, worseState, type NodeState } from "./style";
 
 type S = components["schemas"];
 export type Topology = S["Topology"];
@@ -22,8 +23,7 @@ export function isCollapsed(prev: boolean, zoom: number): boolean {
 
 export type ModelNode = {
   id: string;
-  kind: "device" | "area" | "group";
-  parent?: string;
+  kind: "device" | "group";
   /* the cytoscape data of the node, strings already made safe */
   data: Record<string, unknown>;
   /* absent = the node still needs a layout */
@@ -38,7 +38,6 @@ export type MapModel = { nodes: ModelNode[]; edges: ModelEdge[] };
 export type Overrides = { pos?: ReadonlyMap<number, { x: number; y: number }>; pinned?: ReadonlySet<number> };
 
 export const deviceEid = (id: number) => `d${id}`;
-export const areaEid = (id: number) => `a${id}`;
 export const groupEid = (id: number) => `g${id}`;
 
 const MAX_DEPTH = 64;
@@ -54,14 +53,9 @@ function rootOf(byId: Map<number, Area>): Map<number, number> {
   return out;
 }
 
-/** Areas ordered so parents come before their children (cytoscape needs the parent to exist when a child is added). */
-function parentsFirst(byId: Map<number, Area>): Area[] {
-  const depth = (a: Area): number => {
-    let d = 0;
-    for (let cur = a; cur.parent_id !== null && byId.has(cur.parent_id) && d < MAX_DEPTH; d++) cur = byId.get(cur.parent_id)!;
-    return d;
-  };
-  return [...byId.values()].sort((x, y) => depth(x) - depth(y) || x.id - y.id);
+/** Image layers of a device node, bottom first: halo (open problems), role pictogram, status lamp, pin; see buildStylesheet. */
+export function deviceImages(n: Pick<Topology["nodes"][number], "role" | "state">, sev: EventSeverity | undefined, pinned: boolean): string {
+  return [sev ? haloIcon(sev) : BLANK, roleIcon(n.role), lampIcon(n.state), pinned ? PIN_ICON : BLANK].join(" ");
 }
 
 const SEVERITY_ORDER: EventSeverity[] = ["info", "warning", "average", "high", "disaster"];
@@ -77,9 +71,9 @@ export function severityByDevice(problems: { device_id: number | null; severity:
 }
 
 /**
- * Builds what the map shows. Expanded: areas are compound nodes around their devices (an area without devices is a plain
- * rectangle at its stored position). Collapsed (low zoom): every top-level area becomes one node with the area's aggregate
- * status and device count, devices outside areas stay, and links between collapsed groups merge into one edge.
+ * Builds what the canvas shows. Expanded: every device and link (areas are drawn as zones by the area layer, from their
+ * stored rectangles). Collapsed (low zoom): every top-level area becomes one node with the area's aggregate status and
+ * device count, devices outside areas stay, and links between collapsed groups merge into one edge.
  */
 export function buildModel(topo: Topology, collapsed: boolean, severity: ReadonlyMap<number, EventSeverity>, ov: Overrides = {}): MapModel {
   const nodes: ModelNode[] = [];
@@ -87,17 +81,6 @@ export function buildModel(topo: Topology, collapsed: boolean, severity: Readonl
   const byId = new Map(topo.areas.map((a) => [a.id, a]));
   const roots = rootOf(byId);
   const devices = new Map(topo.nodes.map((n) => [n.device_id, n]));
-
-  /* an area is a compound when anything lives under it */
-  const hasChild = new Set<number>();
-  for (const n of topo.nodes) {
-    let a = n.area_id;
-    for (let i = 0; a !== undefined && byId.has(a) && i < MAX_DEPTH; i++) {
-      hasChild.add(a);
-      a = byId.get(a)!.parent_id ?? undefined;
-    }
-  }
-  for (const a of topo.areas) if (a.parent_id !== null && byId.has(a.parent_id)) hasChild.add(a.parent_id);
 
   const deviceGroup = new Map<number, string>();
   if (collapsed) {
@@ -109,19 +92,7 @@ export function buildModel(topo: Topology, collapsed: boolean, severity: Readonl
         kind: "group",
         areaId: a.id,
         pos: { x: a.x + a.w / 2, y: a.y + a.h / 2 },
-        data: { kind: "group", label: `${safeText(a.name)} (${a.device_count})`, color: STATE_COLOR[a.status], icon: iconUri("area"), ring: 0, ringColor: "#000", w: 120, h: 64, pinned: false },
-      });
-    }
-  } else {
-    for (const a of parentsFirst(byId)) {
-      const leaf = !hasChild.has(a.id);
-      nodes.push({
-        id: areaEid(a.id),
-        kind: "area",
-        areaId: a.id,
-        parent: a.parent_id !== null && byId.has(a.parent_id) ? areaEid(a.parent_id) : undefined,
-        pos: leaf ? { x: a.x + a.w / 2, y: a.y + a.h / 2 } : undefined,
-        data: { kind: "area", label: `${safeText(a.name)} (${a.device_count})`, color: STATE_COLOR[a.status], icon: iconUri("area"), ring: 0, ringColor: "#000", w: Math.max(a.w, 1), h: Math.max(a.h, 1), pinned: false },
+        data: { kind: "group", label: `${safeText(a.name)} (${a.device_count})`, color: STATE_COLOR[a.status], icon: AREA_ICON, w: 120, h: 72 },
       });
     }
   }
@@ -129,21 +100,13 @@ export function buildModel(topo: Topology, collapsed: boolean, severity: Readonl
   for (const n of topo.nodes) {
     if (deviceGroup.has(n.device_id)) continue;
     const sev = severity.get(n.device_id);
+    const pinned = n.pinned || (ov.pinned?.has(n.device_id) ?? false);
     nodes.push({
       id: deviceEid(n.device_id),
       kind: "device",
       deviceId: n.device_id,
-      parent: !collapsed && n.area_id !== undefined && byId.has(n.area_id) ? areaEid(n.area_id) : undefined,
       pos: ov.pos?.get(n.device_id) ?? (n.x !== undefined && n.y !== undefined ? { x: n.x, y: n.y } : undefined),
-      data: {
-        kind: "device",
-        label: safeText(n.name),
-        color: STATE_COLOR[n.state],
-        icon: iconUri(iconKey(n.driver)),
-        ring: sev ? 3 : 0,
-        ringColor: sev ? SEVERITY_COLOR[sev] : "#000",
-        pinned: n.pinned || (ov.pinned?.has(n.device_id) ?? false),
-      },
+      data: { kind: "device", label: safeText(n.name), images: deviceImages(n, sev, pinned), pinned },
     });
   }
 

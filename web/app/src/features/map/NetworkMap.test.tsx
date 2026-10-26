@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import "@/i18n";
 import { installCanvasStub } from "./canvasStub";
 import { area, link, node } from "./fixtures";
+import type { Core } from "cytoscape";
 import { NetworkMap } from "./NetworkMap";
 import type { Topology } from "./semanticZoom";
 
@@ -17,6 +18,7 @@ const topo: Topology = {
 };
 
 const props = { topology: topo, severity: new Map(), onOpenDevice: vi.fn() };
+const cyOf = () => (screen.getByTestId("map-canvas") as unknown as { _cyreg: { cy: Core } })._cyreg.cy;
 
 describe("NetworkMap", () => {
   /* canvasStub inserts the cytoscape marker <meta>, so this only guards the component; the real proof is build.test.ts and the e2e CSP guard. */
@@ -25,8 +27,10 @@ describe("NetworkMap", () => {
     const { container } = render(<NetworkMap {...props} />);
     await waitFor(() => expect(container.querySelector("canvas")).not.toBeNull());
     expect(document.querySelectorAll("style").length).toBe(before);
-    expect(document.querySelector("img[src='x']")).toBeNull();
-    expect(container.innerHTML).not.toContain("onerror");
+    expect(container.querySelector("img")).toBeNull();
+    /* the label layer shows the name as literal text */
+    expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+    expect(screen.getByText("192.0.2.1")).toBeInTheDocument();
   });
 
   it("layers the background as an <img> under the canvas", () => {
@@ -49,8 +53,32 @@ describe("NetworkMap", () => {
     expect(container.querySelector("[data-testid='draw-surface'], [data-testid='area-1']")).toBeNull();
   });
 
-  it("shows the area editor layer when asked", () => {
-    const { container } = render(<NetworkMap {...props} editor={{ tool: "select", onSelect: vi.fn(), onDraw: vi.fn(), onChange: vi.fn() }} />);
+  it("draws areas as zones, and shows the zone editor only in edit mode", () => {
+    const { container } = render(<NetworkMap {...props} editor={{ tool: "select", onSelect: vi.fn(), onCreate: vi.fn(), onUpdate: vi.fn(), onDelete: vi.fn(), onMove: vi.fn(), onResize: vi.fn() }} />);
+    expect(screen.getByTestId("zone-1")).toBeInTheDocument();
     expect(container.querySelector("[data-testid='area-1']")).not.toBeNull();
+  });
+
+  it("shows a hover card with the device data as text", async () => {
+    const hostile: Topology = { ...topo, nodes: [node(1, { x: 10, y: 20, name: "<b>sw</b>", model: "<i>MES</i>", role: "switch", state: "down" })], links: [] };
+    render(<NetworkMap {...props} topology={hostile} problems={new Map([[1, 3]])} />);
+    const cy = cyOf();
+    await waitFor(() => expect(cy.nodes()).toHaveLength(1));
+    cy.getElementById("d1").emit("mouseover");
+    const card = await screen.findByTestId("map-hover-card");
+    expect(card.textContent).toContain("<i>MES</i>");
+    expect(card.textContent).toContain("Коммутатор");
+    expect(card.textContent).toContain("Недоступно");
+    expect(card.textContent).toContain("3");
+    expect(card.querySelector("b, i")).toBeNull();
+  });
+
+  it("drags devices only when positions can be saved", async () => {
+    const { rerender } = render(<NetworkMap {...props} />);
+    const cy = cyOf();
+    await waitFor(() => expect(cy.nodes()).toHaveLength(2));
+    expect(cy.getElementById("d1").grabbable()).toBe(false);
+    rerender(<NetworkMap {...props} save={vi.fn(async () => {})} />);
+    await waitFor(() => expect(cy.getElementById("d1").grabbable()).toBe(true));
   });
 });
