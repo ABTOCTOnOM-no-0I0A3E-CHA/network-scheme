@@ -651,7 +651,7 @@ func TestFreezeOffLiftsAVerifiedFreeze(t *testing.T) {
 	ctx := context.Background()
 	e.guard.Trigger(ctx, freeze.KindTamper, "host")
 	e.mustFreeze(t)
-	if err := e.guard.FreezeOff(ctx, nil); err != nil {
+	if err := e.guard.FreezeOff(ctx, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.guard.Check(ctx); err != nil {
@@ -683,7 +683,7 @@ func TestFreezeOffRefusedWhenVerifyFails(t *testing.T) {
 	ctx := context.Background()
 	attacktest.Tamper(t, e.env, `UPDATE exec.write_device SET port = 23`)
 	e.mustFreeze(t)
-	if err := e.guard.FreezeOff(ctx, nil); !errors.Is(err, freeze.ErrFrozen) {
+	if err := e.guard.FreezeOff(ctx, nil, nil); !errors.Is(err, freeze.ErrFrozen) {
 		t.Fatalf("freeze off over a tampered registry: %v", err)
 	}
 	e.mustFreeze(t)
@@ -698,7 +698,7 @@ func TestFreezeOffDoesNotLiftANewFreeze(t *testing.T) {
 	e := seeded(t)
 	ctx := context.Background()
 	e.guard.Trigger(ctx, freeze.KindTamper, "first")
-	err := e.guard.FreezeOff(ctx, func(*registry.Tx) error {
+	err := e.guard.FreezeOff(ctx, nil, func(*registry.Tx) error {
 		freeze.Latch(e.guard, "second")
 		return nil
 	})
@@ -734,7 +734,7 @@ func TestFreezeOffRacesWithChecks(t *testing.T) {
 		}
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := e.guard.FreezeOff(ctx, nil); err != nil {
+	if err := e.guard.FreezeOff(ctx, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -746,4 +746,19 @@ func TestFreezeOffRacesWithChecks(t *testing.T) {
 	if f, _ := state.Load(e.path, e.keys.State()); f.Frozen {
 		t.Fatal("sticky flag back")
 	}
+}
+
+/* Review minor 2: a freeze that arrives while freeze off runs its pre-check (the audit chain) is not lifted. */
+func TestFreezeOffSeesAFreezeDuringItsCheck(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	e.guard.Trigger(ctx, freeze.KindTamper, "first")
+	err := e.guard.FreezeOff(ctx, func(context.Context) error {
+		freeze.Latch(e.guard, "during the check")
+		return nil
+	}, nil)
+	if !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("freeze off: %v", err)
+	}
+	e.mustFreeze(t)
 }

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -254,6 +255,30 @@ func (a *Admin) view(ctx context.Context, fn func(*registry.Snapshot) error) err
 
 func userObject(id int64) string { return fmt.Sprintf("user:%d", id) }
 
+/*
+after answers a host registry write that returned err. A refusal or a
+freeze is answered as such. Any other error leaves the outcome unknown
+(registry.Write: the COMMIT may have succeeded), so the registry is read
+again and applied says whether the change is there: then the command
+succeeded (ok, and the answer is recorded as such), else it is refused; if
+the registry cannot be read now, the answer says the outcome is unknown.
+*/
+func (a *Admin) after(ctx context.Context, req execadmin.Request, obj string, err error, details map[string]any,
+	applied func(*registry.Snapshot) bool) (execadmin.Response, bool) {
+	if errors.As(err, new(refusal)) || errors.Is(err, freeze.ErrFrozen) {
+		return a.refuse(ctx, req, obj, err, details), false
+	}
+	there := false
+	if verr := a.view(ctx, func(s *registry.Snapshot) error { there = applied(s); return nil }); verr != nil {
+		return a.refuse(ctx, req, obj, fmt.Errorf("outcome unknown (%v): the registry cannot be read now: %v", err, verr), details), false
+	}
+	if !there {
+		return a.refuse(ctx, req, obj, fmt.Errorf("not applied: %w", err), details), false
+	}
+	details["confirmed_after"] = state.Reason(err.Error())
+	return a.done(ctx, req, obj, "", details), true
+}
+
 func userDetails(u execadmin.User) map[string]any {
 	return map[string]any{"user_id": u.ID, "username": u.Username, "created_at": u.CreatedAt}
 }
@@ -305,11 +330,23 @@ func (a *Admin) enroll(ctx context.Context, req execadmin.Request) execadmin.Res
 		return tx.Put("change_totp", map[string]any{"user_id": u.ID, "username_snapshot": u.Username, "ciphertext": ct,
 			"key_version": seal.KeyVersion, "last_step": 0, "failures": 0, "lock_until": nil, "lock_count": 0})
 	})
+	resp := execadmin.Response{OK: true}
 	if err != nil {
-		return a.refuse(ctx, req, obj, err, details)
+		var ok bool
+		if resp, ok = a.after(ctx, req, obj, err, details, func(s *registry.Snapshot) bool {
+			r, ok := s.Get("change_totp", u.ID)
+			if !ok {
+				return false
+			}
+			got, _ := r.Get("ciphertext").([]byte)
+			return bytes.Equal(got, ct)
+		}); !ok {
+			return resp
+		}
 	}
-	return execadmin.Response{OK: true, Text: fmt.Sprintf("change TOTP enrolled for %q (#%d)", u.Username, u.ID),
-		Enrollment: &execadmin.Enrollment{URI: uri, Secret: sec.Reveal()}}
+	resp.Text = fmt.Sprintf("change TOTP enrolled for %q (#%d)", u.Username, u.ID)
+	resp.Enrollment = &execadmin.Enrollment{URI: uri, Secret: sec.Reveal()}
+	return resp
 }
 
 /* grantKey is the key of a write_grant row (the group only for write). */
@@ -341,14 +378,22 @@ func (a *Admin) grant(ctx context.Context, req execadmin.Request) execadmin.Resp
 		tx.Audit(audit.Append(a.event(req, obj, audit.OK, details)))
 		return tx.Put("write_grant", map[string]any{"user_id": u.ID, "kind": kind, "write_group": group, "username_snapshot": u.Username})
 	})
+	resp := execadmin.Response{OK: true}
 	if err != nil {
-		return a.refuse(ctx, req, obj, err, details)
+		var ok bool
+		if resp, ok = a.after(ctx, req, obj, err, details, func(s *registry.Snapshot) bool {
+			r, ok := s.Get("write_grant", u.ID, kind, group)
+			return ok && r.Get("username_snapshot") == u.Username
+		}); !ok {
+			return resp
+		}
 	}
 	what := kind
 	if group != nil {
 		what += " " + req.Group
 	}
-	return execadmin.Response{OK: true, Text: fmt.Sprintf("granted %s to %q (#%d)", what, u.Username, u.ID)}
+	resp.Text = fmt.Sprintf("granted %s to %q (#%d)", what, u.Username, u.ID)
+	return resp
 }
 
 /*
@@ -463,12 +508,17 @@ only): only a registry reset gets out of that freeze.
 func (a *Admin) freezeOff(ctx context.Context, req execadmin.Request) execadmin.Response {
 	_, reason := a.Guard.Frozen()
 	details := map[string]any{"reason": req.Reason, "was": reason}
-	if res, _, err := a.chain(ctx); err != nil {
-		return a.refuse(ctx, req, "executor", fmt.Errorf("the audit chain cannot be verified now: %w", err), details)
-	} else if res.Break != nil {
-		return a.refuse(ctx, req, "executor", a.broken(ctx, res.Break), details)
+	check := func(ctx context.Context) error {
+		res, _, err := a.chain(ctx)
+		switch {
+		case err != nil:
+			return fmt.Errorf("the audit chain cannot be verified now: %w", err)
+		case res.Break != nil:
+			return a.broken(ctx, res.Break)
+		}
+		return nil
 	}
-	err := a.Guard.FreezeOff(ctx, func(tx *registry.Tx) error {
+	err := a.Guard.FreezeOff(ctx, check, func(tx *registry.Tx) error {
 		tx.Audit(audit.Append(a.event(req, "executor", audit.OK, details)))
 		return nil
 	})
@@ -491,10 +541,22 @@ func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Res
 			return tx.Put("exec_state", map[string]any{"singleton": true, "freeze": st.Get("freeze"),
 				"freeze_reason": st.Get("freeze_reason"), "global_fail_window": []byte("[]")})
 		})
+		resp := execadmin.Response{OK: true}
 		if err != nil {
-			return a.refuse(ctx, req, "executor", err, details)
+			var ok bool
+			if resp, ok = a.after(ctx, req, "executor", err, details, func(s *registry.Snapshot) bool {
+				st, ok := s.Get("exec_state", true)
+				if !ok {
+					return false
+				}
+				w, _ := st.Get("global_fail_window").(json.RawMessage)
+				return string(w) == "[]"
+			}); !ok {
+				return resp
+			}
 		}
-		return execadmin.Response{OK: true, Text: "global change TOTP failure window cleared"}
+		resp.Text = "global change TOTP failure window cleared"
+		return resp
 	}
 	id, err := a.target(ctx, req, "change_totp", false)
 	if err != nil {
@@ -512,24 +574,38 @@ func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Res
 			"ciphertext": r.Get("ciphertext"), "key_version": r.Get("key_version"), "last_step": r.Get("last_step"),
 			"failures": 0, "lock_until": nil, "lock_count": 0})
 	})
+	resp := execadmin.Response{OK: true}
 	if err != nil {
-		return a.refuse(ctx, req, obj, err, details)
+		var ok bool
+		if resp, ok = a.after(ctx, req, obj, err, details, func(s *registry.Snapshot) bool {
+			r, ok := s.Get("change_totp", id)
+			return ok && r.Get("failures") == int64(0) && r.Get("lock_count") == int64(0) && r.Get("lock_until") == nil
+		}); !ok {
+			return resp
+		}
 	}
-	return execadmin.Response{OK: true, Text: fmt.Sprintf("change TOTP of #%d unlocked", id)}
+	resp.Text = fmt.Sprintf("change TOTP of #%d unlocked", id)
+	return resp
 }
 
 /* maxStrategies bounds the strategies document (the CHECK of the model profiles table). */
 const maxStrategies = 16384
 
+/* anchored makes a pattern match the whole model or firmware string, never a part of it. */
+func anchored(re string) string { return "^(?:" + re + ")$" }
+
 /*
-modelVerify records a model and firmware line confirmed on the stand
-(the model profiles of the registry, security.md 5.1a): the same driver and patterns replace
-their profile, anything else is a new one. It only records; the transport
-applies profiles and refuses unknown strategy keys (task 4b.5).
+modelVerify records a model and firmware line confirmed on the stand (the
+model profiles of the registry, security.md 5.1a). Both patterns are stored
+anchored (^(?:RE)$): they match the whole string show version gives, so
+"MES2424" never also covers "MES2424P". The same driver and patterns
+replace their profile, anything else is a new one. It only records; the
+transport applies profiles and refuses unknown strategy keys (task 4b.5).
 */
 func (a *Admin) modelVerify(ctx context.Context, req execadmin.Request) execadmin.Response {
-	details := map[string]any{"driver": req.Driver, "model": req.Model, "firmware": req.Firmware, "note": req.Note, "strategies": req.Strategies}
-	for _, re := range []string{req.Model, req.Firmware} {
+	model, firmware := anchored(req.Model), anchored(req.Firmware)
+	details := map[string]any{"driver": req.Driver, "model": model, "firmware": firmware, "note": req.Note, "strategies": req.Strategies}
+	for _, re := range []string{model, firmware} {
 		if _, err := regexp.Compile(re); err != nil {
 			return a.refuse(ctx, req, "model_profile", deny("bad pattern %q: %v", re, err), details)
 		}
@@ -547,7 +623,7 @@ func (a *Admin) modelVerify(ctx context.Context, req execadmin.Request) execadmi
 		id = 1
 		for _, r := range s.Rows("model_profile") {
 			pid, _ := r.Get("id").(int64)
-			if r.Get("write_driver") == req.Driver && r.Get("model_re") == req.Model && r.Get("firmware_re") == req.Firmware {
+			if r.Get("write_driver") == req.Driver && r.Get("model_re") == model && r.Get("firmware_re") == firmware {
 				id = pid
 				break
 			}
@@ -555,13 +631,25 @@ func (a *Admin) modelVerify(ctx context.Context, req execadmin.Request) execadmi
 		}
 		details["id"] = id
 		tx.Audit(audit.Append(a.event(req, fmt.Sprintf("model_profile:%d", id), audit.OK, details)))
-		return tx.Put("model_profile", map[string]any{"id": id, "write_driver": req.Driver, "model_re": req.Model,
-			"firmware_re": req.Firmware, "strategies": json.RawMessage(doc), "note": req.Note})
+		return tx.Put("model_profile", map[string]any{"id": id, "write_driver": req.Driver, "model_re": model,
+			"firmware_re": firmware, "strategies": json.RawMessage(doc), "note": req.Note})
 	})
+	resp := execadmin.Response{OK: true}
 	if err != nil {
-		return a.refuse(ctx, req, "model_profile", err, details)
+		var ok bool
+		if resp, ok = a.after(ctx, req, "model_profile", err, details, func(s *registry.Snapshot) bool {
+			r, ok := s.Get("model_profile", id)
+			if !ok {
+				return false
+			}
+			got, _ := r.Get("strategies").(json.RawMessage)
+			return r.Get("model_re") == model && r.Get("firmware_re") == firmware && r.Get("note") == req.Note && bytes.Equal(got, doc)
+		}); !ok {
+			return resp
+		}
 	}
-	return execadmin.Response{OK: true, Text: fmt.Sprintf("model profile #%d recorded for %s (%s / %s)", id, req.Driver, req.Model, req.Firmware)}
+	resp.Text = fmt.Sprintf("model profile #%d recorded for %s (%s / %s)", id, req.Driver, model, firmware)
+	return resp
 }
 
 /* registryVerify verifies the whole registry now and reports it; tampering freezes. */
@@ -594,52 +682,84 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 		return a.refuse(ctx, req, "registry", deny("registry reset revokes every grant, removes every change TOTP and model profile, disables writes and clears host keys on every device: confirm with --i-understand"), nil)
 	}
 	var details map[string]any
+	var plan audit.Plan
 	rep, err := a.Guard.Reset(ctx, registry.ResetOptions{
-		Audit: func(rep registry.ResetReport) registry.Appender {
-			details = map[string]any{"seq": rep.Seq, "grants_revoked": rep.Grants, "totp_removed": rep.TOTPs,
-				"devices": rep.Devices, "profiles_removed": rep.Profiles, "old_audit_anchor": rep.OldAnchor.LastID,
-				"audit_tail": rep.Tail.LastID, "audit_base": rep.Base.LastID}
-			return audit.Append(a.event(req, "registry", audit.OK, details))
+		Plan: func(ctx context.Context, tx pgx.Tx, old state.Chain, known bool, tail state.AuditHead) (state.Chain, error) {
+			var err error
+			plan, err = audit.PlanReset(ctx, tx, old, known, tail)
+			return plan.Chain, err
 		},
-		ChainIntact: func(ctx context.Context, tx pgx.Tx, base, tail state.AuditHead) (bool, error) {
-			res, err := audit.Verify(ctx, tx, base, tail)
-			/* exec.audit_head may be rewound: the reset sets it again; only the rows count here. */
-			return err == nil && (res.Break == nil || res.Break.Reason == audit.ReasonHeadMismatch), err
+		Audit: func(rep registry.ResetReport) registry.Appender {
+			/* Hashes, not only ids: this row is itself chained, so what the reset vouched for cannot be rewritten later. */
+			details = map[string]any{"seq": rep.Seq, "grants_revoked": rep.Grants, "totp_removed": rep.TOTPs,
+				"devices": rep.Devices, "dropped": rep.Dropped, "profiles_removed": rep.Profiles,
+				"state_file_readable": rep.Known, "audit_intact": plan.Intact, "audit_unanchored": plan.Unanchored,
+				"audit_old_anchor": rep.OldAnchor.LastID, "audit_old_anchor_hash": hex.EncodeToString(rep.OldAnchor.Hash),
+				"audit_last_good": plan.LastGood.LastID, "audit_last_good_hash": hex.EncodeToString(plan.LastGood.Hash),
+				"audit_tail": rep.Tail.LastID, "audit_tail_hash": hex.EncodeToString(rep.Tail.Hash),
+				"audit_base": rep.Chain.Base.LastID, "audit_sealed": len(rep.Chain.Sealed)}
+			if plan.Break != nil {
+				details["audit_break_id"], details["audit_break"] = plan.Break.ID, plan.Break.Reason
+			}
+			return audit.Append(a.event(req, "registry", audit.OK, details))
 		},
 	})
 	if err != nil {
 		return a.refuse(ctx, req, "registry", err, details)
 	}
+	return execadmin.Response{OK: true, Text: resetText(rep, plan)}
+}
+
+/* resetText is the report of a registry reset for the host. */
+func resetText(rep registry.ResetReport, plan audit.Plan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "registry reset at counter %d: %d grant(s) revoked, %d change TOTP enrollment(s) removed (enroll again), %d model profile(s) removed; freeze lifted.\n",
 		rep.Seq, rep.Grants, rep.TOTPs, rep.Profiles)
-	fmt.Fprintf(&b, "Audit chain continues from #%d (anchor was #%d), verified from #%d on.\n", rep.Tail.LastID, rep.OldAnchor.LastID, rep.Base.LastID)
-	fmt.Fprintf(&b, "%d device(s) kept with writes disabled and no host key; check each address before accepting its host key again:\n", len(rep.Devices))
-	for _, d := range rep.Devices {
-		fmt.Fprintf(&b, "  device %d  %s\n", d.ID, d.Address)
+	switch {
+	case !rep.Known:
+		fmt.Fprintf(&b, "AUDIT: the state file was unreadable, so nothing anchors the audit history: %d row(s) up to #%d are not vouched for.\n",
+			plan.Unanchored, rep.Tail.LastID)
+	case plan.Break != nil:
+		fmt.Fprintf(&b, "AUDIT HISTORY REWRITTEN OR TRUNCATED at or before #%d (%s); the anchor was #%d.\n", plan.Break.ID, plan.Break.Reason, rep.OldAnchor.LastID)
+		fmt.Fprintf(&b, "Rows up to #%d still chain and stay sealed (they are checked from now on); rows after #%d up to #%d are not vouched for.\n",
+			plan.LastGood.LastID, plan.LastGood.LastID, rep.Tail.LastID)
+	case plan.Unanchored > 0:
+		fmt.Fprintf(&b, "AUDIT: %d row(s) after the anchor #%d are not anchored (nothing vouches for them); the chain up to the anchor is intact and sealed.\n",
+			plan.Unanchored, rep.OldAnchor.LastID)
+	default:
+		fmt.Fprintf(&b, "Audit chain intact up to its anchor #%d.\n", rep.OldAnchor.LastID)
 	}
-	return execadmin.Response{OK: true, Text: b.String()}
+	fmt.Fprintf(&b, "The audit chain continues from #%d; its live part is verified from #%d on, %d sealed segment(s) before.\n",
+		rep.Tail.LastID, rep.Chain.Base.LastID, len(rep.Chain.Sealed))
+	if len(rep.Dropped) > 0 {
+		fmt.Fprintf(&b, "Removed (MAC did not verify), register again: %s\n", strings.Join(rep.Dropped, ", "))
+	}
+	fmt.Fprintf(&b, "%d device(s) kept with writes disabled and no host key. None of these fields is confirmed: check each before the device is used again:\n", len(rep.Devices))
+	for _, d := range rep.Devices {
+		fmt.Fprintf(&b, "  device %d  address %s  port %d  protocol %s  group %s  driver %s\n", d.ID, d.Address, d.Port, d.Protocol, d.Group, d.Driver)
+	}
+	return b.String()
 }
 
 /* auditReadTimeout bounds one full verification of the audit chain. */
 const auditReadTimeout = 10 * time.Minute
 
-/* chain verifies the audit chain from the state file's base, against its anchor. */
+/* chain verifies the audit chain against what the state file says (sealed segments, base, anchor). */
 func (a *Admin) chain(ctx context.Context) (audit.Result, state.AuditHead, error) {
-	base, anchor, err := a.Reg.AuditBounds()
+	c, err := a.Reg.AuditChain()
 	if errors.Is(err, registry.ErrTampered) {
 		a.Guard.Trigger(ctx, freeze.KindTamper, err.Error())
 	}
 	if err != nil {
-		return audit.Result{}, anchor, err
+		return audit.Result{}, c.Anchor, err
 	}
 	var res audit.Result
 	err = a.Reg.Read(ctx, auditReadTimeout, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = audit.Verify(ctx, tx, base, anchor)
+		res, err = audit.Verify(ctx, tx, c)
 		return err
 	})
-	return res, anchor, err
+	return res, c.Anchor, err
 }
 
 /* broken freezes on a break of the audit chain and returns the refusal. */
@@ -655,11 +775,18 @@ func (a *Admin) auditVerify(ctx context.Context, req execadmin.Request) execadmi
 	if err != nil {
 		return a.refuse(ctx, req, "audit", fmt.Errorf("the audit chain cannot be verified now: %w", err), nil)
 	}
-	details := map[string]any{"count": res.Count, "last_id": res.LastID, "anchor": anchor.LastID}
+	details := map[string]any{"count": res.Count, "unanchored": res.Unanchored, "unverified": res.Unverified,
+		"last_id": res.LastID, "anchor": anchor.LastID}
 	if res.Break != nil {
 		details["break_id"], details["break"] = res.Break.ID, res.Break.Reason
 		return a.refuse(ctx, req, "audit", a.broken(ctx, res.Break), details)
 	}
-	return a.done(ctx, req, "audit", fmt.Sprintf("executor audit chain intact: %d row(s) verified, last #%d, contains the state file's anchor #%d",
-		res.Count, res.LastID, anchor.LastID), details)
+	text := fmt.Sprintf("executor audit chain intact: %d row(s) verified up to the state file's anchor #%d", res.Count, anchor.LastID)
+	if res.Unanchored > 0 {
+		text += fmt.Sprintf("; %d row(s) after the anchor not yet anchored (a change in flight, or rows nothing vouches for)", res.Unanchored)
+	}
+	if res.Unverified > 0 {
+		text += fmt.Sprintf("; %d row(s) outside the verified ranges (cut off by a registry reset)", res.Unverified)
+	}
+	return a.done(ctx, req, "audit", text, details)
 }

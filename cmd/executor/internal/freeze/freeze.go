@@ -286,14 +286,21 @@ registry's lock it verifies the whole registry (a failed verification
 refuses, tampering freezes anew) and records exec_state unfrozen, together
 with whatever also declares (the audit row); then it clears the sticky flag
 of the state file and the latch, unless a new freeze arrived meanwhile: a
-freeze off never lifts a freeze it did not see. Any error leaves the
+freeze off never lifts a freeze it did not see. check, if set, runs first
+(the full audit chain verification): after the generation is taken, so a
+freeze it or anyone triggers meanwhile is seen too. Any error leaves the
 executor frozen (the latch and the sticky flag stay set), even if exec_state
 was recorded unfrozen.
 */
-func (g *Guard) FreezeOff(ctx context.Context, also func(tx *registry.Tx) error) error {
+func (g *Guard) FreezeOff(ctx context.Context, check func(context.Context) error, also func(tx *registry.Tx) error) error {
 	g.mu.Lock()
 	gen := g.gen
 	g.mu.Unlock()
+	if check != nil {
+		if err := check(ctx); err != nil {
+			return err
+		}
+	}
 	var seq int64
 	err := g.reg.Write(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		window := json.RawMessage("[]")

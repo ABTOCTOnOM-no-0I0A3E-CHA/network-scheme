@@ -135,7 +135,11 @@ func Append(events ...Event) registry.Appender {
 			hash := chainHash(head.Hash, payload)
 			var c columns
 			var gotPayload, gotPrev, gotHash []byte
-			/* What was stored, read back: a trigger rewriting the row would be sealed into the anchor otherwise. */
+			/*
+				What was stored, read back: a BEFORE trigger rewriting the row would be
+				sealed into the anchor otherwise. An AFTER trigger changing it later is
+				not seen here (the full verification and the catalog check of 4d.2 are).
+			*/
 			if err := tx.QueryRow(ctx, `INSERT INTO exec.audit_event (ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 				RETURNING id, ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash`,
@@ -166,6 +170,8 @@ const (
 	ReasonIndexedMismatch = "indexed column mismatch"
 	ReasonHeadMismatch    = "head mismatch"
 	ReasonAnchorMissing   = "anchor missing (truncated or rewritten)"
+	ReasonSealedMismatch  = "sealed segment changed"
+	ReasonNoAnchor        = "no anchor (state file unreadable)"
 )
 
 /* Break is the first row at which the chain fails verification. */
@@ -174,29 +180,135 @@ type Break struct {
 	Reason string `json:"reason"`
 }
 
-/* Result is the verified prefix of the chain: Count rows up to LastID, ending in LastHash; Break is nil when all is intact. */
+/*
+Result of a verification: Count rows verified (sealed segments and the live
+chain up to the anchor), Unanchored rows after the anchor (a change in
+flight, or rows nothing vouches for), Unverified rows outside every checked
+range (before a base a reset moved); the last row of the chain (LastID,
+LastHash); Break is nil when all that is checked is intact.
+*/
 type Result struct {
-	Count    int64  `json:"count"`
-	LastID   int64  `json:"last_id"`
-	LastHash []byte `json:"last_hash"`
-	Break    *Break `json:"break,omitempty"`
+	Count      int64  `json:"count"`
+	Unanchored int64  `json:"unanchored"`
+	Unverified int64  `json:"unverified"`
+	LastID     int64  `json:"last_id"`
+	LastHash   []byte `json:"last_hash"`
+	Break      *Break `json:"break,omitempty"`
+}
+
+func same(a, b state.AuditHead) bool { return a.LastID == b.LastID && bytes.Equal(a.Hash, b.Hash) }
+
+/*
+walk checks the rows after from in id order (up to toID; 0: all): ids
+strictly increase, each row chains on the previous (the first on from), its
+hash is SHA-256(prev_hash || payload) over the stored bytes and its indexed
+columns agree with the payload; then check may refuse the row or end the
+walk. It returns the head of the last row that passed, how many passed, and
+the first break.
+*/
+func walk(ctx context.Context, tx pgx.Tx, from state.AuditHead, toID int64,
+	check func(id int64, sum []byte) (reason string, stop bool)) (state.AuditHead, int64, *Break, error) {
+	last, n := from, int64(0)
+	rows, err := tx.Query(ctx, `SELECT id, ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash
+		FROM exec.audit_event WHERE id > $1 AND ($2 = 0 OR id <= $2) ORDER BY id`, from.LastID, toID)
+	if err != nil {
+		return last, n, nil, fmt.Errorf("audit: read events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c columns
+		var payload, prev, sum []byte
+		if err := rows.Scan(&c.id, &c.ts, &c.userID, &c.ip, &c.ua, &c.action, &c.object, &c.result, &payload, &prev, &sum); err != nil {
+			return last, n, nil, fmt.Errorf("audit: scan event: %w", err)
+		}
+		reason, stop := "", false
+		switch {
+		case c.id <= last.LastID, !bytes.Equal(prev, last.Hash):
+			reason = ReasonPrevMismatch
+		case !bytes.Equal(chainHash(prev, payload), sum):
+			reason = ReasonHashMismatch
+		case !c.match(payload):
+			reason = ReasonIndexedMismatch
+		case check != nil:
+			reason, stop = check(c.id, sum)
+		}
+		if reason != "" {
+			return last, n, &Break{ID: c.id, Reason: reason}, nil
+		}
+		last, n = state.AuditHead{LastID: c.id, Hash: sum}, n+1
+		if stop {
+			break
+		}
+	}
+	return last, n, nil, rows.Err()
+}
+
+/* sealed checks one sealed segment: it must chain from From and end exactly at To. */
+func sealed(ctx context.Context, tx pgx.Tx, g state.Segment) (state.AuditHead, int64, *Break, error) {
+	last, n, brk, err := walk(ctx, tx, g.From, g.To.LastID, nil)
+	if err == nil && brk == nil && !same(last, g.To) {
+		brk = &Break{ID: g.To.LastID, Reason: ReasonSealedMismatch}
+	}
+	return last, n, brk, err
 }
 
 /*
-Verify recomputes the chain after base in id order inside tx (one
-snapshot): each row chains on the previous (the first on base), its hash is
-SHA-256(prev_hash || payload) over the stored bytes, its indexed columns
-agree with the payload and ids strictly increase; exec.audit_head points at
-the last row; and the chain contains anchor, the head committed in the
-executor's state file (registry.AuditBounds gives both). The chain may
-extend past the anchor (a change in flight) but never end before it nor
-differ at it: that is a truncation or a rewrite, even with a matching
-exec.audit_head. Rows up to base are not verified (base moves only on a
-registry reset after a break). A broken chain is reported in Result.Break
-with a nil error; err is for database failures.
+live checks the live chain from base against anchor, up to the anchor: a row
+after the anchor id while the anchor was not seen, or a row at its id with
+another hash, is a truncation or a rewrite. It returns the end of the
+verified prefix, the rows verified, whether the anchor was reached, and the
+first break.
 */
-func Verify(ctx context.Context, tx pgx.Tx, base, anchor state.AuditHead) (Result, error) {
-	res := Result{LastID: base.LastID, LastHash: base.Hash}
+func live(ctx context.Context, tx pgx.Tx, base, anchor state.AuditHead) (state.AuditHead, int64, bool, *Break, error) {
+	if same(base, anchor) {
+		return base, 0, true, nil, nil
+	}
+	reached := false
+	last, n, brk, err := walk(ctx, tx, base, 0, func(id int64, sum []byte) (string, bool) {
+		switch {
+		case id > anchor.LastID:
+			return ReasonAnchorMissing, false
+		case id == anchor.LastID && !bytes.Equal(sum, anchor.Hash):
+			return ReasonAnchorMissing, false
+		case id == anchor.LastID:
+			reached = true
+			return "", true
+		}
+		return "", false
+	})
+	if err == nil && brk == nil && !reached {
+		brk = &Break{ID: anchor.LastID, Reason: ReasonAnchorMissing}
+	}
+	return last, n, reached, brk, err
+}
+
+/* stats reads the last row of the chain (or the empty head), the number of rows and of those after id. */
+func stats(ctx context.Context, tx pgx.Tx, after int64) (state.AuditHead, int64, int64, error) {
+	tail := state.AuditHead{Hash: make([]byte, sha256.Size)}
+	var total, past int64
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.count(*), pg_catalog.count(*) FILTER (WHERE id > $1) FROM exec.audit_event`,
+		after).Scan(&total, &past); err != nil {
+		return tail, 0, 0, fmt.Errorf("audit: count events: %w", err)
+	}
+	err := tx.QueryRow(ctx, `SELECT id, hash FROM exec.audit_event ORDER BY id DESC LIMIT 1`).Scan(&tail.LastID, &tail.Hash)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return tail, 0, 0, fmt.Errorf("audit: read the tail: %w", err)
+	}
+	return tail, total, past, nil
+}
+
+/*
+Verify checks the audit chain inside tx (one snapshot) against c (the state
+file's view, registry.AuditChain): every sealed segment again, then the live
+chain from its base up to and including the anchor, the head committed in
+the state file. The chain may extend past the anchor (a change in flight:
+reported as Unanchored, not counted as verified) but never end before it
+nor differ at it: that is a truncation or a rewrite, even with a matching
+exec.audit_head, which must point at the last row. A broken chain is
+reported in Result.Break with a nil error; err is for database failures.
+*/
+func Verify(ctx context.Context, tx pgx.Tx, c state.Chain) (Result, error) {
+	var res Result
 	var headID int64
 	var headHash []byte
 	if err := tx.QueryRow(ctx, `SELECT last_id, hash FROM exec.audit_head`).Scan(&headID, &headHash); err != nil {
@@ -206,52 +318,103 @@ func Verify(ctx context.Context, tx pgx.Tx, base, anchor state.AuditHead) (Resul
 		}
 		return res, fmt.Errorf("audit: read the head: %w", err)
 	}
-	rows, err := tx.Query(ctx, `SELECT id, ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash
-		FROM exec.audit_event WHERE id > $1 ORDER BY id`, base.LastID)
+	tail, total, past, err := stats(ctx, tx, c.Anchor.LastID)
 	if err != nil {
-		return res, fmt.Errorf("audit: read events: %w", err)
+		return res, err
 	}
-	defer rows.Close()
-	anchored := anchor.LastID == base.LastID && bytes.Equal(anchor.Hash, base.Hash)
-	for rows.Next() {
-		var c columns
-		var payload, prev, sum []byte
-		if err := rows.Scan(&c.id, &c.ts, &c.userID, &c.ip, &c.ua, &c.action, &c.object, &c.result, &payload, &prev, &sum); err != nil {
-			return res, fmt.Errorf("audit: scan event: %w", err)
+	res.LastID, res.LastHash = tail.LastID, tail.Hash
+	for _, g := range c.Sealed {
+		_, n, brk, err := sealed(ctx, tx, g)
+		if err != nil || brk != nil {
+			res.Break = brk
+			return res, err
 		}
-		reason := ""
-		switch {
-		case c.id <= res.LastID:
-			reason = ReasonPrevMismatch
-		case !anchored && c.id > anchor.LastID:
-			reason = ReasonAnchorMissing
-		case !bytes.Equal(prev, res.LastHash):
-			reason = ReasonPrevMismatch
-		case !bytes.Equal(chainHash(prev, payload), sum):
-			reason = ReasonHashMismatch
-		case !c.match(payload):
-			reason = ReasonIndexedMismatch
-		case c.id == anchor.LastID && !bytes.Equal(sum, anchor.Hash):
-			reason = ReasonAnchorMissing
-		}
-		if reason != "" {
-			res.Break = &Break{ID: c.id, Reason: reason}
-			return res, nil
-		}
-		anchored = anchored || c.id == anchor.LastID
-		res.Count++
-		res.LastID, res.LastHash = c.id, sum
+		res.Count += n
 	}
-	if err := rows.Err(); err != nil {
-		return res, fmt.Errorf("audit: read events: %w", err)
+	_, n, _, brk, err := live(ctx, tx, c.Base, c.Anchor)
+	if err != nil || brk != nil {
+		res.Break = brk
+		return res, err
 	}
-	switch {
-	case !anchored:
-		res.Break = &Break{ID: anchor.LastID, Reason: ReasonAnchorMissing}
-	case headID != res.LastID || !bytes.Equal(headHash, res.LastHash):
+	res.Count += n
+	res.Unanchored = past
+	res.Unverified = total - res.Count - past
+	if headID != tail.LastID || !bytes.Equal(headHash, tail.Hash) {
 		res.Break = &Break{ID: headID, Reason: ReasonHeadMismatch}
 	}
 	return res, nil
+}
+
+/* Plan is what a registry reset does with the audit chain (PlanReset). */
+type Plan struct {
+	Chain      state.Chain     /* the new sealed segments and base (Anchor unused) */
+	Intact     bool            /* every sealed segment and the live chain up to the anchor verified, nothing unanchored */
+	Break      *Break          /* the first break found, if any */
+	LastGood   state.AuditHead /* the end of the verified prefix of the live chain */
+	Unanchored int64           /* rows after the verified prefix that nothing vouches for */
+}
+
+/*
+PlanReset decides how a registry reset continues the audit chain, whose
+last row is tail, from what the state file said (old; known is false when
+it was unreadable: then nothing is anchored). An intact chain with nothing
+after its anchor keeps its bounds. Otherwise every prefix that still
+verifies is kept as a sealed segment (a later rewrite of it is caught) and
+the live chain starts again at the tail: rows after a break, after the
+anchor or without any anchor are reported and never vouched for.
+*/
+func PlanReset(ctx context.Context, tx pgx.Tx, old state.Chain, known bool, tail state.AuditHead) (Plan, error) {
+	empty := state.AuditHead{Hash: make([]byte, sha256.Size)}
+	if !known {
+		_, total, _, err := stats(ctx, tx, 0)
+		return Plan{Chain: state.Chain{Base: tail}, Break: &Break{Reason: ReasonNoAnchor}, LastGood: empty, Unanchored: total}, err
+	}
+	p := Plan{Intact: true}
+	var keep []state.Segment
+	for _, g := range old.Sealed {
+		last, _, brk, err := sealed(ctx, tx, g)
+		if err != nil {
+			return p, err
+		}
+		if brk == nil {
+			keep = append(keep, g)
+			continue
+		}
+		p.Intact = false
+		if p.Break == nil {
+			p.Break = brk
+		}
+		if last.LastID > g.From.LastID {
+			keep = append(keep, state.Segment{From: g.From, To: last})
+		}
+	}
+	last, _, _, brk, err := live(ctx, tx, old.Base, old.Anchor)
+	if err != nil {
+		return p, err
+	}
+	p.LastGood = last
+	if brk != nil {
+		p.Intact = false
+		if p.Break == nil {
+			p.Break = brk
+		}
+	}
+	/* After the anchor if it was reached, else after the break: nothing vouches for these rows. */
+	if _, _, p.Unanchored, err = stats(ctx, tx, last.LastID); err != nil {
+		return p, err
+	}
+	if p.Unanchored > 0 {
+		p.Intact = false
+	}
+	if p.Intact {
+		p.Chain = state.Chain{Sealed: keep, Base: old.Base}
+		return p, nil
+	}
+	if last.LastID > old.Base.LastID {
+		keep = append(keep, state.Segment{From: old.Base, To: last})
+	}
+	p.Chain = state.Chain{Sealed: keep, Base: tail}
+	return p, nil
 }
 
 /* columns are the indexed columns of one row, as stored. */

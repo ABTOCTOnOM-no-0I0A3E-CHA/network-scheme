@@ -2,7 +2,9 @@ package admin_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -217,8 +219,8 @@ func TestEveryCommandIsAudited(t *testing.T) {
 	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT max(id) FROM exec.audit_event`).Scan(&last); err != nil {
 		t.Fatal(err)
 	}
-	if _, a, err := f.reg.AuditBounds(); err != nil || a.LastID != last {
-		t.Fatalf("anchor %+v %v, last row %d", a, err, last)
+	if c, err := f.reg.AuditChain(); err != nil || c.Anchor.LastID != last {
+		t.Fatalf("anchor %+v %v, last row %d", c, err, last)
 	}
 }
 
@@ -422,6 +424,10 @@ func TestModelVerify(t *testing.T) {
 	if n := f.count(t, `SELECT count(*) FROM exec.model_profile`); n != 2 {
 		t.Fatalf("profiles %d", n)
 	}
+	/* Review minor 7: stored anchored, so a pattern never matches part of a model name. */
+	if n := f.count(t, `SELECT count(*) FROM exec.model_profile WHERE model_re = '^(?:^MES2424)$' AND firmware_re = '^(?:^10\.4)$'`); n != 1 {
+		t.Fatalf("anchored profiles %d", n)
+	}
 }
 
 /* freeze off is refused while the registry does not verify: the executor stays frozen (and the refusal is audited). */
@@ -448,9 +454,10 @@ func TestFreezeOffRefusedWithFailedVerify(t *testing.T) {
 
 /*
 registry reset after real tampering: refused without --i-understand; then
-every grant revoked, writes disabled and host keys cleared on every device,
-model profiles removed, TOTP secrets kept; the registry verifies, the freeze
-is lifted and the audit chain continues intact.
+every grant, change TOTP and model profile removed, writes disabled, both
+flags off and host keys cleared on every device, whose kept fields are all
+listed; the registry verifies, the freeze is lifted and the audit chain
+(only its head pointer was rewound) is reported intact and continues.
 */
 func TestRegistryResetRevokesEverything(t *testing.T) {
 	f := newFixture(t)
@@ -509,7 +516,8 @@ func TestRegistryResetRevokesEverything(t *testing.T) {
 		r.details["totp_removed"] != float64(1) {
 		t.Fatalf("reset audit %+v", r)
 	}
-	if !strings.Contains(resp.Text, "device 1  10.0.0.1") {
+	if !strings.Contains(resp.Text, "device 1  address 10.0.0.1  port 22  protocol ssh  group core  driver esr") ||
+		!strings.Contains(resp.Text, "Audit chain intact up to its anchor") {
 		t.Fatalf("reset report does not list the device: %s", resp.Text)
 	}
 	f.chainIntact(t)
@@ -531,15 +539,15 @@ shows the truncation. Both freeze; the O(1) head check of every
 verification catches the truncation too.
 */
 func TestAuditVerifyCatchesBreakAndTruncation(t *testing.T) {
-	for name, attack := range map[string]string{
-		"break": `ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
+	for name, c := range map[string]struct{ sql, reason string }{
+		"break": {`ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
 			UPDATE exec.audit_event SET payload = convert_to(replace(convert_from(payload, 'UTF8'), 'tester', 'mallory'), 'UTF8')
 				WHERE id = (SELECT min(id) + 1 FROM exec.audit_event);
-			ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only`,
-		"truncation": `ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
+			ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only`, "hash mismatch"},
+		"truncation": {`ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
 			DELETE FROM exec.audit_event WHERE id > (SELECT max(id) - 2 FROM exec.audit_event);
 			ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only;
-			UPDATE exec.audit_head SET (last_id, hash) = (SELECT id, hash FROM exec.audit_event ORDER BY id DESC LIMIT 1)`,
+			UPDATE exec.audit_head SET (last_id, hash) = (SELECT id, hash FROM exec.audit_event ORDER BY id DESC LIMIT 1)`, "anchor missing"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
@@ -549,10 +557,10 @@ func TestAuditVerifyCatchesBreakAndTruncation(t *testing.T) {
 				}
 			}
 			f.chainIntact(t)
-			attacktest.Tamper(t, f.env, attack)
+			attacktest.Tamper(t, f.env, c.sql)
 			resp := f.do(execadmin.Request{Cmd: "audit-verify"})
-			if resp.OK {
-				t.Fatal("tampered chain verified")
+			if resp.OK || !strings.Contains(resp.Error, c.reason) {
+				t.Fatalf("tampered chain: %+v, want %q", resp, c.reason)
 			}
 			if frozen, _ := f.guard.Frozen(); !frozen {
 				t.Fatal("not frozen")
@@ -702,5 +710,165 @@ func TestUnlockIgnoresPanelNames(t *testing.T) {
 	}
 	if resp := f.do(execadmin.Request{Cmd: "unlock", User: name}); !resp.OK || !strings.Contains(resp.Text, fmt.Sprintf("#%d", id)) {
 		t.Fatalf("unlock by snapshot: %+v", resp)
+	}
+}
+
+/* rewriteChain rewrites every audit row as the superuser can, recomputing the unkeyed hash chain and moving the head to match. */
+func rewriteChain(t *testing.T, f *fixture, upTo int64, from, to string) {
+	t.Helper()
+	ctx := context.Background()
+	db := f.env.Pool("postgres")
+	attacktest.Tamper(t, f.env, `ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only`)
+	defer attacktest.Tamper(t, f.env, `ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only`)
+	rows, err := db.Query(ctx, `SELECT id, payload, prev_hash FROM exec.audit_event WHERE $1 = 0 OR id <= $1 ORDER BY id`, upTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	var payloads [][]byte
+	var prev []byte
+	for rows.Next() {
+		var id int64
+		var p, pv []byte
+		if err := rows.Scan(&id, &p, &pv); err != nil {
+			t.Fatal(err)
+		}
+		if prev == nil {
+			prev = pv
+		}
+		ids, payloads = append(ids, id), append(payloads, []byte(strings.ReplaceAll(string(p), from, to)))
+	}
+	rows.Close()
+	for i, id := range ids {
+		h := sha256.Sum256(append(append([]byte{}, prev...), payloads[i]...))
+		if _, err := db.Exec(ctx, `UPDATE exec.audit_event SET payload = $2, prev_hash = $3, hash = $4 WHERE id = $1`, id, payloads[i], prev, h[:]); err != nil {
+			t.Fatal(err)
+		}
+		prev = h[:]
+	}
+	if upTo == 0 {
+		attacktest.Tamper(t, f.env, `UPDATE exec.audit_head SET (last_id, hash) = (SELECT id, hash FROM exec.audit_event ORDER BY id DESC LIMIT 1)`)
+	}
+}
+
+/*
+Review I1 PoC end to end: the whole audit history rewritten with recomputed
+hashes and the head moved to match. The executor freezes; the documented
+reset reports the history as rewritten (in its answer and in its own hashed
+audit row, with the old anchor's hash) instead of vouching for it; the
+rewritten prefix stays sealed, so rewriting it again is caught.
+*/
+func TestResetReportsRewrittenHistory(t *testing.T) {
+	f := newFixture(t)
+	for range 4 {
+		if resp := f.do(execadmin.Request{Cmd: "registry-verify"}); !resp.OK {
+			t.Fatal(resp.Error)
+		}
+	}
+	c, _ := f.reg.AuditChain()
+	anchor := c.Anchor
+	rewriteChain(t, f, 0, "tester", "mallory")
+	if err := f.guard.Check(context.Background()); err == nil {
+		t.Fatal("rewritten chain not seen")
+	}
+	resp := f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK {
+		t.Fatalf("reset: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Text, fmt.Sprintf("AUDIT HISTORY REWRITTEN OR TRUNCATED at or before #%d", anchor.LastID)) {
+		t.Fatalf("reset report vouches for a rewritten history:\n%s", resp.Text)
+	}
+	r := f.lastAudit(t)
+	if r.details["audit_intact"] != false || r.details["audit_break_id"] != float64(anchor.LastID) ||
+		r.details["audit_old_anchor_hash"] != fmt.Sprintf("%x", anchor.Hash) || r.details["audit_last_good_hash"] == "" {
+		t.Fatalf("reset audit row %+v", r.details)
+	}
+	f.chainIntact(t)
+	c, _ = f.reg.AuditChain()
+	if len(c.Sealed) != 1 {
+		t.Fatalf("sealed %+v", c.Sealed)
+	}
+	rewriteChain(t, f, c.Sealed[0].To.LastID, "mallory", "eve")
+	if resp := f.do(execadmin.Request{Cmd: "audit-verify"}); resp.OK || !strings.Contains(resp.Error, "sealed segment changed") {
+		t.Fatalf("sealed segment rewritten: %+v", resp)
+	}
+}
+
+/*
+Review I2: a device row changed by the superuser (moved to another group)
+and a planted credential fail their MAC: the reset removes them and asks to
+register them again instead of sealing them; a sound device is kept and all
+its routing fields are listed.
+*/
+func TestResetDropsRowsWithoutAValidMAC(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	dev := func(id int64, addr string) map[string]any {
+		return map[string]any{"device_id": id, "address": mustAddr(addr), "port": 22, "protocol": "ssh", "write_group": "core",
+			"write_driver": "mes6", "hostkey_algo": nil, "hostkey_fp": nil, "allow_ssh_rsa_sha1": false, "writes_enabled": false,
+			"backup_via_executor": false}
+	}
+	if err := f.guard.HostWrite(ctx, func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+		return errors.Join(tx.Put("write_device", dev(1, "10.0.0.1")), tx.Put("write_device", dev(2, "10.0.0.2")),
+			tx.Put("write_credential", map[string]any{"device_id": 2, "kind": "ssh_write", "ciphertext": []byte{1}, "created_at": time.Now(),
+				"nonce": make([]byte, 16)}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attacktest.Tamper(t, f.env, `UPDATE exec.write_device SET write_group = 'lax' WHERE device_id = 1`)
+	attacktest.Tamper(t, f.env, `INSERT INTO exec.write_credential (device_id, kind, ciphertext, created_at, nonce, version, mac)
+		VALUES (3, 'ssh_write', '\x01', now(), decode(repeat('00', 16), 'hex'), 1, decode(repeat('00', 32), 'hex'))`)
+	resp := f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK {
+		t.Fatalf("reset: %s", resp.Error)
+	}
+	for sql, want := range map[string]int{
+		`SELECT count(*) FROM exec.write_device WHERE device_id = 1`:     0,
+		`SELECT count(*) FROM exec.write_device WHERE device_id = 2`:     1,
+		`SELECT count(*) FROM exec.write_credential WHERE device_id = 3`: 0,
+		`SELECT count(*) FROM exec.write_credential WHERE device_id = 2`: 1,
+	} {
+		if n := f.count(t, sql); n != want {
+			t.Errorf("%s = %d, want %d", sql, n, want)
+		}
+	}
+	for _, want := range []string{"write_device 1", "write_credential 3", "device 2  address 10.0.0.2  port 22  protocol ssh  group core  driver mes6"} {
+		if !strings.Contains(resp.Text, want) {
+			t.Errorf("report lacks %q:\n%s", want, resp.Text)
+		}
+	}
+	if strings.Contains(resp.Text, "group lax") {
+		t.Fatal("tampered group listed as kept")
+	}
+	if err := f.guard.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+/*
+Review minor 6: a grant whose write fails without a verdict (here a table
+lock held by someone else) is not answered as refused-so-not-granted: the
+registry is read again, and while it cannot be read the outcome is unknown.
+*/
+func TestGrantOutcomeUnknown(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, name := f.user(t, "uk")
+	preview := f.do(execadmin.Request{Cmd: "grant", User: name, Kind: "unmask"})
+	if !preview.OK {
+		t.Fatal(preview.Error)
+	}
+	lock, err := f.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Rollback(ctx) }()
+	if _, err := lock.Exec(ctx, `LOCK TABLE exec.write_grant IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	u := preview.Confirm
+	resp := f.do(execadmin.Request{Cmd: "grant", User: u.Username, UserID: u.ID, UserCreated: u.CreatedAt, Kind: "unmask"})
+	if resp.OK || !strings.Contains(resp.Error, "outcome unknown") {
+		t.Fatalf("grant under a lock: %+v", resp)
 	}
 }

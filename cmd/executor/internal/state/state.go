@@ -58,9 +58,11 @@ COMMIT, with the id of its transaction: only that transaction's fate in the
 database (pg_xact_status) ever settles it, never a matching hash. Pending is
 nil once settled. Frozen is sticky: it outlives a database that is
 put back as it was, so only the host (nmsctl, 4a.4) clears it. AuditBase is
-where the verification of the audit chain starts (nil: its first row): a
-registry reset after a break of the chain moves it to the tail it continues
-from, since rows can never be repaired (append only).
+where the verification of the live audit chain starts (nil: its first row):
+a registry reset after a break, a rewrite or unanchored rows moves it to the
+tail it continues from, since rows can never be repaired (append only), and
+keeps the part it could still verify as an AuditSealed segment, which every
+later verification checks again.
 */
 type File struct {
 	V            int        `json:"v"`
@@ -70,14 +72,39 @@ type File struct {
 	Frozen       bool       `json:"frozen"`
 	FreezeReason string     `json:"freeze_reason"`
 	AuditBase    *AuditHead `json:"audit_base,omitempty"`
+	AuditSealed  []Segment  `json:"audit_sealed,omitempty"`
 }
 
-/* Base is the start of the audit chain's verification: AuditBase, or the empty head. */
+/* MaxSealed bounds the sealed segments (one per registry reset that moved the base). */
+const MaxSealed = 256
+
+/* Segment is a part of the audit chain kept verifiable by a reset: the rows after From up to To, chaining from From's hash and ending in To's. */
+type Segment struct {
+	From AuditHead `json:"from"`
+	To   AuditHead `json:"to"`
+}
+
+func (s Segment) valid() bool {
+	return s.From.LastID >= 0 && s.To.LastID > s.From.LastID && len(s.From.Hash) == sha256.Size && len(s.To.Hash) == sha256.Size
+}
+
+/* Chain is what the audit chain is verified against: sealed segments, the live chain's base and the anchor. */
+type Chain struct {
+	Sealed       []Segment
+	Base, Anchor AuditHead
+}
+
+/* Base is the start of the live audit chain's verification: AuditBase, or the empty head. */
 func (f File) Base() AuditHead {
 	if f.AuditBase == nil {
 		return AuditHead{Hash: make([]byte, sha256.Size)}
 	}
 	return *f.AuditBase
+}
+
+/* Chain is the audit chain's verification bounds as committed in f. */
+func (f File) Chain() Chain {
+	return Chain{Sealed: f.AuditSealed, Base: f.Base(), Anchor: f.Committed.AuditHead}
 }
 
 /* Equal reports whether two records describe the same registry state. */
@@ -136,7 +163,7 @@ func Load(path string, key *[32]byte) (File, error) {
 		return File{}, ErrInvalid
 	}
 	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || (f.Pending == nil) != (f.PendingXID == 0) || len(f.FreezeReason) > MaxReason ||
-		(f.AuditBase != nil && (f.AuditBase.LastID < 0 || len(f.AuditBase.Hash) != sha256.Size)) {
+		(f.AuditBase != nil && (f.AuditBase.LastID < 0 || len(f.AuditBase.Hash) != sha256.Size)) || !sealedValid(f.AuditSealed, f.Base()) {
 		return File{}, ErrInvalid
 	}
 	return f, nil
@@ -184,4 +211,19 @@ func syncDir(dir string) error {
 		return fmt.Errorf("state: %w", err)
 	}
 	return errors.Join(d.Sync(), d.Close())
+}
+
+/* sealedValid: well-formed segments in id order, none overlapping another or the live chain's base. */
+func sealedValid(segs []Segment, base AuditHead) bool {
+	if len(segs) > MaxSealed {
+		return false
+	}
+	last := int64(-1)
+	for _, g := range segs {
+		if !g.valid() || g.From.LastID < last {
+			return false
+		}
+		last = g.To.LastID
+	}
+	return last <= base.LastID
 }

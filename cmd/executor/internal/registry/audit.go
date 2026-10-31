@@ -113,15 +113,15 @@ func (r *Registry) Append(ctx context.Context, a Appender) error {
 }
 
 /*
-AuditBounds is what the audit chain is verified against: base, where the
-verification starts (the first row, or where a registry reset after a break
-continued the chain), and anchor, the head committed in the state file. The
+AuditChain is what the audit chain is verified against (state.File.Chain):
+the sealed segments a registry reset kept, the base the live chain is
+verified from, and the anchor, the head committed in the state file. The
 chain in the database always extends the anchor (a change in flight only
 adds rows), so a chain that does not contain it was truncated or rewritten.
 */
-func (r *Registry) AuditBounds() (base, anchor state.AuditHead, err error) {
+func (r *Registry) AuditChain() (state.Chain, error) {
 	f, err := r.load()
-	return f.Base(), f.Committed.AuditHead, err
+	return f.Chain(), err
 }
 
 /*
