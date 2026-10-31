@@ -365,15 +365,29 @@ func (r *Registry) loadLocked() (state.File, error) {
 }
 
 /*
-save writes f, keeping a sticky freeze the file already holds: MarkFrozen
-does not wait for the registry's lock, so it may have marked the file
-between this operation's load and this save, and that mark must never be lost.
+save writes the records of f (committed, pending). The sticky freeze is the
+file's own: save always keeps the Frozen and FreezeReason the file holds at
+that moment, never the copy f was loaded with, so neither MarkFrozen nor
+ClearFrozen (which do not wait for the registry's lock) can be undone by a
+save of an operation that loaded the file before them. A file that cannot be
+read is not written over: only the bootstrap's first save (an empty
+committed record) may find no file at all.
 */
 func (r *Registry) save(f state.File) error {
 	r.fileMu.Lock()
 	defer r.fileMu.Unlock()
-	if cur, err := state.Load(r.path, r.keys.State()); err == nil && cur.Frozen && !f.Frozen {
-		f.Frozen, f.FreezeReason = true, cur.FreezeReason
+	cur, err := state.Load(r.path, r.keys.State())
+	switch {
+	case err == nil:
+		f.Frozen, f.FreezeReason = cur.Frozen, cur.FreezeReason
+	case errors.Is(err, os.ErrNotExist) && f.Committed.HWM == 0:
+		f.Frozen, f.FreezeReason = false, ""
+	case errors.Is(err, os.ErrNotExist):
+		return tampered("state file missing")
+	case errors.Is(err, state.ErrInvalid):
+		return tampered("state file invalid or of another install")
+	default:
+		return err
 	}
 	return state.Save(r.path, r.keys.State(), f)
 }
@@ -437,9 +451,15 @@ func (r *Registry) settle(ctx context.Context, f state.File) (state.File, error)
 	return f, r.save(f)
 }
 
-/* settleWait retries settle until it succeeds, is tampering or settleFor passes; the registry's lock stays held. */
+/*
+settleWait retries settle until it succeeds, is tampering or settleFor passes;
+the registry's lock stays held. Every attempt (each read of the fate) ends by
+the deadline too, so a stalled read cannot carry the wait past settleFor.
+*/
 func (r *Registry) settleWait(ctx context.Context, f state.File) (state.File, error) {
 	deadline := time.Now().Add(r.settleFor)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	for {
 		g, err := r.settle(ctx, f)
 		if err == nil || errors.Is(err, ErrTampered) || time.Now().After(deadline) {
@@ -515,15 +535,20 @@ ErrTampered error means freeze; any other error (including ctx ending while
 waiting for the registry's lock) means the registry is not verified now.
 */
 func (r *Registry) View(ctx context.Context, fn func(*Snapshot) error) error {
-	if err := r.lock(ctx); err != nil {
-		return err
-	}
-	s, err := r.verified(ctx)
-	r.unlock()
+	s, err := r.locked(ctx)
 	if err != nil {
 		return err
 	}
 	return fn(s)
+}
+
+/* locked verifies under the registry's lock, released however verified ends (a panic included). */
+func (r *Registry) locked(ctx context.Context) (*Snapshot, error) {
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
+	return r.verified(ctx)
 }
 
 /* Report is the verified state of the registry. */
@@ -979,5 +1004,21 @@ func (r *Registry) MarkFrozen(reason string) error {
 		return err
 	}
 	f.Frozen, f.FreezeReason = true, reason
+	return state.Save(r.path, r.keys.State(), f)
+}
+
+/*
+ClearFrozen lifts the sticky freeze of the state file, under the file's own
+lock and with a save of its own (an ordinary save keeps whatever the file
+says). Only the host's freeze off calls it, after a verification passed.
+*/
+func (r *Registry) ClearFrozen() error {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	f, err := r.loadLocked()
+	if err != nil || !f.Frozen {
+		return err
+	}
+	f.Frozen, f.FreezeReason = false, ""
 	return state.Save(r.path, r.keys.State(), f)
 }

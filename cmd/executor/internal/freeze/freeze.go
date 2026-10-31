@@ -2,8 +2,9 @@
 Package freeze is the executor's freeze: an in-memory latch that every
 decision consults, backed by a disaster alert in execpub.alert, by a sticky
 flag in the state file and by exec_state (written through the registry when
-the registry still verifies). Once latched it stays latched for the life of
-the process; lifting a freeze is host-only (nmsctl, task 4a.4).
+the registry still verifies). Once latched it stays latched until the host
+lifts it (FreezeOff, through nmsctl executor freeze off) or, after tampering,
+resets the registry.
 */
 package freeze
 
@@ -41,7 +42,14 @@ const (
 	alertRetries  = 5
 	recordTimeout = 2 * registry.StatementTimeout
 	failureAlert  = 3
-	/* checkTimeout bounds one periodic verification, waiting for the registry's lock included (below Interval). */
+)
+
+/*
+Run's pace (variables for the tests): a verification every checkEvery, each
+bounded by checkTimeout, waiting for the registry's lock included (below checkEvery).
+*/
+var (
+	checkEvery   = Interval
 	checkTimeout = Interval - 5*time.Second
 )
 
@@ -56,6 +64,10 @@ type Guard struct {
 	reason   string
 	alerted  map[string]bool /* kinds already triggered in this process */
 	failures int             /* consecutive verifications failing without a verdict */
+	/* gen moves with every new freeze: a freeze off lifts nothing if it moved meanwhile. */
+	gen int64
+	/* offSeq is the registry counter of the last freeze off: older snapshots no longer latch. */
+	offSeq int64
 	/* Published, if set, is called once the latch is set, after the alert (hook for execpub.status, 4a.7). */
 	Published func(ctx context.Context, reason string)
 }
@@ -102,7 +114,7 @@ func (g *Guard) View(ctx context.Context, fn func(*registry.Snapshot) error) err
 		passed = true
 		g.verification(true)
 		if frozen, reason := s.Frozen(); frozen {
-			g.latch(reason) /* a freeze already recorded: no new alert */
+			g.latchAt(s.Seq(), reason) /* a freeze already recorded: no new alert */
 		}
 		if frozen, _ := g.Frozen(); frozen {
 			return ErrFrozen
@@ -113,6 +125,9 @@ func (g *Guard) View(ctx context.Context, fn func(*registry.Snapshot) error) err
 	case errors.Is(err, registry.ErrTampered):
 		g.Trigger(ctx, KindTamper, err.Error())
 		return ErrFrozen
+	case err != nil && !passed && errors.Is(err, context.Canceled) && ctx.Err() != nil:
+		/* The caller went away (a client disconnect): no evidence about the registry, not counted. */
+		return fmt.Errorf("verify registry: %w", err)
 	case err != nil && !passed:
 		if g.verification(false) {
 			g.alert(ctx, KindUnverifiable, "high", err.Error())
@@ -133,7 +148,7 @@ func (g *Guard) Write(ctx context.Context, fn func(ctx context.Context, s *regis
 	}
 	err := g.reg.Write(ctx, func(ctx context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		if frozen, reason := s.Frozen(); frozen {
-			g.latch(reason)
+			g.latchAt(s.Seq(), reason)
 			return ErrFrozen
 		}
 		/* The latch again: it may have been set while this write waited for the registry. */
@@ -160,7 +175,7 @@ has its own deadline (checkTimeout), so a stalled one ends as a failure that
 counts toward the alert instead of stopping the loop.
 */
 func (g *Guard) Run(ctx context.Context) {
-	t := time.NewTicker(Interval)
+	t := time.NewTicker(checkEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -188,12 +203,76 @@ func (g *Guard) verification(passed bool) (alert bool) {
 	return g.failures == failureAlert
 }
 
-func (g *Guard) latch(reason string) {
+/* latch sets the latch; setting it, or a new freeze (fresh, from Trigger), moves the generation. */
+func (g *Guard) latch(reason string, fresh bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if fresh || !g.frozen {
+		g.gen++
+	}
 	if !g.frozen {
 		g.frozen, g.reason = true, state.Reason(reason)
 	}
+}
+
+/* latchAt latches a freeze read from a snapshot at seq, unless a freeze off committed after that snapshot. */
+func (g *Guard) latchAt(seq int64, reason string) {
+	g.mu.Lock()
+	stale := seq < g.offSeq
+	g.mu.Unlock()
+	if !stale {
+		g.latch(reason, false)
+	}
+}
+
+/*
+FreezeOff lifts the freeze (host only: nmsctl executor freeze off). Under the
+registry's lock it verifies the whole registry (a failed verification
+refuses, tampering freezes anew) and records exec_state unfrozen, together
+with whatever also declares (the audit row); then it clears the sticky flag
+of the state file and the latch, unless a new freeze arrived meanwhile: a
+freeze off never lifts a freeze it did not see. Any error leaves the
+executor frozen (the latch and the sticky flag stay set), even if exec_state
+was recorded unfrozen.
+*/
+func (g *Guard) FreezeOff(ctx context.Context, also func(tx *registry.Tx) error) error {
+	g.mu.Lock()
+	gen := g.gen
+	g.mu.Unlock()
+	var seq int64
+	err := g.reg.Write(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+		window := json.RawMessage("[]")
+		if st, ok := s.Get("exec_state", true); ok {
+			window, _ = st.Get("global_fail_window").(json.RawMessage)
+		}
+		if err := tx.Put("exec_state", map[string]any{"singleton": true, "freeze": false, "freeze_reason": nil,
+			"global_fail_window": window}); err != nil {
+			return err
+		}
+		seq = tx.Seq()
+		if also != nil {
+			return also(tx)
+		}
+		return nil
+	})
+	if errors.Is(err, registry.ErrTampered) {
+		g.Trigger(ctx, KindTamper, err.Error())
+		return fmt.Errorf("%w: the registry does not verify: %v", ErrFrozen, err)
+	}
+	if err != nil {
+		return fmt.Errorf("freeze off: %w", err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.gen != gen {
+		return fmt.Errorf("%w: a new freeze arrived during freeze off", ErrFrozen)
+	}
+	if err := g.reg.ClearFrozen(); err != nil {
+		return fmt.Errorf("freeze off: state file: %w", err)
+	}
+	g.frozen, g.reason, g.offSeq, g.failures = false, "", seq, 0
+	g.alerted = map[string]bool{}
+	return nil
 }
 
 /* firstOf reports whether kind is triggered for the first time in this process. */
@@ -241,13 +320,13 @@ behind the registry's lock, which a stalled database call may hold), then
 the disaster alert (its own deadline, retried in the background), then
 exec_state through the registry, which refuses to write over a registry
 that does not verify, so a tampered state is never sealed as legitimate. All but the
-latch happen once per kind and process, so a tampered registry found again
+latch happen once per kind until a freeze off, so a tampered registry found again
 every Interval does not flood the log and the alerts; every step is bounded
 in time, so a lock held by someone else delays nothing but exec_state.
 */
 func (g *Guard) Trigger(ctx context.Context, kind, reason string) {
 	reason = state.Reason(reason)
-	g.latch(reason)
+	g.latch(reason, true)
 	if !g.firstOf(kind) {
 		return
 	}

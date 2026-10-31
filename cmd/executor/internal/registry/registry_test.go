@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
@@ -464,6 +465,18 @@ func TestPendingFromTheFutureIsTampering(t *testing.T) {
 	}
 }
 
+/* within runs fn and fails the test if it has not returned after d (fn may then stay blocked). */
+func within(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s: still blocked after %v", what, d)
+	}
+}
+
 /*
 I1: MarkFrozen does not wait for the registry's lock, so it can mark the
 state file in the middle of a write; the write's later save keeps the mark.
@@ -477,11 +490,196 @@ func TestMarkFrozenDuringAWriteIsKept(t *testing.T) {
 			}
 		}
 	}
-	if err := grant(context.Background(), r, 1); err != nil {
-		t.Fatal(err)
-	}
+	within(t, time.Minute, "write", func() {
+		if err := grant(context.Background(), r, 1); err != nil {
+			t.Error(err)
+		}
+	})
 	if f := loadState(t, r); !f.Frozen || f.FreezeReason != "mid-write" || f.Pending != nil || f.Committed.HWM != 2 {
 		t.Fatalf("state %+v", f)
+	}
+}
+
+/*
+Step 0 (1, 2): the sticky freeze belongs to the file. A write that loaded the
+file while frozen and saves after the host cleared the flag does not freeze
+it again (and, above, one that loaded it unfrozen does not lift a later mark).
+*/
+func TestStaleSaveDoesNotRefreeze(t *testing.T) {
+	_, r := fresh(t)
+	if err := r.MarkFrozen("host"); err != nil {
+		t.Fatal(err)
+	}
+	r.hook = func(s string, _ pgx.Tx) {
+		if s == "pending" {
+			if err := r.ClearFrozen(); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	within(t, time.Minute, "write", func() {
+		if err := grant(context.Background(), r, 1); err != nil {
+			t.Error(err)
+		}
+	})
+	if f := loadState(t, r); f.Frozen || f.FreezeReason != "" || f.Pending != nil || f.Committed.HWM != 2 {
+		t.Fatalf("state %+v", f)
+	}
+	if rep := verify(t, r); rep.Frozen {
+		t.Fatalf("report %+v", rep)
+	}
+}
+
+/* Step 0 (1): a save never writes over a state file it cannot read (deleted or replaced mid-write): tampering, nothing committed. */
+func TestSaveRefusesAnUnreadableStateFile(t *testing.T) {
+	for name, attack := range map[string]func(path string) error{
+		"deleted":  os.Remove,
+		"replaced": func(p string) error { return os.WriteFile(p, []byte("x\n{}"), 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, r := fresh(t)
+			r.hook = func(s string, _ pgx.Tx) {
+				if s == "verified" {
+					if err := attack(r.path); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			if err := grant(context.Background(), r, 1); !errors.Is(err, ErrTampered) {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := os.Stat(r.path); name == "deleted" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state file recreated: %v", err)
+			}
+			if n := count(t, env, `SELECT count(*) FROM exec.write_grant`); n != 0 {
+				t.Fatalf("grants %d", n)
+			}
+		})
+	}
+}
+
+/* Step 0 (3): a function that panics inside Write releases the registry's lock. */
+func TestPanicReleasesTheLock(t *testing.T) {
+	_, r := fresh(t)
+	ctx := context.Background()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("no panic")
+			}
+		}()
+		_ = r.Write(ctx, func(context.Context, *Snapshot, *Tx) error { panic("boom") })
+	}()
+	within(t, 30*time.Second, "verify after a panic", func() { verify(t, r) })
+	within(t, 30*time.Second, "write after a panic", func() {
+		if err := grant(ctx, r, 1); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+/*
+Step 0 (6): the backend of a write is stopped (SIGSTOP) after the pending
+record, so the COMMIT is sent but not answered and the write's own deadline
+expires. The settle after the failed COMMIT reads the fate under a context
+of its own (WithoutCancel): resumed while it waits, the backend commits and
+the write reports success. Resumed only after the write gave up, the change
+stays pending, nothing verifies meanwhile, and the next verification settles it.
+*/
+func TestStallAtPendingSettles(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resumed late %v", late), func(t *testing.T) {
+			env, r := fresh(t)
+			ctx := context.Background()
+			r.opTimeout, r.settleFor = 3*time.Second, 5*time.Second
+			if late {
+				r.settleFor = time.Second
+			}
+			var resume func()
+			r.hook = func(s string, tx pgx.Tx) {
+				if s == "pending" {
+					resume = attacktest.Stall(t, env, tx.Conn().PgConn().PID())
+				}
+			}
+			r.commitTx = func(ctx context.Context, tx pgx.Tx) error {
+				err := tx.Commit(ctx)
+				if !late {
+					resume() /* the write's deadline has passed: only a settle with a context of its own sees the outcome */
+				}
+				return err
+			}
+			var err error
+			within(t, time.Minute, "stalled write", func() { err = grant(ctx, r, 1) })
+			r.hook = nil
+			if !late {
+				if err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			} else {
+				if err == nil || errors.Is(err, ErrTampered) {
+					t.Fatalf("write: %v", err)
+				}
+				if f := loadState(t, r); f.Pending == nil {
+					t.Fatalf("pending dropped while unsettled: %+v", f)
+				}
+				if _, err := r.Verify(ctx); err == nil || errors.Is(err, ErrTampered) {
+					t.Fatalf("verify while stalled: %v", err)
+				}
+				resume()
+				deadline := time.Now().Add(30 * time.Second)
+				for {
+					if _, err = r.Verify(ctx); err == nil || errors.Is(err, ErrTampered) || time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				if err != nil {
+					t.Fatalf("verify after resume: %v", err)
+				}
+			}
+			if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 2 {
+				t.Fatalf("state %+v", f)
+			}
+			if rep := verify(t, r); rep.Seq != 2 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 1 {
+				t.Fatalf("not settled as committed: %+v", rep)
+			}
+		})
+	}
+}
+
+/*
+Step 0 (5): each read of a pending transaction's fate ends by the settle
+deadline. Here no connection is free (the pool's only one is held), so every
+read waits: the settle still ends after settleFor, not StatementTimeout.
+*/
+func TestSettleWaitIsBounded(t *testing.T) {
+	env, r := fresh(t)
+	ctx := context.Background()
+	f := loadState(t, r)
+	pending := f.Committed
+	f.Pending, f.PendingXID = &pending, 1
+	if err := state.Save(r.path, r.keys.State(), f); err != nil {
+		t.Fatal(err)
+	}
+	db, pw := env.Config("nms_executor")
+	pool, err := store.Open(ctx, db, pw, PinSession, func(c *pgxpool.Config) { c.MaxConns = 1 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	held, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	n := New(pool, keys(t), r.path)
+	n.settleFor = time.Second
+	began := time.Now()
+	if err := n.Init(ctx); err == nil || errors.Is(err, ErrTampered) {
+		t.Fatalf("init: %v", err)
+	}
+	if d := time.Since(began); d > StatementTimeout/2 {
+		t.Fatalf("settle took %v", d)
 	}
 }
 

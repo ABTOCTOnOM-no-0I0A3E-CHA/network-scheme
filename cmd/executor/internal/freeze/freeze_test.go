@@ -1,6 +1,7 @@
 package freeze_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -484,6 +486,19 @@ func TestFreezeSurvivesRestart(t *testing.T) {
 	}
 }
 
+/* waitForLock returns once some goroutine is waiting for the registry's lock (it is past the guard's latch check). */
+func waitForLock(t *testing.T) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(10 * time.Second)
+	for !bytes.Contains(buf[:runtime.Stack(buf, true)], []byte("registry.(*Registry).lock(")) {
+		if time.Now().After(deadline) {
+			t.Fatal("no write waits for the registry")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 /* M4: a write that waited for the registry while the latch was set is refused before its function runs. */
 func TestWriteRechecksTheLatch(t *testing.T) {
 	e := seeded(t)
@@ -506,7 +521,7 @@ func TestWriteRechecksTheLatch(t *testing.T) {
 			return tx.Put("write_grant", map[string]any{"user_id": 9, "kind": "write", "write_group": "core", "username_snapshot": "u"})
 		})
 	}()
-	time.Sleep(300 * time.Millisecond) /* the second write passed the latch and waits for the registry */
+	waitForLock(t) /* the second write passed the latch and waits for the registry */
 	freeze.Latch(e.guard, "concurrent freeze")
 	close(release)
 	if err := <-first; err == nil {
@@ -538,5 +553,192 @@ func TestTriggerRecordsTheFreeze(t *testing.T) {
 	}
 	if err := e.restart(t).guard.Check(ctx); !errors.Is(err, freeze.ErrFrozen) {
 		t.Fatalf("after restart: %v", err)
+	}
+}
+
+/*
+Step 0 (4): checks abandoned by their caller (a canceled context: a client
+that went away) are no evidence about the registry and do not count toward
+the unverifiable alert; real failures still do.
+*/
+func TestCanceledChecksAreNotCounted(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	tx, err := e.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE exec.write_grant IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	fail := func() {
+		t.Helper()
+		if err := e.guard.Check(ctx); err == nil || errors.Is(err, freeze.ErrFrozen) {
+			t.Fatalf("check under the lock: %v", err)
+		}
+	}
+	fail()
+	fail()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	for range 5 {
+		if err := e.guard.Check(canceled); err == nil || errors.Is(err, freeze.ErrFrozen) {
+			t.Fatalf("canceled check: %v", err)
+		}
+	}
+	if n := e.alerts(t, freeze.KindUnverifiable, "high"); n != 0 {
+		t.Fatalf("canceled checks counted: %d alerts", n)
+	}
+	fail()
+	if n := e.alerts(t, freeze.KindUnverifiable, "high"); n != 1 {
+		t.Fatalf("alerts %d", n)
+	}
+}
+
+/*
+Step 0 (6): Run bounds every periodic verification (checkTimeout). With the
+registry's lock held by a write that does not end, each check gives up on
+time, counts as a failure, and the loop goes on to raise the alert.
+*/
+func TestRunBoundsEachCheck(t *testing.T) {
+	defer freeze.SetRunTiming(100*time.Millisecond, 50*time.Millisecond)()
+	e := seeded(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	held, release := make(chan struct{}), make(chan struct{})
+	wrote := make(chan error, 1)
+	go func() {
+		wrote <- e.guard.Write(context.Background(), func(context.Context, *registry.Snapshot, *registry.Tx) error {
+			close(held)
+			<-release
+			return errors.New("released")
+		})
+	}()
+	<-held
+	ran := make(chan struct{})
+	go func() { defer close(ran); e.guard.Run(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for e.alerts(t, freeze.KindUnverifiable, "high") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no alert from the periodic checks")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	close(release)
+	if err := <-wrote; err == nil {
+		t.Fatal("the held write committed")
+	}
+	cancel()
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+	if err := e.guard.Check(context.Background()); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+/* FreezeOff lifts a freeze over a verifying registry: latch, sticky flag and exec_state; a restart stays unfrozen. */
+func TestFreezeOffLiftsAVerifiedFreeze(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	e.guard.Trigger(ctx, freeze.KindTamper, "host")
+	e.mustFreeze(t)
+	if err := e.guard.FreezeOff(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.guard.Check(ctx); err != nil {
+		t.Fatalf("check after freeze off: %v", err)
+	}
+	if f, err := state.Load(e.path, e.keys.State()); err != nil || f.Frozen {
+		t.Fatalf("state file %+v %v", f, err)
+	}
+	var frozen bool
+	if err := e.env.Pool("postgres").QueryRow(ctx, `SELECT "freeze" FROM exec.exec_state`).Scan(&frozen); err != nil || frozen {
+		t.Fatalf("exec_state %v %v", frozen, err)
+	}
+	if err := e.restart(t).guard.Check(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	/* A later freeze of the same kind alerts and marks again. */
+	e.guard.Trigger(ctx, freeze.KindTamper, "again")
+	if n := e.alerts(t, freeze.KindTamper, "disaster"); n != 2 {
+		t.Fatalf("alerts %d", n)
+	}
+	if f, _ := state.Load(e.path, e.keys.State()); !f.Frozen {
+		t.Fatal("second freeze not sticky")
+	}
+}
+
+/* FreezeOff over a registry that does not verify is refused: the executor stays frozen, also after a restart. */
+func TestFreezeOffRefusedWhenVerifyFails(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	attacktest.Tamper(t, e.env, `UPDATE exec.write_device SET port = 23`)
+	e.mustFreeze(t)
+	if err := e.guard.FreezeOff(ctx, nil); !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("freeze off over a tampered registry: %v", err)
+	}
+	e.mustFreeze(t)
+	if f, _ := state.Load(e.path, e.keys.State()); !f.Frozen {
+		t.Fatal("sticky flag cleared")
+	}
+	e.restart(t).mustFreeze(t)
+}
+
+/* A new freeze that arrives while a freeze off runs is never lifted by it. */
+func TestFreezeOffDoesNotLiftANewFreeze(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	e.guard.Trigger(ctx, freeze.KindTamper, "first")
+	err := e.guard.FreezeOff(ctx, func(*registry.Tx) error {
+		freeze.Latch(e.guard, "second")
+		return nil
+	})
+	if !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("freeze off: %v", err)
+	}
+	e.mustFreeze(t)
+	if f, _ := state.Load(e.path, e.keys.State()); !f.Frozen {
+		t.Fatal("sticky flag cleared")
+	}
+	e.restart(t).mustFreeze(t)
+}
+
+/*
+Step 0 (2): verifications (which settle and save the state file) running
+while a freeze off runs neither keep nor bring back the lifted freeze.
+*/
+func TestFreezeOffRacesWithChecks(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	e.guard.Trigger(ctx, freeze.KindTamper, "host")
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = e.guard.Check(ctx)
+			}
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := e.guard.FreezeOff(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	<-done
+	if err := e.guard.Check(ctx); err != nil {
+		t.Fatalf("frozen again after freeze off: %v", err)
+	}
+	if f, _ := state.Load(e.path, e.keys.State()); f.Frozen {
+		t.Fatal("sticky flag back")
 	}
 }
