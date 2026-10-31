@@ -167,15 +167,22 @@ func ReadKeyFile(path string) (*[32]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read key file: %w", err)
 	}
+	defer clear(raw)
 	key := new([32]byte)
 	if len(raw) == len(key) {
 		copy(key[:], raw)
 		return key, nil
 	}
-	text := string(bytes.TrimSpace(raw))
+	text := bytes.TrimSpace(raw)
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if b, err := enc.DecodeString(text); err == nil && len(b) == len(key) {
+		b := make([]byte, enc.DecodedLen(len(text)))
+		n, err := enc.Decode(b, text)
+		ok := err == nil && n == len(key)
+		if ok {
 			copy(key[:], b)
+		}
+		clear(b)
+		if ok {
 			return key, nil
 		}
 	}

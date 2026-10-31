@@ -3,8 +3,11 @@ package seal
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +83,23 @@ func TestWipeZeroesAndLoadWipesMaster(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("missing key file accepted")
+	}
+}
+
+/* Keys never render their bytes through fmt or slog. */
+func TestKeysAreMasked(t *testing.T) {
+	k, err := Derive(master(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	slog.New(slog.NewTextHandler(&b, nil)).Info("x", slog.Any("keys", k))
+	for _, s := range []string{fmt.Sprint(k), fmt.Sprintf("%v %+v %#v %s", k, k, k, k), b.String()} {
+		if strings.Contains(s, hex.EncodeToString(k.MAC()[:4])) || strings.Contains(s, "["+fmt.Sprint(k.Enc()[0])) {
+			t.Fatalf("leak: %s", s)
+		}
+		if !strings.Contains(s, "***") {
+			t.Fatalf("not masked: %s", s)
+		}
 	}
 }

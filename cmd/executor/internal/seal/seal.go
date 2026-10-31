@@ -9,6 +9,7 @@ package seal
 import (
 	"crypto/hkdf"
 	"crypto/sha256"
+	"log/slog"
 
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
 )
@@ -22,7 +23,10 @@ const (
 
 /*
 Keys are the subkeys of the sealing key. They live in this one value so they
-can be wiped together; accessors return pointers into it, never copies.
+can be wiped together; accessors return pointers into it, never copies, and
+every formatting and logging path prints "***". Wipe clears this value only:
+copies made by their users (the ipad/opad state inside an HMAC, an AEAD's
+key schedule) are not reachable from here.
 */
 type Keys struct {
 	enc, mac, state [32]byte
@@ -64,6 +68,15 @@ func (k *Keys) MAC() *[32]byte { return &k.mac }
 
 /* State is the HMAC-SHA-256 key of the state file. */
 func (k *Keys) State() *[32]byte { return &k.state }
+
+/* String, GoString and LogValue never render key material. */
+func (*Keys) String() string { return "***" }
+
+/* GoString implements fmt.GoStringer. */
+func (*Keys) GoString() string { return "***" }
+
+/* LogValue implements slog.LogValuer. */
+func (*Keys) LogValue() slog.Value { return slog.StringValue("***") }
 
 /* Wipe zeroes every subkey; the Keys are unusable afterwards. */
 func (k *Keys) Wipe() {
