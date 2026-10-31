@@ -54,13 +54,16 @@ type Record struct {
 
 /*
 File is the body of the state file. Pending is the change written before its
-COMMIT, nil once committed. Frozen is sticky: it outlives a database that is
+COMMIT, with the id of its transaction: only that transaction's fate in the
+database (pg_xact_status) ever settles it, never a matching hash. Pending is
+nil once settled. Frozen is sticky: it outlives a database that is
 put back as it was, so only the host (nmsctl, 4a.4) clears it.
 */
 type File struct {
 	V            int     `json:"v"`
 	Committed    Record  `json:"committed"`
 	Pending      *Record `json:"pending"`
+	PendingXID   uint64  `json:"pending_xid"` /* the database transaction (xid8) of Pending; set iff Pending is */
 	Frozen       bool    `json:"frozen"`
 	FreezeReason string  `json:"freeze_reason"`
 }
@@ -120,7 +123,7 @@ func Load(path string, key *[32]byte) (File, error) {
 	if err := dec.Decode(&f); err != nil || dec.More() {
 		return File{}, ErrInvalid
 	}
-	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || len(f.FreezeReason) > MaxReason {
+	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || (f.Pending == nil) != (f.PendingXID == 0) || len(f.FreezeReason) > MaxReason {
 		return File{}, ErrInvalid
 	}
 	return f, nil

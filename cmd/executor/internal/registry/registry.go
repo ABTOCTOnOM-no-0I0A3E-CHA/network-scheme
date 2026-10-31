@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,11 +77,13 @@ type Registry struct {
 	/* Test seams: hook runs at named stages; commitTx commits. */
 	hook     func(stage string, tx pgx.Tx)
 	commitTx func(ctx context.Context, tx pgx.Tx) error
+	/* settleFor bounds the wait for the fate of a transaction whose COMMIT failed ambiguously. */
+	settleFor time.Duration
 }
 
 /* New returns the registry over pool, with the state file at path. */
 func New(pool *pgxpool.Pool, keys *seal.Keys, path string) *Registry {
-	return &Registry{pool: pool, keys: keys, path: path,
+	return &Registry{pool: pool, keys: keys, path: path, settleFor: 2 * StatementTimeout,
 		commitTx: func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) }}
 }
 
@@ -307,19 +310,12 @@ func (s *Snapshot) check(key *[32]byte) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-/*
-match compares the verified database with the state file: the committed
-record is accepted, and so is the pending one (crash after COMMIT, before
-"committed" was written). It reports whether the database is at pending.
-*/
-func match(f state.File, seq int64, hash []byte) (atPending bool, err error) {
+/* match compares the verified database with the committed record of the (settled) state file. */
+func match(f state.File, seq int64, hash []byte) error {
 	if f.Committed.HWM == seq && bytes.Equal(f.Committed.StateHash, hash) {
-		return false, nil
+		return nil
 	}
-	if p := f.Pending; p != nil && p.HWM == seq && bytes.Equal(p.StateHash, hash) {
-		return true, nil
-	}
-	return false, tampered("registry at %d does not match the state file (committed %d)", seq, f.Committed.HWM)
+	return tampered("registry at %d does not match the state file (committed %d)", seq, f.Committed.HWM)
 }
 
 func (r *Registry) load() (state.File, error) {
@@ -335,27 +331,86 @@ func (r *Registry) load() (state.File, error) {
 
 func (r *Registry) save(f state.File) error { return state.Save(r.path, r.keys.State(), f) }
 
+/* errUnsettled: the fate of the pending transaction cannot be read now; nothing is decided until it can. */
+var errUnsettled = errors.New("registry: the pending change is not settled yet")
+
 /*
-settle moves the state file to where the verified database is: a pending
-record the database reached becomes committed, one it did not reach is
-dropped (it can never be accepted later, so a failed change cannot be
-replayed into the database).
+xactStatus is pg_xact_status of xid: "committed", "aborted", "in progress"
+or "" (too old to be known). A transaction in the database's future means
+the database was put back behind the state file: tampering.
 */
-func (r *Registry) settle(f state.File, atPending bool) (state.File, error) {
+func (r *Registry) xactStatus(ctx context.Context, xid uint64) (string, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pinSession(ctx, tx); err != nil {
+		return "", err
+	}
+	var st *string
+	err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_xact_status($1::pg_catalog.text::pg_catalog.xid8)`,
+		strconv.FormatUint(xid, 10)).Scan(&st)
+	var pe *pgconn.PgError
+	switch {
+	case errors.As(err, &pe) && pe.Code == "22023":
+		return "", tampered("pending transaction %d is in the database's future", xid)
+	case err != nil:
+		return "", err
+	case st == nil:
+		return "", nil
+	}
+	return *st, nil
+}
+
+/*
+settle resolves a pending record by the fate of its own transaction, never
+by comparing hashes: committed makes it the committed record, aborted (or
+too old to know) drops it, so the rows of a change that did not commit can
+never be accepted later, even replayed exactly. While the fate cannot be
+read, settle fails and nothing is verified (fail closed).
+*/
+func (r *Registry) settle(ctx context.Context, f state.File) (state.File, error) {
 	if f.Pending == nil {
 		return f, nil
 	}
-	if atPending {
+	st, err := r.xactStatus(ctx, f.PendingXID)
+	switch {
+	case err != nil:
+		return f, err
+	case st == "committed":
 		f.Committed = *f.Pending
+	case st == "aborted" || st == "":
+	default:
+		return f, errUnsettled
 	}
-	f.Pending = nil
+	f.Pending, f.PendingXID = nil, 0
 	return f, r.save(f)
+}
+
+/* settleWait retries settle until it succeeds, is tampering or settleFor passes; r.mu stays held. */
+func (r *Registry) settleWait(ctx context.Context, f state.File) (state.File, error) {
+	deadline := time.Now().Add(r.settleFor)
+	for {
+		g, err := r.settle(ctx, f)
+		if err == nil || errors.Is(err, ErrTampered) || time.Now().After(deadline) {
+			return g, err
+		}
+		select {
+		case <-ctx.Done():
+			return g, errors.Join(err, ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 /* verified reads and verifies the whole registry; r.mu must be held. */
 func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
 	f, err := r.load()
 	if err != nil {
+		return nil, err
+	}
+	if f, err = r.settle(ctx, f); err != nil {
 		return nil, err
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -377,11 +432,7 @@ func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	atPending, err := match(f, s.seq, hash)
-	if err != nil {
-		return nil, err
-	}
-	if f, err = r.settle(f, atPending); err != nil {
+	if err := match(f, s.seq, hash); err != nil {
 		return nil, err
 	}
 	s.frozen, s.reason = frozen(s, f)
@@ -518,14 +569,18 @@ func (t *Tx) Delete(table string, pk ...any) error {
 }
 
 /*
-Write changes the registry. Under the counter's row lock it verifies the
+Write changes the registry. Under the registry's locks it verifies the
 current registry against the state file (an unverified registry is never
 extended), hands fn that verified snapshot to declare its changes with
 tx.Put and tx.Delete, applies them at version seq+1 with MACs computed from
 the declared values, checks that the database now holds exactly the
 previous rows plus those changes (anything else — a trigger, a rule, a
 default, a planted row — is tampering), then records the change as pending
-in the state file, commits and records it as committed.
+in the state file (with its transaction id), commits and records it as
+committed. Every registry table is locked in EXCLUSIVE mode for the whole
+transaction. fn may run up to five times (serialization retries): it must
+only declare changes, with no side effect of its own (no device I/O, no
+other writes).
 */
 func (r *Registry) Write(ctx context.Context, fn func(ctx context.Context, s *Snapshot, tx *Tx) error) error {
 	r.mu.Lock()
@@ -549,12 +604,18 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err != nil {
 		return err
 	}
+	if f, err = r.settle(ctx, f); err != nil {
+		return err
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := pinSession(ctx, tx); err != nil {
+		return err
+	}
+	if err := lockRegistry(ctx, tx); err != nil {
 		return err
 	}
 	var seq int64
@@ -575,11 +636,7 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err != nil {
 		return err
 	}
-	atPending, err := match(f, pre.seq, hash)
-	if err != nil {
-		return err
-	}
-	if f, err = r.settle(f, atPending); err != nil {
+	if err := match(f, pre.seq, hash); err != nil {
 		return err
 	}
 	pre.frozen, pre.reason = frozen(pre, f)
@@ -657,9 +714,17 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if err != nil {
 		return err
 	}
+	var xid string
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::pg_catalog.text`).Scan(&xid); err != nil {
+		return err
+	}
+	xid8, err := strconv.ParseUint(xid, 10, 64)
+	if err != nil || xid8 == 0 {
+		return fmt.Errorf("registry: transaction id %q", xid)
+	}
 	base := f.Committed
 	next := state.Record{HWM: seq, StateHash: hash, AuditHead: base.AuditHead}
-	f.Pending = &next
+	f.Pending, f.PendingXID = &next, xid8
 	if err := r.save(f); err != nil {
 		return err
 	}
@@ -668,28 +733,31 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 		return r.failedCommit(ctx, f, next, err)
 	}
 	r.step("committed", tx)
-	f.Committed, f.Pending = next, nil
+	f.Committed, f.Pending, f.PendingXID = next, nil, 0
 	return r.save(f)
 }
 
 /*
 failedCommit settles the pending record after a failed COMMIT, before the
-lock is released, so a change that did not commit can never be accepted
-later (replayed by someone who saw its rows). A definite failure (the
-server answered, or nothing was sent) drops it; an ambiguous one (the
-connection broke) is resolved at once against the database. If that is
-impossible now, the next verification settles it the same way.
+lock is released. A COMMIT the server refused with an ERROR (or never
+received) aborted: the record is dropped. Anything else (the connection
+broke, or a FATAL that may come after the commit was written locally) is
+settled by the fate of the transaction, retried for a while under the lock;
+if it is still unknown, every verification keeps failing until it is known
+(fail closed), and a change that did commit is then advanced, one that did
+not is dropped: never accepted on a matching hash.
 */
 func (r *Registry) failedCommit(ctx context.Context, f state.File, next state.Record, err error) error {
 	var pe *pgconn.PgError
-	if errors.As(err, &pe) || pgconn.SafeToRetry(err) || errors.Is(err, pgx.ErrTxCommitRollback) {
-		f.Pending = nil
+	if (errors.As(err, &pe) && pe.Severity == "ERROR") || pgconn.SafeToRetry(err) || errors.Is(err, pgx.ErrTxCommitRollback) {
+		f.Pending, f.PendingXID = nil, 0
 		return errors.Join(err, r.save(f))
 	}
-	if _, verr := r.verified(ctx); verr != nil {
-		return errors.Join(err, verr)
+	g, serr := r.settleWait(ctx, f)
+	if serr != nil {
+		return errors.Join(err, serr)
 	}
-	if g, lerr := state.Load(r.path, r.keys.State()); lerr == nil && g.Committed.Equal(next) {
+	if g.Committed.Equal(next) {
 		return nil /* it did commit */
 	}
 	return err
@@ -721,6 +789,13 @@ func (r *Registry) Init(ctx context.Context) error {
 		return tampered("state file invalid or of another install")
 	case err != nil && !missing:
 		return err
+	case !missing && f.Pending != nil:
+		/* A crash inside a write or the bootstrap: settled by its transaction's fate, as after any failed COMMIT. */
+		if f, err = r.settleWait(ctx, f); err != nil {
+			return err
+		}
+	}
+	switch {
 	case !missing && f.Committed.HWM != 0:
 		return r.markInitialized(dir)
 	case missing:
@@ -738,12 +813,7 @@ func (r *Registry) Init(ctx context.Context) error {
 		return err
 	}
 	r.step("begin", tx)
-	/* Before the snapshot: nothing can be planted between the check and the inserts. */
-	names := []string{"exec.audit_head"}
-	for _, t := range tables {
-		names = append(names, t.qname())
-	}
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+strings.Join(names, ", ")+" IN EXCLUSIVE MODE"); err != nil {
+	if err := lockRegistry(ctx, tx); err != nil {
 		return err
 	}
 	if err := checkCatalog(ctx, tx); err != nil {
@@ -762,7 +832,7 @@ func (r *Registry) Init(ctx context.Context) error {
 		if missing {
 			return tampered("state file missing, registry not empty")
 		}
-		return nil /* bootstrap was pending: the verification decides */
+		return nil /* the verification decides (it fails: the state file says empty) */
 	}
 	empty := sha256.Sum256(nil)
 	f.Committed = state.Record{StateHash: empty[:], AuditHead: state.AuditHead{Hash: make([]byte, sha256.Size)}}
@@ -779,6 +849,22 @@ func (r *Registry) Init(ctx context.Context) error {
 		return err
 	}
 	return r.markInitialized(dir)
+}
+
+/*
+lockRegistry takes every registry table (and audit_head) in EXCLUSIVE mode
+before the transaction's first snapshot: from then until COMMIT nobody else
+writes a row or changes the tables (DDL, triggers, constraints wait), so
+what the catalog check and the scan see is what the write runs against.
+Readers are not blocked.
+*/
+func lockRegistry(ctx context.Context, tx pgx.Tx) error {
+	names := []string{"exec.audit_head"}
+	for _, t := range tables {
+		names = append(names, t.qname())
+	}
+	_, err := tx.Exec(ctx, "LOCK TABLE "+strings.Join(names, ", ")+" IN EXCLUSIVE MODE")
+	return err
 }
 
 /* unused accepts a state directory that holds nothing but temporary files. */

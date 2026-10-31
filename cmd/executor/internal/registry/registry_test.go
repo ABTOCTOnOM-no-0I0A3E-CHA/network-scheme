@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -131,7 +133,7 @@ func TestWriteAndView(t *testing.T) {
 			tx.Put("write_credential", map[string]any{"device_id": 1, "kind": "ssh_write", "ciphertext": []byte{0xde, 0xad},
 				"created_at": at, "nonce": make([]byte, 16)}),
 			tx.Put("model_profile", map[string]any{"id": 5, "write_driver": "mes6", "model_re": "^MES", "firmware_re": ".",
-				"strategies": json.RawMessage(`{"b": [1, 2.50, 1e2], "a": null,  "a": "x"}`), "note": "n"}),
+				"strategies": json.RawMessage(`{"b": [1, 2.50, 100], "a": null,  "a": "x"}`), "note": "n"}),
 		)
 	}); err != nil {
 		t.Fatal(err)
@@ -157,6 +159,9 @@ func TestWriteAndView(t *testing.T) {
 		c, _ := s.Get("write_credential", 1)
 		if !c.Get("created_at").(time.Time).Equal(at.Truncate(time.Microsecond)) {
 			t.Errorf("created_at %v", c.Get("created_at"))
+		}
+		if m, _ := s.Get("model_profile", 5); string(m.Get("strategies").(json.RawMessage)) != `{"a":"x","b":[1,2.50,100]}` {
+			t.Errorf("strategies %s", m.Get("strategies"))
 		}
 		if len(s.Rows("write_grant")) != 3 {
 			t.Error("rows")
@@ -282,6 +287,8 @@ failure drops the pending record at once; an ambiguous one is resolved at
 once; a crash before COMMIT is settled by the next verification. Replaying
 the captured rows afterwards is tampering in every case.
 */
+var heldLock pgx.Tx
+
 func TestFailedCommitCannotBeReplayed(t *testing.T) {
 	ctx := context.Background()
 	for name, c := range map[string]struct {
@@ -297,6 +304,25 @@ func TestFailedCommitCannotBeReplayed(t *testing.T) {
 			return errors.New("connection reset")
 		}},
 		"crash before commit": {crash: true},
+		/*
+			Re-review PoC (I-A): the COMMIT fails ambiguously and the change rolled
+			back; the attacker holds ACCESS EXCLUSIVE on the table so that a
+			re-verification would time out, replays the captured rows and releases.
+			The fate of the transaction is read from pg_xact_status, which no table
+			lock delays: the record is dropped and the replay is never accepted.
+		*/
+		"ambiguous, re-verification blocked by a lock": {commit: func(ctx context.Context, tx pgx.Tx) error {
+			_ = tx.Rollback(ctx)
+			lock, err := testdb.New(t).Pool("postgres").Begin(ctx)
+			if err != nil {
+				return err
+			}
+			if _, err := lock.Exec(ctx, `LOCK TABLE exec.write_grant IN ACCESS EXCLUSIVE MODE`); err != nil {
+				return err
+			}
+			heldLock = lock
+			return errors.New("unexpected EOF")
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env, r := fresh(t)
@@ -329,6 +355,24 @@ func TestFailedCommitCannotBeReplayed(t *testing.T) {
 					t.Fatal("write reported success")
 				}
 			}
+			if heldLock != nil {
+				/* The replay goes in under the attacker's lock, then the lock is released. */
+				if _, err := heldLock.Exec(ctx, `UPDATE exec.registry_counter SET seq = $1, mac = $2`, seq, cm); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := heldLock.Exec(ctx, `INSERT INTO exec.write_grant (user_id, kind, write_group, username_snapshot, version, mac)
+					VALUES (7, 'write', 'core', 'u', $1, $2)`, seq, gm); err != nil {
+					t.Fatal(err)
+				}
+				if err := heldLock.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				heldLock = nil
+				if _, err := r.Verify(ctx); !errors.Is(err, ErrTampered) {
+					t.Fatalf("replay under a lock accepted: %v", err)
+				}
+				return
+			}
 			if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 1 {
 				t.Fatalf("pending record kept: %+v", f)
 			}
@@ -337,6 +381,51 @@ func TestFailedCommitCannotBeReplayed(t *testing.T) {
 				t.Fatalf("replayed change accepted: %v", err)
 			}
 		})
+	}
+}
+
+/*
+A pending record is settled by its transaction alone. Here the database
+holds exactly the pending state, but the recorded transaction is first in
+progress (nothing is verified: fail closed, not tampering) and then aborted:
+the record is dropped and the database, which never reached it through that
+transaction, is tampering. A hash match is never enough.
+*/
+func TestPendingIsSettledOnlyByItsTransaction(t *testing.T) {
+	env, r := fresh(t)
+	ctx := context.Background()
+	before := loadState(t, r)
+	if err := grant(ctx, r, 1); err != nil {
+		t.Fatal(err)
+	}
+	after := loadState(t, r)
+	other, err := env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Rollback(ctx) }()
+	var xid string
+	if err := other.QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&xid); err != nil {
+		t.Fatal(err)
+	}
+	x, _ := strconv.ParseUint(xid, 10, 64)
+	forged := before
+	forged.Pending, forged.PendingXID = &after.Committed, x
+	if err := state.Save(r.path, r.keys.State(), forged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Verify(ctx); err == nil || errors.Is(err, ErrTampered) {
+		t.Fatalf("in progress: %v", err)
+	}
+	if err := grant(ctx, r, 2); err == nil {
+		t.Fatal("write over an unsettled change")
+	}
+	_ = other.Rollback(ctx)
+	if _, err := r.Verify(ctx); !errors.Is(err, ErrTampered) {
+		t.Fatalf("aborted: %v", err)
+	}
+	if f := loadState(t, r); f.Pending != nil {
+		t.Fatalf("pending kept: %+v", f)
 	}
 }
 
@@ -388,6 +477,68 @@ func TestWriteRefusesUndeclaredChanges(t *testing.T) {
 			r.hook = nil
 			if rep := verify(t, r); rep.Seq != 2 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 1 {
 				t.Fatalf("state after refused write: %+v", rep)
+			}
+		})
+	}
+}
+
+/*
+I-B: inside the write, the database ends up with the same number of rows,
+each validly MACed and no newer than the counter, but not the declared
+ones: an older valid version of a row put back (content only), or a row
+swapped for an old valid one that was deleted. Only the per-row comparison
+with the declared state catches these; the state hash would otherwise seal
+them.
+*/
+func TestWriteRefusesOldValidRows(t *testing.T) {
+	ctx := context.Background()
+	oldRow := func(t *testing.T, env *testdb.Env, user int) (int64, []byte) {
+		var v int64
+		var m []byte
+		if err := env.Pool("postgres").QueryRow(ctx, `SELECT version, mac FROM exec.write_grant WHERE user_id = $1`, user).Scan(&v, &m); err != nil {
+			t.Fatal(err)
+		}
+		return v, m
+	}
+	for name, attack := range map[string]func(v2 int64, m2 []byte, v4 int64, m4 []byte) []string{
+		"old content of the same row": func(v2 int64, m2 []byte, _ int64, _ []byte) []string {
+			return []string{fmt.Sprintf(`UPDATE exec.write_grant SET username_snapshot = 'u', version = %d, mac = '\x%x' WHERE user_id = 2`, v2, m2)}
+		},
+		"row swapped for an old deleted one": func(_ int64, _ []byte, v4 int64, m4 []byte) []string {
+			return []string{`DELETE FROM exec.write_grant WHERE user_id = 3`,
+				fmt.Sprintf(`INSERT INTO exec.write_grant (user_id, kind, write_group, username_snapshot, version, mac)
+					VALUES (4, 'write', 'core', 'u', %d, '\x%x')`, v4, m4)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, r := fresh(t)
+			for _, u := range []int64{2, 3, 4} {
+				if err := grant(ctx, r, u); err != nil {
+					t.Fatal(err)
+				}
+			}
+			v2, m2 := oldRow(t, env, 2)
+			v4, m4 := oldRow(t, env, 4)
+			if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error {
+				return errors.Join(tx.Put("write_grant", grantRow(2, "v")), tx.Delete("write_grant", 4, "write", "core"))
+			}); err != nil {
+				t.Fatal(err)
+			}
+			r.hook = func(s string, tx pgx.Tx) {
+				if s == "written" {
+					for _, q := range attack(v2, m2, v4, m4) {
+						if _, err := tx.Exec(ctx, q); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+			}
+			if err := grant(ctx, r, 1); !errors.Is(err, ErrTampered) {
+				t.Fatalf("err %v", err)
+			}
+			r.hook = nil
+			if rep := verify(t, r); rep.Seq != 5 {
+				t.Fatalf("seq %d", rep.Seq)
 			}
 		})
 	}
@@ -521,19 +672,22 @@ func TestCheckRefusesVersionAboveCounter(t *testing.T) {
 	}
 }
 
-/* jsonb rewrites keys, numbers and whitespace: the canonical form does not change; any change of meaning does. */
+/* jsonb reorders keys and drops whitespace and duplicates but keeps decimal scale: so does the canonical form. */
 func TestCanonJSON(t *testing.T) {
-	a, err := canonJSON([]byte(`{"b": [1, 2.50, 1e2], "a": null}`))
+	a, err := canonJSON([]byte(`{"b": [1, 2.50, 100], "a": null, "a": "x"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := canonJSON([]byte(`{"a":null,"b":[1.0,2.5,100]}`))
-	c, _ := canonJSON([]byte(`{"a":null,"b":[1,2.5,101]}`))
-	d, _ := canonJSON([]byte(`{"a":"null","b":[1,2.5,100]}`))
-	if a != b || a == c || a == d {
+	if a != `{"a":"x","b":[1,2.50,100]}` {
+		t.Fatalf("canonical %s", a)
+	}
+	b, _ := canonJSON([]byte(`{"a":"x","b":[1,2.50,100]}`))
+	c, _ := canonJSON([]byte(`{"a":"x","b":[1.0,2.50,100]}`))
+	d, _ := canonJSON([]byte(`{"a":"x","b":[1,2.5,100]}`))
+	if a != b || a == c || a == d || b == c {
 		t.Fatalf("%s %s %s %s", a, b, c, d)
 	}
-	for _, bad := range []string{``, `{`, `{} {}`, `[1,]`} {
+	for _, bad := range []string{``, `{`, `{} {}`, `[1,]`, `[1e2]`, `[1E2]`, `[-0]`, `[-0.00]`, `[.5]`} {
 		if _, err := canonJSON([]byte(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

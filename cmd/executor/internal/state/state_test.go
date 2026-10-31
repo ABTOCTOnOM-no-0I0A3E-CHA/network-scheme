@@ -23,7 +23,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("missing file: %v", err)
 	}
 	pend := rec(8, 2)
-	in := File{Committed: rec(7, 1), Pending: &pend, Frozen: true, FreezeReason: "x"}
+	in := File{Committed: rec(7, 1), Pending: &pend, PendingXID: 991, Frozen: true, FreezeReason: "x"}
 	if err := Save(p, key, in); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.V != Version || !got.Committed.Equal(in.Committed) || !got.Pending.Equal(pend) || !got.Frozen || got.FreezeReason != "x" {
+	if got.V != Version || !got.Committed.Equal(in.Committed) || !got.Pending.Equal(pend) || got.PendingXID != 991 || !got.Frozen || got.FreezeReason != "x" {
 		t.Fatalf("got %+v", got)
 	}
 	if ents, _ := os.ReadDir(filepath.Dir(p)); len(ents) != 1 {
@@ -89,5 +89,20 @@ func TestReasonIsBoundedUTF8(t *testing.T) {
 	}
 	if Reason("a\xffb") != "a?b" {
 		t.Fatal("invalid UTF-8 kept")
+	}
+}
+
+/* A pending record without its transaction id (or an id without a record) is refused. */
+func TestPendingNeedsItsTransaction(t *testing.T) {
+	key := &[32]byte{1}
+	p := filepath.Join(t.TempDir(), "state")
+	pend := rec(2, 2)
+	for _, f := range []File{{Committed: rec(1, 1), Pending: &pend}, {Committed: rec(1, 1), PendingXID: 5}} {
+		if err := Save(p, key, f); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p, key); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%+v: %v", f, err)
+		}
 	}
 }

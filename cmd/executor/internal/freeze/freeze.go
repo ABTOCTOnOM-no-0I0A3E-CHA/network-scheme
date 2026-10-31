@@ -22,6 +22,9 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
 )
 
+/* alertRetryEvery spaces the background retries of a failed alert (a variable for the tests). */
+var alertRetryEvery = 2 * time.Second
+
 /* ErrFrozen refuses a decision while the executor is frozen. */
 var ErrFrozen = errors.New("executor is frozen")
 
@@ -35,6 +38,7 @@ const (
 const (
 	Interval      = 30 * time.Second
 	alertTimeout  = 5 * time.Second
+	alertRetries  = 5
 	recordTimeout = 2 * registry.StatementTimeout
 	failureAlert  = 3
 )
@@ -189,21 +193,41 @@ func (g *Guard) firstOf(kind string) bool {
 	return first
 }
 
-/* alert publishes to execpub.alert under its own deadline, so nothing held elsewhere can suppress it. */
+/*
+alert publishes to execpub.alert under its own deadline, so nothing held
+elsewhere can suppress it. A failed publication is logged and retried in the
+background a bounded number of times; the log line is the record if all fail.
+*/
 func (g *Guard) alert(ctx context.Context, kind, severity, text string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)
-	defer cancel()
-	if _, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, text) VALUES ($1, $2, $3)`,
-		kind, severity, state.Reason(text)); err != nil {
-		g.log.Error("execpub.alert: cannot publish", slog.String("kind", kind), slog.Any("err", err))
+	text = state.Reason(text)
+	g.log.Warn("executor alert", slog.String("kind", kind), slog.String("severity", severity), slog.String("text", text))
+	publish := func() error {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)
+		defer cancel()
+		_, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, text) VALUES ($1, $2, $3)`, kind, severity, text)
+		return err
+	}
+	if err := publish(); err != nil {
+		g.log.Error("execpub.alert: cannot publish, retrying", slog.String("kind", kind), slog.Any("err", err))
+		go func() {
+			for i := range alertRetries {
+				time.Sleep(alertRetryEvery)
+				err := publish()
+				if err == nil {
+					return
+				}
+				g.log.Error("execpub.alert: retry failed", slog.String("kind", kind), slog.Int("try", i+1), slog.Any("err", err))
+			}
+		}()
 	}
 }
 
 /*
 Trigger freezes: the latch first (it alone already refuses every decision),
-then the disaster alert, the sticky flag in the state file and exec_state
-through the registry — which refuses to write over a registry that does not
-verify, so a tampered state is never sealed as legitimate. All but the
+then the sticky flag in the local state file (no database involved), then
+the disaster alert (its own deadline, retried in the background), then
+exec_state through the registry, which refuses to write over a registry
+that does not verify, so a tampered state is never sealed as legitimate. All but the
 latch happen once per kind and process, so a tampered registry found again
 every Interval does not flood the log and the alerts; every step is bounded
 in time, so a lock held by someone else delays nothing but exec_state.
@@ -215,10 +239,10 @@ func (g *Guard) Trigger(ctx context.Context, kind, reason string) {
 		return
 	}
 	g.log.Error("executor frozen", slog.String("kind", kind), slog.String("reason", reason))
-	g.alert(ctx, kind, "disaster", reason)
 	if err := g.reg.MarkFrozen(reason); err != nil {
 		g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
 	}
+	g.alert(ctx, kind, "disaster", reason)
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	err := g.reg.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {

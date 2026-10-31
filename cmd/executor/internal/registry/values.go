@@ -6,14 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
 )
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+var (
+	plainNumber  = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+	negativeZero = regexp.MustCompile(`^-0(\.0+)?$`)
+)
 
 /*
 value is one column value in its three forms: canon (the MACed bytes, nil
@@ -108,16 +113,19 @@ func norm(c column, v any) (value, error) {
 		if err != nil {
 			return value{}, fmt.Errorf("%s: %w", c.name, err)
 		}
-		return value{s(cj), json.RawMessage(slices.Clone(raw)), string(raw)}, nil
+		return value{s(cj), json.RawMessage(cj), cj}, nil
 	}
 	return value{}, fmt.Errorf("%s: %T is not a %s", c.name, v, sqlType[c.kind])
 }
 
 /*
-canonJSON is an injective text of the meaning of a JSON document, the same
-for what a writer sends and what jsonb gives back (jsonb reorders keys,
-drops whitespace and duplicate keys and rewrites numbers): object keys
-sorted, strings as encoding/json writes them, numbers as exact rationals.
+canonJSON is the canonical JSON text of a document, the same for what a
+writer sends and what jsonb gives back (jsonb reorders keys and drops
+whitespace and duplicate keys): object keys sorted, strings as
+encoding/json writes them, numbers verbatim. jsonb keeps a number's decimal
+scale ("1.0" stays "1.0") and never writes an exponent, so numbers must be
+plain decimals and not a negative zero; then "1" and "1.0" stay distinct
+and the MAC covers exactly the text decisions read (Row.Get returns it).
 */
 func canonJSON(raw []byte) (string, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -143,11 +151,11 @@ func writeCanon(b *bytes.Buffer, v any) error {
 	case bool:
 		b.WriteString(strconv.FormatBool(x))
 	case json.Number:
-		r, ok := new(big.Rat).SetString(string(x))
-		if !ok {
-			return fmt.Errorf("bad number %q", x)
+		n := string(x)
+		if !plainNumber.MatchString(n) || negativeZero.MatchString(n) {
+			return fmt.Errorf("number %q: want a plain decimal", n)
 		}
-		b.WriteString(r.RatString())
+		b.WriteString(n)
 	case string:
 		q, err := json.Marshal(x)
 		if err != nil {

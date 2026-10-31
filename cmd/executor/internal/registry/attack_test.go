@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -46,16 +47,22 @@ func forged(t *testing.T, env *testdb.Env) int {
 }
 
 /*
-C1 PoC: a trigger created after the executor checked the catalog, on
-registry_counter (forges a write-admin grant inside the executor's
-transaction) or on the target table (rewrites the declared row). The write
-is refused as tampering, the guard freezes, and nothing forged is left
-sealed once the trigger is gone.
+C1 PoC and the re-review's "second catalog check is blind" PoC: a trigger
+created while a write runs, on registry_counter (forges a write-admin
+grant), on the target table (rewrites the declared row) or on another
+registry table. The write holds every registry table in EXCLUSIVE mode from
+before its snapshot, so the DDL waits for the COMMIT and never fires inside
+it: nothing forged is written; the next verification sees the trigger and
+freezes, also after a restart.
 */
-func TestTriggerCreatedDuringWriteFreezes(t *testing.T) {
-	for name, ddl := range map[string]string{
-		"on registry_counter": `CREATE TRIGGER forge AFTER UPDATE ON exec.registry_counter FOR EACH ROW EXECUTE FUNCTION attack.forge()`,
-		"on the target table": `CREATE TRIGGER forge BEFORE INSERT ON exec.write_grant FOR EACH ROW EXECUTE FUNCTION attack.rewrite()`,
+func TestTriggerCreatedDuringWriteWaitsAndFreezes(t *testing.T) {
+	for name, c := range map[string]struct{ create, drop string }{
+		"on registry_counter": {`CREATE TRIGGER forge AFTER UPDATE ON exec.registry_counter FOR EACH ROW EXECUTE FUNCTION attack.forge()`,
+			`DROP TRIGGER forge ON exec.registry_counter`},
+		"on the target table": {`CREATE TRIGGER forge BEFORE INSERT ON exec.write_grant FOR EACH ROW EXECUTE FUNCTION attack.rewrite()`,
+			`DROP TRIGGER forge ON exec.write_grant`},
+		"on another registry table": {`CREATE TRIGGER forge BEFORE UPDATE ON exec.model_profile FOR EACH ROW EXECUTE FUNCTION attack.rewrite()`,
+			`DROP TRIGGER forge ON exec.model_profile`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := testdb.New(t)
@@ -71,21 +78,29 @@ func TestTriggerCreatedDuringWriteFreezes(t *testing.T) {
 			if err := guard.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
+			created := make(chan error, 1)
 			registry.SetHook(reg, func(stage string, _ pgx.Tx) {
 				if stage == "verified" {
-					attacktest.Tamper(t, env, ddl)
+					go func() {
+						_, err := env.Pool("postgres").Exec(context.Background(), c.create)
+						created <- err
+					}()
+					time.Sleep(300 * time.Millisecond) /* the DDL is now queued behind the write's locks */
 				}
 			})
-			if err := guard.Write(context.Background(), grant(1)); !errors.Is(err, freeze.ErrFrozen) {
+			if err := guard.Write(context.Background(), grant(1)); err != nil {
 				t.Fatalf("write: %v", err)
 			}
 			registry.SetHook(reg, nil)
-			attacktest.Tamper(t, env, dropTrigger(name))
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { attacktest.Tamper(t, env, c.drop) })
 			if forged(t, env) != 0 {
 				t.Fatal("forged row committed")
 			}
-			if frozen, _ := guard.Frozen(); !frozen {
-				t.Fatal("not frozen")
+			if err := guard.Check(context.Background()); !errors.Is(err, freeze.ErrFrozen) {
+				t.Fatalf("check with the trigger: %v", err)
 			}
 			_, guard = executor(t, env, dir)
 			if err := guard.Start(context.Background()); err != nil {
@@ -96,13 +111,6 @@ func TestTriggerCreatedDuringWriteFreezes(t *testing.T) {
 			}
 		})
 	}
-}
-
-func dropTrigger(name string) string {
-	if name == "on registry_counter" {
-		return `DROP TRIGGER forge ON exec.registry_counter`
-	}
-	return `DROP TRIGGER forge ON exec.write_grant`
 }
 
 /*

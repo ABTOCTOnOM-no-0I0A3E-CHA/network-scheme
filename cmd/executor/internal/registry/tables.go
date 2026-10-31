@@ -144,7 +144,11 @@ func (t *table) fingerprint() string {
 		if def == "identity" {
 			ident, def = "d", ""
 		}
-		parts = append(parts, c.name+" "+sqlType[c.kind]+" "+ident+" "+def)
+		coll := ""
+		if c.kind == kText {
+			coll = "default"
+		}
+		parts = append(parts, c.name+" "+sqlType[c.kind]+" "+ident+" "+def+" "+coll)
 	}
 	slices.Sort(parts)
 	return strings.Join(parts, ",")

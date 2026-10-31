@@ -57,7 +57,10 @@ func start(t *testing.T, env *testdb.Env, path string) *executor {
 	return startOn(t, env, env.Pool("nms_executor"), path)
 }
 
-func (e *executor) restart(t *testing.T) *executor { t.Helper(); return startOn(t, e.env, e.pool, e.path) }
+func (e *executor) restart(t *testing.T) *executor {
+	t.Helper()
+	return startOn(t, e.env, e.pool, e.path)
+}
 
 /* seeded is a fresh install with a row in every registry table, not frozen. */
 func seeded(t *testing.T) *executor {
@@ -167,9 +170,13 @@ func TestDatabaseTamperingFreezes(t *testing.T) {
 			}
 			restore()
 		}},
-		"deleted row":                  {do: tamper(`DELETE FROM exec.write_device`)},
-		"deleted exec_state":           {do: tamper(`DELETE FROM exec.exec_state`)},
-		"registry_counter rolled back": {do: func(t *testing.T, e *executor) { r := attacktest.Copy(t, e.env, "registry_counter"); e.grant(t, 3); r() }},
+		"deleted row":        {do: tamper(`DELETE FROM exec.write_device`)},
+		"deleted exec_state": {do: tamper(`DELETE FROM exec.exec_state`)},
+		"registry_counter rolled back": {do: func(t *testing.T, e *executor) {
+			r := attacktest.Copy(t, e.env, "registry_counter")
+			e.grant(t, 3)
+			r()
+		}},
 		"whole registry replayed": {do: func(t *testing.T, e *executor) {
 			var restores []func()
 			for _, tb := range registryTables {
@@ -214,6 +221,34 @@ func TestDatabaseTamperingFreezes(t *testing.T) {
 				UPDATE exec.write_grant SET version = NULL WHERE user_id = 2`),
 			undo: `DELETE FROM exec.write_grant; ALTER TABLE exec.write_grant ALTER COLUMN version SET NOT NULL`},
 		"infinite timestamp": {do: tamper(`UPDATE exec.write_credential SET created_at = 'infinity'`)},
+		/* Re-review PoC: a CHECK calling a volatile function sees every written row (MAC, version) inside the write. */
+		"CHECK constraint with a leaking function": {
+			do: func(t *testing.T, e *executor) {
+				attacktest.Tamper(t, e.env, `CREATE SCHEMA IF NOT EXISTS attack;
+					CREATE TABLE IF NOT EXISTS attack.loot (mac bytea, version bigint);
+					CREATE OR REPLACE FUNCTION attack.leak(m bytea, v bigint) RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+						BEGIN INSERT INTO attack.loot VALUES (m, v); RETURN true; END $$;
+					ALTER TABLE exec.write_grant ADD CONSTRAINT leak CHECK (attack.leak(mac, version)) NOT VALID`)
+				/* The executor's next write must not run under the constraint. */
+				err := e.guard.Write(context.Background(), func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+					return tx.Put("write_grant", map[string]any{"user_id": 5, "kind": "write", "write_group": "core", "username_snapshot": "u"})
+				})
+				if !errors.Is(err, freeze.ErrFrozen) {
+					t.Fatalf("write under the constraint: %v", err)
+				}
+				var n int
+				if err := e.env.Pool("postgres").QueryRow(context.Background(), `SELECT count(*) FROM attack.loot`).Scan(&n); err != nil || n != 0 {
+					t.Fatalf("leaked %d rows (%v)", n, err)
+				}
+			},
+			undo: `ALTER TABLE exec.write_grant DROP CONSTRAINT leak; DROP TABLE attack.loot`},
+		"partial index": {do: tamper(`CREATE INDEX attack_idx ON exec.write_grant (user_id) WHERE user_id > 1`),
+			undo: `DROP INDEX exec.attack_idx`},
+		"foreign key into a registry table": {
+			do:   tamper(`CREATE SCHEMA IF NOT EXISTS attack; CREATE TABLE attack.pin (d bigint REFERENCES exec.write_device)`),
+			undo: `DROP TABLE attack.pin`},
+		"changed collation": {do: tamper(`ALTER TABLE exec.write_grant ALTER COLUMN username_snapshot TYPE text COLLATE "C"`),
+			undo: `ALTER TABLE exec.write_grant ALTER COLUMN username_snapshot TYPE text COLLATE "default"`},
 		"deleted audit_head": {do: tamper(`ALTER TABLE exec.audit_head DISABLE TRIGGER audit_head_keep_row; DELETE FROM exec.audit_head`),
 			undo: `INSERT INTO exec.audit_head VALUES (true, 0, decode(repeat('00', 32), 'hex'));
 				ALTER TABLE exec.audit_head ENABLE TRIGGER audit_head_keep_row`},
@@ -400,6 +435,33 @@ func TestRepeatedVerificationFailuresAlert(t *testing.T) {
 	_ = tx.Rollback(ctx)
 	if err := e.guard.Check(ctx); err != nil {
 		t.Fatalf("after the lock: %v", err)
+	}
+}
+
+/*
+The freeze is recorded in the local state file before anything that needs
+the database, and an alert that cannot be published at once is retried in
+the background until it is.
+*/
+func TestAlertIsRetried(t *testing.T) {
+	defer freeze.SetAlertRetryEvery(200 * time.Millisecond)()
+	e := seeded(t)
+	attacktest.Tamper(t, e.env, `REVOKE INSERT ON execpub.alert FROM nms_executor`)
+	t.Cleanup(func() { attacktest.Tamper(t, e.env, `GRANT INSERT ON execpub.alert TO nms_executor`) })
+	e.guard.Trigger(context.Background(), freeze.KindTamper, "test")
+	if f, err := state.Load(e.path, e.keys.State()); err != nil || !f.Frozen {
+		t.Fatalf("state file: %+v %v", f, err)
+	}
+	if e.alerts(t, freeze.KindTamper, "disaster") != 0 {
+		t.Fatal("alert published without the right")
+	}
+	attacktest.Tamper(t, e.env, `GRANT INSERT ON execpub.alert TO nms_executor`)
+	deadline := time.Now().Add(5 * time.Second)
+	for e.alerts(t, freeze.KindTamper, "disaster") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("alert never published")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
