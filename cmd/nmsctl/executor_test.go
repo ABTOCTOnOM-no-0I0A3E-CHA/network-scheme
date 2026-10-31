@@ -278,3 +278,21 @@ func TestNmsctlLinksNoExecutorPackage(t *testing.T) {
 		}
 	}
 }
+
+/* Review minor 1: control characters from the daemon (database errors, api-chosen names) never reach the terminal. */
+func TestDaemonTextIsTerminalSafe(t *testing.T) {
+	evil := "x\x1b]52;c;cGF5bG9hZA==\x07y\u009b2Jz\x00"
+	sys := &daemon{respond: func(execadmin.Request) execadmin.Response {
+		return execadmin.Response{Text: "text " + evil + "\n\tok", Error: "error " + evil}
+	}}
+	code, out := execRun(t, sys, "", "registry", "verify")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.ContainsAny(out, "\x1b\x07\x00\u009b") {
+		t.Fatalf("control characters printed: %q", out)
+	}
+	if !strings.Contains(out, "x?]52;c;cGF5bG9hZA==?y?2Jz?") || !strings.Contains(out, "\n\tok") {
+		t.Fatalf("output %q", out)
+	}
+}

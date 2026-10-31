@@ -31,6 +31,7 @@ const executorUsage = `usage:
   nmsctl executor freeze on|off [--reason TEXT]
   nmsctl executor unlock U|--global
   nmsctl executor model-verify --driver mes6|mes10|esr --model RE --firmware RE [--strategy k=v ...] --note TEXT
+      (RE matches the whole model or firmware string: stored as ^(?:RE)$)
   nmsctl executor registry verify|reset [--i-understand]
   nmsctl executor audit verify
   nmsctl executor device add|accept-hostkey|writes on|off
@@ -183,15 +184,30 @@ func show(ctx context.Context, d deps, req execadmin.Request) error {
 
 func printResponse(d deps, resp execadmin.Response) error {
 	if resp.Text != "" {
-		printf(d.out, "%s\n", strings.TrimSuffix(resp.Text, "\n"))
+		printf(d.out, "%s\n", terminalSafe(strings.TrimSuffix(resp.Text, "\n")))
 	}
 	if !resp.OK {
 		if resp.Error == "" {
 			resp.Error = "refused"
 		}
-		return fmt.Errorf("executor: %s", resp.Error)
+		return fmt.Errorf("executor: %s", terminalSafe(resp.Error))
 	}
 	return nil
+}
+
+/*
+terminalSafe replaces C0 (but newline and tab), DEL and C1 control
+characters with "?": the daemon's texts carry database error messages and
+names the api controls, which must never reach the operator's terminal as
+escape sequences (OSC 52 clipboard writes, cursor tricks).
+*/
+func terminalSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 /* confirm asks a yes/no question on stderr and reads the answer from stdin; only yes goes on. */

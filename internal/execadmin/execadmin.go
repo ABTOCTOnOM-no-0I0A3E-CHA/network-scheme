@@ -107,6 +107,33 @@ func printable(s string) bool {
 	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
+/* MaxPattern bounds a model or firmware pattern: stored anchored as ^(?:RE)$, 6 bytes more, within the column's 256. */
+const MaxPattern = 250
+
+/* uses lists the optional fields each command takes; any other field set is refused. */
+var uses = map[string][]string{
+	CmdPolicyReload:  {"action"},
+	CmdDevice:        {"action"},
+	CmdEnroll:        {"user", "user_id", "user_created_at", "replace"},
+	CmdGrant:         {"user", "user_id", "user_created_at", "kind", "group"},
+	CmdRevoke:        {"user", "kind", "group", "all"},
+	CmdFreezeOn:      {"reason"},
+	CmdFreezeOff:     {"reason"},
+	CmdUnlock:        {"user", "global"},
+	CmdModelVerify:   {"driver", "model", "firmware", "note", "strategies"},
+	CmdRegistryReset: {"i_understand"},
+}
+
+/* fields reports which optional fields are set. */
+func (r Request) fields() map[string]bool {
+	return map[string]bool{
+		"user": r.User != "", "user_id": r.UserID != 0, "user_created_at": !r.UserCreated.IsZero(), "kind": r.Kind != "",
+		"group": r.Group != "", "all": r.All, "replace": r.Replace, "global": r.Global, "i_understand": r.IUnderstand,
+		"reason": r.Reason != "", "action": r.Action != "", "driver": r.Driver != "", "model": r.Model != "",
+		"firmware": r.Firmware != "", "note": r.Note != "", "strategies": len(r.Strategies) > 0,
+	}
+}
+
 /* UserRef parses User: "#id" gives the id, anything else is a user name. */
 func (r Request) UserRef() (id int64, name string, err error) {
 	if s, ok := strings.CutPrefix(r.User, "#"); ok {
@@ -135,6 +162,11 @@ func (r Request) Validate() error {
 	}
 	if len(r.Reason) > 512 || !printable(r.Reason) {
 		return errors.New("reason: at most 512 bytes of printable text")
+	}
+	for name, set := range r.fields() {
+		if set && !slices.Contains(uses[r.Cmd], name) {
+			return fmt.Errorf("%s takes no %s", r.Cmd, name)
+		}
 	}
 	needUser := slices.Contains([]string{CmdEnroll, CmdGrant, CmdRevoke}, r.Cmd) || (r.Cmd == CmdUnlock && !r.Global)
 	if needUser {
@@ -183,10 +215,10 @@ func (r Request) validateModel() error {
 	switch {
 	case !slices.Contains(Drivers, r.Driver):
 		return fmt.Errorf("driver %q, want one of %s", r.Driver, strings.Join(Drivers, ", "))
-	case r.Model == "" || len(r.Model) > 256 || !printable(r.Model):
-		return errors.New("model: a regular expression of 1..256 printable bytes")
-	case r.Firmware == "" || len(r.Firmware) > 256 || !printable(r.Firmware):
-		return errors.New("firmware: a regular expression of 1..256 printable bytes")
+	case r.Model == "" || len(r.Model) > MaxPattern || !printable(r.Model):
+		return fmt.Errorf("model: a regular expression of 1..%d printable bytes", MaxPattern)
+	case r.Firmware == "" || len(r.Firmware) > MaxPattern || !printable(r.Firmware):
+		return fmt.Errorf("firmware: a regular expression of 1..%d printable bytes", MaxPattern)
 	case utf8.RuneCountInString(r.Note) < 1 || utf8.RuneCountInString(r.Note) > 1000 || !printable(r.Note):
 		return errors.New("note: 1..1000 characters of printable text (what was verified, where, by whom)")
 	case len(r.Strategies) > 64:
