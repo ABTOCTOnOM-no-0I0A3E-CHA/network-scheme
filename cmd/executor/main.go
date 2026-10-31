@@ -78,7 +78,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	pool, err := store.Open(ctx, cfg.DB, pw)
+	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession)
 	pw.Wipe()
 	if err != nil {
 		return err

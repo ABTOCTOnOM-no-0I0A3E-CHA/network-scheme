@@ -48,10 +48,10 @@ func Canonical(table string, pk, content []*string, version int64) []byte {
 	return binary.BigEndian.AppendUint64(b, uint64(version)) // #nosec G115 -- versions are positive
 }
 
-/* rowMAC is HMAC-SHA-256 under the mac subkey of the canonical encoding. */
-func rowMAC(key *[32]byte, table string, pk, content []*string, version int64) []byte {
+/* macOf is HMAC-SHA-256 under the mac subkey of a canonical encoding. */
+func macOf(key *[32]byte, canonical []byte) []byte {
 	h := hmac.New(sha256.New, key[:])
-	h.Write(Canonical(table, pk, content, version))
+	h.Write(canonical)
 	return h.Sum(nil)
 }
 

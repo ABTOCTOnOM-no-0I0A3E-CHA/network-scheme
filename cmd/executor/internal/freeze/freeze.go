@@ -1,14 +1,15 @@
 /*
 Package freeze is the executor's freeze: an in-memory latch that every
-decision consults, backed by exec_state (written through the registry when
-the registry still verifies), by a sticky flag in the state file and by a
-disaster alert in execpub.alert. Once latched it stays latched for the life
-of the process; lifting a freeze is host-only (nmsctl, task 4a.4).
+decision consults, backed by a disaster alert in execpub.alert, by a sticky
+flag in the state file and by exec_state (written through the registry when
+the registry still verifies). Once latched it stays latched for the life of
+the process; lifting a freeze is host-only (nmsctl, task 4a.4).
 */
 package freeze
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,11 +27,17 @@ var ErrFrozen = errors.New("executor is frozen")
 
 /* Alert kinds (execpub.alert.kind, task 4a.7 turns them into problems). */
 const (
-	KindTamper = "executor_tamper"
+	KindTamper       = "executor_tamper"       /* disaster: the registry or the state file was tampered with */
+	KindUnverifiable = "executor_unverifiable" /* high: the registry cannot be verified (decisions refused) */
 )
 
-/* Interval is how often Run verifies the registry (security.md 5.1a). */
-const Interval = 30 * time.Second
+/* Timing: periodic verification (security.md 5.1a), bounds of the freeze's own writes, failures before an alert. */
+const (
+	Interval      = 30 * time.Second
+	alertTimeout  = 5 * time.Second
+	recordTimeout = 2 * registry.StatementTimeout
+	failureAlert  = 3
+)
 
 /* Guard holds the latch and verifies the registry for every decision. */
 type Guard struct {
@@ -38,10 +45,11 @@ type Guard struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
 
-	mu      sync.Mutex
-	frozen  bool
-	reason  string
-	alerted map[string]bool /* kinds already triggered in this process */
+	mu       sync.Mutex
+	frozen   bool
+	reason   string
+	alerted  map[string]bool /* kinds already triggered in this process */
+	failures int             /* consecutive verifications failing without a verdict */
 	/* Published, if set, is called once the latch is set, after the alert (hook for execpub.status, 4a.7). */
 	Published func(ctx context.Context, reason string)
 }
@@ -77,24 +85,63 @@ func (g *Guard) Start(ctx context.Context) error {
 }
 
 /*
-Check is the gate before every decision: it verifies the registry and
-returns nil only if the verification passes and nothing is frozen. Any
-other outcome refuses the decision.
+View is the gate of every decision: it verifies the registry and runs fn
+on the verified snapshot, only if nothing is frozen. fn decides from that
+snapshot alone (registry.View). Tampering freezes; any other failure refuses
+the decision, and several in a row raise an alert.
 */
-func (g *Guard) Check(ctx context.Context) error {
-	rep, err := g.reg.Verify(ctx)
+func (g *Guard) View(ctx context.Context, fn func(*registry.Snapshot) error) error {
+	passed := false
+	err := g.reg.View(ctx, func(s *registry.Snapshot) error {
+		passed = true
+		g.verification(true)
+		if frozen, reason := s.Frozen(); frozen {
+			g.latch(reason) /* a freeze already recorded: no new alert */
+		}
+		if frozen, _ := g.Frozen(); frozen {
+			return ErrFrozen
+		}
+		return fn(s)
+	})
 	switch {
 	case errors.Is(err, registry.ErrTampered):
 		g.Trigger(ctx, KindTamper, err.Error())
-	case err != nil:
+		return ErrFrozen
+	case err != nil && !passed:
+		if g.verification(false) {
+			g.alert(ctx, KindUnverifiable, "high", err.Error())
+		}
 		return fmt.Errorf("verify registry: %w", err)
-	case rep.Frozen:
-		g.latch(rep.Reason) /* a freeze already recorded: no new alert */
 	}
+	return err
+}
+
+/*
+Write is the gate of every decision that changes the registry: refused
+while frozen, frozen on tampering (registry.Write). fn sees the verified
+snapshot the change is based on.
+*/
+func (g *Guard) Write(ctx context.Context, fn func(ctx context.Context, s *registry.Snapshot, tx *registry.Tx) error) error {
 	if frozen, _ := g.Frozen(); frozen {
 		return ErrFrozen
 	}
-	return nil
+	err := g.reg.Write(ctx, func(ctx context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+		if frozen, reason := s.Frozen(); frozen {
+			g.latch(reason)
+			return ErrFrozen
+		}
+		return fn(ctx, s, tx)
+	})
+	if errors.Is(err, registry.ErrTampered) {
+		g.Trigger(ctx, KindTamper, err.Error())
+		return ErrFrozen
+	}
+	return err
+}
+
+/* Check verifies the registry and reports whether a decision may be taken now. */
+func (g *Guard) Check(ctx context.Context) error {
+	return g.View(ctx, func(*registry.Snapshot) error { return nil })
 }
 
 /* Run verifies the registry every Interval until ctx ends. */
@@ -111,6 +158,18 @@ func (g *Guard) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+/* verification counts failed verifications in a row; it reports true at the failureAlert-th. */
+func (g *Guard) verification(passed bool) (alert bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if passed {
+		g.failures = 0
+		return false
+	}
+	g.failures++
+	return g.failures == failureAlert
 }
 
 func (g *Guard) latch(reason string) {
@@ -130,13 +189,24 @@ func (g *Guard) firstOf(kind string) bool {
 	return first
 }
 
+/* alert publishes to execpub.alert under its own deadline, so nothing held elsewhere can suppress it. */
+func (g *Guard) alert(ctx context.Context, kind, severity, text string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)
+	defer cancel()
+	if _, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, text) VALUES ($1, $2, $3)`,
+		kind, severity, state.Reason(text)); err != nil {
+		g.log.Error("execpub.alert: cannot publish", slog.String("kind", kind), slog.Any("err", err))
+	}
+}
+
 /*
 Trigger freezes: the latch first (it alone already refuses every decision),
-then the sticky flag in the state file, then exec_state through the
-registry — which refuses to write over a registry that does not verify, so
-a tampered state is never sealed as legitimate — and a disaster alert. All
-but the latch happen once per kind and process, so a tampered registry
-found again every Interval does not flood the log and the alerts.
+then the disaster alert, the sticky flag in the state file and exec_state
+through the registry — which refuses to write over a registry that does not
+verify, so a tampered state is never sealed as legitimate. All but the
+latch happen once per kind and process, so a tampered registry found again
+every Interval does not flood the log and the alerts; every step is bounded
+in time, so a lock held by someone else delays nothing but exec_state.
 */
 func (g *Guard) Trigger(ctx context.Context, kind, reason string) {
 	reason = state.Reason(reason)
@@ -145,22 +215,22 @@ func (g *Guard) Trigger(ctx context.Context, kind, reason string) {
 		return
 	}
 	g.log.Error("executor frozen", slog.String("kind", kind), slog.String("reason", reason))
+	g.alert(ctx, kind, "disaster", reason)
 	if err := g.reg.MarkFrozen(reason); err != nil {
 		g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
 	}
-	err := g.reg.Write(ctx, func(ctx context.Context, tx *registry.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exec.exec_state (singleton, "freeze", freeze_reason, version, mac)
-			VALUES (true, true, $1, $2, $3)
-			ON CONFLICT (singleton) DO UPDATE SET "freeze" = true, freeze_reason = $1, version = $2, mac = $3`,
-			reason, tx.Seq(), registry.Unsealed())
-		return err
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	err := g.reg.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+		window := json.RawMessage("[]")
+		if st, ok := s.Get("exec_state", true); ok {
+			window, _ = st.Get("global_fail_window").(json.RawMessage)
+		}
+		return tx.Put("exec_state", map[string]any{"singleton": true, "freeze": true, "freeze_reason": reason,
+			"global_fail_window": window})
 	})
 	if err != nil {
 		g.log.Error("exec_state: cannot record the freeze", slog.Any("err", err))
-	}
-	if _, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, text) VALUES ($1, 'disaster', $2)`,
-		kind, reason); err != nil {
-		g.log.Error("execpub.alert: cannot publish the freeze", slog.Any("err", err))
 	}
 	if g.Published != nil {
 		g.Published(ctx, reason)

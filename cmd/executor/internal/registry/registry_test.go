@@ -2,14 +2,18 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/netip"
+	"os"
 	"path/filepath"
-	"slices"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
@@ -60,12 +64,12 @@ func verify(t *testing.T, r *Registry) Report {
 	return rep
 }
 
+func grantRow(user int64, name string) map[string]any {
+	return map[string]any{"user_id": user, "kind": "write", "write_group": "core", "username_snapshot": name}
+}
+
 func grant(ctx context.Context, r *Registry, user int64) error {
-	return r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exec.write_grant (user_id, kind, write_group, username_snapshot, version, mac)
-			VALUES ($1, 'write', 'core', 'u', $2, $3)`, user, tx.Seq(), Unsealed())
-		return err
-	})
+	return r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error { return tx.Put("write_grant", grantRow(user, "u")) })
 }
 
 func count(t *testing.T, env *testdb.Env, sql string) int {
@@ -77,27 +81,37 @@ func count(t *testing.T, env *testdb.Env, sql string) int {
 	return n
 }
 
-/* A fresh install gets registry_counter, an unfrozen exec_state and a committed state file; a second Init changes nothing. */
+func loadState(t *testing.T, r *Registry) state.File {
+	t.Helper()
+	f, err := state.Load(r.path, r.keys.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+/* A fresh install gets registry_counter, an unfrozen exec_state, a committed state file and the sentinel; a second Init changes nothing. */
 func TestInitBootstrapsAFreshInstall(t *testing.T) {
 	env, r := fresh(t)
 	if rep := verify(t, r); rep.Seq != 1 || rep.Frozen {
 		t.Fatalf("report %+v", rep)
 	}
-	f, err := state.Load(r.path, r.keys.State())
-	if err != nil || f.Committed.HWM != 1 || f.Pending != nil || f.Frozen {
-		t.Fatalf("state %+v, %v", f, err)
+	if f := loadState(t, r); f.Committed.HWM != 1 || f.Pending != nil || f.Frozen {
+		t.Fatalf("state %+v", f)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(r.path), Sentinel)); err != nil {
+		t.Fatal(err)
 	}
 	if n := count(t, env, `SELECT count(*) FROM exec.exec_state WHERE NOT "freeze" AND version = 1`); n != 1 {
 		t.Fatalf("exec_state rows %d", n)
 	}
-	r = restart(t, env, r)
-	if rep := verify(t, r); rep.Seq != 1 {
+	if rep := verify(t, restart(t, env, r)); rep.Seq != 1 {
 		t.Fatalf("after restart %+v", rep)
 	}
 }
 
-/* Writes take consecutive versions, and inserts, updates and deletes all verify. */
-func TestWriteKeepsTheRegistryVerified(t *testing.T) {
+/* Puts and deletes take consecutive versions and verify; View hands out the verified Go values. */
+func TestWriteAndView(t *testing.T) {
 	env, r := fresh(t)
 	ctx := context.Background()
 	for u := int64(1); u <= 3; u++ {
@@ -105,82 +119,125 @@ func TestWriteKeepsTheRegistryVerified(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE exec.write_grant SET username_snapshot = 'v', version = $1, mac = $2 WHERE user_id = 2`, tx.Seq(), Unsealed())
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM exec.write_grant WHERE user_id = 3`)
-		}
-		return err
+	at := time.Date(2026, 10, 26, 12, 34, 56, 789012345, time.FixedZone("x", 3*3600))
+	if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error {
+		return errors.Join(
+			tx.Put("write_grant", grantRow(2, "v")),
+			tx.Delete("write_grant", 3, "write", "core"),
+			tx.Put("write_grant", map[string]any{"user_id": 4, "kind": "unmask", "write_group": nil, "username_snapshot": "w"}),
+			tx.Put("write_device", map[string]any{"device_id": 1, "address": netip.MustParseAddr("2001:db8::1"), "port": 22,
+				"protocol": "ssh", "write_group": "core", "write_driver": "esr", "hostkey_algo": nil, "hostkey_fp": nil,
+				"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": true}),
+			tx.Put("write_credential", map[string]any{"device_id": 1, "kind": "ssh_write", "ciphertext": []byte{0xde, 0xad},
+				"created_at": at, "nonce": make([]byte, 16)}),
+			tx.Put("model_profile", map[string]any{"id": 5, "write_driver": "mes6", "model_re": "^MES", "firmware_re": ".",
+				"strategies": json.RawMessage(`{"b": [1, 2.50, 1e2], "a": null,  "a": "x"}`), "note": "n"}),
+		)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if rep := verify(t, r); rep.Seq != 5 {
-		t.Fatalf("seq %d", rep.Seq)
-	}
-	if n := count(t, env, `SELECT count(*) FROM exec.write_grant`); n != 2 {
+	if n := count(t, env, `SELECT count(*) FROM exec.write_grant`); n != 3 {
 		t.Fatalf("grants %d", n)
 	}
-	/* A failing function leaves nothing behind. */
+	err := r.View(ctx, func(s *Snapshot) error {
+		if s.Seq() != 5 {
+			t.Errorf("seq %d", s.Seq())
+		}
+		g, ok := s.Get("write_grant", 2, "write", "core")
+		if !ok || g.Get("username_snapshot") != "v" || g.Version() != 5 {
+			t.Errorf("grant 2: %v %v", ok, g.r)
+		}
+		if _, ok := s.Get("write_grant", 4, "unmask", nil); !ok {
+			t.Error("unmask grant missing")
+		}
+		d, _ := s.Get("write_device", 1)
+		if d.Get("address") != netip.MustParseAddr("2001:db8::1") || d.Get("port") != int64(22) {
+			t.Errorf("device %v", d.r.typed)
+		}
+		c, _ := s.Get("write_credential", 1)
+		if !c.Get("created_at").(time.Time).Equal(at.Truncate(time.Microsecond)) {
+			t.Errorf("created_at %v", c.Get("created_at"))
+		}
+		if len(s.Rows("write_grant")) != 3 {
+			t.Error("rows")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	/* A failing function leaves nothing behind; a bad declaration is refused before any write. */
 	boom := errors.New("boom")
-	if err := r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-		_, _ = tx.Exec(ctx, `DELETE FROM exec.write_grant`)
+	if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error {
+		_ = tx.Delete("write_grant", 2, "write", "core")
 		return boom
 	}); !errors.Is(err, boom) {
 		t.Fatalf("err %v", err)
 	}
-	if rep := verify(t, r); rep.Seq != 5 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 2 {
-		t.Fatalf("failed write left traces: %+v", rep)
+	for _, bad := range []func(tx *Tx) error{
+		func(tx *Tx) error { return tx.Put("write_grant", map[string]any{"user_id": 1}) },
+		func(tx *Tx) error { return tx.Put("registry_counter", map[string]any{"singleton": true}) },
+		func(tx *Tx) error { return tx.Delete("exec_state", true) },
+		func(tx *Tx) error { return tx.Put("write_grant", grantRow(1, "")) }, /* CHECK in the database */
+	} {
+		if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error { return bad(tx) }); err == nil || errors.Is(err, ErrTampered) {
+			t.Fatalf("bad declaration: %v", err)
+		}
+	}
+	if rep := verify(t, r); rep.Seq != 5 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 3 {
+		t.Fatalf("failed writes left traces: %+v", rep)
+	}
+	if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 5 {
+		t.Fatalf("state %+v", f)
 	}
 }
 
-/* A row written without the new version is a caller bug: the write is refused, not sealed, and it is not tampering. */
-func TestWriteRefusesRowsOutsideTheVersion(t *testing.T) {
-	_, r := fresh(t)
-	err := r.Write(context.Background(), func(ctx context.Context, tx *Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exec.write_grant (user_id, kind, username_snapshot, version, mac)
-			VALUES (9, 'unmask', 'u', 1, $1)`, Unsealed())
-		return err
-	})
-	if err == nil || errors.Is(err, ErrTampered) {
-		t.Fatalf("err %v", err)
+/* crashAt runs a Write that dies (as the process would) at stage: no deferred cleanup but the transaction's. */
+func crashAt(t *testing.T, r *Registry, stage string, fn func() error) {
+	t.Helper()
+	r.hook = func(s string, _ pgx.Tx) {
+		if s == stage {
+			runtime.Goexit()
+		}
 	}
-	verify(t, r)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		done <- fn()
+	}()
+	if err, ok := <-done; ok {
+		t.Fatalf("no crash at %s: %v", stage, err)
+	}
+	r.hook = nil
 }
 
 /*
 Crash windows: dying after the pending record and before COMMIT leaves the
-database at committed; dying after COMMIT and before "committed" leaves it
-at pending, which the next start advances. Both are accepted. The same holds
-for the bootstrap.
+database at committed, and the next verification drops the pending record;
+dying after COMMIT and before "committed" leaves it at pending, which the
+next verification advances. Both are accepted, also for the bootstrap.
 */
 func TestCrashWindowsAreAccepted(t *testing.T) {
 	ctx := context.Background()
-	crash := errors.New("crash")
 	for _, c := range []struct {
-		stage   string
-		seq     int64
-		grants  int
-		pending bool
-	}{{"pending", 1, 0, true}, {"committed", 2, 1, false}} {
+		stage  string
+		seq    int64
+		grants int
+	}{{"pending", 1, 0}, {"committed", 2, 1}} {
 		env, r := fresh(t)
-		r.hook = func(s string) error {
-			if s == c.stage {
-				return crash
-			}
-			return nil
-		}
-		if err := grant(ctx, r, 1); !errors.Is(err, crash) {
-			t.Fatalf("%s: %v", c.stage, err)
+		crashAt(t, r, c.stage, func() error { return grant(ctx, r, 1) })
+		if f := loadState(t, r); f.Pending == nil {
+			t.Fatalf("%s: no pending record", c.stage)
 		}
 		r = restart(t, env, r)
 		if rep := verify(t, r); rep.Seq != c.seq || rep.Frozen {
 			t.Fatalf("%s: report %+v", c.stage, rep)
 		}
+		if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != c.seq {
+			t.Fatalf("%s: state %+v", c.stage, f)
+		}
 		if n := count(t, env, `SELECT count(*) FROM exec.write_grant`); n != c.grants {
 			t.Fatalf("%s: grants %d", c.stage, n)
-		}
-		if f, _ := state.Load(r.path, r.keys.State()); f.Pending != nil != c.pending || f.Committed.HWM != c.seq {
-			t.Fatalf("%s: state %+v", c.stage, f)
 		}
 		if err := grant(ctx, r, 2); err != nil {
 			t.Fatalf("%s: next write: %v", c.stage, err)
@@ -190,15 +247,7 @@ func TestCrashWindowsAreAccepted(t *testing.T) {
 		env := testdb.New(t)
 		attacktest.Reset(t, env)
 		r := New(env.Pool("nms_executor"), keys(t), filepath.Join(t.TempDir(), "state"))
-		r.hook = func(s string) error {
-			if s == stage {
-				return crash
-			}
-			return nil
-		}
-		if err := r.Init(ctx); !errors.Is(err, crash) {
-			t.Fatalf("bootstrap %s: %v", stage, err)
-		}
+		crashAt(t, r, stage, func() error { return r.Init(ctx) })
 		r = restart(t, env, r)
 		if rep := verify(t, r); rep.Seq != 1 || rep.Frozen {
 			t.Fatalf("bootstrap %s: %+v", stage, rep)
@@ -206,15 +255,153 @@ func TestCrashWindowsAreAccepted(t *testing.T) {
 	}
 }
 
+/* capture reads, inside the writer's transaction, the rows a change is about to commit (as a spying superuser could). */
+func capture(t *testing.T, tx pgx.Tx) (seq int64, counterMAC []byte, grantMAC []byte) {
+	t.Helper()
+	ctx := context.Background()
+	if err := tx.QueryRow(ctx, `SELECT seq, mac FROM exec.registry_counter`).Scan(&seq, &counterMAC); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT mac FROM exec.write_grant WHERE user_id = 7`).Scan(&grantMAC); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+/* replay puts the captured, never committed change into the database as the superuser. */
+func replay(t *testing.T, env *testdb.Env, seq int64, counterMAC, grantMAC []byte) {
+	t.Helper()
+	attacktest.Tamper(t, env, `UPDATE exec.registry_counter SET seq = $1, mac = $2`, seq, counterMAC)
+	attacktest.Tamper(t, env, `INSERT INTO exec.write_grant (user_id, kind, write_group, username_snapshot, version, mac)
+		VALUES (7, 'write', 'core', 'u', $1, $2)`, seq, grantMAC)
+}
+
+/*
+I1: a change whose COMMIT failed must never be accepted later. A definite
+failure drops the pending record at once; an ambiguous one is resolved at
+once; a crash before COMMIT is settled by the next verification. Replaying
+the captured rows afterwards is tampering in every case.
+*/
+func TestFailedCommitCannotBeReplayed(t *testing.T) {
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		commit func(ctx context.Context, tx pgx.Tx) error
+		crash  bool
+	}{
+		"definite": {commit: func(ctx context.Context, tx pgx.Tx) error {
+			_ = tx.Rollback(ctx)
+			return &pgconn.PgError{Code: "23514", Message: "check violation at commit"}
+		}},
+		"ambiguous, not committed": {commit: func(ctx context.Context, tx pgx.Tx) error {
+			_ = tx.Rollback(ctx)
+			return errors.New("connection reset")
+		}},
+		"crash before commit": {crash: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, r := fresh(t)
+			var seq int64
+			var cm, gm []byte
+			write := func() error {
+				return r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error { return tx.Put("write_grant", grantRow(7, "u")) })
+			}
+			if c.crash {
+				r.hook = func(s string, tx pgx.Tx) {
+					if s == "pending" {
+						seq, cm, gm = capture(t, tx)
+						runtime.Goexit()
+					}
+				}
+				done := make(chan struct{})
+				go func() { defer close(done); _ = write() }()
+				<-done
+				r.hook = nil
+				r = restart(t, env, r)
+				verify(t, r) /* settles: the database never reached pending */
+			} else {
+				r.hook = func(s string, tx pgx.Tx) {
+					if s == "pending" {
+						seq, cm, gm = capture(t, tx)
+					}
+				}
+				r.commitTx = c.commit
+				if err := write(); err == nil {
+					t.Fatal("write reported success")
+				}
+			}
+			if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 1 {
+				t.Fatalf("pending record kept: %+v", f)
+			}
+			replay(t, env, seq, cm, gm)
+			if _, err := restart(t, env, r).Verify(ctx); !errors.Is(err, ErrTampered) {
+				t.Fatalf("replayed change accepted: %v", err)
+			}
+		})
+	}
+}
+
+/* An ambiguous COMMIT failure that did commit is resolved as committed. */
+func TestAmbiguousCommitThatCommitted(t *testing.T) {
+	_, r := fresh(t)
+	r.commitTx = func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("connection reset")
+	}
+	if err := grant(context.Background(), r, 1); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 2 {
+		t.Fatalf("state %+v", f)
+	}
+}
+
+/*
+Inside the write, the database ends up holding something else than what
+was declared (as a trigger, rule or default would make it): refused as
+tampering, nothing sealed, nothing committed.
+*/
+func TestWriteRefusesUndeclaredChanges(t *testing.T) {
+	ctx := context.Background()
+	for name, sql := range map[string]string{
+		"rewritten value": `UPDATE exec.write_grant SET username_snapshot = 'evil' WHERE user_id = 1`,
+		"extra row":       `INSERT INTO exec.write_grant (user_id, kind, username_snapshot, version, mac) SELECT 9, 'write-admin', 'evil', version, mac FROM exec.write_grant WHERE user_id = 1`,
+		"vanished row":    `DELETE FROM exec.write_grant WHERE user_id = 2`,
+		"counter moved":   `UPDATE exec.registry_counter SET seq = seq + 1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, r := fresh(t)
+			if err := grant(ctx, r, 2); err != nil {
+				t.Fatal(err)
+			}
+			r.hook = func(s string, tx pgx.Tx) {
+				if s == "written" {
+					if _, err := tx.Exec(ctx, sql); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			if err := grant(ctx, r, 1); !errors.Is(err, ErrTampered) {
+				t.Fatalf("err %v", err)
+			}
+			r.hook = nil
+			if rep := verify(t, r); rep.Seq != 2 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 1 {
+				t.Fatalf("state after refused write: %+v", rep)
+			}
+		})
+	}
+}
+
 /* Concurrent read-modify-write updates are serialized: no update is lost. */
 func TestWritersAreSerialized(t *testing.T) {
 	env, r := fresh(t)
 	ctx := context.Background()
-	if err := r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exec.change_totp (user_id, username_snapshot, ciphertext, key_version, version, mac)
-			VALUES (1, 'u', '\x01', 1, $1, $2)`, tx.Seq(), Unsealed())
-		return err
-	}); err != nil {
+	totp := func(failures int64) map[string]any {
+		return map[string]any{"user_id": 1, "username_snapshot": "u", "ciphertext": []byte{1}, "key_version": 1,
+			"last_step": 0, "failures": failures, "lock_until": nil, "lock_count": 0}
+	}
+	if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error { return tx.Put("change_totp", totp(0)) }); err != nil {
 		t.Fatal(err)
 	}
 	const n = 20
@@ -222,14 +409,9 @@ func TestWritersAreSerialized(t *testing.T) {
 	errs := make(chan error, n)
 	for range n {
 		wg.Go(func() {
-			errs <- r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-				var f int
-				if err := tx.QueryRow(ctx, `SELECT failures FROM exec.change_totp WHERE user_id = 1`).Scan(&f); err != nil {
-					return err
-				}
-				_, err := tx.Exec(ctx, `UPDATE exec.change_totp SET failures = $1, version = $2, mac = $3 WHERE user_id = 1`,
-					f+1, tx.Seq(), Unsealed())
-				return err
+			errs <- r.Write(ctx, func(_ context.Context, s *Snapshot, tx *Tx) error {
+				row, _ := s.Get("change_totp", 1)
+				return tx.Put("change_totp", totp(row.Get("failures").(int64)+1))
 			})
 		})
 	}
@@ -286,57 +468,74 @@ func TestCounterRowLockOrdersTransactions(t *testing.T) {
 	}
 }
 
-/* Every column of every registry table is covered by the MAC (key, content or version). */
-func TestTablesCoverEveryColumn(t *testing.T) {
-	env := testdb.New(t)
-	for _, tb := range tables {
-		rows, err := env.Pool("postgres").Query(context.Background(),
-			`SELECT column_name FROM information_schema.columns WHERE table_schema = 'exec' AND table_name = $1`, tb.name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := []string{tb.version, "mac"}
-		for _, c := range append(append([]column(nil), tb.pk...), tb.content...) {
-			want = append(want, c.name)
-		}
-		slices.Sort(got)
-		slices.Sort(want)
-		if !slices.Equal(got, want) {
-			t.Errorf("%s: columns %v, covered %v", tb.name, got, want)
-		}
-	}
-}
-
-/* The canonical text of every column type does not depend on session settings. */
+/*
+What is verified does not depend on session settings, including a
+search_path that shadows pg_catalog functions (the pool here is not
+pinned: pinSession alone must hold).
+*/
 func TestVerifyIgnoresSessionSettings(t *testing.T) {
 	env, r := fresh(t)
 	ctx := context.Background()
-	if err := r.Write(ctx, func(ctx context.Context, tx *Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO exec.write_credential (device_id, kind, ciphertext, created_at, nonce, version, mac)
-			VALUES (1, 'ssh_write', '\xdeadbeef', '2026-10-26 12:34:56.789012+03', '\x00112233445566778899aabbccddeeff', $1, $2)`, tx.Seq(), Unsealed())
-		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE exec.exec_state SET global_fail_window = '{"b": [1, 2.50], "a": null}', version = $1, mac = $2`, tx.Seq(), Unsealed())
-		}
-		return err
+	if err := r.Write(ctx, func(_ context.Context, _ *Snapshot, tx *Tx) error {
+		return errors.Join(
+			tx.Put("write_credential", map[string]any{"device_id": 1, "kind": "ssh_write", "ciphertext": []byte{0xde, 0xad},
+				"created_at": time.Now(), "nonce": make([]byte, 16)}),
+			tx.Put("exec_state", map[string]any{"singleton": true, "freeze": false, "freeze_reason": nil,
+				"global_fail_window": json.RawMessage(`{"b": [1, 2.50], "a": null}`)}))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	attacktest.Tamper(t, env, `ALTER ROLE nms_executor SET TimeZone = 'Asia/Kathmandu'`)
-	attacktest.Tamper(t, env, `ALTER ROLE nms_executor SET DateStyle = 'SQL, DMY'`)
-	attacktest.Tamper(t, env, `ALTER ROLE nms_executor SET bytea_output = 'escape'`)
-	t.Cleanup(func() { attacktest.Tamper(t, env, `ALTER ROLE nms_executor RESET ALL`) })
+	attacktest.Tamper(t, env, `CREATE SCHEMA IF NOT EXISTS shadow`)
+	attacktest.Tamper(t, env, `CREATE OR REPLACE FUNCTION shadow.encode(bytea, text) RETURNS text LANGUAGE sql AS $$ SELECT 'x' $$`)
+	t.Cleanup(func() {
+		attacktest.Tamper(t, env, `ALTER ROLE nms_executor RESET ALL`)
+		attacktest.Tamper(t, env, `DROP SCHEMA shadow CASCADE`)
+	})
+	for _, s := range []string{`TimeZone = 'Asia/Kathmandu'`, `DateStyle = 'SQL, DMY'`, `bytea_output = 'escape'`,
+		`search_path = shadow, pg_catalog`, `extra_float_digits = 3`, `IntervalStyle = 'iso_8601'`} {
+		attacktest.Tamper(t, env, `ALTER ROLE nms_executor SET `+s)
+	}
 	db, pw := env.Config("nms_executor")
 	pool, err := store.Open(ctx, db, pw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	other := New(pool, keys(t), r.path)
-	if _, err := other.Verify(ctx); err != nil {
+	if _, err := New(pool, keys(t), r.path).Verify(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+/* M2: a validly MACed row whose version is above the counter is refused. */
+func TestCheckRefusesVersionAboveCounter(t *testing.T) {
+	k := keys(t)
+	pk := []*string{p("1")}
+	s := &Snapshot{seq: 3, rows: []*row{{t: lookup("write_grant"), pk: pk, version: 4,
+		mac: macOf(k.MAC(), Canonical("write_grant", pk, nil, 4))}}}
+	if _, err := s.check(k.MAC()); !errors.Is(err, ErrTampered) {
+		t.Fatalf("err %v", err)
+	}
+	s.seq = 4
+	if _, err := s.check(k.MAC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+/* jsonb rewrites keys, numbers and whitespace: the canonical form does not change; any change of meaning does. */
+func TestCanonJSON(t *testing.T) {
+	a, err := canonJSON([]byte(`{"b": [1, 2.50, 1e2], "a": null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := canonJSON([]byte(`{"a":null,"b":[1.0,2.5,100]}`))
+	c, _ := canonJSON([]byte(`{"a":null,"b":[1,2.5,101]}`))
+	d, _ := canonJSON([]byte(`{"a":"null","b":[1,2.5,100]}`))
+	if a != b || a == c || a == d {
+		t.Fatalf("%s %s %s %s", a, b, c, d)
+	}
+	for _, bad := range []string{``, `{`, `{} {}`, `[1,]`} {
+		if _, err := canonJSON([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

@@ -2,19 +2,24 @@ package freeze_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
+	"github.com/beekamai/network-scheme/internal/store"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
@@ -25,30 +30,36 @@ var master = [32]byte{7}
 /* executor is one executor process: its registry and guard over the test database and a state file. */
 type executor struct {
 	env   *testdb.Env
+	pool  *pgxpool.Pool
 	keys  *seal.Keys
 	path  string
 	reg   *registry.Registry
 	guard *freeze.Guard
 }
 
-func start(t *testing.T, env *testdb.Env, path string) *executor {
+func startOn(t *testing.T, env *testdb.Env, pool *pgxpool.Pool, path string) *executor {
 	t.Helper()
 	k, err := seal.Derive(&master)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &executor{env: env, keys: k, path: path}
-	e.reg = registry.New(env.Pool("nms_executor"), k, path)
-	e.guard = freeze.New(e.reg, env.Pool("nms_executor"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e := &executor{env: env, pool: pool, keys: k, path: path}
+	e.reg = registry.New(pool, k, path)
+	e.guard = freeze.New(e.reg, pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := e.guard.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	return e
 }
 
-func (e *executor) restart(t *testing.T) *executor { t.Helper(); return start(t, e.env, e.path) }
+func start(t *testing.T, env *testdb.Env, path string) *executor {
+	t.Helper()
+	return startOn(t, env, env.Pool("nms_executor"), path)
+}
 
-/* seeded is a fresh install with two grants and one write device, not frozen. */
+func (e *executor) restart(t *testing.T) *executor { t.Helper(); return startOn(t, e.env, e.pool, e.path) }
+
+/* seeded is a fresh install with a row in every registry table, not frozen. */
 func seeded(t *testing.T) *executor {
 	t.Helper()
 	env := testdb.New(t)
@@ -56,36 +67,40 @@ func seeded(t *testing.T) *executor {
 	e := start(t, env, filepath.Join(t.TempDir(), "state"))
 	e.grant(t, 1)
 	e.grant(t, 2)
-	e.write(t, `INSERT INTO exec.write_device (device_id, address, write_group, write_driver, version, mac)
-		VALUES (1, '10.0.0.1', 'core', 'esr', $1, $2)`)
+	e.put(t, "write_device", map[string]any{"device_id": 1, "address": netip.MustParseAddr("10.0.0.1"), "port": 22,
+		"protocol": "ssh", "write_group": "core", "write_driver": "esr", "hostkey_algo": nil, "hostkey_fp": nil,
+		"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": false})
+	e.put(t, "change_totp", map[string]any{"user_id": 1, "username_snapshot": "u", "ciphertext": []byte{1, 2, 3},
+		"key_version": 1, "last_step": 10, "failures": 0, "lock_until": nil, "lock_count": 0})
+	e.put(t, "model_profile", map[string]any{"id": 1, "write_driver": "esr", "model_re": "^ESR", "firmware_re": ".",
+		"strategies": json.RawMessage(`{}`), "note": "n"})
+	e.put(t, "write_credential", map[string]any{"device_id": 1, "kind": "ssh_write", "ciphertext": []byte{9, 9},
+		"created_at": time.Now(), "nonce": make([]byte, 16)})
 	if err := e.guard.Check(context.Background()); err != nil {
 		t.Fatalf("seeded registry: %v", err)
 	}
 	return e
 }
 
-/* write runs one registry change; sql takes $1 = version and $2 = placeholder MAC. */
-func (e *executor) write(t *testing.T, sql string) {
+func (e *executor) put(t *testing.T, table string, vals map[string]any) {
 	t.Helper()
-	if err := e.reg.Write(context.Background(), func(ctx context.Context, tx *registry.Tx) error {
-		_, err := tx.Exec(ctx, sql, tx.Seq(), registry.Unsealed())
-		return err
+	if err := e.guard.Write(context.Background(), func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+		return tx.Put(table, vals)
 	}); err != nil {
-		t.Fatalf("write %q: %v", sql, err)
+		t.Fatalf("put %s: %v", table, err)
 	}
 }
 
 func (e *executor) grant(t *testing.T, user int) {
 	t.Helper()
-	e.write(t, `INSERT INTO exec.write_grant (user_id, kind, write_group, username_snapshot, version, mac)
-		VALUES (`+strconv.Itoa(user)+`, 'write', 'core', 'u', $1, $2)`)
+	e.put(t, "write_grant", map[string]any{"user_id": user, "kind": "write", "write_group": "core", "username_snapshot": "u"})
 }
 
-func (e *executor) alerts(t *testing.T) int {
+func (e *executor) alerts(t *testing.T, kind, severity string) int {
 	t.Helper()
 	var n int
 	if err := e.env.Pool("postgres").QueryRow(context.Background(),
-		`SELECT count(*) FROM execpub.alert WHERE kind = 'executor_tamper' AND severity = 'disaster'`).Scan(&n); err != nil {
+		`SELECT count(*) FROM execpub.alert WHERE kind = $1 AND severity = $2`, kind, severity).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -100,70 +115,115 @@ func (e *executor) mustFreeze(t *testing.T) {
 	if frozen, reason := e.guard.Frozen(); !frozen || reason == "" {
 		t.Fatalf("latch %v %q", frozen, reason)
 	}
-	if e.alerts(t) == 0 {
+	if e.alerts(t, freeze.KindTamper, "disaster") == 0 {
 		t.Fatal("no disaster alert")
+	}
+	if err := e.guard.Write(context.Background(), func(context.Context, *registry.Snapshot, *registry.Tx) error { return nil }); !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("write allowed: %v", err)
 	}
 }
 
 func TestFreshInstallIsNotFrozen(t *testing.T) {
 	e := seeded(t)
-	if frozen, _ := e.guard.Frozen(); frozen || e.alerts(t) != 0 {
+	if frozen, _ := e.guard.Frozen(); frozen || e.alerts(t, freeze.KindTamper, "disaster") != 0 {
 		t.Fatal("fresh install frozen")
 	}
-	e = e.restart(t)
-	if err := e.guard.Check(context.Background()); err != nil {
+	if err := e.restart(t).guard.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
 
-/* Each tampering with the database ends in freeze + disaster (C2e, C2f, security.md 5.1a). */
+type attack struct {
+	do   func(t *testing.T, e *executor)
+	undo string /* SQL that puts the schema back for the next test */
+}
+
+func tamper(sql string) func(t *testing.T, e *executor) {
+	return func(t *testing.T, e *executor) { attacktest.Tamper(t, e.env, sql) }
+}
+
+/* Each tampering with the database ends in freeze + disaster (C2e, C2f, C1, C2, M1, security.md 5.1a). */
 func TestDatabaseTamperingFreezes(t *testing.T) {
-	for name, attack := range map[string]func(t *testing.T, e *executor){
-		"C2e wrong MAC": func(t *testing.T, e *executor) {
-			attacktest.Tamper(t, e.env, `UPDATE exec.write_device SET port = 23`)
-		},
-		"C2e MAC of another row": func(t *testing.T, e *executor) {
-			attacktest.Tamper(t, e.env, `UPDATE exec.write_grant SET mac = (SELECT mac FROM exec.write_grant WHERE user_id = 1) WHERE user_id = 2`)
-		},
-		"C2e planted row": func(t *testing.T, e *executor) {
-			attacktest.Tamper(t, e.env, `INSERT INTO exec.write_grant (user_id, kind, username_snapshot, version, mac)
-				VALUES (9, 'write-admin', 'evil', 1, decode(repeat('00', 32), 'hex'))`)
-		},
-		"C2f old exec_state without freeze": func(t *testing.T, e *executor) {
+	registryTables := []string{"registry_counter", "write_device", "write_grant", "change_totp", "exec_state",
+		"model_profile", "write_credential"}
+	for name, a := range map[string]attack{
+		"C2e wrong MAC":          {do: tamper(`UPDATE exec.write_device SET port = 23`)},
+		"C2e MAC of another row": {do: tamper(`UPDATE exec.write_grant SET mac = (SELECT mac FROM exec.write_grant WHERE user_id = 1) WHERE user_id = 2`)},
+		"C2e planted row": {do: tamper(`INSERT INTO exec.write_grant (user_id, kind, username_snapshot, version, mac)
+			VALUES (9, 'write-admin', 'evil', 1, decode(repeat('00', 32), 'hex'))`)},
+		"C2e ciphertext swapped": {do: tamper(`UPDATE exec.change_totp SET ciphertext = '\x010204'`)},
+		"C2f old exec_state without freeze": {do: func(t *testing.T, e *executor) {
 			restore := attacktest.Copy(t, e.env, "exec_state")
-			e.write(t, `UPDATE exec.exec_state SET "freeze" = true, freeze_reason = 'host', version = $1, mac = $2`)
+			e.put(t, "exec_state", map[string]any{"singleton": true, "freeze": true, "freeze_reason": "host",
+				"global_fail_window": json.RawMessage(`[]`)})
 			restore()
-		},
-		"C2f revoked grant restored": func(t *testing.T, e *executor) {
+		}},
+		"C2f revoked grant restored": {do: func(t *testing.T, e *executor) {
 			restore := attacktest.Copy(t, e.env, "write_grant")
-			e.write(t, `DELETE FROM exec.write_grant WHERE user_id = 2 AND version < $1 AND $2::bytea IS NOT NULL`)
+			if err := e.guard.Write(context.Background(), func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+				return tx.Delete("write_grant", 2, "write", "core")
+			}); err != nil {
+				t.Fatal(err)
+			}
 			restore()
-		},
-		"deleted row": func(t *testing.T, e *executor) {
-			attacktest.Tamper(t, e.env, `DELETE FROM exec.write_device`)
-		},
-		"deleted exec_state": func(t *testing.T, e *executor) {
-			attacktest.Tamper(t, e.env, `DELETE FROM exec.exec_state`)
-		},
-		"registry_counter rolled back": func(t *testing.T, e *executor) {
-			restore := attacktest.Copy(t, e.env, "registry_counter")
-			e.grant(t, 3)
-			restore()
-		},
-		"whole registry replayed": func(t *testing.T, e *executor) {
+		}},
+		"deleted row":                  {do: tamper(`DELETE FROM exec.write_device`)},
+		"deleted exec_state":           {do: tamper(`DELETE FROM exec.exec_state`)},
+		"registry_counter rolled back": {do: func(t *testing.T, e *executor) { r := attacktest.Copy(t, e.env, "registry_counter"); e.grant(t, 3); r() }},
+		"whole registry replayed": {do: func(t *testing.T, e *executor) {
 			var restores []func()
-			for _, tb := range []string{"registry_counter", "write_grant", "write_device", "exec_state"} {
+			for _, tb := range registryTables {
 				restores = append(restores, attacktest.Copy(t, e.env, tb))
 			}
-			e.write(t, `UPDATE exec.write_device SET writes_enabled = false, version = $1, mac = $2`)
+			e.put(t, "write_device", map[string]any{"device_id": 1, "address": netip.MustParseAddr("10.0.0.2"), "port": 22,
+				"protocol": "ssh", "write_group": "core", "write_driver": "esr", "hostkey_algo": nil, "hostkey_fp": nil,
+				"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": false})
 			for _, r := range restores {
 				r()
 			}
-		},
+		}},
+		/* The catalog: anything that can make the database store or show other values than the executor's. */
+		"trigger on registry_counter": {
+			do: tamper(`CREATE SCHEMA IF NOT EXISTS attack;
+				CREATE OR REPLACE FUNCTION attack.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+				CREATE TRIGGER t AFTER UPDATE ON exec.registry_counter FOR EACH ROW EXECUTE FUNCTION attack.noop()`),
+			undo: `DROP TRIGGER t ON exec.registry_counter`},
+		"trigger on a registry table": {
+			do: tamper(`CREATE SCHEMA IF NOT EXISTS attack;
+				CREATE OR REPLACE FUNCTION attack.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+				CREATE TRIGGER t BEFORE INSERT ON exec.write_grant FOR EACH ROW EXECUTE FUNCTION attack.noop()`),
+			undo: `DROP TRIGGER t ON exec.write_grant`},
+		"view in place of a table": {
+			do: tamper(`ALTER TABLE exec.write_grant RENAME TO write_grant_real;
+				CREATE VIEW exec.write_grant AS SELECT * FROM exec.write_grant_real WHERE user_id <> 2;
+				GRANT SELECT ON exec.write_grant TO nms_executor`),
+			undo: `DROP VIEW exec.write_grant; ALTER TABLE exec.write_grant_real RENAME TO write_grant`},
+		"rule": {do: tamper(`CREATE RULE r AS ON INSERT TO exec.write_grant DO INSTEAD NOTHING`),
+			undo: `DROP RULE r ON exec.write_grant`},
+		"row-level security": {
+			do: tamper(`ALTER TABLE exec.write_grant ENABLE ROW LEVEL SECURITY;
+				CREATE POLICY hide ON exec.write_grant USING (user_id <> 2)`),
+			undo: `DROP POLICY hide ON exec.write_grant; ALTER TABLE exec.write_grant DISABLE ROW LEVEL SECURITY`},
+		"altered DEFAULT": {do: tamper(`ALTER TABLE exec.write_device ALTER COLUMN port SET DEFAULT 23`),
+			undo: `ALTER TABLE exec.write_device ALTER COLUMN port SET DEFAULT 22`},
+		"renamed column": {do: tamper(`ALTER TABLE exec.model_profile RENAME COLUMN note TO note2`),
+			undo: `ALTER TABLE exec.model_profile RENAME COLUMN note2 TO note`},
+		"dropped column": {do: tamper(`ALTER TABLE exec.write_device DROP COLUMN backup_via_executor`),
+			undo: `ALTER TABLE exec.write_device ADD COLUMN backup_via_executor boolean NOT NULL DEFAULT false`},
+		"NULL version": {do: tamper(`ALTER TABLE exec.write_grant ALTER COLUMN version DROP NOT NULL;
+				UPDATE exec.write_grant SET version = NULL WHERE user_id = 2`),
+			undo: `DELETE FROM exec.write_grant; ALTER TABLE exec.write_grant ALTER COLUMN version SET NOT NULL`},
+		"infinite timestamp": {do: tamper(`UPDATE exec.write_credential SET created_at = 'infinity'`)},
+		"deleted audit_head": {do: tamper(`ALTER TABLE exec.audit_head DISABLE TRIGGER audit_head_keep_row; DELETE FROM exec.audit_head`),
+			undo: `INSERT INTO exec.audit_head VALUES (true, 0, decode(repeat('00', 32), 'hex'));
+				ALTER TABLE exec.audit_head ENABLE TRIGGER audit_head_keep_row`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := seeded(t)
-			attack(t, e)
+			if a.undo != "" {
+				t.Cleanup(func() { attacktest.Tamper(t, e.env, a.undo) })
+			}
+			a.do(t, e)
 			e.mustFreeze(t)
 			/* The tampered state is never sealed: the freeze is in the state file, not laundered into the registry. */
 			if f, err := state.Load(e.path, e.keys.State()); err != nil || !f.Frozen {
@@ -177,6 +237,31 @@ func TestDatabaseTamperingFreezes(t *testing.T) {
 	}
 }
 
+/*
+C2 PoC: a function shadowing pg_catalog.encode through the role's
+search_path, while the stored ciphertext changes. Values are read in binary
+and the session is pinned, so the change is seen.
+*/
+func TestShadowedFunctionsDoNotHideTampering(t *testing.T) {
+	e := seeded(t)
+	attacktest.Tamper(t, e.env, `CREATE SCHEMA IF NOT EXISTS shadow;
+		CREATE OR REPLACE FUNCTION shadow.encode(bytea, text) RETURNS text LANGUAGE sql AS $$ SELECT '010203' $$;
+		ALTER ROLE nms_executor SET search_path = shadow, pg_catalog`)
+	t.Cleanup(func() { attacktest.Tamper(t, e.env, `ALTER ROLE nms_executor RESET ALL; DROP SCHEMA shadow CASCADE`) })
+	db, pw := e.env.Config("nms_executor")
+	pool, err := store.Open(context.Background(), db, pw, registry.PinSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	shadowed := startOn(t, e.env, pool, e.path)
+	if err := shadowed.guard.Check(context.Background()); err != nil {
+		t.Fatalf("before tampering: %v", err)
+	}
+	attacktest.Tamper(t, e.env, `UPDATE exec.change_totp SET ciphertext = '\x0a0b0c'`)
+	shadowed.mustFreeze(t)
+}
+
 /* Removing or replacing the state file while the registry is not empty freezes the next start. */
 func TestStateFileTamperingFreezes(t *testing.T) {
 	for name, attack := range map[string]func(t *testing.T, e *executor){
@@ -184,6 +269,12 @@ func TestStateFileTamperingFreezes(t *testing.T) {
 			if err := os.Remove(e.path); err != nil {
 				t.Fatal(err)
 			}
+		},
+		"deleted with the registry wiped": func(t *testing.T, e *executor) {
+			if err := os.Remove(e.path); err != nil {
+				t.Fatal(err)
+			}
+			attacktest.Reset(t, e.env)
 		},
 		"replaced by an older copy": func(t *testing.T, e *executor) {
 			old, err := os.ReadFile(e.path)
@@ -220,8 +311,101 @@ func TestStateFileTamperingFreezes(t *testing.T) {
 }
 
 /*
+M6: the bootstrap happens only into a never used state directory (empty but
+for temporary files) over an untouched schema; anything else in the
+directory without a state file freezes, even with an empty registry.
+*/
+func TestBootstrapNeedsAnUnusedStateDirectory(t *testing.T) {
+	env := testdb.New(t)
+	for name, c := range map[string]struct {
+		files []string
+		ok    bool
+	}{
+		"empty":           {ok: true},
+		"temporary files": {files: []string{".state-123", ".probe-9"}, ok: true},
+		"sentinel":        {files: []string{registry.Sentinel}},
+		"other file":      {files: []string{"state.bak"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			attacktest.Reset(t, env)
+			dir := t.TempDir()
+			for _, f := range c.files {
+				if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e := start(t, env, filepath.Join(dir, "state"))
+			err := e.guard.Check(context.Background())
+			if c.ok != (err == nil) {
+				t.Fatalf("check: %v", err)
+			}
+			if c.ok {
+				if _, err := os.Stat(filepath.Join(dir, registry.Sentinel)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+/*
+I3: someone holds the counter's row lock and then tampers. The alert still
+arrives and the decision is refused as frozen within the lock timeout; the
+exec_state record just fails.
+*/
+func TestHeldLockDoesNotDelayTheFreeze(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	tx, err := e.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT seq FROM exec.registry_counter FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	attacktest.Tamper(t, e.env, `UPDATE exec.write_device SET port = 23`)
+	began := time.Now()
+	if err := e.guard.Check(ctx); !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("check: %v", err)
+	}
+	if d := time.Since(began); d > registry.LockTimeout+5*time.Second {
+		t.Fatalf("freeze took %v", d)
+	}
+	if e.alerts(t, freeze.KindTamper, "disaster") != 1 {
+		t.Fatal("no alert")
+	}
+}
+
+/* I3: verifications that keep failing without a verdict (a held table lock) raise one alert and refuse decisions. */
+func TestRepeatedVerificationFailuresAlert(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	tx, err := e.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE exec.write_grant IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := e.guard.Check(ctx); err == nil || errors.Is(err, freeze.ErrFrozen) {
+			t.Fatalf("check %d: %v", i, err)
+		}
+	}
+	if n := e.alerts(t, freeze.KindUnverifiable, "high"); n != 1 {
+		t.Fatalf("alerts %d", n)
+	}
+	_ = tx.Rollback(ctx)
+	if err := e.guard.Check(ctx); err != nil {
+		t.Fatalf("after the lock: %v", err)
+	}
+}
+
+/*
 The freeze outlives restarts, even once the database is put back exactly as
-it was and Verify passes again: lifting it is host-only (nmsctl, 4a.4).
+it was and the verification passes again: lifting it is host-only (nmsctl, 4a.4).
 */
 func TestFreezeSurvivesRestart(t *testing.T) {
 	e := seeded(t)
@@ -233,8 +417,7 @@ func TestFreezeSurvivesRestart(t *testing.T) {
 	if _, err := e.reg.Verify(context.Background()); err != nil {
 		t.Fatalf("verify after repair: %v", err)
 	}
-	e = e.restart(t)
-	if err := e.guard.Check(context.Background()); !errors.Is(err, freeze.ErrFrozen) {
+	if err := e.restart(t).guard.Check(context.Background()); !errors.Is(err, freeze.ErrFrozen) {
 		t.Fatalf("repaired database unfroze the executor: %v", err)
 	}
 }
@@ -246,7 +429,7 @@ func TestTriggerRecordsTheFreeze(t *testing.T) {
 	e.guard.Trigger(ctx, freeze.KindTamper, "requested")
 	e.guard.Trigger(ctx, freeze.KindTamper, "again")
 	e.mustFreeze(t)
-	if n := e.alerts(t); n != 1 {
+	if n := e.alerts(t, freeze.KindTamper, "disaster"); n != 1 {
 		t.Fatalf("alerts %d", n)
 	}
 	rep, err := e.reg.Verify(ctx)
