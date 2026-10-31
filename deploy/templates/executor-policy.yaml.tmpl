@@ -1,3 +1,54 @@
-# Executor policy. Written by nmsctl install; changed only on the host (nmsctl executor).
-# The executor stays disabled until an administrator enables it.
+# Executor policy (security.md 5.5): mounted read-only into the executor and
+# changed only on the host, with nmsctl executor enable|disable|policy edit
+# (validated, replaced atomically). The executor rereads it by mtime; an
+# invalid policy disables the executor and raises an alert. Every key is
+# optional: the values below are the defaults.
+
+# The executor changes nothing until the host enables it.
 enabled: false
+
+# Confirmation of sessions, dangerous lines and changesets: totp, or fido2
+# (not before Phase 7: with fido2 every confirmed action is refused).
+confirm_mode: totp
+
+# Change sessions: lifetime and idle timeout (minutes), devices per session,
+# configuration lines per user and hour.
+session_minutes: 30
+idle_minutes: 10
+max_devices_per_session: 5
+max_config_lines_per_hour: 500
+
+# Change windows in this IANA time zone. No window: changes at any time.
+# Outside every window: deny, or second_person (refused until Phase 5).
+timezone: UTC
+windows: []
+#  - days: [mon, tue, wed, thu, fri]
+#    start: "09:00"
+#    end: "18:00"
+outside_window: deny
+
+# Write groups whose sessions need a second person (refused until Phase 5).
+two_person_groups: []
+
+# Command classes overriding the driver's (driver mes6|mes10|esr|any, the
+# normalized command prefix, class safe|dangerous|denied).
+class_overrides: []
+#  - driver: any
+#    command: "clear counters"
+#    class: safe
+
+# Writes over telnet (not implemented: with true they are still refused).
+telnet_write: false
+
+# MES safety net "reload in" (minutes, 5..120; 0: off).
+mes_reload_in_min: 0
+
+# ESR "commit confirm-timeout" (seconds, 120..1200) and the paste size
+# (lines) that needs a confirmation with the text shown.
+esr_commit_timer_s: 300
+paste_confirm_lines: 5
+
+# Unmasked config views per user and hour, and the hourly total that raises
+# the mass_unmask alert.
+unmask_per_hour: 10
+mass_unmask_alert: 20

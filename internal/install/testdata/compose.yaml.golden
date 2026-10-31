@@ -175,7 +175,8 @@ services:
       - executor-state:/var/lib/executor
       - "/etc/nms/config/executor.yaml:/etc/nms/executor.yaml:ro"
       - "/etc/nms/config/egress.yaml:/etc/nms/egress.yaml:ro"
-      - "/etc/nms/policies/executor.yaml:/etc/nms/policies/executor.yaml:ro"
+      # The directory, not the file: nmsctl replaces the policy atomically (rename), which a file mount would not see.
+      - "/etc/nms/policies:/etc/nms/policies:ro"
     networks:
       core: {}
       devices: {}

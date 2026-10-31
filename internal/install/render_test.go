@@ -380,12 +380,23 @@ func TestComposeHardening(t *testing.T) {
 	if !slices.Equal(x.Tmpfs, []string{"/run/executor:mode=0700,uid=65533,gid=65533,size=1m"}) {
 		t.Errorf("executor tmpfs = %v", x.Tmpfs)
 	}
+	/* The administration socket lives in the executor's own tmpfs: no other service mounts /run/executor. */
+	for name, s := range c.Services {
+		if name == "executor" {
+			continue
+		}
+		for _, m := range append(slices.Clone(s.Volumes), s.Tmpfs...) {
+			if strings.Contains(m, "/run/executor") {
+				t.Errorf("%s mounts %s", name, m)
+			}
+		}
+	}
 	if want := []any{"db_executor_password", "executor_sealing_key", "domain_write_key", "domain_backup_key", "ticket_pub", "executor_tls_crt", "executor_tls_key", "ca_crt"}; !slices.Equal(x.Secrets, want) {
 		t.Errorf("executor secrets = %v, want %v", x.Secrets, want)
 	}
 	if want := []string{
 		"executor-state:/var/lib/executor", "/etc/nms/config/executor.yaml:/etc/nms/executor.yaml:ro",
-		"/etc/nms/config/egress.yaml:/etc/nms/egress.yaml:ro", "/etc/nms/policies/executor.yaml:/etc/nms/policies/executor.yaml:ro",
+		"/etc/nms/config/egress.yaml:/etc/nms/egress.yaml:ro", "/etc/nms/policies:/etc/nms/policies:ro",
 	}; !slices.Equal(x.Volumes, want) {
 		t.Errorf("executor volumes = %v", x.Volumes)
 	}

@@ -301,6 +301,12 @@ func writeRendered(etc string, files map[string][]byte) error {
 			return fmt.Errorf("install: %w", err)
 		}
 		mode := os.FileMode(0o644)
+		if n == PolicyFile {
+			/* Bind-mounted as a directory and listed by the executor's uid. */
+			if err := os.Chmod(filepath.Dir(p), 0o755); err != nil { // #nosec G302 -- read by the executor (uid 65533) through its mount
+				return fmt.Errorf("install: %w", err)
+			}
+		}
 		if n == initDBScript {
 			mode = 0o755
 			if err := os.Chmod(filepath.Dir(p), 0o755); err != nil { // #nosec G302 -- listed by the postgres user in its container

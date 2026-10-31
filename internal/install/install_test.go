@@ -488,6 +488,11 @@ func TestRunInstalls(t *testing.T) {
 		if err != nil || st.Mode().Perm() != 0o755 {
 			t.Errorf("initdb dir mode: %v %v", st, err)
 		}
+		/* Mounted as a directory into the executor (uid 65533), which must list and read it. */
+		st, err = os.Stat(filepath.Join(etc, "policies"))
+		if err != nil || st.Mode().Perm() != 0o755 {
+			t.Errorf("policies dir mode: %v %v", st, err)
+		}
 	}
 	if got := sys.chowns[filepath.Join(vr, "anchors")]; got != [2]int{install.ContainerUID, install.ContainerUID} {
 		t.Errorf("anchors dir owner = %v", got)
@@ -834,6 +839,9 @@ func TestRunChecksStackSubnets(t *testing.T) {
 		"mgmt covers all":       {func(o *install.Options) { o.MgmtSubnets = []string{"172.16.0.0/12"} }, "overlaps --core-subnet"},
 		"host executor":         {func(o *install.Options) { o.PublicHost = "executor" }, "internal service"},
 		"host gateway":          {func(o *install.Options) { o.PublicHost = "Gateway" }, "internal service"},
+		"host api":              {func(o *install.Options) { o.PublicHost = "api" }, "internal service"},
+		"host postgres":         {func(o *install.Options) { o.PublicHost = "postgres" }, "internal service"},
+		"host nmsctl":           {func(o *install.Options) { o.PublicHost = "nmsctl" }, "internal service"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			o, root, _ := installOptions(t)
@@ -899,5 +907,42 @@ func TestPreflightChecksEveryPublishedPort(t *testing.T) {
 	slices.Sort(published)
 	if len(published) == 0 || !slices.Equal(checked, published) {
 		t.Errorf("preflight checks %v, compose publishes %v", checked, published)
+	}
+}
+
+/* nmsctl executor reaches the daemon only through docker compose exec in the executor container, the request on stdin. */
+func TestRunInExecutor(t *testing.T) {
+	sys := newFakeSys()
+	req := []byte(`{"v":1,"cmd":"registry-verify"}` + "\n")
+	if err := install.RunInExecutor(context.Background(), sys, "/etc/nms", req, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(sys.cmds) != 1 || cmdline(sys.cmds[0]) != "docker compose -f /etc/nms/compose.yaml exec -T executor /executor admin" {
+		t.Fatalf("cmds = %v", sys.cmds)
+	}
+	if sys.stdins[0] != string(req) {
+		t.Fatalf("stdin = %q", sys.stdins[0])
+	}
+}
+
+/* ReplaceFile swaps the whole file (a new inode, mode 0644) and leaves no temporary file behind. */
+func TestReplaceFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "executor.yaml")
+	if err := os.WriteFile(p, []byte("enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := install.ReplaceFile(p, []byte("enabled: true\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, p); string(got) != "enabled: true\n" {
+		t.Fatalf("content %q", got)
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 1 {
+		t.Fatalf("left %v", ents)
+	}
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o644 {
+		t.Fatalf("mode %v", st.Mode())
 	}
 }

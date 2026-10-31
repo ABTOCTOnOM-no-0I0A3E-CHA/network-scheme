@@ -150,7 +150,7 @@ func TestExecutorRoleGrants(t *testing.T) {
 		"execpub.freeze_request": "SELECT DELETE",
 		"execpub.alert":          dml, "execpub.device_busy": dml, "execpub.session_summary": dml, "execpub.status": dml,
 		"core.device":            "SELECT(address,driver,firmware,group_id,id,model,name)",
-		`core."user"`:            "SELECT(disabled,id,username)",
+		`core."user"`:            "SELECT(created_at,disabled,id,username)",
 		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
 		"backups.backup_state":   "SELECT INSERT UPDATE",
 	}

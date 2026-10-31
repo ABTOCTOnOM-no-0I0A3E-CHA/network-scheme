@@ -1,7 +1,8 @@
 /*
 Command nmsctl is the host-only administration CLI: installation, the
-break-glass admin, user resets and unlocks, audit chain verification and the
-egress rules of the devices network. Database
+break-glass admin, user resets and unlocks, audit chain verification, the
+egress rules of the devices network and the executor's host-only
+administration (nmsctl executor, through its container's socket). Database
 commands run in the one-shot "nmsctl" tools container of the compose
 project; on the host nmsctl only prompts and forwards them.
 */
@@ -40,7 +41,8 @@ const usage = `usage:
   nmsctl user reset U [--password [--password-file F]] [--totp]
   nmsctl user unlock U
   nmsctl audit verify [--anchors F]
-  nmsctl audit anchor [--anchors F]`
+  nmsctl audit anchor [--anchors F]
+  nmsctl executor ... (nmsctl executor for its commands)`
 
 /* printf writes CLI output; a failing stdout or stderr cannot be reported anywhere better. */
 func printf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
@@ -56,13 +58,15 @@ type deps struct {
 	/* openDB connects as nms_cli and loads the data key (tools container only). */
 	openDB func(ctx context.Context) (*pgxpool.Pool, *[32]byte, func(), error)
 	now    func() time.Time
+	/* edit runs the operator's editor on a file (nmsctl executor policy edit). */
+	edit func(ctx context.Context, path string) error
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], deps{
 		in: os.Stdin, out: os.Stdout, errw: os.Stderr,
-		sys: install.OSSystem{}, openDB: openDB, now: time.Now,
+		sys: install.OSSystem{}, openDB: openDB, now: time.Now, edit: runEditor,
 	})
 	stop()
 	os.Exit(code)
@@ -99,6 +103,9 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 			return errors.New("install runs on the host, not in a container")
 		}
 		return installCmd(ctx, args[1:], d)
+	}
+	if args[0] == "executor" {
+		return executorCmd(ctx, args[1:], d)
 	}
 	if len(args) < 2 {
 		return errors.New(usage)

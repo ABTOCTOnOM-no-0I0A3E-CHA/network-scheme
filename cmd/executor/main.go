@@ -6,12 +6,14 @@ administration, reached through docker compose exec).
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -19,11 +21,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
+	"github.com/beekamai/network-scheme/internal/execadmin"
 	"github.com/beekamai/network-scheme/internal/store"
 )
 
@@ -41,8 +46,10 @@ func run(ctx context.Context, args []string) error {
 		return errors.New("usage: executor run|healthcheck [--config executor.yaml] | admin")
 	}
 	if args[0] == "admin" {
-		/* The administration socket and its commands come with nmsctl executor. */
-		return errors.New("admin: not implemented")
+		if len(args) > 1 {
+			return errors.New("usage: executor admin (one JSON request on stdin; run by nmsctl executor)")
+		}
+		return relay(ctx, os.Stdin, os.Stdout)
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	cfgPath := fs.String("config", "/etc/nms/executor.yaml", "path to executor.yaml")
@@ -66,8 +73,11 @@ func run(ctx context.Context, args []string) error {
 /*
 serve checks that every file the executor needs is present and well-formed,
 opens the database, verifies the registry (bootstrapping a fresh install,
-freezing on tampering) and keeps verifying it every 30 s until
-SIGTERM/SIGINT. It listens nowhere yet and touches no device.
+freezing on tampering), loads the policy, serves the host-only
+administration socket and keeps verifying the registry every 30 s and
+rereading the policy until SIGTERM/SIGINT. It touches no device yet. It
+returns (and wipes the keys) only after every administration command and
+the policy loop ended.
 */
 func serve(ctx context.Context, cfg config.Config) error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -89,15 +99,63 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer keys.Wipe()
-	guard := freeze.New(registry.New(pool, keys, filepath.Join(cfg.StateDir, "state")), pool, log)
+	reg := registry.New(pool, keys, filepath.Join(cfg.StateDir, "state"))
+	guard := freeze.New(reg, pool, log)
 	if err := guard.Start(ctx); err != nil {
 		return err
 	}
+	pol := policy.New(cfg.PolicyFile)
+	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log}
+	old, cur, _ := pol.Reload(true)
+	adm.PolicyChanged(ctx, "start", old, cur)
 	frozen, _ := guard.Frozen()
-	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()), slog.Bool("frozen", frozen))
+	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()), slog.Bool("frozen", frozen),
+		slog.Bool("enabled", cur.Enabled()))
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &admin.Server{Path: adminSocket, UID: admin.ExecutorUID, Handle: adm.Handle, Log: log,
+		Refused: func(reason string, uid int) { adm.Refused(ctx, reason, uid) }}
+	served := make(chan error, 1)
+	go func() {
+		served <- srv.Serve(ctx)
+		cancel() /* no administration socket: stop, the container restarts */
+	}()
+	reloads := make(chan struct{})
+	go func() {
+		defer close(reloads)
+		pol.Run(ctx, policyEvery, func(old, cur policy.State) { adm.PolicyChanged(ctx, "reload", old, cur) })
+	}()
 	guard.Run(ctx)
 	log.Info("shutting down")
-	return nil
+	err = <-served
+	<-reloads
+	return err
+}
+
+/* adminSocket and policyEvery are variables for the tests. */
+var (
+	adminSocket = admin.SocketPath
+	policyEvery = 2 * time.Second
+)
+
+/*
+relay is "executor admin", run by nmsctl on the host through docker compose
+exec -T executor: it forwards the one request line on stdin to the
+daemon's socket (as the container's uid, which the daemon checks) and
+copies the response line to stdout. It decides nothing.
+*/
+func relay(ctx context.Context, in io.Reader, out io.Writer) error {
+	line, err := bufio.NewReaderSize(io.LimitReader(in, execadmin.MaxRequest+1), execadmin.MaxRequest+1).ReadSlice('\n')
+	if err != nil {
+		return errors.New("admin: one JSON request line expected on stdin")
+	}
+	resp, err := admin.Call(ctx, adminSocket, line)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(resp)
+	return err
 }
 
 /*

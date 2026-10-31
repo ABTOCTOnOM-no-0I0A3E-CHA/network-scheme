@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,15 @@ egress_file: %q
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	/* Unix socket paths are short (sun_path): a directory of its own under the system temp directory. */
+	sock, err := os.MkdirTemp("", "exa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sock) })
+	old := adminSocket
+	adminSocket = filepath.Join(sock, "admin.sock")
+	t.Cleanup(func() { adminSocket = old })
 	return cfgPath, secrets
 }
 
@@ -102,8 +112,8 @@ func replace(p string) error {
 	return os.WriteFile(p, []byte("x"), 0o600)
 }
 
-/* A missing or malformed key stops the daemon before it connects; admin is not there yet. */
-func TestRunRefusesBadFilesAndAdminIsAStub(t *testing.T) {
+/* A missing or malformed key stops the daemon before it connects; admin takes no arguments and needs a request on stdin. */
+func TestRunRefusesBadFilesAndAdminUsage(t *testing.T) {
 	for name, mutate := range map[string]func(secrets string) error{
 		"write key missing":  func(s string) error { return os.Remove(filepath.Join(s, "domain_write.key")) },
 		"ticket.pub garbage": func(s string) error { return replace(filepath.Join(s, "ticket.pub")) },
@@ -118,8 +128,11 @@ func TestRunRefusesBadFilesAndAdminIsAStub(t *testing.T) {
 		}
 	}
 	cfgPath, _ := writeConfig(t)
-	if err := run(context.Background(), []string{"admin", "status"}); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("admin = %v", err)
+	if err := run(context.Background(), []string{"admin", "status"}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Errorf("admin with arguments = %v", err)
+	}
+	if err := relay(context.Background(), strings.NewReader(""), io.Discard); err == nil {
+		t.Error("relay without a request line")
 	}
 	if err := run(context.Background(), []string{"serve", "--config", cfgPath}); err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Errorf("unknown command: %v", err)
