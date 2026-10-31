@@ -31,9 +31,14 @@ var ErrFrozen = errors.New("executor is frozen")
 
 /* Alert kinds (execpub.alert.kind, task 4a.7 turns them into problems). */
 const (
-	KindTamper       = "executor_tamper"       /* disaster: the registry or the state file was tampered with */
-	KindUnverifiable = "executor_unverifiable" /* high: the registry cannot be verified (decisions refused) */
+	KindTamper        = "executor_tamper"         /* disaster: the registry, the state file or the audit chain was tampered with */
+	KindUnverifiable  = "executor_unverifiable"   /* high: the registry cannot be verified (decisions refused) */
+	KindHostFreeze    = "executor_freeze"         /* warning: the host froze the executor (nmsctl executor freeze on) */
+	KindPolicyInvalid = "executor_policy_invalid" /* high: the policy file is invalid, the executor is disabled */
 )
+
+/* severity of the freezes Trigger alerts; any other kind is a disaster. */
+var severity = map[string]string{KindHostFreeze: "warning"}
 
 /* Timing: periodic verification (security.md 5.1a), bounds of the freeze's own writes, failures before an alert. */
 const (
@@ -164,6 +169,55 @@ func (g *Guard) Write(ctx context.Context, fn func(ctx context.Context, s *regis
 	return err
 }
 
+/*
+HostWrite is the gate of the host's registry changes (nmsctl executor:
+enroll, grant, revoke, unlock, model-verify). Unlike Write it runs while
+frozen: a freeze stops decisions on devices, and the host must still be able
+to revoke or unlock during an incident. The registry is verified all the
+same (registry.Write) and tampering freezes.
+*/
+func (g *Guard) HostWrite(ctx context.Context, fn func(ctx context.Context, s *registry.Snapshot, tx *registry.Tx) error) error {
+	err := g.reg.Write(ctx, fn)
+	if errors.Is(err, registry.ErrTampered) {
+		g.Trigger(ctx, KindTamper, err.Error())
+		return fmt.Errorf("%w: %v", ErrFrozen, err)
+	}
+	return err
+}
+
+/* Alert publishes an alert that freezes nothing (e.g. an invalid policy), as freezes do. */
+func (g *Guard) Alert(ctx context.Context, kind, sev, text string) { g.alert(ctx, kind, sev, text) }
+
+/*
+Reset resets a tampered registry (registry.Reset, host only) and then lifts
+the freeze as FreezeOff does: unless a new freeze arrived meanwhile.
+Tampering found on the way (the schema itself changed) freezes anew.
+*/
+func (g *Guard) Reset(ctx context.Context, o registry.ResetOptions) (registry.ResetReport, error) {
+	g.mu.Lock()
+	gen := g.gen
+	g.mu.Unlock()
+	rep, err := g.reg.Reset(ctx, o)
+	if errors.Is(err, registry.ErrTampered) {
+		g.Trigger(ctx, KindTamper, err.Error())
+		return rep, fmt.Errorf("%w: %v", ErrFrozen, err)
+	}
+	if err != nil {
+		return rep, fmt.Errorf("registry reset: %w", err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.gen != gen {
+		return rep, fmt.Errorf("%w: a new freeze arrived during the reset", ErrFrozen)
+	}
+	if err := g.reg.ClearFrozen(); err != nil {
+		return rep, fmt.Errorf("registry reset: state file: %w", err)
+	}
+	g.frozen, g.reason, g.offSeq, g.failures = false, "", rep.Seq, 0
+	g.alerted = map[string]bool{}
+	return rep, nil
+}
+
 /* Check verifies the registry and reports whether a decision may be taken now. */
 func (g *Guard) Check(ctx context.Context) error {
 	return g.View(ctx, func(*registry.Snapshot) error { return nil })
@@ -218,7 +272,8 @@ func (g *Guard) latch(reason string, fresh bool) {
 /* latchAt latches a freeze read from a snapshot at seq, unless a freeze off committed after that snapshot. */
 func (g *Guard) latchAt(seq int64, reason string) {
 	g.mu.Lock()
-	stale := seq < g.offSeq
+	/* At offSeq itself too: the freeze off's own write; a new freeze after it latches through Trigger. */
+	stale := g.offSeq > 0 && seq <= g.offSeq
 	g.mu.Unlock()
 	if !stale {
 		g.latch(reason, false)
@@ -334,7 +389,11 @@ func (g *Guard) Trigger(ctx context.Context, kind, reason string) {
 	if err := g.reg.MarkFrozen(reason); err != nil {
 		g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
 	}
-	g.alert(ctx, kind, "disaster", reason)
+	sev, ok := severity[kind]
+	if !ok {
+		sev = "disaster"
+	}
+	g.alert(ctx, kind, sev, reason)
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	err := g.reg.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {

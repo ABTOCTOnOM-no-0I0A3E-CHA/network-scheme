@@ -251,6 +251,11 @@ func TestDatabaseTamperingFreezes(t *testing.T) {
 			undo: `DROP TABLE attack.pin`},
 		"changed collation": {do: tamper(`ALTER TABLE exec.write_grant ALTER COLUMN username_snapshot TYPE text COLLATE "C"`),
 			undo: `ALTER TABLE exec.write_grant ALTER COLUMN username_snapshot TYPE text COLLATE "default"`},
+		/* The audit chain must end at the head anchored in the state file (4a.4): a row after it, or a moved head, is tampering. */
+		"planted audit row": {do: tamper(`INSERT INTO exec.audit_event (ts, action, result, payload, prev_hash, hash)
+				VALUES (now(), 'admin.grant', 'ok', '{7d', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`)},
+		"audit head moved": {do: tamper(`UPDATE exec.audit_head SET last_id = 5`),
+			undo: `UPDATE exec.audit_head SET last_id = 0`},
 		"deleted audit_head": {do: tamper(`ALTER TABLE exec.audit_head DISABLE TRIGGER audit_head_keep_row; DELETE FROM exec.audit_head`),
 			undo: `INSERT INTO exec.audit_head VALUES (true, 0, decode(repeat('00', 32), 'hex'));
 				ALTER TABLE exec.audit_head ENABLE TRIGGER audit_head_keep_row`},

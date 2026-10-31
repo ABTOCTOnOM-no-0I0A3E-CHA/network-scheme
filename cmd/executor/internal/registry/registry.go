@@ -506,6 +506,9 @@ func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
 	if err := match(f, s.seq, hash); err != nil {
 		return nil, err
 	}
+	if err := checkAuditHead(ctx, tx, f.Committed.AuditHead); err != nil {
+		return nil, err
+	}
 	s.frozen, s.reason = frozen(s, f)
 	return s, nil
 }
@@ -581,9 +584,13 @@ type op struct {
 
 /* Tx collects the changes of one Write; nothing reaches the database before the function returns. */
 type Tx struct {
-	seq int64
-	ops []op
+	seq   int64
+	ops   []op
+	audit []Appender
 }
+
+/* Audit declares rows of the executor's audit chain to append in the same transaction as the change. */
+func (t *Tx) Audit(a Appender) { t.audit = append(t.audit, a) }
 
 /* Seq is the version every row of this change takes. */
 func (t *Tx) Seq() int64 { return t.seq }
@@ -654,9 +661,11 @@ extended), hands fn that verified snapshot to declare its changes with
 tx.Put and tx.Delete, applies them at version seq+1 with MACs computed from
 the declared values, checks that the database now holds exactly the
 previous rows plus those changes (anything else — a trigger, a rule, a
-default, a planted row — is tampering), then records the change as pending
-in the state file (with its transaction id), commits and records it as
-committed. Every registry table is locked in EXCLUSIVE mode for the whole
+default, a planted row — is tampering), appends the audit rows declared with
+tx.Audit in the same transaction, then records the change (and the new head
+of the audit chain) as pending in the state file (with its transaction id),
+commits and records it as committed. The audit chain must end at the head
+anchored in the state file before anything is written. Every registry table is locked in EXCLUSIVE mode for the whole
 transaction. fn may run up to five times (serialization retries): it must
 only declare changes, with no side effect of its own (no device I/O, no
 other writes). Each attempt runs within OpTimeout; waiting for the
@@ -730,6 +739,9 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err := match(f, pre.seq, hash); err != nil {
 		return err
 	}
+	if err := checkAuditHead(ctx, tx, f.Committed.AuditHead); err != nil {
+		return err
+	}
 	pre.frozen, pre.reason = frozen(pre, f)
 	w := &Tx{seq: seq + 1}
 	if err := fn(ctx, pre, w); err != nil {
@@ -740,14 +752,16 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err != nil {
 		return err
 	}
-	return r.apply(ctx, tx, f, pre, append([]op{counter}, w.ops...), w.seq)
+	return r.apply(ctx, tx, f, pre, append([]op{counter}, w.ops...), w.seq, f.Committed.AuditHead, w.audit)
 }
 
 /*
 apply writes ops at version seq, insists the database holds exactly pre
-with ops applied, then commits in two phases through the state file.
+with ops applied, appends the declared audit rows to the chain from head
+(and insists the chain then ends exactly there), then commits in two phases
+through the state file.
 */
-func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snapshot, ops []op, seq int64) error {
+func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snapshot, ops []op, seq int64, head state.AuditHead, audit []Appender) error {
 	type want struct {
 		canonical, mac []byte
 	}
@@ -805,6 +819,18 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if err != nil {
 		return err
 	}
+	if head, err = appendAudit(ctx, tx, head, audit); err != nil {
+		return err
+	}
+	return r.commit(ctx, tx, f, state.Record{HWM: seq, StateHash: hash, AuditHead: head})
+}
+
+/*
+commit records next as pending in the state file (with the transaction's
+id), commits, and records it as committed; a failed COMMIT is settled
+before the lock is released (failedCommit).
+*/
+func (r *Registry) commit(ctx context.Context, tx pgx.Tx, f state.File, next state.Record) error {
 	var xid string
 	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::pg_catalog.text`).Scan(&xid); err != nil {
 		return err
@@ -813,8 +839,6 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if err != nil || xid8 == 0 {
 		return fmt.Errorf("registry: transaction id %q", xid)
 	}
-	base := f.Committed
-	next := state.Record{HWM: seq, StateHash: hash, AuditHead: base.AuditHead}
 	f.Pending, f.PendingXID = &next, xid8
 	if err := r.save(f); err != nil {
 		return err
@@ -941,7 +965,7 @@ func (r *Registry) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := r.apply(ctx, tx, f, &Snapshot{byKey: map[string]*row{}}, []op{counter, st}, 1); err != nil {
+	if err := r.apply(ctx, tx, f, &Snapshot{byKey: map[string]*row{}}, []op{counter, st}, 1, f.Committed.AuditHead, nil); err != nil {
 		return err
 	}
 	return r.markInitialized(dir)

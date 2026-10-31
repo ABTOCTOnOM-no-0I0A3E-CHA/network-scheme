@@ -57,15 +57,27 @@ File is the body of the state file. Pending is the change written before its
 COMMIT, with the id of its transaction: only that transaction's fate in the
 database (pg_xact_status) ever settles it, never a matching hash. Pending is
 nil once settled. Frozen is sticky: it outlives a database that is
-put back as it was, so only the host (nmsctl, 4a.4) clears it.
+put back as it was, so only the host (nmsctl, 4a.4) clears it. AuditBase is
+where the verification of the audit chain starts (nil: its first row): a
+registry reset after a break of the chain moves it to the tail it continues
+from, since rows can never be repaired (append only).
 */
 type File struct {
-	V            int     `json:"v"`
-	Committed    Record  `json:"committed"`
-	Pending      *Record `json:"pending"`
-	PendingXID   uint64  `json:"pending_xid"` /* the database transaction (xid8) of Pending; set iff Pending is */
-	Frozen       bool    `json:"frozen"`
-	FreezeReason string  `json:"freeze_reason"`
+	V            int        `json:"v"`
+	Committed    Record     `json:"committed"`
+	Pending      *Record    `json:"pending"`
+	PendingXID   uint64     `json:"pending_xid"` /* the database transaction (xid8) of Pending; set iff Pending is */
+	Frozen       bool       `json:"frozen"`
+	FreezeReason string     `json:"freeze_reason"`
+	AuditBase    *AuditHead `json:"audit_base,omitempty"`
+}
+
+/* Base is the start of the audit chain's verification: AuditBase, or the empty head. */
+func (f File) Base() AuditHead {
+	if f.AuditBase == nil {
+		return AuditHead{Hash: make([]byte, sha256.Size)}
+	}
+	return *f.AuditBase
 }
 
 /* Equal reports whether two records describe the same registry state. */
@@ -123,7 +135,8 @@ func Load(path string, key *[32]byte) (File, error) {
 	if err := dec.Decode(&f); err != nil || dec.More() {
 		return File{}, ErrInvalid
 	}
-	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || (f.Pending == nil) != (f.PendingXID == 0) || len(f.FreezeReason) > MaxReason {
+	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || (f.Pending == nil) != (f.PendingXID == 0) || len(f.FreezeReason) > MaxReason ||
+		(f.AuditBase != nil && (f.AuditBase.LastID < 0 || len(f.AuditBase.Hash) != sha256.Size)) {
 		return File{}, ErrInvalid
 	}
 	return f, nil

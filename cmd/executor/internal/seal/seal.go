@@ -8,8 +8,13 @@ package seal
 
 import (
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"log/slog"
+	"strconv"
+
+	"golang.org/x/crypto/chacha20poly1305"
 
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
 )
@@ -77,6 +82,47 @@ func (*Keys) GoString() string { return "***" }
 
 /* LogValue implements slog.LogValuer. */
 func (*Keys) LogValue() slog.Value { return slog.StringValue("***") }
+
+/* KeyVersion is the version of the sealing key the change TOTP secrets are sealed under (key_version of their registry rows). */
+const KeyVersion = 1
+
+/* totpAAD binds a change TOTP secret to its user and key version (security.md 5.2). */
+func totpAAD(userID int64, keyVersion int32) []byte {
+	return []byte(strconv.FormatInt(userID, 10) + "|change-totp|" + strconv.FormatInt(int64(keyVersion), 10))
+}
+
+/*
+SealTOTP encrypts a change TOTP secret with XChaCha20-Poly1305 under enc,
+AAD = "user_id|change-totp|key_version": a random nonce, then the ciphertext.
+A ciphertext moved to another user (even with a valid row MAC) does not open.
+*/
+func (k *Keys) SealTOTP(userID int64, keyVersion int32, secret []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.NewX(k.enc[:])
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize(), aead.NonceSize()+len(secret)+aead.Overhead())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return aead.Seal(nonce, nonce, secret, totpAAD(userID, keyVersion)), nil
+}
+
+/* OpenTOTP decrypts a change TOTP secret sealed for userID and keyVersion; any other binding fails. */
+func (k *Keys) OpenTOTP(userID int64, keyVersion int32, ct []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.NewX(k.enc[:])
+	if err != nil {
+		return nil, err
+	}
+	if len(ct) < aead.NonceSize()+aead.Overhead() {
+		return nil, errors.New("seal: change TOTP ciphertext too short")
+	}
+	pt, err := aead.Open(nil, ct[:aead.NonceSize()], ct[aead.NonceSize():], totpAAD(userID, keyVersion))
+	if err != nil {
+		return nil, errors.New("seal: change TOTP ciphertext does not open for this user")
+	}
+	return pt, nil
+}
 
 /* Wipe zeroes every subkey; the Keys are unusable afterwards. */
 func (k *Keys) Wipe() {

@@ -103,3 +103,37 @@ func TestKeysAreMasked(t *testing.T) {
 		}
 	}
 }
+
+/* C2g primitive: a sealed change TOTP secret opens only for its user and key version, and not under another sealing key. */
+func TestTOTPSealIsBoundToTheUser(t *testing.T) {
+	k, _ := Derive(master(1))
+	other, _ := Derive(master(2))
+	secret := []byte("12345678901234567890")
+	ct, err := k.SealTOTP(5, KeyVersion, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, err := k.OpenTOTP(5, KeyVersion, ct)
+	if err != nil || !bytes.Equal(pt, secret) {
+		t.Fatalf("open: %q %v", pt, err)
+	}
+	ct2, _ := k.SealTOTP(5, KeyVersion, secret)
+	if bytes.Equal(ct, ct2) {
+		t.Fatal("nonce reused")
+	}
+	for name, open := range map[string]func() ([]byte, error){
+		"other user":        func() ([]byte, error) { return k.OpenTOTP(6, KeyVersion, ct) },
+		"other key version": func() ([]byte, error) { return k.OpenTOTP(5, KeyVersion+1, ct) },
+		"other sealing key": func() ([]byte, error) { return other.OpenTOTP(5, KeyVersion, ct) },
+		"flipped bit": func() ([]byte, error) {
+			bad := bytes.Clone(ct)
+			bad[len(bad)-1] ^= 1
+			return k.OpenTOTP(5, KeyVersion, bad)
+		},
+		"truncated": func() ([]byte, error) { return k.OpenTOTP(5, KeyVersion, ct[:10]) },
+	} {
+		if pt, err := open(); err == nil {
+			t.Errorf("%s: opened %q", name, pt)
+		}
+	}
+}
