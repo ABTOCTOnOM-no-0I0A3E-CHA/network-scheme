@@ -42,6 +42,21 @@ func Copy(t testing.TB, env *testdb.Env, table string) (restore func()) {
 	}
 }
 
+/*
+Stall stops the database backend pid with SIGSTOP (the superuser's COPY TO
+PROGRAM runs as the server's OS user): it keeps its locks and never answers,
+and no server-side timeout fires in a stopped process. The returned
+function resumes it.
+*/
+func Stall(t testing.TB, env *testdb.Env, pid uint32) (resume func()) {
+	t.Helper()
+	Tamper(t, env, fmt.Sprintf(`COPY (SELECT 1) TO PROGRAM 'kill -STOP %d && cat >/dev/null'`, pid))
+	return func() {
+		t.Helper()
+		Tamper(t, env, fmt.Sprintf(`COPY (SELECT 1) TO PROGRAM 'kill -CONT %d && cat >/dev/null'`, pid))
+	}
+}
+
 /* Reset empties the registry (a fresh install) for the next test; the append-only tables stay untouched. */
 func Reset(t testing.TB, env *testdb.Env) {
 	t.Helper()

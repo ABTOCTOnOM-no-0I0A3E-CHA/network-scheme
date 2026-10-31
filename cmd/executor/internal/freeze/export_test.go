@@ -8,3 +8,6 @@ func SetAlertRetryEvery(d time.Duration) (restore func()) {
 	alertRetryEvery = d
 	return func() { alertRetryEvery = old }
 }
+
+/* Latch sets the latch alone (no alert, no record), as a concurrent freeze would first. */
+func Latch(g *Guard, reason string) { g.latch(reason) }

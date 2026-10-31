@@ -41,6 +41,8 @@ const (
 	alertRetries  = 5
 	recordTimeout = 2 * registry.StatementTimeout
 	failureAlert  = 3
+	/* checkTimeout bounds one periodic verification, waiting for the registry's lock included (below Interval). */
+	checkTimeout = Interval - 5*time.Second
 )
 
 /* Guard holds the latch and verifies the registry for every decision. */
@@ -134,6 +136,10 @@ func (g *Guard) Write(ctx context.Context, fn func(ctx context.Context, s *regis
 			g.latch(reason)
 			return ErrFrozen
 		}
+		/* The latch again: it may have been set while this write waited for the registry. */
+		if frozen, _ := g.Frozen(); frozen {
+			return ErrFrozen
+		}
 		return fn(ctx, s, tx)
 	})
 	if errors.Is(err, registry.ErrTampered) {
@@ -148,7 +154,11 @@ func (g *Guard) Check(ctx context.Context) error {
 	return g.View(ctx, func(*registry.Snapshot) error { return nil })
 }
 
-/* Run verifies the registry every Interval until ctx ends. */
+/*
+Run verifies the registry every Interval until ctx ends. Each verification
+has its own deadline (checkTimeout), so a stalled one ends as a failure that
+counts toward the alert instead of stopping the loop.
+*/
 func (g *Guard) Run(ctx context.Context) {
 	t := time.NewTicker(Interval)
 	defer t.Stop()
@@ -157,9 +167,11 @@ func (g *Guard) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := g.Check(ctx); err != nil && !errors.Is(err, ErrFrozen) {
+			cctx, cancel := context.WithTimeout(ctx, checkTimeout)
+			if err := g.Check(cctx); err != nil && !errors.Is(err, ErrFrozen) {
 				g.log.Error("registry verification failed", slog.Any("err", err))
 			}
+			cancel()
 		}
 	}
 }
@@ -224,7 +236,8 @@ func (g *Guard) alert(ctx context.Context, kind, severity, text string) {
 
 /*
 Trigger freezes: the latch first (it alone already refuses every decision),
-then the sticky flag in the local state file (no database involved), then
+then the sticky flag in the local state file (no database involved, and not
+behind the registry's lock, which a stalled database call may hold), then
 the disaster alert (its own deadline, retried in the background), then
 exec_state through the registry, which refuses to write over a registry
 that does not verify, so a tampered state is never sealed as legitimate. All but the

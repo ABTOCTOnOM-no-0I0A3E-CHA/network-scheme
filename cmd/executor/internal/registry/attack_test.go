@@ -15,6 +15,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
@@ -111,6 +112,114 @@ func TestTriggerCreatedDuringWriteWaitsAndFreezes(t *testing.T) {
 			}
 		})
 	}
+}
+
+/* within runs fn and fails the test if it has not returned after d (fn may then stay blocked). */
+func within(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s: still blocked after %v", what, d)
+	}
+}
+
+func alerts(t *testing.T, env *testdb.Env, kind, severity string) int {
+	t.Helper()
+	var n int
+	if err := env.Pool("postgres").QueryRow(context.Background(),
+		`SELECT count(*) FROM execpub.alert WHERE kind = $1 AND severity = $2`, kind, severity).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+/*
+Review I1 PoC: a superuser stops (SIGSTOP) the backend of a write in flight,
+so neither lock_timeout nor statement_timeout ever fires and the write holds
+the registry's lock. Callers waiting for the lock give up with their context
+and count as failed verifications (the unverifiable alert goes out); a
+freeze is still marked sticky in the state file and alerted at once; the
+stalled write ends at its client-side deadline; a restart comes up frozen.
+*/
+func TestStalledBackendDoesNotStallTheFreeze(t *testing.T) {
+	env := testdb.New(t)
+	attacktest.Reset(t, env)
+	dir := t.TempDir()
+	reg, guard := executor(t, env, dir)
+	const op = 6 * time.Second
+	registry.SetTimeouts(reg, op, time.Second)
+	ctx := context.Background()
+	if err := guard.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pids, stopped := make(chan uint32, 1), make(chan struct{})
+	registry.SetHook(reg, func(stage string, tx pgx.Tx) {
+		if stage == "verified" {
+			pids <- tx.Conn().PgConn().PID()
+			<-stopped
+		}
+	})
+	began := time.Now()
+	wrote := make(chan error, 1)
+	go func() { wrote <- guard.Write(ctx, grant(1)) }()
+	t.Cleanup(attacktest.Stall(t, env, <-pids))
+	close(stopped)
+
+	for i := range 3 {
+		var err error
+		within(t, 2*time.Second, "check", func() {
+			cctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			defer cancel()
+			err = guard.Check(cctx)
+		})
+		if err == nil || errors.Is(err, freeze.ErrFrozen) {
+			t.Fatalf("check %d while stalled: %v", i, err)
+		}
+	}
+	if n := alerts(t, env, freeze.KindUnverifiable, "high"); n != 1 {
+		t.Fatalf("unverifiable alerts %d", n)
+	}
+
+	triggered := make(chan struct{})
+	go func() { defer close(triggered); guard.Trigger(ctx, freeze.KindTamper, "stalled") }()
+	k, err := seal.Derive(&[32]byte{42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f, err := state.Load(filepath.Join(dir, "state"), k.State())
+		if err == nil && f.Frozen && alerts(t, env, freeze.KindTamper, "disaster") == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no sticky freeze or disaster alert while the write is stalled: %+v %v", f, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if time.Since(began) >= op {
+		t.Fatal("the stalled write ended before the freeze was checked: the test proves nothing")
+	}
+
+	select {
+	case err := <-wrote:
+		if err == nil {
+			t.Fatal("the stalled write reported success")
+		}
+	case <-time.After(op + 5*time.Second):
+		t.Fatal("the stalled write never ended")
+	}
+	_, guard = executor(t, env, dir)
+	if err := guard.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.Check(ctx); !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("restart: %v", err)
+	}
+	within(t, 30*time.Second, "trigger", func() { <-triggered })
 }
 
 /*

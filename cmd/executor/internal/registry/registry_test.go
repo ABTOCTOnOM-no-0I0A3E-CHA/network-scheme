@@ -295,9 +295,14 @@ func TestFailedCommitCannotBeReplayed(t *testing.T) {
 		commit func(ctx context.Context, tx pgx.Tx) error
 		crash  bool
 	}{
-		"definite": {commit: func(ctx context.Context, tx pgx.Tx) error {
-			_ = tx.Rollback(ctx)
-			return &pgconn.PgError{Code: "23514", Message: "check violation at commit"}
+		/*
+			A server with lc_messages = ru_RU localizes Severity; only
+			SeverityUnlocalized says ERROR. The transaction is left open here, so
+			only the definite branch drops the record: settling by the fate would
+			find it in progress and keep the record (and the write would fail).
+		*/
+		"definite": {commit: func(context.Context, pgx.Tx) error {
+			return &pgconn.PgError{Severity: "ОШИБКА", SeverityUnlocalized: "ERROR", Code: "23514", Message: "check violation at commit"}
 		}},
 		"ambiguous, not committed": {commit: func(ctx context.Context, tx pgx.Tx) error {
 			_ = tx.Rollback(ctx)
@@ -326,6 +331,7 @@ func TestFailedCommitCannotBeReplayed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			env, r := fresh(t)
+			r.settleFor = time.Second
 			var seq int64
 			var cm, gm []byte
 			write := func() error {
@@ -426,6 +432,56 @@ func TestPendingIsSettledOnlyByItsTransaction(t *testing.T) {
 	}
 	if f := loadState(t, r); f.Pending != nil {
 		t.Fatalf("pending kept: %+v", f)
+	}
+}
+
+/*
+M2: a pending transaction beyond the database's next transaction id means the
+database was put back behind the state file (pg_xact_status: 22023): tampering.
+*/
+func TestPendingFromTheFutureIsTampering(t *testing.T) {
+	env, r := fresh(t)
+	ctx := context.Background()
+	var xid string
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&xid); err != nil {
+		t.Fatal(err)
+	}
+	x, err := strconv.ParseUint(xid, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := loadState(t, r)
+	pending := f.Committed
+	f.Pending, f.PendingXID = &pending, x+1_000_000
+	if err := state.Save(r.path, r.keys.State(), f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Verify(ctx); !errors.Is(err, ErrTampered) {
+		t.Fatalf("verify: %v", err)
+	}
+	if err := grant(ctx, r, 1); !errors.Is(err, ErrTampered) {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+/*
+I1: MarkFrozen does not wait for the registry's lock, so it can mark the
+state file in the middle of a write; the write's later save keeps the mark.
+*/
+func TestMarkFrozenDuringAWriteIsKept(t *testing.T) {
+	_, r := fresh(t)
+	r.hook = func(s string, _ pgx.Tx) {
+		if s == "pending" {
+			if err := r.MarkFrozen("mid-write"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if err := grant(context.Background(), r, 1); err != nil {
+		t.Fatal(err)
+	}
+	if f := loadState(t, r); !f.Frozen || f.FreezeReason != "mid-write" || f.Pending != nil || f.Committed.HWM != 2 {
+		t.Fatalf("state %+v", f)
 	}
 }
 

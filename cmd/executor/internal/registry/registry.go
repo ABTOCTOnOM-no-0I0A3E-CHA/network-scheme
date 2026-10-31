@@ -16,8 +16,13 @@ seals anything it reads back. Decisions read the registry only through View,
 from the very snapshot that was verified.
 
 One Registry per process (the executor is the single writer): an in-process
-mutex orders writes and verifications, the row lock on registry_counter
+lock orders writes and verifications, the row lock on registry_counter
 orders transactions (never an advisory lock: the api can take those).
+Waiting for that lock respects the caller's context, and every database
+operation runs under a client-side deadline as well as the server-side
+timeouts: a backend that stops answering (a superuser can SIGSTOP it, and
+then no server-side timeout fires) closes the connection on expiry instead
+of holding the lock forever.
 */
 package registry
 
@@ -54,10 +59,15 @@ func tampered(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrTampered, fmt.Sprintf(format, a...))
 }
 
-/* Bounds of every registry transaction: a row or table lock held by someone else cannot stall the executor. */
+/*
+Bounds of every registry transaction: a row or table lock held by someone
+else cannot stall the executor (server side), nor can a backend that stops
+answering (OpTimeout, client side: one verification or write transaction).
+*/
 const (
 	LockTimeout      = 3 * time.Second
 	StatementTimeout = 10 * time.Second
+	OpTimeout        = 2 * StatementTimeout
 )
 
 /* Sentinel is created in the state directory once the registry is bootstrapped and never removed. */
@@ -73,19 +83,37 @@ type Registry struct {
 	pool *pgxpool.Pool
 	keys *seal.Keys
 	path string
-	mu   sync.Mutex
+	/* sem is the registry's lock (a channel, so waiting for it can end with the caller's context). */
+	sem chan struct{}
+	/* fileMu orders the state file's loads and saves; it is never held across a database call. */
+	fileMu sync.Mutex
 	/* Test seams: hook runs at named stages; commitTx commits. */
 	hook     func(stage string, tx pgx.Tx)
 	commitTx func(ctx context.Context, tx pgx.Tx) error
 	/* settleFor bounds the wait for the fate of a transaction whose COMMIT failed ambiguously. */
 	settleFor time.Duration
+	/* opTimeout bounds one verification or write transaction on the client side (OpTimeout). */
+	opTimeout time.Duration
 }
 
 /* New returns the registry over pool, with the state file at path. */
 func New(pool *pgxpool.Pool, keys *seal.Keys, path string) *Registry {
-	return &Registry{pool: pool, keys: keys, path: path, settleFor: 2 * StatementTimeout,
+	return &Registry{pool: pool, keys: keys, path: path, sem: make(chan struct{}, 1),
+		settleFor: 2 * StatementTimeout, opTimeout: OpTimeout,
 		commitTx: func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) }}
 }
+
+/* lock takes the registry's lock, or fails once ctx ends: a stalled holder cannot hold the caller past its deadline. */
+func (r *Registry) lock(ctx context.Context) error {
+	select {
+	case r.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("registry: waiting for the lock: %w", ctx.Err())
+	}
+}
+
+func (r *Registry) unlock() { <-r.sem }
 
 /* row is one verified registry row. */
 type row struct {
@@ -319,6 +347,13 @@ func match(f state.File, seq int64, hash []byte) error {
 }
 
 func (r *Registry) load() (state.File, error) {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	return r.loadLocked()
+}
+
+/* loadLocked is load with fileMu held. */
+func (r *Registry) loadLocked() (state.File, error) {
 	f, err := state.Load(r.path, r.keys.State())
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -329,7 +364,19 @@ func (r *Registry) load() (state.File, error) {
 	return f, err
 }
 
-func (r *Registry) save(f state.File) error { return state.Save(r.path, r.keys.State(), f) }
+/*
+save writes f, keeping a sticky freeze the file already holds: MarkFrozen
+does not wait for the registry's lock, so it may have marked the file
+between this operation's load and this save, and that mark must never be lost.
+*/
+func (r *Registry) save(f state.File) error {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	if cur, err := state.Load(r.path, r.keys.State()); err == nil && cur.Frozen && !f.Frozen {
+		f.Frozen, f.FreezeReason = true, cur.FreezeReason
+	}
+	return state.Save(r.path, r.keys.State(), f)
+}
 
 /* errUnsettled: the fate of the pending transaction cannot be read now; nothing is decided until it can. */
 var errUnsettled = errors.New("registry: the pending change is not settled yet")
@@ -340,6 +387,8 @@ or "" (too old to be known). A transaction in the database's future means
 the database was put back behind the state file: tampering.
 */
 func (r *Registry) xactStatus(ctx context.Context, xid uint64) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, StatementTimeout)
+	defer cancel()
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return "", err
@@ -388,7 +437,7 @@ func (r *Registry) settle(ctx context.Context, f state.File) (state.File, error)
 	return f, r.save(f)
 }
 
-/* settleWait retries settle until it succeeds, is tampering or settleFor passes; r.mu stays held. */
+/* settleWait retries settle until it succeeds, is tampering or settleFor passes; the registry's lock stays held. */
 func (r *Registry) settleWait(ctx context.Context, f state.File) (state.File, error) {
 	deadline := time.Now().Add(r.settleFor)
 	for {
@@ -404,8 +453,10 @@ func (r *Registry) settleWait(ctx context.Context, f state.File) (state.File, er
 	}
 }
 
-/* verified reads and verifies the whole registry; r.mu must be held. */
+/* verified reads and verifies the whole registry within opTimeout; the registry's lock must be held. */
 func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
 	f, err := r.load()
 	if err != nil {
 		return nil, err
@@ -460,12 +511,15 @@ snapshot it verified. It is the only way decisions read the registry: a
 second query after a verification could see other rows. fn runs without
 the registry's lock and must not call Write; a read-modify-write goes
 through Write, whose function receives its own verified snapshot. An
-ErrTampered error means freeze.
+ErrTampered error means freeze; any other error (including ctx ending while
+waiting for the registry's lock) means the registry is not verified now.
 */
 func (r *Registry) View(ctx context.Context, fn func(*Snapshot) error) error {
-	r.mu.Lock()
+	if err := r.lock(ctx); err != nil {
+		return err
+	}
 	s, err := r.verified(ctx)
-	r.mu.Unlock()
+	r.unlock()
 	if err != nil {
 		return err
 	}
@@ -580,11 +634,21 @@ in the state file (with its transaction id), commits and records it as
 committed. Every registry table is locked in EXCLUSIVE mode for the whole
 transaction. fn may run up to five times (serialization retries): it must
 only declare changes, with no side effect of its own (no device I/O, no
-other writes).
+other writes). Each attempt runs within OpTimeout; waiting for the
+registry's lock ends with ctx.
+
+A nil error means the change committed. An ErrTampered error means freeze.
+Any other error does NOT mean the change was not applied: the COMMIT may
+have succeeded and only recording it in the state file failed, or the
+COMMIT failed ambiguously and its fate could not be read in time (the next
+verification settles it). Callers must treat such an error as "unknown":
+never as a refusal they may undo or retry blindly, and never as success.
 */
 func (r *Registry) Write(ctx context.Context, fn func(ctx context.Context, s *Snapshot, tx *Tx) error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.lock(ctx); err != nil {
+		return err
+	}
+	defer r.unlock()
 	var err error
 	for range 5 {
 		if err = r.write(ctx, fn); !isSerialization(err) {
@@ -600,6 +664,8 @@ func isSerialization(err error) bool {
 }
 
 func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Snapshot, tx *Tx) error) error {
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
 	f, err := r.load()
 	if err != nil {
 		return err
@@ -745,15 +811,16 @@ broke, or a FATAL that may come after the commit was written locally) is
 settled by the fate of the transaction, retried for a while under the lock;
 if it is still unknown, every verification keeps failing until it is known
 (fail closed), and a change that did commit is then advanced, one that did
-not is dropped: never accepted on a matching hash.
+not is dropped: never accepted on a matching hash. The fate is read under
+its own deadline (settleFor), not the write's, which may be what ran out.
 */
 func (r *Registry) failedCommit(ctx context.Context, f state.File, next state.Record, err error) error {
 	var pe *pgconn.PgError
-	if (errors.As(err, &pe) && pe.Severity == "ERROR") || pgconn.SafeToRetry(err) || errors.Is(err, pgx.ErrTxCommitRollback) {
+	if (errors.As(err, &pe) && pe.SeverityUnlocalized == "ERROR") || pgconn.SafeToRetry(err) || errors.Is(err, pgx.ErrTxCommitRollback) {
 		f.Pending, f.PendingXID = nil, 0
 		return errors.Join(err, r.save(f))
 	}
-	g, serr := r.settleWait(ctx, f)
+	g, serr := r.settleWait(context.WithoutCancel(ctx), f)
 	if serr != nil {
 		return errors.Join(err, serr)
 	}
@@ -779,8 +846,10 @@ transaction, an untouched exec schema. A missing state file in a used
 directory, or with a non-empty schema, is tampering; so is an invalid one.
 */
 func (r *Registry) Init(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.lock(ctx); err != nil {
+		return err
+	}
+	defer r.unlock()
 	dir := filepath.Dir(r.path)
 	f, err := state.Load(r.path, r.keys.State())
 	missing := errors.Is(err, os.ErrNotExist)
@@ -804,6 +873,8 @@ func (r *Registry) Init(ctx context.Context) error {
 		}
 		f = state.File{}
 	}
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return err
@@ -896,18 +967,17 @@ func (r *Registry) markInitialized(dir string) error {
 /*
 MarkFrozen makes the freeze sticky in the state file (it outlives a database
 put back as it was). Without a valid state file there is nothing to mark:
-that condition alone freezes every start.
+that condition alone freezes every start. It touches only the state file,
+under the file's own lock and never the registry's, so no database call in
+flight (however stalled) delays it; every later save keeps the mark.
 */
 func (r *Registry) MarkFrozen(reason string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	f, err := r.load()
-	if err != nil {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	f, err := r.loadLocked()
+	if err != nil || f.Frozen {
 		return err
 	}
-	if f.Frozen {
-		return nil
-	}
 	f.Frozen, f.FreezeReason = true, reason
-	return r.save(f)
+	return state.Save(r.path, r.keys.State(), f)
 }

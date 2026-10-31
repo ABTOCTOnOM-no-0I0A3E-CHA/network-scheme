@@ -484,6 +484,39 @@ func TestFreezeSurvivesRestart(t *testing.T) {
 	}
 }
 
+/* M4: a write that waited for the registry while the latch was set is refused before its function runs. */
+func TestWriteRechecksTheLatch(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	held, release := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		first <- e.guard.Write(ctx, func(context.Context, *registry.Snapshot, *registry.Tx) error {
+			close(held)
+			<-release
+			return errors.New("released")
+		})
+	}()
+	<-held
+	ran := false
+	second := make(chan error, 1)
+	go func() {
+		second <- e.guard.Write(ctx, func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+			ran = true
+			return tx.Put("write_grant", map[string]any{"user_id": 9, "kind": "write", "write_group": "core", "username_snapshot": "u"})
+		})
+	}()
+	time.Sleep(300 * time.Millisecond) /* the second write passed the latch and waits for the registry */
+	freeze.Latch(e.guard, "concurrent freeze")
+	close(release)
+	if err := <-first; err == nil {
+		t.Fatal("the first write committed")
+	}
+	if err := <-second; !errors.Is(err, freeze.ErrFrozen) || ran {
+		t.Fatalf("write after the latch: %v (ran %v)", err, ran)
+	}
+}
+
 /* A freeze over a sound registry is recorded in exec_state (sealed), the state file and one alert per kind. */
 func TestTriggerRecordsTheFreeze(t *testing.T) {
 	e := seeded(t)
