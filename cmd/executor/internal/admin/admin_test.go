@@ -714,13 +714,13 @@ func TestUnlockIgnoresPanelNames(t *testing.T) {
 }
 
 /* rewriteChain rewrites every audit row as the superuser can, recomputing the unkeyed hash chain and moving the head to match. */
-func rewriteChain(t *testing.T, f *fixture, upTo int64, from, to string) {
+func rewriteChain(t *testing.T, f *fixture, after, upTo int64, from, to string) {
 	t.Helper()
 	ctx := context.Background()
 	db := f.env.Pool("postgres")
 	attacktest.Tamper(t, f.env, `ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only`)
 	defer attacktest.Tamper(t, f.env, `ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only`)
-	rows, err := db.Query(ctx, `SELECT id, payload, prev_hash FROM exec.audit_event WHERE $1 = 0 OR id <= $1 ORDER BY id`, upTo)
+	rows, err := db.Query(ctx, `SELECT id, payload, prev_hash FROM exec.audit_event WHERE id > $2 AND ($1 = 0 OR id <= $1) ORDER BY id`, upTo, after)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,9 +754,9 @@ func rewriteChain(t *testing.T, f *fixture, upTo int64, from, to string) {
 /*
 Review I1 PoC end to end: the whole audit history rewritten with recomputed
 hashes and the head moved to match. The executor freezes; the documented
-reset reports the history as rewritten (in its answer and in its own hashed
-audit row, with the old anchor's hash) instead of vouching for it; the
-rewritten prefix stays sealed, so rewriting it again is caught.
+reset reports the rows as possibly forged (in its answer and in its own
+hashed audit row, with the old anchor's hash) and vouches for none of them:
+nothing is sealed, and audit verify then counts none of them as verified.
 */
 func TestResetReportsRewrittenHistory(t *testing.T) {
 	f := newFixture(t)
@@ -767,7 +767,7 @@ func TestResetReportsRewrittenHistory(t *testing.T) {
 	}
 	c, _ := f.reg.AuditChain()
 	anchor := c.Anchor
-	rewriteChain(t, f, 0, "tester", "mallory")
+	rewriteChain(t, f, 0, 0, "tester", "mallory")
 	if err := f.guard.Check(context.Background()); err == nil {
 		t.Fatal("rewritten chain not seen")
 	}
@@ -775,22 +775,212 @@ func TestResetReportsRewrittenHistory(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("reset: %s", resp.Error)
 	}
-	if !strings.Contains(resp.Text, fmt.Sprintf("AUDIT HISTORY REWRITTEN OR TRUNCATED at or before #%d", anchor.LastID)) {
-		t.Fatalf("reset report vouches for a rewritten history:\n%s", resp.Text)
+	if !strings.Contains(resp.Text, "AUDIT HISTORY REWRITTEN OR TRUNCATED") || !strings.Contains(resp.Text, fmt.Sprintf("up to #%d may be forged", anchor.LastID)) ||
+		strings.Contains(resp.Text, "stay sealed") {
+		t.Fatalf("reset report:\n%s", resp.Text)
 	}
 	r := f.lastAudit(t)
 	if r.details["audit_intact"] != false || r.details["audit_break_id"] != float64(anchor.LastID) ||
-		r.details["audit_old_anchor_hash"] != fmt.Sprintf("%x", anchor.Hash) || r.details["audit_last_good_hash"] == "" {
+		r.details["audit_old_anchor_hash"] != fmt.Sprintf("%x", anchor.Hash) || len(r.details["audit_vouched"].([]any)) != 0 {
 		t.Fatalf("reset audit row %+v", r.details)
 	}
-	f.chainIntact(t)
-	c, _ = f.reg.AuditChain()
-	if len(c.Sealed) != 1 {
+	if c, _ = f.reg.AuditChain(); len(c.Sealed) != 0 {
+		t.Fatalf("forged rows sealed: %+v", c.Sealed)
+	}
+	if resp := f.do(execadmin.Request{Cmd: "audit-verify"}); !resp.OK || !strings.Contains(resp.Text, "outside the verified ranges") {
+		t.Fatalf("audit verify after the reset: %+v", resp)
+	}
+}
+
+/* auditIDs are the ids of the first n audit rows. */
+func auditIDs(t *testing.T, f *fixture, n int) []int64 {
+	t.Helper()
+	rows, err := f.env.Pool("postgres").Query(context.Background(), `SELECT id FROM exec.audit_event ORDER BY id LIMIT $1`, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+/*
+Re-review PoC B, then PoC C, end to end. B: rows 1-3 rewritten with
+recomputed hashes, row 4 left as it was; audit verify freezes; the reset
+seals only what the anchor proves backward (row 4 on) and reports rows 1-3
+as possibly forged. C: the sealed segment is then rewritten including its
+end row; audit verify freezes again; a second reset finds the segment's
+trusted end hash gone, vouches for nothing in it and never seals the forged
+rows again.
+*/
+func TestResetVouchesOnlyBackwardFromTrustedEnds(t *testing.T) {
+	f := newFixture(t)
+	for range 6 {
+		if resp := f.do(execadmin.Request{Cmd: "registry-verify"}); !resp.OK {
+			t.Fatal(resp.Error)
+		}
+	}
+	ids := auditIDs(t, f, 6)
+	rewriteChain(t, f, 0, ids[2], "tester", "mallory")
+	if resp := f.do(execadmin.Request{Cmd: "audit-verify"}); resp.OK {
+		t.Fatal("broken chain verified")
+	}
+	resp := f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK {
+		t.Fatalf("reset: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Text, fmt.Sprintf("up to #%d may be forged", ids[2])) ||
+		!strings.Contains(resp.Text, fmt.Sprintf("rows after #%d up to", ids[2])) || !strings.Contains(resp.Text, "stay sealed") {
+		t.Fatalf("reset report:\n%s", resp.Text)
+	}
+	c, _ := f.reg.AuditChain()
+	if len(c.Sealed) != 1 || c.Sealed[0].From.LastID != ids[2] {
 		t.Fatalf("sealed %+v", c.Sealed)
 	}
-	rewriteChain(t, f, c.Sealed[0].To.LastID, "mallory", "eve")
+	if resp := f.do(execadmin.Request{Cmd: "audit-verify"}); !resp.OK || !strings.Contains(resp.Text, "3 row(s) outside the verified ranges") {
+		t.Fatalf("audit verify after the first reset: %+v", resp)
+	}
+
+	sealedEnd := c.Sealed[0].To.LastID
+	rewriteChain(t, f, c.Sealed[0].From.LastID, sealedEnd, "tester", "eve")
 	if resp := f.do(execadmin.Request{Cmd: "audit-verify"}); resp.OK || !strings.Contains(resp.Error, "sealed segment changed") {
-		t.Fatalf("sealed segment rewritten: %+v", resp)
+		t.Fatalf("rewritten sealed segment: %+v", resp)
+	}
+	resp = f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK {
+		t.Fatalf("second reset: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Text, fmt.Sprintf("rows after #%d up to #%d may be forged", ids[2], sealedEnd)) {
+		t.Fatalf("second reset report:\n%s", resp.Text)
+	}
+	c, _ = f.reg.AuditChain()
+	for _, g := range c.Sealed {
+		if g.To.LastID <= sealedEnd {
+			t.Fatalf("forged segment sealed again: %+v", c.Sealed)
+		}
+	}
+	f.chainIntact(t)
+}
+
+/*
+Minor (a): a reset after a change that committed but was still pending in
+the state file takes the pending head as the anchor: its audit row is
+vouched, not unanchored. An aborted pending change vouches for nothing.
+*/
+func TestResetUsesTheCommittedPendingHead(t *testing.T) {
+	for _, committed := range []bool{true, false} {
+		t.Run(fmt.Sprint("committed ", committed), func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			for range 2 {
+				if resp := f.do(execadmin.Request{Cmd: "registry-verify"}); !resp.OK {
+					t.Fatal(resp.Error)
+				}
+			}
+			path := filepath.Join(f.dir, "state")
+			before, err := state.Load(path, f.keys.State())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp := f.do(execadmin.Request{Cmd: "registry-verify"}); !resp.OK {
+				t.Fatal(resp.Error)
+			}
+			after, err := state.Load(path, f.keys.State())
+			if err != nil {
+				t.Fatal(err)
+			}
+			/* The file as a crash between COMMIT and the committed record leaves it. */
+			tx, err := f.env.Pool("postgres").Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var xid uint64
+			if err := tx.QueryRow(ctx, `SELECT pg_current_xact_id()::text::bigint`).Scan(&xid); err != nil {
+				t.Fatal(err)
+			}
+			if committed {
+				err = tx.Commit(ctx)
+			} else {
+				err = tx.Rollback(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := after.Committed
+			before.Pending, before.PendingXID = &pending, xid
+			if err := state.Save(path, f.keys.State(), before); err != nil {
+				t.Fatal(err)
+			}
+			resp := f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+			if !resp.OK {
+				t.Fatalf("reset: %s", resp.Error)
+			}
+			intact := strings.Contains(resp.Text, fmt.Sprintf("Audit chain intact up to its anchor #%d", after.Committed.AuditHead.LastID))
+			unanchored := strings.Contains(resp.Text, "1 row(s) after the anchor")
+			if intact != committed || unanchored == committed {
+				t.Fatalf("committed %v:\n%s", committed, resp.Text)
+			}
+		})
+	}
+}
+
+/*
+Minor (b): the answer after a host write that failed without a verdict
+follows what the registry holds. Applied: the COMMIT went through but the
+write reported an error (seam), and the grant is confirmed. Not applied: the
+write could not take its locks (a SHARE lock on exec.audit_head blocks
+writes, not reads), and the grant is reported as not applied.
+*/
+func TestGrantOutcomeFollowsTheRegistry(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	confirm := func(name string) execadmin.Request {
+		preview := f.do(execadmin.Request{Cmd: "grant", User: name, Kind: "unmask"})
+		if !preview.OK {
+			t.Fatal(preview.Error)
+		}
+		u := preview.Confirm
+		return execadmin.Request{Cmd: "grant", User: u.Username, UserID: u.ID, UserCreated: u.CreatedAt, Kind: "unmask"}
+	}
+	id, name := f.user(t, "ap")
+	req := confirm(name)
+	admin.SetWriteHook(f.admin, func(err error) error {
+		if err == nil {
+			return errors.New("connection reset after COMMIT")
+		}
+		return err
+	})
+	resp := f.do(req)
+	admin.SetWriteHook(f.admin, nil)
+	if !resp.OK || !strings.Contains(resp.Text, "granted") {
+		t.Fatalf("applied: %+v", resp)
+	}
+	if r := f.lastAudit(t); r.result != "ok" || r.details["confirmed_after"] == nil {
+		t.Fatalf("applied audit %+v", r)
+	}
+	if n := f.count(t, `SELECT count(*) FROM exec.write_grant WHERE user_id = $1`, id); n != 1 {
+		t.Fatalf("grants %d", n)
+	}
+
+	_, other := f.user(t, "na")
+	req = confirm(other)
+	lock, err := f.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Rollback(ctx) }()
+	if _, err := lock.Exec(ctx, `LOCK TABLE exec.audit_head IN SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	if resp := f.do(req); resp.OK || !strings.Contains(resp.Error, "not applied") {
+		t.Fatalf("not applied: %+v", resp)
 	}
 }
 

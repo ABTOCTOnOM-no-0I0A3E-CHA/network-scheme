@@ -278,8 +278,8 @@ func plan(t *testing.T, r *registry.Registry, c state.Chain, known bool) audit.P
 /*
 Review I1 PoC: the whole history rewritten with recomputed hashes and the
 head moved to match is consistent in itself; Verify and PlanReset both see
-that the row at the anchor id no longer has the anchored hash. The reset
-plan is not intact, moves the base to the tail and seals only the prefix.
+that the row at the anchor id no longer has the anchored hash. With the
+trusted end row wrong, nothing is vouched: no forged row is sealed.
 */
 func TestRewrittenHistoryIsNotIntact(t *testing.T) {
 	env, r := setup(t)
@@ -291,15 +291,16 @@ func TestRewrittenHistoryIsNotIntact(t *testing.T) {
 	}
 	c, _ := r.AuditChain()
 	p := plan(t, r, c, true)
-	if p.Intact || p.Break == nil || p.Break.ID != anchor.LastID || p.LastGood.LastID != heads[1].LastID {
+	if p.Intact || p.Break == nil || p.Break.ID != anchor.LastID || len(p.Vouched) != 0 ||
+		len(p.Suspect) != 1 || p.Suspect[0] != (audit.Range{From: 0, To: anchor.LastID}) {
 		t.Fatalf("plan %+v", p)
 	}
-	if p.Chain.Base.LastID != anchor.LastID || len(p.Chain.Sealed) != 1 || p.Chain.Sealed[0].To.LastID != heads[1].LastID {
+	if p.Chain.Base.LastID != anchor.LastID || len(p.Chain.Sealed) != 0 {
 		t.Fatalf("plan chain %+v", p.Chain)
 	}
 }
 
-/* The anchor row removed and forged rows appended after its id: the first forged row is the break (not only the missing anchor). */
+/* The anchor row removed and forged rows appended after its id: the first forged row is the break; nothing is vouched. */
 func TestForgedRowsPastTheAnchor(t *testing.T) {
 	env, r := setup(t)
 	heads := appendRows(t, r, "a.one", "a.two", "a.three")
@@ -316,7 +317,7 @@ func TestForgedRowsPastTheAnchor(t *testing.T) {
 		t.Fatalf("verify: %+v", res)
 	}
 	c, _ := r.AuditChain()
-	if p := plan(t, r, c, true); p.Intact || p.LastGood.LastID != heads[1].LastID || p.Unanchored != 2 {
+	if p := plan(t, r, c, true); p.Intact || len(p.Vouched) != 0 || len(p.Chain.Sealed) != 0 || p.Unanchored != 2 {
 		t.Fatalf("plan %+v", p)
 	}
 }
@@ -331,10 +332,12 @@ func TestUnanchoredRowsAreReported(t *testing.T) {
 		t.Fatalf("verify: %+v", res)
 	}
 	c, _ := r.AuditChain()
-	if p := plan(t, r, c, true); p.Intact || p.Unanchored != 1 || len(p.Chain.Sealed) != 1 || p.Chain.Sealed[0].To.LastID != heads[1].LastID {
+	if p := plan(t, r, c, true); p.Intact || p.Unanchored != 1 || len(p.Chain.Sealed) != 1 || !sameHead(p.Chain.Sealed[0].To, heads[1]) {
 		t.Fatalf("plan %+v", p)
 	}
 }
+
+func sameHead(a, b state.AuditHead) bool { return a.LastID == b.LastID && bytes.Equal(a.Hash, b.Hash) }
 
 /* A sealed segment is checked on every verification: rewriting it, even consistently, is a break. */
 func TestSealedSegmentsStayChecked(t *testing.T) {
@@ -352,5 +355,56 @@ func TestSealedSegmentsStayChecked(t *testing.T) {
 	/* Unreadable state file: nothing is anchored, the plan vouches for nothing. */
 	if p := plan(t, r, c, false); p.Intact || p.Unanchored != 3 || len(p.Chain.Sealed) != 0 || p.Chain.Base.LastID != heads[2].LastID {
 		t.Fatalf("unknown plan %+v", p)
+	}
+}
+
+/*
+Re-review PoC B: rows 1-3 rewritten with recomputed hashes, row 4's
+prev_hash left as it was, so the chain breaks at #4. Only the anchor
+vouches, backward: rows 4-6 are proven and sealed, rows 1-3 (the forged
+ones, consistent among themselves from the start hash) may be forged and
+are never sealed; verification then counts only rows 4-6.
+*/
+func TestOnlyTheAnchorVouchesBackward(t *testing.T) {
+	env, r := setup(t)
+	heads := appendRows(t, r, "a.1", "a.2", "a.3", "a.4", "a.5", "a.6")
+	rewrite(t, env, heads[2].LastID, func(p []byte) []byte { return bytes.ReplaceAll(p, []byte(`"v"`), []byte(`"forged"`)) })
+	c, _ := r.AuditChain()
+	p := plan(t, r, c, true)
+	if p.Intact || len(p.Vouched) != 1 || p.Vouched[0].From.LastID != heads[2].LastID || !sameHead(p.Vouched[0].To, heads[5]) {
+		t.Fatalf("vouched %+v", p.Vouched)
+	}
+	if len(p.Suspect) != 1 || p.Suspect[0] != (audit.Range{From: 0, To: heads[2].LastID}) {
+		t.Fatalf("suspect %+v", p.Suspect)
+	}
+	if len(p.Chain.Sealed) != 1 || p.Chain.Sealed[0].From.LastID != heads[2].LastID {
+		t.Fatalf("sealed %+v", p.Chain.Sealed)
+	}
+	p.Chain.Anchor = p.Chain.Base
+	if res := verifyChain(t, r, p.Chain); res.Break != nil || res.Count != 3 || res.Unverified != 3 {
+		t.Fatalf("verify after the plan: %+v", res)
+	}
+}
+
+/*
+Re-review PoC C: a sealed segment rewritten including its end row. Its
+trusted end hash no longer matches, so nothing in its range is vouched any
+more: a second reset never seals the forged segment again.
+*/
+func TestRewrittenSealedEndVouchesNothing(t *testing.T) {
+	env, r := setup(t)
+	heads := appendRows(t, r, "a.1", "a.2", "a.3", "a.4", "a.5", "a.6")
+	genesis := state.AuditHead{Hash: make([]byte, sha256.Size)}
+	c := state.Chain{Sealed: []state.Segment{{From: genesis, To: heads[2]}}, Base: heads[2], Anchor: heads[5]}
+	rewrite(t, env, heads[2].LastID, func(p []byte) []byte { return bytes.ReplaceAll(p, []byte(`"v"`), []byte(`"eve"`)) })
+	p := plan(t, r, c, true)
+	for _, g := range p.Chain.Sealed {
+		if g.To.LastID <= heads[2].LastID {
+			t.Fatalf("forged segment sealed again: %+v", p.Chain.Sealed)
+		}
+	}
+	if p.Intact || p.Break == nil || p.Break.Reason != audit.ReasonSealedMismatch || len(p.Suspect) != 1 ||
+		p.Suspect[0] != (audit.Range{From: 0, To: heads[2].LastID}) || len(p.Vouched) != 1 || !sameHead(p.Vouched[0].To, heads[5]) {
+		t.Fatalf("plan %+v", p)
 	}
 }

@@ -106,3 +106,41 @@ func TestPendingNeedsItsTransaction(t *testing.T) {
 		}
 	}
 }
+
+/* Sealed audit segments must be well formed, in order, apart and before the live base: anything else is an invalid file. */
+func TestSealedSegmentsAreChecked(t *testing.T) {
+	key := &[32]byte{1}
+	p := filepath.Join(t.TempDir(), "state")
+	h := func(id int64, b byte) AuditHead { return AuditHead{LastID: id, Hash: bytes.Repeat([]byte{b}, 32)} }
+	base := h(20, 9)
+	ok := File{Committed: rec(3, 1), AuditBase: &base, AuditSealed: []Segment{{h(0, 0), h(5, 1)}, {h(5, 2), h(10, 3)}}}
+	if err := Save(p, key, ok); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := Load(p, key); err != nil || len(f.Chain().Sealed) != 2 || f.Chain().Base.LastID != 20 {
+		t.Fatalf("valid segments: %+v %v", f, err)
+	}
+	many := make([]Segment, MaxSealed+1)
+	for i := range many {
+		many[i] = Segment{h(int64(i), 0), h(int64(i)+1, 1)}
+	}
+	big := h(int64(MaxSealed)+1, 9)
+	for name, f := range map[string]File{
+		"empty segment": {AuditBase: &base, AuditSealed: []Segment{{h(5, 0), h(5, 1)}}},
+		"backward":      {AuditBase: &base, AuditSealed: []Segment{{h(6, 0), h(5, 1)}}},
+		"overlapping":   {AuditBase: &base, AuditSealed: []Segment{{h(0, 0), h(8, 1)}, {h(5, 2), h(10, 3)}}},
+		"past the base": {AuditBase: &base, AuditSealed: []Segment{{h(0, 0), h(21, 1)}}},
+		"no base":       {AuditSealed: []Segment{{h(0, 0), h(1, 1)}}},
+		"short hash":    {AuditBase: &base, AuditSealed: []Segment{{AuditHead{LastID: 0, Hash: []byte{1}}, h(1, 1)}}},
+		"too many":      {AuditBase: &big, AuditSealed: many},
+		"negative base": {AuditBase: &AuditHead{LastID: -1, Hash: make([]byte, 32)}},
+	} {
+		f.Committed = rec(3, 1)
+		if err := Save(p, key, f); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p, key); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

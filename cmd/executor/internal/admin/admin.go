@@ -44,6 +44,17 @@ type Admin struct {
 	Keys   *seal.Keys
 	Policy *policy.Holder
 	Log    *slog.Logger
+	/* writeHook, if set, replaces the result of every host registry write (test seam: an error after a COMMIT). */
+	writeHook func(error) error
+}
+
+/* hostWrite is Guard.HostWrite, through writeHook. */
+func (a *Admin) hostWrite(ctx context.Context, fn func(ctx context.Context, s *registry.Snapshot, tx *registry.Tx) error) error {
+	err := a.Guard.HostWrite(ctx, fn)
+	if a.writeHook != nil {
+		err = a.writeHook(err)
+	}
+	return err
 }
 
 /* refusal is a command refused by a rule (audit result "denied"), not a failure. */
@@ -320,7 +331,7 @@ func (a *Admin) enroll(ctx context.Context, req execadmin.Request) execadmin.Res
 	if err != nil {
 		return a.refuse(ctx, req, obj, err, details)
 	}
-	err = a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+	err = a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		if err := enrolled(s); err != nil {
 			return err
 		}
@@ -372,7 +383,7 @@ func (a *Admin) grant(ctx context.Context, req execadmin.Request) execadmin.Resp
 		return resp
 	}
 	kind, group := grantKey(req)
-	err = a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+	err = a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		_, existed := s.Get("write_grant", u.ID, kind, group)
 		details["existed"] = existed
 		tx.Audit(audit.Append(a.event(req, obj, audit.OK, details)))
@@ -451,7 +462,7 @@ func (a *Admin) revoke(ctx context.Context, req execadmin.Request) execadmin.Res
 	}
 	details := map[string]any{"user_id": id, "kind": req.Kind, "group": req.Group, "all": req.All}
 	var revoked []string
-	err = a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+	err = a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		revoked = nil
 		for _, r := range s.Rows("write_grant") {
 			if !matches(r) {
@@ -532,7 +543,7 @@ func (a *Admin) freezeOff(ctx context.Context, req execadmin.Request) execadmin.
 func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Response {
 	if req.Global {
 		details := map[string]any{"global": true}
-		err := a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+		err := a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 			st, ok := s.Get("exec_state", true)
 			if !ok {
 				return deny("exec_state missing")
@@ -563,7 +574,7 @@ func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Res
 		return a.refuse(ctx, req, "user", err, map[string]any{"user": req.User})
 	}
 	obj, details := userObject(id), map[string]any{"user_id": id}
-	err = a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+	err = a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		r, ok := s.Get("change_totp", id)
 		if !ok {
 			return deny("user #%d has no change TOTP", id)
@@ -619,7 +630,7 @@ func (a *Admin) modelVerify(ctx context.Context, req execadmin.Request) execadmi
 		return a.refuse(ctx, req, "model_profile", deny("strategies: at most %d bytes", maxStrategies), details)
 	}
 	var id int64
-	err = a.Guard.HostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+	err = a.hostWrite(ctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		id = 1
 		for _, r := range s.Rows("model_profile") {
 			pid, _ := r.Get("id").(int64)
@@ -695,7 +706,7 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 				"devices": rep.Devices, "dropped": rep.Dropped, "profiles_removed": rep.Profiles,
 				"state_file_readable": rep.Known, "audit_intact": plan.Intact, "audit_unanchored": plan.Unanchored,
 				"audit_old_anchor": rep.OldAnchor.LastID, "audit_old_anchor_hash": hex.EncodeToString(rep.OldAnchor.Hash),
-				"audit_last_good": plan.LastGood.LastID, "audit_last_good_hash": hex.EncodeToString(plan.LastGood.Hash),
+				"audit_vouched": vouchedDetails(plan.Vouched), "audit_may_be_forged": plan.Suspect,
 				"audit_tail": rep.Tail.LastID, "audit_tail_hash": hex.EncodeToString(rep.Tail.Hash),
 				"audit_base": rep.Chain.Base.LastID, "audit_sealed": len(rep.Chain.Sealed)}
 			if plan.Break != nil {
@@ -710,6 +721,16 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 	return execadmin.Response{OK: true, Text: resetText(rep, plan)}
 }
 
+/* vouchedDetails are the vouched ranges with their endpoint hashes, for the reset's audit row. */
+func vouchedDetails(segs []state.Segment) []map[string]any {
+	out := make([]map[string]any, 0, len(segs))
+	for _, g := range segs {
+		out = append(out, map[string]any{"after": g.From.LastID, "after_hash": hex.EncodeToString(g.From.Hash),
+			"to": g.To.LastID, "to_hash": hex.EncodeToString(g.To.Hash)})
+	}
+	return out
+}
+
 /* resetText is the report of a registry reset for the host. */
 func resetText(rep registry.ResetReport, plan audit.Plan) string {
 	var b strings.Builder
@@ -717,17 +738,22 @@ func resetText(rep registry.ResetReport, plan audit.Plan) string {
 		rep.Seq, rep.Grants, rep.TOTPs, rep.Profiles)
 	switch {
 	case !rep.Known:
-		fmt.Fprintf(&b, "AUDIT: the state file was unreadable, so nothing anchors the audit history: %d row(s) up to #%d are not vouched for.\n",
-			plan.Unanchored, rep.Tail.LastID)
+		fmt.Fprintf(&b, "AUDIT: the state file was unreadable, so no trusted hash vouches for the audit history: every row up to #%d may be forged.\n", rep.Tail.LastID)
 	case plan.Break != nil:
-		fmt.Fprintf(&b, "AUDIT HISTORY REWRITTEN OR TRUNCATED at or before #%d (%s); the anchor was #%d.\n", plan.Break.ID, plan.Break.Reason, rep.OldAnchor.LastID)
-		fmt.Fprintf(&b, "Rows up to #%d still chain and stay sealed (they are checked from now on); rows after #%d up to #%d are not vouched for.\n",
-			plan.LastGood.LastID, plan.LastGood.LastID, rep.Tail.LastID)
-	case plan.Unanchored > 0:
-		fmt.Fprintf(&b, "AUDIT: %d row(s) after the anchor #%d are not anchored (nothing vouches for them); the chain up to the anchor is intact and sealed.\n",
-			plan.Unanchored, rep.OldAnchor.LastID)
-	default:
+		fmt.Fprintf(&b, "AUDIT HISTORY REWRITTEN OR TRUNCATED (first at #%d: %s; the anchor was #%d).\n", plan.Break.ID, plan.Break.Reason, rep.OldAnchor.LastID)
+	case plan.Unanchored == 0:
 		fmt.Fprintf(&b, "Audit chain intact up to its anchor #%d.\n", rep.OldAnchor.LastID)
+	}
+	for _, r := range plan.Suspect {
+		if rep.Known {
+			fmt.Fprintf(&b, "  rows after #%d up to #%d may be forged (no trusted hash proves them)\n", r.From, r.To)
+		}
+	}
+	for _, g := range plan.Vouched {
+		fmt.Fprintf(&b, "  rows after #%d up to #%d are proven by the trusted hash of #%d and stay sealed\n", g.From.LastID, g.To.LastID, g.To.LastID)
+	}
+	if plan.Unanchored > 0 && rep.Known {
+		fmt.Fprintf(&b, "AUDIT: %d row(s) after the anchor #%d are not anchored: nothing vouches for them.\n", plan.Unanchored, rep.OldAnchor.LastID)
 	}
 	fmt.Fprintf(&b, "The audit chain continues from #%d; its live part is verified from #%d on, %d sealed segment(s) before.\n",
 		rep.Tail.LastID, rep.Chain.Base.LastID, len(rep.Chain.Sealed))

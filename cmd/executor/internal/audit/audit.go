@@ -172,6 +172,7 @@ const (
 	ReasonAnchorMissing   = "anchor missing (truncated or rewritten)"
 	ReasonSealedMismatch  = "sealed segment changed"
 	ReasonNoAnchor        = "no anchor (state file unreadable)"
+	ReasonUnvouched       = "rows before it are not vouched by a trusted hash (rewritten)"
 )
 
 /* Break is the first row at which the chain fails verification. */
@@ -345,75 +346,132 @@ func Verify(ctx context.Context, tx pgx.Tx, c state.Chain) (Result, error) {
 	return res, nil
 }
 
+/* Range is the rows after From up to To (ids). */
+type Range struct {
+	From int64 `json:"after"`
+	To   int64 `json:"to"`
+}
+
 /* Plan is what a registry reset does with the audit chain (PlanReset). */
 type Plan struct {
 	Chain      state.Chain     /* the new sealed segments and base (Anchor unused) */
-	Intact     bool            /* every sealed segment and the live chain up to the anchor verified, nothing unanchored */
+	Intact     bool            /* everything covered before is vouched in full and nothing lies past the anchor */
 	Break      *Break          /* the first break found, if any */
-	LastGood   state.AuditHead /* the end of the verified prefix of the live chain */
-	Unanchored int64           /* rows after the verified prefix that nothing vouches for */
+	Vouched    []state.Segment /* the ranges a trusted end hash proves (kept sealed), with their endpoint hashes */
+	Suspect    []Range         /* ranges covered before that no trusted end proves any more: may be forged */
+	Unanchored int64           /* rows after the anchor (all rows when the state file was unreadable) */
+}
+
+/*
+vouch walks back from end, a trusted head (the state file's anchor or a
+sealed segment's To), down to floor. The row at end's id must exist, carry
+end's hash and verify itself (hash over prev_hash and payload, indexed
+columns); each earlier row must verify itself too and its hash must be the
+prev_hash of the vouched row after it. The walk stops at the first row that
+fails (or at floor) and returns the vouched segment: From is that row's id
+(or floor) with the prev_hash of the earliest vouched row. A hash chain
+proves rows only backward from a trusted end hash: forward from a start
+hash anyone can recompute it. ok is false when the end row itself fails:
+then nothing in the range is vouched.
+*/
+func vouch(ctx context.Context, tx pgx.Tx, end state.AuditHead, floor int64) (state.Segment, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT id, ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash
+		FROM exec.audit_event WHERE id > $1 AND id <= $2 ORDER BY id DESC`, floor, end.LastID)
+	if err != nil {
+		return state.Segment{}, false, fmt.Errorf("audit: read events: %w", err)
+	}
+	defer rows.Close()
+	from, expect, n := floor, end.Hash, 0
+	for rows.Next() {
+		var c columns
+		var payload, prev, sum []byte
+		if err := rows.Scan(&c.id, &c.ts, &c.userID, &c.ip, &c.ua, &c.action, &c.object, &c.result, &payload, &prev, &sum); err != nil {
+			return state.Segment{}, false, fmt.Errorf("audit: scan event: %w", err)
+		}
+		if (n == 0 && c.id != end.LastID) || !bytes.Equal(sum, expect) || !bytes.Equal(chainHash(prev, payload), sum) || !c.match(payload) {
+			from = c.id
+			break
+		}
+		n++
+		expect = prev
+	}
+	if err := rows.Err(); err != nil {
+		return state.Segment{}, false, fmt.Errorf("audit: read events: %w", err)
+	}
+	if n == 0 {
+		return state.Segment{}, end.LastID == floor, nil
+	}
+	return state.Segment{From: state.AuditHead{LastID: from, Hash: expect}, To: end}, true, nil
 }
 
 /*
 PlanReset decides how a registry reset continues the audit chain, whose
 last row is tail, from what the state file said (old; known is false when
-it was unreadable: then nothing is anchored). An intact chain with nothing
-after its anchor keeps its bounds. Otherwise every prefix that still
-verifies is kept as a sealed segment (a later rewrite of it is caught) and
-the live chain starts again at the tail: rows after a break, after the
-anchor or without any anchor are reported and never vouched for.
+it was unreadable: then nothing is vouched). Only trusted end hashes vouch
+for rows, walking backward: each sealed segment's To and the anchor. An
+intact chain (everything it covered is vouched, nothing past the anchor)
+keeps its bounds. Otherwise only the vouched ranges are kept, as sealed
+segments that every later verification checks, and the live chain starts
+again at the tail; everything else is reported: ranges that may be forged
+and rows past the anchor that nothing vouches for. A range never ends
+anywhere but at a trusted end, so a forged prefix is never sealed.
 */
 func PlanReset(ctx context.Context, tx pgx.Tx, old state.Chain, known bool, tail state.AuditHead) (Plan, error) {
-	empty := state.AuditHead{Hash: make([]byte, sha256.Size)}
 	if !known {
 		_, total, _, err := stats(ctx, tx, 0)
-		return Plan{Chain: state.Chain{Base: tail}, Break: &Break{Reason: ReasonNoAnchor}, LastGood: empty, Unanchored: total}, err
+		return Plan{Chain: state.Chain{Base: tail}, Break: &Break{Reason: ReasonNoAnchor}, Unanchored: total,
+			Suspect: []Range{{From: 0, To: tail.LastID}}}, err
 	}
 	p := Plan{Intact: true}
-	var keep []state.Segment
+	fail := func(b *Break, r Range) {
+		p.Intact = false
+		if p.Break == nil {
+			p.Break = b
+		}
+		if r.To > r.From {
+			p.Suspect = append(p.Suspect, r)
+		}
+	}
+	check := func(start, end state.AuditHead, reason string) error {
+		if end.LastID <= start.LastID {
+			if !same(start, end) {
+				fail(&Break{ID: end.LastID, Reason: reason}, Range{})
+			}
+			return nil
+		}
+		seg, ok, err := vouch(ctx, tx, end, start.LastID)
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			fail(&Break{ID: end.LastID, Reason: reason}, Range{From: start.LastID, To: end.LastID})
+			return nil
+		case !same(seg.From, start):
+			fail(&Break{ID: seg.From.LastID, Reason: ReasonUnvouched}, Range{From: start.LastID, To: seg.From.LastID})
+		}
+		p.Vouched = append(p.Vouched, seg)
+		return nil
+	}
 	for _, g := range old.Sealed {
-		last, _, brk, err := sealed(ctx, tx, g)
-		if err != nil {
+		if err := check(g.From, g.To, ReasonSealedMismatch); err != nil {
 			return p, err
 		}
-		if brk == nil {
-			keep = append(keep, g)
-			continue
-		}
-		p.Intact = false
-		if p.Break == nil {
-			p.Break = brk
-		}
-		if last.LastID > g.From.LastID {
-			keep = append(keep, state.Segment{From: g.From, To: last})
-		}
 	}
-	last, _, _, brk, err := live(ctx, tx, old.Base, old.Anchor)
-	if err != nil {
+	if err := check(old.Base, old.Anchor, ReasonAnchorMissing); err != nil {
 		return p, err
 	}
-	p.LastGood = last
-	if brk != nil {
-		p.Intact = false
-		if p.Break == nil {
-			p.Break = brk
-		}
-	}
-	/* After the anchor if it was reached, else after the break: nothing vouches for these rows. */
-	if _, _, p.Unanchored, err = stats(ctx, tx, last.LastID); err != nil {
+	var err error
+	if _, _, p.Unanchored, err = stats(ctx, tx, max(old.Anchor.LastID, old.Base.LastID)); err != nil {
 		return p, err
 	}
 	if p.Unanchored > 0 {
 		p.Intact = false
 	}
 	if p.Intact {
-		p.Chain = state.Chain{Sealed: keep, Base: old.Base}
+		p.Chain = state.Chain{Sealed: old.Sealed, Base: old.Base}
 		return p, nil
 	}
-	if last.LastID > old.Base.LastID {
-		keep = append(keep, state.Segment{From: old.Base, To: last})
-	}
-	p.Chain = state.Chain{Sealed: keep, Base: tail}
+	p.Chain = state.Chain{Sealed: p.Vouched, Base: tail}
 	return p, nil
 }
 
