@@ -1,0 +1,215 @@
+package triggers_test
+
+import (
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/beekamai/network-scheme/internal/triggers"
+)
+
+/* alert publishes an executor alert as the executor does, aged by ago (the database clock). */
+func (h *harness) alert(kind, severity string, dev int64, text string, ago time.Duration) {
+	h.t.Helper()
+	var d any
+	if dev != 0 {
+		d = dev
+	}
+	h.exec(h.env.Pool("nms_executor"), `INSERT INTO execpub.alert (at, kind, severity, device_id, text)
+		VALUES (now() - make_interval(secs => $1), $2, $3, $4, $5)`, ago.Seconds(), kind, severity, d, text)
+}
+
+/* sysOpen returns the open problem of system kind sys, object obj and device dev (0: none), if there is one. */
+func (h *harness) sysOpen(sys, obj string, dev int64) (prob, bool) {
+	h.t.Helper()
+	for _, p := range h.openProblems(0) {
+		if p.Sys == sys && p.Object == obj && p.Device == dev {
+			return p, true
+		}
+	}
+	return prob{}, false
+}
+
+func (h *harness) settle() {
+	h.t.Helper()
+	for range 3 {
+		h.advance(5 * time.Second)
+	}
+}
+
+/*
+Every executor alert kind is a system problem with its fixed severity
+(whatever the row says), one per kind and device however many alerts
+repeat, about the device when the panel has it.
+*/
+func TestExecutorAlertProblems(t *testing.T) {
+	h := newHarness(t)
+	dev := h.newDevice()
+	want := map[string]string{"executor_tamper": "disaster", "executor_bruteforce": "disaster", "executor_freeze": "warning",
+		"executor_policy_invalid": "high", "executor_guards_unwritable": "high", "executor_unverifiable": "high",
+		"hostkey_mismatch_write": "high", "mass_unmask": "high", "session_interrupted": "high", "session_outside_window": "warning"}
+	for kind := range want {
+		h.alert(kind, "info", 0, "first "+kind, time.Minute)
+		h.alert(kind, "info", 0, "second "+kind, 0)
+		h.alert(kind, "info", dev, "on the device", 0)
+	}
+	h.settle()
+	for kind, sev := range want {
+		p, ok := h.sysOpen(kind, "executor", 0)
+		if !ok || p.Device != 0 || p.Value != "second "+kind {
+			t.Errorf("%s: problem %+v open %v", kind, p, ok)
+			continue
+		}
+		if p2, ok := h.sysOpen(kind, "executor", dev); !ok || p2.Device != dev {
+			t.Errorf("%s: no device problem", kind)
+		}
+		var got string
+		if err := h.root.QueryRow(h.ctx, `SELECT severity FROM problems.problem WHERE id = $1`, p.ID).Scan(&got); err != nil || got != sev {
+			t.Errorf("%s: severity %q, want %q (%v)", kind, got, sev, err)
+		}
+		if name := triggers.SystemName(kind); name == "System problem" {
+			t.Errorf("%s has no name", kind)
+		}
+	}
+	if n := len(h.openProblems(0)); n != 2*len(want) {
+		t.Fatalf("%d open problems, want %d (one per kind and device)", n, 2*len(want))
+	}
+	/* The marker of a lifted freeze is not a problem itself. */
+	h.alert("executor_unfrozen", "info", 0, "lifted", 0)
+	h.settle()
+	if _, ok := h.sysOpen("executor_unfrozen", "executor", 0); ok {
+		t.Fatal("the unfrozen marker opened a problem")
+	}
+}
+
+/*
+An alert's problem is open for 24 h like config_drift: acknowledging does not
+resolve it, age does; an alert of an unknown kind is an executor_alert with
+the row's severity; one about a device the panel no longer has stays a
+problem without a device.
+*/
+func TestExecutorAlertLifetime(t *testing.T) {
+	h := newHarness(t)
+	h.alert("session_interrupted", "high", 0, "interrupted", time.Hour)
+	h.alert("executor_future2", "average", 0, "new kind", 0)
+	h.alert("hostkey_mismatch_write", "high", 987654321, "gone device", 0)
+	h.settle()
+	p, ok := h.sysOpen("session_interrupted", "executor", 0)
+	if !ok {
+		t.Fatal("no problem")
+	}
+	if _, ok := h.sysOpen("executor_alert", "kind:executor_future2", 0); !ok {
+		t.Fatal("unknown kind not raised as executor_alert")
+	}
+	if _, ok := h.sysOpen("hostkey_mismatch_write", "executor:device:987654321", 0); !ok {
+		t.Fatal("alert about a device the panel does not have was dropped")
+	}
+	var sev string
+	if err := h.root.QueryRow(h.ctx, `SELECT severity FROM problems.problem WHERE system_kind = 'executor_alert'`).Scan(&sev); err != nil || sev != "average" {
+		t.Fatalf("unknown kind severity %q (%v)", sev, err)
+	}
+	h.exec(h.root, `UPDATE problems.problem SET state = 'acknowledged', acknowledged_at = now() WHERE id = $1`, p.ID)
+	h.settle()
+	if _, ok := h.sysOpen("session_interrupted", "executor", 0); !ok {
+		t.Fatal("acknowledging resolved the problem")
+	}
+	h.exec(h.root, `UPDATE execpub.alert SET at = now() - interval '25 hours' WHERE kind = 'session_interrupted'`)
+	h.settle()
+	if _, ok := h.sysOpen("session_interrupted", "executor", 0); ok {
+		t.Fatal("a day-old alert still open")
+	}
+}
+
+/*
+A freeze problem stays open past 24 h while the executor's status says
+frozen, and resolves once the host lifted the freeze (executor_unfrozen
+newer than the alert), even within 24 h; an older marker does not hide a
+new freeze.
+*/
+func TestExecutorFreezeProblemFollowsTheFreeze(t *testing.T) {
+	h := newHarness(t)
+	exe := h.env.Pool("nms_executor")
+	h.alert("executor_unfrozen", "info", 0, "lifted", 72*time.Hour)
+	h.alert("executor_tamper", "disaster", 0, "bad MAC in write_grant", 30*time.Hour)
+	h.exec(exe, `INSERT INTO execpub.status (enabled, frozen) VALUES (true, true)`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); !ok {
+		t.Fatal("a frozen executor's tamper problem resolved with age")
+	}
+	h.alert("executor_unfrozen", "info", 0, "lifted", 0)
+	h.exec(exe, `UPDATE execpub.status SET frozen = false`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); ok {
+		t.Fatal("the tamper problem outlived freeze off")
+	}
+	/* A new freeze after the marker, within a minute: open; lifted again: resolved although it is fresh. */
+	time.Sleep(10 * time.Millisecond)
+	h.alert("executor_freeze", "warning", 0, "panel: freeze requested", 0)
+	h.exec(exe, `UPDATE execpub.status SET frozen = true`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_freeze", "executor", 0); !ok {
+		t.Fatal("a new freeze did not open its problem")
+	}
+	time.Sleep(10 * time.Millisecond)
+	h.alert("executor_unfrozen", "info", 0, "lifted", 0)
+	h.settle()
+	if _, ok := h.sysOpen("executor_freeze", "executor", 0); ok {
+		t.Fatal("a lifted freeze is still a problem")
+	}
+}
+
+/*
+Alert text comes from the executor and may carry device data: it is stored
+and shown as plain text only, without control or format characters, and
+bounded.
+*/
+func TestExecutorAlertTextIsPlainBoundedText(t *testing.T) {
+	h := newHarness(t)
+	evil := "<img src=x onerror=alert(1)>\x1b[31m\x07\u202e\u200bgone\r\nnext " + strings.Repeat("ж", 450) /* 900 bytes: the column allows 1024 */
+	h.alert("mass_unmask", "high", 0, evil, 0)
+	h.settle()
+	p, ok := h.sysOpen("mass_unmask", "executor", 0)
+	if !ok {
+		t.Fatal("no problem")
+	}
+	if !strings.HasPrefix(p.Value, "<img src=x onerror=alert(1)> [31m") || utf8.RuneCountInString(p.Value) > 200 || !utf8.ValidString(p.Value) {
+		t.Fatalf("value %q", p.Value)
+	}
+	for _, r := range p.Value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			t.Fatalf("value keeps %U", r)
+		}
+	}
+}
+
+/* Every system problem kind the engine raises has an English name and a Russian one in the panel (web/app ru.json). */
+func TestEverySystemKindHasNames(t *testing.T) {
+	raw, err := os.ReadFile("../../web/app/src/i18n/ru.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ru struct {
+		Problems struct {
+			SystemKind map[string]string `json:"systemKind"`
+		} `json:"problems"`
+	}
+	if err := json.Unmarshal(raw, &ru); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{string(triggers.SystemPollerUnavailable), triggers.SystemUnknownSource, triggers.SystemProfileMismatch,
+		triggers.SystemSSHMismatch, triggers.SystemConfigDrift, triggers.SystemExecutorTamper, triggers.SystemExecutorBruteforce,
+		triggers.SystemExecutorFreeze, triggers.SystemExecutorPolicyInvalid, triggers.SystemExecutorGuards,
+		triggers.SystemExecutorUnverifiable, triggers.SystemHostKeyMismatchWrite, triggers.SystemMassUnmask,
+		triggers.SystemSessionInterrupted, triggers.SystemSessionOutsideWindow, triggers.SystemExecutorAlert} {
+		if triggers.SystemName(k) == "System problem" {
+			t.Errorf("%s has no English name", k)
+		}
+		if strings.TrimSpace(ru.Problems.SystemKind[k]) == "" {
+			t.Errorf("%s has no Russian name in ru.json", k)
+		}
+	}
+}

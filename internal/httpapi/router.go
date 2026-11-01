@@ -311,6 +311,10 @@ func (s *server) handler() http.Handler {
 
 	/* The executor's session ticket: the api's claim about who the caller is; rights and TOTP are checked by the executor. */
 	s.route(r, http.MethodPost, "/api/executor/ticket", self, s.executorTicket)
+	/* execpub: the executor's status and session history (read only) and "freeze on", the only request the api can make; no route lifts a freeze. */
+	s.route(r, http.MethodPost, "/api/executor/freeze", Policy{Perm: rbac.PermExecutorFreeze, StepUp: true}, s.executorFreeze)
+	s.route(r, http.MethodGet, "/api/executor/status", Policy{Perm: rbac.PermSystemRead}, s.executorStatusGet)
+	s.route(r, http.MethodGet, "/api/devices/{id}/sessions", read, s.deviceSessions)
 	return r
 }
 

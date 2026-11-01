@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/jobs"
-	"github.com/beekamai/network-scheme/internal/ssh"
 )
 
 /*
@@ -84,6 +82,7 @@ const (
 	errStoreFailed   = "storing the configuration failed"
 	errBackupTimeout = "configuration backup timed out"
 	errBusy          = "the poller is busy with other backups; try again later"
+	errChangeSession = "the device is in a change session of the executor; backed up after it"
 )
 
 /* errBackupSkipped: the poller-side gap skipped the run, nothing was fetched (not a success, not a failure). */
@@ -167,10 +166,11 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 	}
 	/*
 		Drift: a change with an earlier version on record (pre- and post-session
-		versions are the executor's, the database refuses them from the poller).
-		The first version of a device is the baseline, not drift.
+		versions are the executor's, the database refuses them from the poller),
+		unless it is what a change session just left on the device. The first
+		version of a device is the baseline, not drift.
 	*/
-	drift := last != nil
+	drift := last != nil && !p.sessionResult(ctx, d.ID, sum)
 	if err := p.storeVersion(ctx, d.ID, source, sum, len(raw), masked, ct, dekCT, drift, jobID); err != nil {
 		return fail(errStoreFailed, err)
 	}
@@ -187,7 +187,10 @@ func (p *Poller) sshFetch(ctx context.Context, d device, cache *devCache, drv dr
 	if err != nil {
 		return "", fail(errNoSSHProfile, err)
 	}
-	runner, err := ssh.Dial(ctx, netip.AddrPortFrom(d.Addr.Addr(), sshPort), d.ID, c, p.hostKeys, drv.Dialect())
+	runner, err := p.dialSSH(ctx, d, c, drv.Dialect())
+	if errors.Is(err, errInSession) {
+		return "", fail(errChangeSession, err)
+	}
 	if err != nil {
 		return "", fail(errSSHFailed, err)
 	}

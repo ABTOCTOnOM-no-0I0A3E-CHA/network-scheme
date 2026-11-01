@@ -547,7 +547,18 @@
       "unknown_source": "События от неизвестных источников",
       "access_profile_mismatch": "Профиль доступа не подходит устройству",
       "ssh_host_key_mismatch": "Ключ SSH-хоста не совпадает с закреплённым",
-      "config_drift": "Конфигурация изменена вне сессии изменений"
+      "config_drift": "Конфигурация изменена вне сессии изменений",
+      "executor_tamper": "Подмена реестра или аудита executor'а; executor заморожен",
+      "executor_bruteforce": "Подбор TOTP изменений несколькими пользователями; executor заморожен",
+      "executor_freeze": "Executor заморожен",
+      "executor_policy_invalid": "Политика executor'а невалидна; executor выключен",
+      "executor_guards_unwritable": "Executor не может сохранить счётчики TOTP изменений",
+      "executor_unverifiable": "Реестр executor'а не удаётся проверить",
+      "hostkey_mismatch_write": "Ключ SSH-хоста не совпадает с закреплённым в executor'е",
+      "mass_unmask": "Массовый просмотр конфигураций без маскирования",
+      "session_interrupted": "Сессия изменений прервана",
+      "session_outside_window": "Сессия изменений отклонена вне окна",
+      "executor_alert": "Сообщение executor'а"
     },
     "seeded": {
       "deviceUnavailable": "Устройство недоступно",
@@ -868,6 +879,7 @@
       "storeFailed": "Не удалось сохранить конфигурацию",
       "timeout": "Истекло время снятия бэкапа",
       "busy": "Поллер занят другими бэкапами; повторите позже",
+      "inSession": "Устройство в сессии изменений executor'а; бэкап будет снят после неё",
       "other": "Бэкап не удался"
     },
     "latest": "Последняя версия",

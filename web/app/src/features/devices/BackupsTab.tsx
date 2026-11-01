@@ -31,6 +31,7 @@ const BACKUP_ERRORS: Record<string, string> = {
   "storing the configuration failed": "storeFailed",
   "configuration backup timed out": "timeout",
   "the poller is busy with other backups; try again later": "busy",
+  "the device is in a change session of the executor; backed up after it": "inSession",
 };
 
 /** Drift badge of a version (a change made outside a change session of the panel). */

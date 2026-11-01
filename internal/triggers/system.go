@@ -3,6 +3,7 @@ package triggers
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -17,6 +18,47 @@ const (
 	SystemSSHMismatch     = "ssh_host_key_mismatch"
 	SystemConfigDrift     = "config_drift"
 )
+
+/*
+Executor alert kinds (execpub.alert.kind, written by the executor only):
+each is a system problem kind of its own with a fixed severity. A kind not
+listed here (a newer executor) becomes SystemExecutorAlert with the severity
+of the row and the kind in the object. executorUnfrozen is the marker the
+executor writes when the host lifts a freeze; it is not a problem.
+*/
+const (
+	SystemExecutorTamper        = "executor_tamper"
+	SystemExecutorBruteforce    = "executor_bruteforce"
+	SystemExecutorFreeze        = "executor_freeze"
+	SystemExecutorPolicyInvalid = "executor_policy_invalid"
+	SystemExecutorGuards        = "executor_guards_unwritable"
+	SystemExecutorUnverifiable  = "executor_unverifiable"
+	SystemHostKeyMismatchWrite  = "hostkey_mismatch_write"
+	SystemMassUnmask            = "mass_unmask"
+	SystemSessionInterrupted    = "session_interrupted"
+	SystemSessionOutsideWindow  = "session_outside_window"
+	SystemExecutorAlert         = "executor_alert"
+	executorUnfrozen            = "executor_unfrozen"
+)
+
+var executorSeverity = map[string]string{
+	SystemExecutorTamper: "disaster", SystemExecutorBruteforce: "disaster", SystemExecutorFreeze: "warning",
+	SystemExecutorPolicyInvalid: "high", SystemExecutorGuards: "high", SystemExecutorUnverifiable: "high",
+	SystemHostKeyMismatchWrite: "high", SystemMassUnmask: "high", SystemSessionInterrupted: "high",
+	SystemSessionOutsideWindow: "warning",
+}
+
+/*
+An executor alert is an event: its problem (one per kind and device, from
+the newest alert) is open while that alert is at most executorAlertFor old,
+like config_drift; acknowledging does not resolve it. The freeze kinds
+(executorFreezeKinds) also stay open, whatever their age, while the
+executor's published status says frozen; and they resolve once the host
+lifted the freeze after them (the executor_unfrozen marker is newer).
+*/
+const executorAlertFor = 24 * time.Hour
+
+var executorFreezeKinds = []string{SystemExecutorTamper, SystemExecutorBruteforce, SystemExecutorFreeze}
 
 /*
 config_drift (warning) is open while the newest configuration version of a
@@ -69,8 +111,84 @@ func systemName(kind string) string {
 		return "SSH host key does not match the pinned one"
 	case SystemConfigDrift:
 		return "Device configuration changed outside a change session"
+	case SystemExecutorTamper:
+		return "Executor registry or audit chain tampered with; executor frozen"
+	case SystemExecutorBruteforce:
+		return "Change TOTP failures of several users; executor frozen"
+	case SystemExecutorFreeze:
+		return "Executor frozen"
+	case SystemExecutorPolicyInvalid:
+		return "Executor policy invalid; executor disabled"
+	case SystemExecutorGuards:
+		return "Executor cannot save its change TOTP guards"
+	case SystemExecutorUnverifiable:
+		return "Executor registry cannot be verified"
+	case SystemHostKeyMismatchWrite:
+		return "SSH host key does not match the executor's pinned one"
+	case SystemMassUnmask:
+		return "Many unmasked configurations viewed"
+	case SystemSessionInterrupted:
+		return "Change session interrupted"
+	case SystemSessionOutsideWindow:
+		return "Change session refused outside its window"
+	case SystemExecutorAlert:
+		return "Executor alert"
 	}
 	return "System problem"
+}
+
+/*
+executorAlerts adds to want the problems of the executor's alerts (see
+executorAlertFor). The text is the executor's and may carry device data: it
+is only the problem's value, sanitized like any device text. An alert about a
+device the panel no longer has is kept as a problem without a device (object
+"device:<id>"), never dropped.
+*/
+func (e *Engine) executorAlerts(ctx context.Context, want map[pkey]sysWant, now time.Time) error {
+	var frozen bool
+	if err := e.pool.QueryRow(ctx, `SELECT coalesce((SELECT frozen FROM execpub.status), false)`).Scan(&frozen); err != nil {
+		return fmt.Errorf("triggers: executor status: %w", err)
+	}
+	rows, err := e.pool.Query(ctx, `
+		WITH unfrozen AS (SELECT coalesce(max(at), '-infinity') AS at FROM execpub.alert WHERE kind = $3),
+		last AS (
+		    SELECT DISTINCT ON (a.kind, coalesce(a.device_id, 0)) a.kind, a.device_id, a.severity, a.text, a.at
+		    FROM execpub.alert a, unfrozen u
+		    WHERE a.kind <> $3 AND (a.at > $1 OR (a.kind = ANY ($2) AND a.at > u.at))
+		    ORDER BY a.kind, coalesce(a.device_id, 0), a.at DESC, a.id DESC)
+		SELECT l.kind, coalesce(l.device_id, 0), d.id IS NOT NULL, l.severity, l.text, l.at > $1, l.at > u.at
+		FROM last l CROSS JOIN unfrozen u LEFT JOIN core.device d ON d.id = l.device_id`,
+		now.Add(-executorAlertFor), executorFreezeKinds, executorUnfrozen)
+	if err != nil {
+		return fmt.Errorf("triggers: executor alerts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, sev, text string
+		var dev int64
+		var known, recent, sinceUnfrozen bool
+		if err := rows.Scan(&kind, &dev, &known, &sev, &text, &recent, &sinceUnfrozen); err != nil {
+			return fmt.Errorf("triggers: executor alerts: %w", err)
+		}
+		freezeKind := slices.Contains(executorFreezeKinds, kind)
+		if (freezeKind && !sinceUnfrozen) || (!recent && (!freezeKind || !frozen)) {
+			continue
+		}
+		k := pkey{sys: kind, dev: dev, obj: "executor"}
+		if s, ok := executorSeverity[kind]; ok {
+			sev = s
+		} else {
+			k.sys, k.obj = SystemExecutorAlert, "kind:"+kind
+		}
+		if dev != 0 && !known {
+			k.dev, k.obj = 0, fmt.Sprintf("%s:device:%d", k.obj, dev)
+		}
+		want[k] = sysWant{sev, text}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("triggers: executor alerts: %w", err)
+	}
+	return nil
 }
 
 type sysWant struct{ severity, value string }
@@ -84,7 +202,8 @@ type counterSample struct {
 evalSystem raises and clears the system problems: a poller that owns devices
 and whose heartbeat (inventory.poller_heartbeat, by the database clock) is
 older than 90 s, rejected SSH host keys, a flood of packets from unknown
-sources, and access profiles in status "mismatch".
+sources, access profiles in status "mismatch", configuration drift and the
+executor's alerts.
 */
 func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) error {
 	want := map[pkey]sysWant{}
@@ -171,6 +290,10 @@ func (e *Engine) evalSystem(ctx context.Context, a *actions, now time.Time) erro
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("triggers: config drift check: %w", err)
+	}
+
+	if err := e.executorAlerts(ctx, want, now); err != nil {
+		return err
 	}
 
 	if grew, err := e.unknownSourceGrowth(ctx, now); err != nil {
