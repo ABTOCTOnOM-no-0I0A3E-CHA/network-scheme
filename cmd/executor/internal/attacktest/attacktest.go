@@ -58,8 +58,8 @@ func Stall(t testing.TB, env *testdb.Env, pid uint32) (resume func()) {
 }
 
 /*
-Reset empties the registry and the executor's audit chain (a fresh install)
-for the next test; the other append-only tables stay untouched. The audit
+Reset empties the registry and the executor's audit chain (a fresh install),
+the alerts and a pending freeze request for the next test; the other append-only tables stay untouched. The audit
 rows go with the append-only trigger disabled for the statement, as only a
 superuser could.
 */
@@ -67,7 +67,7 @@ func Reset(t testing.TB, env *testdb.Env) {
 	t.Helper()
 	Tamper(t, env, `DELETE FROM exec.write_device; DELETE FROM exec.write_grant; DELETE FROM exec.change_totp;
 		DELETE FROM exec.model_profile; DELETE FROM exec.write_credential; DELETE FROM exec.exec_state;
-		DELETE FROM exec.registry_counter; DELETE FROM execpub.alert;
+		DELETE FROM exec.registry_counter; DELETE FROM execpub.alert; DELETE FROM execpub.freeze_request;
 		ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
 		DELETE FROM exec.audit_event;
 		ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only;

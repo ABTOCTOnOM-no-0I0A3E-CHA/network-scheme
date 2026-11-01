@@ -418,9 +418,11 @@ func TestRouteTableHasNoHostOnlyRoutes(t *testing.T) {
 			}
 		}
 	}
-	for _, p := range []string{"/x/freeze", "/x/unlock", "/x/enroll", "/x/grant", "/x/policy", "/x/registry/reset", "/api/auth/login", "/"} {
-		for _, m := range []string{http.MethodGet, http.MethodPost} {
-			if a := h.do(t, m, p, "{}", hdr()); a.status != http.StatusNotFound {
+	for _, p := range []string{"/x/freeze", "/x/freeze/off", "/x/unfreeze", "/x/status/freeze", "/x/unlock", "/x/enroll", "/x/grant",
+		"/x/policy", "/x/registry/reset", "/api/executor/freeze", "/api/auth/login", "/"} {
+		for i, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+			/* A client address per method: the whole table would cross the per-IP rate limit. */
+			if a := h.do(t, m, p, "{}", hdr("X-Forwarded-For", fmt.Sprintf("192.0.2.%d", 100+i))); a.status != http.StatusNotFound {
 				t.Errorf("%s %s = %d, want 404", m, p, a.status)
 			}
 		}

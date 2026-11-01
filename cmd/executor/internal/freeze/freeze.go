@@ -33,7 +33,8 @@ var ErrFrozen = errors.New("executor is frozen")
 const (
 	KindTamper           = "executor_tamper"            /* disaster: the registry, the state file or the audit chain was tampered with */
 	KindUnverifiable     = "executor_unverifiable"      /* high: the registry cannot be verified (decisions refused) */
-	KindHostFreeze       = "executor_freeze"            /* warning: the host froze the executor (nmsctl executor freeze on) */
+	KindHostFreeze       = "executor_freeze"            /* warning: the host (nmsctl executor freeze on) or the panel (Request) froze the executor */
+	KindUnfrozen         = "executor_unfrozen"          /* info: the host lifted the freeze (freeze off, registry reset); ends the panel's freeze problems */
 	KindPolicyInvalid    = "executor_policy_invalid"    /* high: the policy file is invalid, the executor is disabled */
 	KindBruteforce       = "executor_bruteforce"        /* disaster: change TOTP failures of several users within an hour froze the executor */
 	KindGuardsUnwritable = "executor_guards_unwritable" /* high: the change TOTP guards cannot be saved, decisions are refused */
@@ -75,7 +76,11 @@ type Guard struct {
 	gen int64
 	/* offSeq is the registry counter of the last freeze off: older snapshots no longer latch. */
 	offSeq int64
-	/* Published, if set, is called once the latch is set, after the alert (hook for execpub.status, 4a.7). */
+	/*
+		Published, if set, is called after the latch changed: set by Trigger or
+		Request (after the alert), lifted by FreezeOff or Reset (hook for
+		execpub.status, package pub). It must return at once.
+	*/
 	Published func(ctx context.Context, reason string)
 }
 
@@ -207,17 +212,33 @@ func (g *Guard) Reset(ctx context.Context, o registry.ResetOptions) (registry.Re
 	if err != nil {
 		return rep, fmt.Errorf("registry reset: %w", err)
 	}
+	return rep, g.lift(ctx, gen, rep.Seq, "registry reset")
+}
+
+/*
+lift clears the sticky flag of the state file and the latch after a freeze
+off or a reset that committed at seq, unless a new freeze arrived since gen
+was taken; then it publishes the KindUnfrozen marker (the panel resolves its
+freeze problems on it) and calls Published.
+*/
+func (g *Guard) lift(ctx context.Context, gen, seq int64, what string) error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.gen != gen {
-		return rep, fmt.Errorf("%w: a new freeze arrived during the reset", ErrFrozen)
+		g.mu.Unlock()
+		return fmt.Errorf("%w: a new freeze arrived during %s", ErrFrozen, what)
 	}
 	if err := g.reg.ClearFrozen(); err != nil {
-		return rep, fmt.Errorf("registry reset: state file: %w", err)
+		g.mu.Unlock()
+		return fmt.Errorf("%s: state file: %w", what, err)
 	}
-	g.frozen, g.reason, g.offSeq, g.failures = false, "", rep.Seq, 0
+	g.frozen, g.reason, g.offSeq, g.failures = false, "", seq, 0
 	g.alerted = map[string]bool{}
-	return rep, nil
+	g.mu.Unlock()
+	g.alert(ctx, KindUnfrozen, "info", "the host lifted the freeze ("+what+")")
+	if g.Published != nil {
+		g.Published(ctx, "")
+	}
+	return nil
 }
 
 /* Check verifies the registry and reports whether a decision may be taken now. */
@@ -326,16 +347,61 @@ func (g *Guard) FreezeOff(ctx context.Context, check func(context.Context) error
 	if err != nil {
 		return fmt.Errorf("freeze off: %w", err)
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.gen != gen {
-		return fmt.Errorf("%w: a new freeze arrived during freeze off", ErrFrozen)
+	return g.lift(ctx, gen, seq, "freeze off")
+}
+
+/*
+Request freezes at the panel's request (execpub.freeze_request): the only
+thing the api can ask of the executor, and only "on". The latch is set
+first and the sticky flag of the state file next, both before anything is
+committed: a freeze off running meanwhile then lifts nothing (the generation
+moved), and a crash leaves the executor frozen. Then one registry write
+records exec_state frozen (keeping the reason of a freeze already recorded)
+and runs consume in that same transaction: consume deletes the request
+(DELETE ... RETURNING) and appends its audit row, so the request is never
+gone without the freeze recorded, nor recorded twice. The registry's lock
+serializes it with FreezeOff. Any error leaves the executor frozen and the
+request in place (the caller retries); tampering freezes as KindTamper. The
+KindHostFreeze alert is published when this request froze an executor
+that was not frozen.
+*/
+func (g *Guard) Request(ctx context.Context, reason string, consume registry.Appender) error {
+	reason = state.Reason(reason)
+	frozen, _ := g.Frozen()
+	g.latch(reason, true)
+	if err := g.reg.MarkFrozen(reason); err != nil {
+		g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
 	}
-	if err := g.reg.ClearFrozen(); err != nil {
-		return fmt.Errorf("freeze off: state file: %w", err)
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	err := g.reg.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
+		window, why := json.RawMessage("[]"), any(reason)
+		if st, ok := s.Get("exec_state", true); ok {
+			window, _ = st.Get("global_fail_window").(json.RawMessage)
+			if f, _ := st.Get("freeze").(bool); f && st.Get("freeze_reason") != nil {
+				why = st.Get("freeze_reason")
+			}
+		}
+		if err := tx.Put("exec_state", map[string]any{"singleton": true, "freeze": true, "freeze_reason": why,
+			"global_fail_window": window}); err != nil {
+			return err
+		}
+		tx.Audit(consume)
+		return nil
+	})
+	if errors.Is(err, registry.ErrTampered) {
+		g.Trigger(ctx, KindTamper, err.Error())
+		return fmt.Errorf("%w: %v", ErrFrozen, err)
 	}
-	g.frozen, g.reason, g.offSeq, g.failures = false, "", seq, 0
-	g.alerted = map[string]bool{}
+	if err != nil {
+		return fmt.Errorf("freeze request: %w", err)
+	}
+	if !frozen {
+		g.alert(ctx, KindHostFreeze, "warning", reason)
+	}
+	if g.Published != nil {
+		g.Published(ctx, reason)
+	}
 	return nil
 }
 

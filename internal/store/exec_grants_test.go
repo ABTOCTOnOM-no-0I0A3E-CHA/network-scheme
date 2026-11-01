@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -289,7 +290,12 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 			}
 		}
 	}
-	for _, sql := range []string{`SELECT 1 FROM execpub.alert`, `SELECT 1 FROM execpub.status`, `SELECT 1 FROM execpub.freeze_request`} {
+	for _, sql := range []string{`SELECT 1 FROM execpub.alert`, `SELECT 1 FROM execpub.status`, `SELECT 1 FROM execpub.freeze_request`,
+		`INSERT INTO execpub.freeze_request (requested_by) VALUES (1) ON CONFLICT DO NOTHING`,
+		`INSERT INTO execpub.alert (kind, severity, text) VALUES ('x', 'info', 'x')`,
+		`INSERT INTO execpub.status (enabled, frozen) VALUES (false, false)`,
+		`INSERT INTO execpub.device_busy (device_id, session_id) VALUES (1, gen_random_uuid())`,
+		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`} {
 		requireDenied(t, "nms_poller", sql)
 	}
 	for _, sql := range []string{`SELECT 1 FROM execpub.device_busy`, `SELECT 1 FROM execpub.session_summary`} {
@@ -324,6 +330,60 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 	var frozen bool
 	if err := api.QueryRow(ctx, `SELECT frozen FROM execpub.status`).Scan(&frozen); err != nil || !frozen {
 		t.Errorf("api reads status: frozen %v, err %v", frozen, err)
+	}
+}
+
+/*
+The api's target-less ON CONFLICT DO NOTHING swallows a violation of any
+unique index or exclusion constraint of freeze_request: the singleton primary
+key must stay the only one (00026), else a request could be dropped silently
+while none is pending.
+*/
+func TestFreezeRequestOnlyUniqueIndex(t *testing.T) {
+	var unique, excl int
+	if err := testdb.New(t).Pool("postgres").QueryRow(context.Background(), `
+		SELECT (SELECT count(*) FROM pg_index WHERE indrelid = 'execpub.freeze_request'::regclass AND indisunique),
+		       (SELECT count(*) FROM pg_constraint WHERE conrelid = 'execpub.freeze_request'::regclass AND contype = 'x')`).
+		Scan(&unique, &excl); err != nil {
+		t.Fatal(err)
+	}
+	if unique != 1 || excl != 0 {
+		t.Fatalf("freeze_request: %d unique indexes, %d exclusion constraints; want only the primary key", unique, excl)
+	}
+}
+
+/*
+Every api INSERT into freeze_request wakes the executor through channel
+execpub_freeze, also one that inserted nothing (a request already pending);
+the payload is empty: the executor reads the table itself.
+*/
+func TestFreezeRequestNotifies(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	conn, err := env.Pool("nms_executor").Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `LISTEN execpub_freeze`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.freeze_request`)
+	})
+	for i := range 2 {
+		if _, err := env.Pool("nms_api").Exec(ctx, `INSERT INTO execpub.freeze_request (requested_by) VALUES (5) ON CONFLICT DO NOTHING`); err != nil {
+			t.Fatal(err)
+		}
+		wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		n, err := conn.Conn().WaitForNotification(wctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("insert %d: no notification: %v", i, err)
+		}
+		if n.Channel != "execpub_freeze" || n.Payload != "" {
+			t.Fatalf("insert %d: notification %q %q", i, n.Channel, n.Payload)
+		}
 	}
 }
 

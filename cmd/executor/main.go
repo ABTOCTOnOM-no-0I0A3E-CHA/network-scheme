@@ -32,6 +32,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
@@ -85,10 +86,11 @@ freezing on tampering), loads the policy, serves the host-only
 administration socket and /x (web: TLS with the gateway's client
 certificate, bound only to the executor's address in xnet), and keeps
 verifying the registry every 30 s and rereading the policy until
-SIGTERM/SIGINT. The authorizer of session tickets and change TOTP (authz)
+SIGTERM/SIGINT; meanwhile it publishes its status in execpub and freezes on
+the panel's requests (pub). The authorizer of session tickets and change TOTP (authz)
 and the confirm(H) store are built here; authz follows the host's unlocks.
 It touches no device yet. It returns (and wipes the keys) only after every
-administration command, every /x request and the policy loop ended.
+administration command, every /x request, the policy loop and pub ended.
 */
 func serve(ctx context.Context, cfg config.Config) error {
 	started := time.Now() /* tickets issued before (minus authz's skew) are refused: none survives a restart */
@@ -112,6 +114,12 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	pol := policy.New(cfg.PolicyFile)
+	/* execpub (set before anything runs concurrently): the status for the panel and the panel's only request, "freeze on". */
+	consumer := pub.NewConsumer(pub.New(pool, log), guard, func() (bool, bool) {
+		frozen, _ := guard.Frozen()
+		return pol.Current().Enabled(), frozen
+	})
+	guard.Published = func(context.Context, string) { consumer.Wake() }
 	pub, err := nmsconfig.ReadKeyFile(cfg.TicketPubKeyFile)
 	if err != nil {
 		return err
@@ -165,10 +173,16 @@ func serve(ctx context.Context, cfg config.Config) error {
 		defer close(reloads)
 		pol.Run(ctx, policyEvery, func(old, cur policy.State) { adm.PolicyChanged(ctx, "reload", old, cur) })
 	}()
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		consumer.Run(ctx)
+	}()
 	guard.Run(ctx)
 	log.Info("shutting down")
 	err = errors.Join(<-served, <-webbed)
 	<-reloads
+	<-published
 	return err
 }
 

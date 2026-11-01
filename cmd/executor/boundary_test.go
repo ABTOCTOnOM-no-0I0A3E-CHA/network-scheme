@@ -14,6 +14,8 @@ var (
 	registrySQL = regexp.MustCompile(`(?i)\bexec\\?"?\s*\.\s*\\?"?(registry_counter|write_device|write_grant|change_totp|exec_state|model_profile|write_credential)\b`)
 	/* Any way to a database connection of one's own: a pool, a direct connection, database/sql, store.Open. */
 	dbAccess = regexp.MustCompile(`pgxpool|\bpgx\.Connect|\bpgconn\.Connect|"database/sql"|jackc/pgx/v5/stdlib|\bstore\.Open\b`)
+	/* Any table of schema exec (execpub is another schema). */
+	execSQL = regexp.MustCompile(`(?i)\bexec\\?"?\s*\.`)
 )
 
 /* violations lists what the source text of a non-test file in dir (relative to cmd/executor) does against the boundary. */
@@ -22,8 +24,11 @@ func violations(dir, text string) []string {
 	if dir != "internal/registry" && dir != "internal/attacktest" && registrySQL.MatchString(text) {
 		out = append(out, "names a registry table; use registry.View / registry.Write")
 	}
-	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dbAccess.MatchString(text) {
+	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dir != "internal/pub" && dbAccess.MatchString(text) {
 		out = append(out, "opens or holds a database connection; decisions go through the registry")
+	}
+	if dir == "internal/pub" && execSQL.MatchString(text) {
+		out = append(out, "names schema exec; pub writes execpub only (the audit row goes through package audit)")
 	}
 	if dir != "internal/attacktest" && strings.Contains(text, "internal/attacktest") {
 		out = append(out, "imports attacktest outside tests")
@@ -37,8 +42,9 @@ later code in cmd/executor:
   - only package registry names the registry tables in SQL (everyone else
     reads through registry.View and writes through registry.Write, which
     verify and seal);
-  - no package but registry, freeze (its alert) and main holds or opens a
-    database connection, so decision code cannot run its own queries;
+  - no package but registry, freeze (its alert), pub (schema execpub only)
+    and main holds or opens a database connection, so decision code cannot
+    run its own queries;
   - attacktest (superuser tampering) is imported by tests only.
 */
 func TestRegistryBoundary(t *testing.T) {
@@ -91,5 +97,13 @@ func TestRegistryBoundaryCatchesBypasses(t *testing.T) {
 		if v := violations("internal/authz", src); len(v) != 0 {
 			t.Errorf("false positive %v: %s", v, src)
 		}
+	}
+	for _, src := range []string{"q := `SELECT * FROM exec.session`", `q := "INSERT INTO exec.\"audit_event\""`, "q := `UPDATE EXEC . audit_head`"} {
+		if len(violations("internal/pub", src)) == 0 {
+			t.Errorf("pub: not caught: %s", src)
+		}
+	}
+	if v := violations("internal/pub", "var p *pgxpool.Pool; q := `DELETE FROM execpub.freeze_request`"); len(v) != 0 {
+		t.Errorf("pub: false positive %v", v)
 	}
 }
