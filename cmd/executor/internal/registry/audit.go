@@ -76,6 +76,10 @@ anchored head first (else ErrTampered: freeze). As for Write, an error other
 than ErrTampered does not mean the rows were not appended.
 */
 func (r *Registry) Append(ctx context.Context, a Appender) error {
+	return oversized(r.appendAlone(ctx, a))
+}
+
+func (r *Registry) appendAlone(ctx context.Context, a Appender) error {
 	if err := r.lock(ctx); err != nil {
 		return err
 	}

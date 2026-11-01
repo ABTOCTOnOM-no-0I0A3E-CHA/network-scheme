@@ -112,7 +112,7 @@ func (r *Registry) Reset(ctx context.Context, o ResetOptions) (ResetReport, erro
 	if err := checkCatalog(ctx, tx); err != nil {
 		return rep, fmt.Errorf("registry reset: the exec schema itself was changed; restore it first: %w", err)
 	}
-	pre, err := scan(ctx, tx)
+	pre, err := scan(ctx, tx, nil)
 	if err != nil {
 		return rep, fmt.Errorf("registry reset: %w", err)
 	}

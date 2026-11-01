@@ -216,7 +216,7 @@ func healthcheck(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	pool, err := store.Open(ctx, cfg.DB, pw)
+	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession, registry.BoundMessages)
 	pw.Wipe()
 	if err != nil {
 		return err

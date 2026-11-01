@@ -91,6 +91,19 @@ recordings (task 4c, up to 4 MiB a row) needs a raised bound there.
 */
 const MaxMessage = 1 << 20
 
+/*
+oversized turns a message over MaxMessage into tampering: nothing the
+executor reads from schema exec or the catalog is that large, so only a
+planted value (a row, a constraint definition) can be.
+*/
+func oversized(err error) error {
+	var e *pgproto3.ExceededMaxBodyLenErr
+	if errors.As(err, &e) {
+		return tampered("a message of %d bytes from the database (bound %d)", e.ActualBodyLen, e.MaxExpectedBodyLen)
+	}
+	return err
+}
+
 /* BoundMessages sets MaxMessage on the pool's connections (main passes it to store.Open). */
 func BoundMessages(cfg *pgxpool.Config) {
 	cfg.ConnConfig.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
@@ -245,13 +258,31 @@ func pinSession(ctx context.Context, tx pgx.Tx) error {
 }
 
 /*
+Bounds of a snapshot: rows per table (the deployment's scale, 5 000
+devices, with room to spare) and bytes in all. Each row is checked against
+them, and its MAC verified, as it streams in: rows planted by someone
+without the MAC key stop the read at the first one, and no number of them
+can make the executor hold more than the bounds (a superuser could
+otherwise exhaust its memory and have it restarted). Legitimate data beyond
+the bounds is refused as well (fail closed).
+*/
+var (
+	maxRows = map[string]int{counterTable: 1, stateTable: 1, "write_device": 10000, "write_credential": 10000,
+		"write_grant": 20000, "change_totp": 10000, "model_profile": 1024}
+	maxSnapshotBytes = 64 << 20
+)
+
+/*
 scan reads the whole registry into Go values. Values that cannot be
 scanned or are out of their domain (NULL where none is allowed, infinite
-time, a network instead of an address, two rows with one key) are tampering:
-the executor never writes them.
+time, a network instead of an address, two rows with one key), a table
+over its row bound or a snapshot over its byte bound are tampering: the
+executor never writes them. With macKey every row's MAC is verified as it
+is read (nil: the registry reset, which keeps the rows that verify).
 */
-func scan(ctx context.Context, q pgx.Tx) (*Snapshot, error) {
+func scan(ctx context.Context, q pgx.Tx, macKey *[32]byte) (*Snapshot, error) {
 	s := &Snapshot{byKey: map[string]*row{}}
+	size := 0
 	for i := range tables {
 		t := &tables[i]
 		rows, err := q.Query(ctx, t.selectSQL())
@@ -259,7 +290,12 @@ func scan(ctx context.Context, q pgx.Tx) (*Snapshot, error) {
 			return nil, fmt.Errorf("registry: read %s: %w", t.name, err)
 		}
 		cols := t.columns()
+		n := 0
 		for rows.Next() {
+			if n++; n > maxRows[t.name] {
+				rows.Close()
+				return nil, tampered("%s has more than %d rows", t.name, maxRows[t.name])
+			}
 			dst := make([]any, 0, len(cols)+2)
 			for _, c := range cols {
 				dst = append(dst, dest(c.kind))
@@ -289,6 +325,19 @@ func scan(ctx context.Context, q pgx.Tx) (*Snapshot, error) {
 				return nil, tampered("%s: NULL version or bad mac", t.name)
 			}
 			r.version, r.mac = *version, *mac
+			if macKey != nil && !hmac.Equal(r.mac, macOf(macKey, r.canonical())) {
+				rows.Close()
+				return nil, tampered("bad MAC in %s", t.name)
+			}
+			for _, v := range append(append([]*string(nil), r.pk...), r.content...) {
+				if v != nil {
+					size += len(*v)
+				}
+			}
+			if size > maxSnapshotBytes {
+				rows.Close()
+				return nil, tampered("the registry holds more than %d bytes", maxSnapshotBytes)
+			}
 			r.key = keyEnc(t, r.pk)
 			if s.byKey[r.key] != nil {
 				rows.Close()
@@ -299,11 +348,6 @@ func scan(ctx context.Context, q pgx.Tx) (*Snapshot, error) {
 		}
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("registry: read %s: %w", t.name, err)
-		}
-	}
-	for _, name := range []string{counterTable, stateTable} {
-		if n := len(s.Rows(name)); n > 1 {
-			return nil, tampered("%s has %d rows", name, n)
 		}
 	}
 	if c := s.Rows(counterTable); len(c) == 1 {
@@ -340,13 +384,10 @@ func deref(p any) any {
 	return v.Elem().Interface()
 }
 
-/* check verifies every row's MAC and version against the counter and returns the state hash. */
-func (s *Snapshot) check(key *[32]byte) ([]byte, error) {
+/* check verifies every row's version against the counter and returns the state hash (scan verified the MACs). */
+func (s *Snapshot) check() ([]byte, error) {
 	entries := make([][]byte, 0, len(s.rows))
 	for _, r := range s.rows {
-		if !hmac.Equal(r.mac, macOf(key, r.canonical())) {
-			return nil, tampered("bad MAC in %s", r.t.name)
-		}
 		if r.version > s.seq {
 			return nil, tampered("%s row version %d above counter %d", r.t.name, r.version, s.seq)
 		}
@@ -517,11 +558,11 @@ func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
 	if err := checkCatalog(ctx, tx); err != nil {
 		return nil, err
 	}
-	s, err := scan(ctx, tx)
+	s, err := scan(ctx, tx, r.keys.MAC())
 	if err != nil {
 		return nil, err
 	}
-	hash, err := s.check(r.keys.MAC())
+	hash, err := s.check()
 	if err != nil {
 		return nil, err
 	}
@@ -573,7 +614,8 @@ func (r *Registry) locked(ctx context.Context) (*Snapshot, error) {
 		return nil, err
 	}
 	defer r.unlock()
-	return r.verified(ctx)
+	s, err := r.verified(ctx)
+	return s, oversized(err)
 }
 
 /* Report is the verified state of the registry. */
@@ -708,7 +750,7 @@ func (r *Registry) Write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	var err error
 	for range 5 {
 		if err = r.write(ctx, fn); !isSerialization(err) {
-			return err
+			return oversized(err)
 		}
 	}
 	return err
@@ -750,11 +792,11 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err := checkCatalog(ctx, tx); err != nil {
 		return err
 	}
-	pre, err := scan(ctx, tx)
+	pre, err := scan(ctx, tx, r.keys.MAC())
 	if err != nil {
 		return err
 	}
-	hash, err := pre.check(r.keys.MAC())
+	hash, err := pre.check()
 	if err != nil {
 		return err
 	}
@@ -818,7 +860,7 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if err := checkCatalog(ctx, tx); err != nil {
 		return err
 	}
-	post, err := scan(ctx, tx)
+	post, err := scan(ctx, tx, r.keys.MAC())
 	if err != nil {
 		return err
 	}
@@ -837,7 +879,7 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if _, ok := post.Get(stateTable, true); !ok {
 		return errors.New("registry: a write must leave exec_state")
 	}
-	hash, err := post.check(r.keys.MAC())
+	hash, err := post.check()
 	if err != nil {
 		return err
 	}
@@ -1051,6 +1093,12 @@ func (r *Registry) MarkFrozen(reason string) error {
 	}
 	f.Frozen, f.FreezeReason = true, reason
 	return state.Save(r.path, r.keys.State(), f)
+}
+
+/* StickyFrozen reports the sticky freeze mark of the state file. */
+func (r *Registry) StickyFrozen() (bool, error) {
+	f, err := r.load()
+	return f.Frozen, err
 }
 
 /*

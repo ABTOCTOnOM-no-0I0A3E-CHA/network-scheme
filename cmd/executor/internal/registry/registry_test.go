@@ -917,11 +917,11 @@ func TestCheckRefusesVersionAboveCounter(t *testing.T) {
 	pk := []*string{p("1")}
 	s := &Snapshot{seq: 3, rows: []*row{{t: lookup("write_grant"), pk: pk, version: 4,
 		mac: macOf(k.MAC(), Canonical("write_grant", pk, nil, 4))}}}
-	if _, err := s.check(k.MAC()); !errors.Is(err, ErrTampered) {
+	if _, err := s.check(); !errors.Is(err, ErrTampered) {
 		t.Fatalf("err %v", err)
 	}
 	s.seq = 4
-	if _, err := s.check(k.MAC()); err != nil {
+	if _, err := s.check(); err != nil {
 		t.Fatal(err)
 	}
 }
