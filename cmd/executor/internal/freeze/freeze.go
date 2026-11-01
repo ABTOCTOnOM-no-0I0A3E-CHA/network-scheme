@@ -31,11 +31,12 @@ var ErrFrozen = errors.New("executor is frozen")
 
 /* Alert kinds (execpub.alert.kind, task 4a.7 turns them into problems). */
 const (
-	KindTamper        = "executor_tamper"         /* disaster: the registry, the state file or the audit chain was tampered with */
-	KindUnverifiable  = "executor_unverifiable"   /* high: the registry cannot be verified (decisions refused) */
-	KindHostFreeze    = "executor_freeze"         /* warning: the host froze the executor (nmsctl executor freeze on) */
-	KindPolicyInvalid = "executor_policy_invalid" /* high: the policy file is invalid, the executor is disabled */
-	KindBruteforce    = "executor_bruteforce"     /* disaster: change TOTP failures of several users within an hour froze the executor */
+	KindTamper           = "executor_tamper"            /* disaster: the registry, the state file or the audit chain was tampered with */
+	KindUnverifiable     = "executor_unverifiable"      /* high: the registry cannot be verified (decisions refused) */
+	KindHostFreeze       = "executor_freeze"            /* warning: the host froze the executor (nmsctl executor freeze on) */
+	KindPolicyInvalid    = "executor_policy_invalid"    /* high: the policy file is invalid, the executor is disabled */
+	KindBruteforce       = "executor_bruteforce"        /* disaster: change TOTP failures of several users within an hour froze the executor */
+	KindGuardsUnwritable = "executor_guards_unwritable" /* high: the change TOTP guards cannot be saved, decisions are refused */
 )
 
 /* severity of the freezes Trigger alerts; any other kind is a disaster. */

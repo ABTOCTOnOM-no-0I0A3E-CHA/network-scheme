@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,6 +148,22 @@ func TestTripFreezeCommitsWithTheFailure(t *testing.T) {
 	if frozen, _ := g.Frozen(); !frozen {
 		t.Fatal("not frozen after the restart")
 	}
+	/* The restarted authorizer sends the alert the crash lost, and marks the freeze sticky. */
+	if n := f.alerts(t, freeze.KindBruteforce, "disaster"); n != 0 {
+		t.Fatalf("%d alerts before the restart", n)
+	}
+	f.guard = g
+	f.az = f.authorizer(t)
+	if n := f.alerts(t, freeze.KindBruteforce, "disaster"); n != 1 {
+		t.Fatalf("%d brute-force alerts after the restart, want 1", n)
+	}
+	if sticky, err := f.reg.StickyFrozen(); err != nil || !sticky {
+		t.Fatalf("sticky %v %v", sticky, err)
+	}
+	f.az = f.authorizer(t) /* once sticky, a later start does not alert again */
+	if n := f.alerts(t, freeze.KindBruteforce, "disaster"); n != 1 {
+		t.Fatalf("%d alerts after a second restart", n)
+	}
 }
 
 /* M1: a locked user gets the same answer whatever grants it holds: no oracle on the registry's grants. */
@@ -208,27 +225,44 @@ func TestNonceCacheFullRefuses(t *testing.T) {
 	})
 }
 
-/* M4: a host reset waits for the decision in progress, so the decision cannot write back a state older than the reset. */
-func TestResetWaitsForDecision(t *testing.T) {
+/*
+M4: a host unlock and the reset of the in-memory guards are one step for
+the decisions. PoC: 4 unrecorded failures, then a wrong-code decision is
+queued while the host unlocks; the decision must not evaluate the unlocked
+registry against the old memory and write a lock back.
+*/
+func TestUnlockWaitsForQueuedDecision(t *testing.T) {
 	f := newFixture(t)
 	u := f.enrolled(t, "alice")
+	authz.SetAbortWrite(f.az, func() error { return errors.New("injected") })
+	for range authz.MaxFailures - 1 {
+		_ = f.try(t, u, f.wrong(t, u))
+	}
+	authz.SetAbortWrite(f.az, nil)
 	entered, release := make(chan struct{}), make(chan struct{})
-	authz.SetBeforeDecide(f.az, func() { close(entered); <-release })
+	var once sync.Once
+	authz.SetBeforeDecide(f.az, func() { once.Do(func() { close(entered); <-release }) })
 	done := make(chan error, 1)
 	go func() { done <- f.try(t, u, f.wrong(t, u)) }()
 	<-entered
-	reset := make(chan struct{})
-	go func() { f.az.ResetUser(u.id); close(reset) }()
+	unlocked := make(chan struct{})
+	go func() { f.host(t, execadmin.Request{Cmd: execadmin.CmdUnlock, User: u.name}); close(unlocked) }()
 	select {
-	case <-reset:
-		t.Fatal("ResetUser ran during a decision")
+	case <-unlocked:
+		t.Fatal("the unlock ran during a decision")
 	case <-time.After(300 * time.Millisecond):
 	}
 	close(release)
-	if err := <-done; err != authz.ErrDenied {
-		t.Fatal(err)
+	if err := <-done; !errors.Is(err, authz.ErrLocked) {
+		t.Fatalf("the queued 5th failure: %v", err)
 	}
-	<-reset
+	<-unlocked
+	if got := f.row(t, u.id); got.lockCount != 0 || got.failures != 0 {
+		t.Fatalf("a decision wrote a lock past the unlock: %+v", got)
+	}
+	if err := f.try(t, u, f.code(t, u)); err != nil {
+		t.Fatalf("after the unlock: %v", err)
+	}
 }
 
 /* Eight parallel requests with one code (each with its own ticket): exactly one is accepted. */
@@ -315,5 +349,105 @@ func (f *fixture) tamperFile(t *testing.T, path string) {
 	b[len(b)-2] ^= 1
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+/*
+I1': the guards file cannot be written. No code is evaluated (nothing
+counted, no step used), every decision is refused as unavailable with one
+high alert, until a save succeeds again.
+*/
+func TestUnwritableGuardsRefuseWithoutEvaluating(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	dir := filepath.Join(t.TempDir(), "missing")
+	a, err := authz.New(authz.Config{Guard: f.guard, Reg: f.reg, Keys: f.keys, Policy: f.pol, Log: f.log,
+		TicketKey: ticketPub, Started: f.clk.Now(), Now: f.clk.Now, GuardsFile: filepath.Join(dir, "guards")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.az = a
+	authz.SetAbortWrite(a, func() error { return errors.New("injected: recording fails too") })
+	code := f.code(t, u)
+	for i, c := range []string{f.wrong(t, u), f.wrong(t, u), code, f.wrong(t, u), f.wrong(t, u), f.wrong(t, u)} {
+		f.oneAudit(t, "denied", "guards_unwritable", func() {
+			if err := f.try(t, u, c); err != authz.ErrUnavailable {
+				t.Fatalf("attempt %d: %v", i+1, err)
+			}
+		})
+	}
+	if n := f.alerts(t, freeze.KindGuardsUnwritable, "high"); n != 1 {
+		t.Fatalf("%d alerts, want 1", n)
+	}
+	/* Every decision is refused while the latch holds, also one that would have been refused before its code. */
+	f.oneAudit(t, "denied", "guards_unwritable", func() {
+		if err := f.ask(f.ticketFor(t, u), code, authz.Need{Kind: "unmask"}); err != authz.ErrUnavailable {
+			t.Fatalf("no grant while unwritable: %v", err)
+		}
+	})
+	/* Nothing was evaluated: once the file can be written, the same code opens the action. */
+	authz.SetAbortWrite(a, nil)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.try(t, u, code); err != nil {
+		t.Fatalf("after the file became writable: %v", err)
+	}
+	if got := f.row(t, u.id); got.failures != 0 {
+		t.Fatalf("refused attempts were counted: %+v", got)
+	}
+}
+
+/*
+I1': the guards file records an attempt as failed, with its step window
+used, before the code is evaluated: a crash right after the evaluation
+(here: when its write returns, before memory and the file are updated)
+already finds it on disk.
+*/
+func TestGuardsPersistBeforeEvaluate(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	path := filepath.Join(f.dir, "guards")
+	var failures, lastStep int64
+	var lerr error
+	authz.SetAbortWrite(f.az, func() error { return errors.New("injected") })
+	authz.SetAfterWrite(f.az, func(err error) error {
+		failures, lastStep, lerr = authz.SavedUser(path, f.keys.State(), u.id)
+		return err
+	})
+	if err := f.try(t, u, f.code(t, u)); err != authz.ErrUnavailable {
+		t.Fatal(err)
+	}
+	if lerr != nil || failures != 1 || lastStep < f.clk.Now().Unix()/30+1 {
+		t.Fatalf("on disk before the outcome: failures %d, last step %d (now %d), %v", failures, lastStep, f.clk.Now().Unix()/30, lerr)
+	}
+}
+
+/* At most 4 core.user reads run at once. */
+func TestPanelReadsBounded(t *testing.T) {
+	f := newFixture(t)
+	var active, peak atomic.Int64
+	authz.SetPanelHook(f.az, func() {
+		n := active.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		active.Add(-1)
+	})
+	var wg sync.WaitGroup
+	for i := range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = f.try(t, user{id: int64(900000 + i), name: "ghost"}, "123456")
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p != 4 {
+		t.Fatalf("%d concurrent core.user reads, want 4", p)
 	}
 }

@@ -3,15 +3,18 @@ package authz
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"time"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
 )
 
@@ -84,15 +87,40 @@ func loadGuards(path string, key *[32]byte) (map[int64]userState, []failure, err
 	return users, b.Window, nil
 }
 
-/*
-saveGuards writes the in-memory guards (the caller holds sem, so saves are
-ordered like the decisions). A failure is logged: the guards stay in memory,
-only a restart would lose them.
-*/
-func (a *Authorizer) saveGuards() {
+/* pessimism is an attempt about to be evaluated, recorded as failed with its step window used. */
+type pessimism struct {
+	user int64
+	st   userState
+	fail failure
+}
+
+/* isUnsaved reports whether the last save of the guards failed. */
+func (a *Authorizer) isUnsaved() bool {
 	a.mu.Lock()
-	b := guardsBody{V: guardsVersion, Users: make([]guardUser, 0, len(a.users)), Window: mergeWindow(a.c.Now(), a.window)}
-	for id, st := range a.users {
+	defer a.mu.Unlock()
+	return a.unsaved
+}
+
+/*
+saveGuards writes the in-memory guards, with over (if set) in place of its
+user's state and its failure added (the caller holds sem, so saves are
+ordered like the decisions). A failure latches: decide refuses every code
+without evaluating it until a save succeeds, and a high alert is raised
+once per latch.
+*/
+func (a *Authorizer) saveGuards(ctx context.Context, over *pessimism) error {
+	a.mu.Lock()
+	window := a.window
+	if over != nil {
+		window = append(slices.Clone(window), over.fail)
+	}
+	b := guardsBody{V: guardsVersion, Users: make([]guardUser, 0, len(a.users)+1), Window: mergeWindow(a.c.Now(), window)}
+	users := a.users
+	if over != nil {
+		users = maps.Clone(users)
+		users[over.user] = over.st
+	}
+	for id, st := range users {
 		u := guardUser{ID: id, LastStep: st.lastStep, Failures: st.failures, LockCount: st.lockCount}
 		if !st.lockUntil.IsZero() {
 			u.LockUntil = st.lockUntil.UnixMicro()
@@ -108,7 +136,15 @@ func (a *Authorizer) saveGuards() {
 	if err == nil {
 		err = state.SaveSealed(a.c.GuardsFile, a.c.Keys.State(), guardsLabel, body)
 	}
+	a.mu.Lock()
+	first := err != nil && !a.unsaved
+	a.unsaved = err != nil
+	a.mu.Unlock()
 	if err != nil {
-		a.c.Log.Error("authz: cannot persist the lockout guards (a restart would lose what only memory knows)", slog.Any("err", err))
+		a.c.Log.Error("authz: cannot persist the lockout guards: decisions refused until it can", slog.Any("err", err))
 	}
+	if first {
+		a.c.Guard.Alert(ctx, freeze.KindGuardsUnwritable, "high", "change TOTP guards cannot be saved, executor decisions refused: "+err.Error())
+	}
+	return err
 }

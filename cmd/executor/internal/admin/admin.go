@@ -50,13 +50,33 @@ type Admin struct {
 	writeHook func(error) error
 }
 
-/* Lockouts are the in-memory change TOTP guards (authz.Authorizer). */
+/*
+Lockouts are the in-memory change TOTP guards (authz.Authorizer). Exclusive
+runs its function with no decision in progress; ResetUser and ResetGlobal
+are called only inside it.
+*/
 type Lockouts interface {
+	Exclusive(fn func())
 	ResetUser(id int64)
 	ResetGlobal()
 }
 
-/* resetUser and resetGlobal tell Lockouts, if set, that the host reset a user's lockout or the global window. */
+/*
+exclusive runs a command that changes lockouts (enroll, unlock, registry
+reset) with no change TOTP decision in progress, so its registry change and
+the reset of the in-memory guards are one step for the decisions: none
+evaluates the new registry against the old memory and writes a lock back.
+*/
+func (a *Admin) exclusive(fn func() execadmin.Response) execadmin.Response {
+	if a.Lockouts == nil {
+		return fn()
+	}
+	var resp execadmin.Response
+	a.Lockouts.Exclusive(func() { resp = fn() })
+	return resp
+}
+
+/* resetUser and resetGlobal tell Lockouts, if set, that the host reset a user's lockout or the global window (inside exclusive). */
 func (a *Admin) resetUser(id int64) {
 	if a.Lockouts != nil {
 		a.Lockouts.ResetUser(id)
@@ -170,7 +190,7 @@ func (a *Admin) Handle(ctx context.Context, req execadmin.Request) execadmin.Res
 	case execadmin.CmdPolicyShow, execadmin.CmdPolicyCheck, execadmin.CmdPolicyReload:
 		return a.policyCmd(ctx, req)
 	case execadmin.CmdEnroll:
-		return a.enroll(ctx, req)
+		return a.exclusive(func() execadmin.Response { return a.enroll(ctx, req) })
 	case execadmin.CmdGrant:
 		return a.grant(ctx, req)
 	case execadmin.CmdRevoke:
@@ -181,13 +201,13 @@ func (a *Admin) Handle(ctx context.Context, req execadmin.Request) execadmin.Res
 	case execadmin.CmdFreezeOff:
 		return a.freezeOff(ctx, req)
 	case execadmin.CmdUnlock:
-		return a.unlock(ctx, req)
+		return a.exclusive(func() execadmin.Response { return a.unlock(ctx, req) })
 	case execadmin.CmdModelVerify:
 		return a.modelVerify(ctx, req)
 	case execadmin.CmdRegistryVerify:
 		return a.registryVerify(ctx, req)
 	case execadmin.CmdRegistryReset:
-		return a.registryReset(ctx, req)
+		return a.exclusive(func() execadmin.Response { return a.registryReset(ctx, req) })
 	case execadmin.CmdAuditVerify:
 		return a.auditVerify(ctx, req)
 	default: /* execadmin.CmdDevice */

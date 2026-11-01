@@ -47,6 +47,7 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -107,9 +108,11 @@ const (
 	maxWindow   = 256 /* failure entries kept in the window; far more than ever needed to trip it */
 	maxCode     = 16
 	maxGroups   = 64
-	panelReads  = 4                      /* concurrent core.user reads */
+	panelReads  = 4  /* concurrent core.user reads */
+	totpPeriod  = 30 /* seconds of a TOTP step (auth.ValidateTOTP) */
+	tripPrefix  = "change TOTP: "
 	decideTime  = 2 * registry.OpTimeout /* bound of a decision's write and of its audit row, apart from the caller's context */
-	tripMessage = "change TOTP: %d failures of %d users within an hour"
+	tripMessage = tripPrefix + "%d failures of %d users within an hour"
 )
 
 var actionRe = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
@@ -197,6 +200,8 @@ type Authorizer struct {
 	users  map[int64]userState
 	window []failure
 	lastMs int64 /* the last failure time handed out: failure times are unique in this process */
+	/* unsaved is set while the guards file cannot be written: no code is evaluated until a save succeeds. */
+	unsaved bool
 
 	/*
 		Test seams: abortWrite fails a decision's write after it declared its
@@ -208,6 +213,7 @@ type Authorizer struct {
 	afterWrite   func(error) error
 	beforeDecide func()
 	noTrigger    bool
+	panelHook    func()
 }
 
 /* New returns the Authorizer of cfg. */
@@ -226,37 +232,62 @@ func New(cfg Config) (*Authorizer, error) {
 		return nil, err
 	}
 	start := time.Now()
-	return &Authorizer{c: cfg, sem: make(chan struct{}, 1), panel: make(chan struct{}, panelReads),
+	a := &Authorizer{c: cfg, sem: make(chan struct{}, 1), panel: make(chan struct{}, panelReads),
 		mono: func() time.Duration { return time.Since(start) }, nonceCap: maxNonces,
-		nonces: map[[ticket.NonceSize]byte]nonceEntry{}, users: users, window: window}, nil
+		nonces: map[[ticket.NonceSize]byte]nonceEntry{}, users: users, window: window}
+	a.republish()
+	return a, nil
 }
 
 /*
-ResetUser is called by the host's enroll and unlock (once committed): the
-in-memory failures and locks of the user are dropped, the registry row is
-what counts again. The last step used stays: a step is never reused. It
-waits for the decision in progress (sem), so none writes back a state
-older than the reset.
+republish sends the brute-force freeze's alert again when the registry
+holds that freeze (committed with the failure that tripped it) but the
+state file has no sticky mark: the process died between the COMMIT and
+Trigger, so neither the alert nor the mark was made.
 */
-func (a *Authorizer) ResetUser(id int64) {
+func (a *Authorizer) republish() {
+	frozen, reason := a.c.Guard.Frozen()
+	if !frozen || !strings.HasPrefix(reason, tripPrefix) {
+		return
+	}
+	if sticky, err := a.c.Reg.StickyFrozen(); err != nil || sticky {
+		return
+	}
+	a.c.Guard.Trigger(context.Background(), freeze.KindBruteforce, reason)
+}
+
+/*
+Exclusive runs fn with no decision in progress and none starting: the
+host's enroll, unlock and reset make their registry change and reset the
+in-memory guards (ResetUser, ResetGlobal, only inside fn) as one step, so
+no decision evaluates the new registry against the old memory.
+*/
+func (a *Authorizer) Exclusive(fn func()) {
 	a.sem <- struct{}{}
 	defer func() { <-a.sem }()
+	fn()
+}
+
+/*
+ResetUser (inside Exclusive, after the host's enroll or unlock committed)
+drops the in-memory failures and locks of the user: the registry row is
+what counts again. The last step used stays: a step is never reused.
+*/
+func (a *Authorizer) ResetUser(id int64) {
 	a.mu.Lock()
 	if st, ok := a.users[id]; ok {
 		a.users[id] = userState{lastStep: st.lastStep}
 	}
 	a.mu.Unlock()
-	a.saveGuards()
+	_ = a.saveGuards(context.Background(), nil)
 }
 
-/* ResetGlobal drops the in-memory global failure window (nmsctl executor unlock --global, registry reset), ordered like ResetUser. */
+/* ResetGlobal (inside Exclusive) drops the in-memory global failure window (nmsctl executor unlock --global, registry reset). */
 func (a *Authorizer) ResetGlobal() {
-	a.sem <- struct{}{}
-	defer func() { <-a.sem }()
 	a.mu.Lock()
 	a.window = nil
 	a.mu.Unlock()
-	a.saveGuards()
+	_ = a.saveGuards(context.Background(), nil)
 }
 
 /* decision is one Authorize call on its way. */
@@ -368,6 +399,9 @@ func (a *Authorizer) panelUser(ctx context.Context, c ticket.Claims) *refusal {
 		return &refusal{"busy", ErrUnavailable}
 	}
 	defer func() { <-a.panel }()
+	if a.panelHook != nil {
+		a.panelHook()
+	}
 	var name string
 	var disabled, found bool
 	err := a.c.Reg.Read(ctx, registry.OpTimeout, func(ctx context.Context, tx pgx.Tx) error {
@@ -421,6 +455,10 @@ func (a *Authorizer) decide(ctx context.Context, d *decision, c ticket.Claims) (
 	if a.beforeDecide != nil {
 		a.beforeDecide()
 	}
+	/* The guards file must be writable before any code is evaluated (a restart must not reset what memory knows). */
+	if a.isUnsaved() && a.saveGuards(ctx, nil) != nil {
+		return Decision{}, a.refuse(ctx, d, &refusal{"guards_unwritable", ErrUnavailable})
+	}
 	var out outcome
 	ran := false
 	err := a.c.Guard.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
@@ -430,7 +468,7 @@ func (a *Authorizer) decide(ctx context.Context, d *decision, c ticket.Claims) (
 			out = outcome{refuse: &refusal{"disabled", ErrDisabled}}
 			return errAbort
 		}
-		out = a.evaluate(s, c, d.req, a.c.Now())
+		out = a.evaluate(ctx, s, c, d.req, a.c.Now())
 		if out.refuse != nil || out.tamper != "" {
 			return errAbort
 		}
@@ -460,7 +498,7 @@ func (a *Authorizer) decide(ctx context.Context, d *decision, c ticket.Claims) (
 			rem.next.lastStep = max(out.cur.lastStep, out.next.lastStep)
 		}
 		a.remember(c.UserID, rem)
-		a.saveGuards()
+		_ = a.saveGuards(ctx, nil)
 	}
 	switch {
 	case ran && out.tamper != "":
@@ -540,7 +578,7 @@ func (st userState) failed(now time.Time) userState {
 evaluate decides on the verified snapshot and the in-memory guards. It only
 reads (Write may run it more than once); the caller records the outcome.
 */
-func (a *Authorizer) evaluate(s *registry.Snapshot, c ticket.Claims, req Request, now time.Time) outcome {
+func (a *Authorizer) evaluate(ctx context.Context, s *registry.Snapshot, c ticket.Claims, req Request, now time.Time) outcome {
 	row, ok := s.Get("change_totp", c.UserID)
 	if !ok {
 		return outcome{refuse: &refusal{"not_enrolled", ErrDenied}}
@@ -579,6 +617,19 @@ func (a *Authorizer) evaluate(s *registry.Snapshot, c ticket.Claims, req Request
 	sec := secret.New(string(pt))
 	clear(pt)
 	defer sec.Wipe()
+	/*
+		Persist before evaluating: the guards file first records this attempt as
+		failed and its step window as used, so whatever happens to the outcome
+		(the registry write fails, the process dies) a restart never gives the
+		attempt back. Write may run this function more than once: each run
+		records the same kind of pessimistic state, the outcome then replaces it.
+	*/
+	fail := failure{U: c.UserID, T: a.stamp(now)}
+	pess := cur.failed(now)
+	pess.lastStep = max(cur.lastStep, now.Unix()/totpPeriod+1)
+	if a.saveGuards(ctx, &pessimism{user: c.UserID, st: pess, fail: fail}) != nil {
+		return outcome{refuse: &refusal{"guards_unwritable", ErrUnavailable}}
+	}
 	short := len(req.Code) <= maxCode
 	if step, valid := auth.ValidateTOTP(req.Code, sec, cur.lastStep, now); short && valid {
 		return outcome{ok: true, class: "accepted", cur: cur, next: userState{lastStep: step}}
@@ -587,7 +638,7 @@ func (a *Authorizer) evaluate(s *registry.Snapshot, c ticket.Claims, req Request
 	if _, valid := auth.ValidateTOTP(req.Code, sec, -1, now); short && valid {
 		class = "replayed"
 	}
-	out := outcome{class: class, cur: cur, next: cur.failed(now), fail: &failure{U: c.UserID, T: a.stamp(now)}}
+	out := outcome{class: class, cur: cur, next: cur.failed(now), fail: &fail}
 	out.window = mergeWindow(now, reg, memWindow, []failure{*out.fail})
 	out.locked = out.next.lock(now)
 	return out

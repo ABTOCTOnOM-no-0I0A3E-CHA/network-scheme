@@ -19,3 +19,12 @@ func SetMono(a *Authorizer, f func() time.Duration) { a.mono = f }
 
 /* SetNonceCap shrinks the nonce cache. */
 func SetNonceCap(a *Authorizer, n int) { a.nonceCap = n }
+
+/* SetPanelHook runs f inside every core.user read slot. */
+func SetPanelHook(a *Authorizer, f func()) { a.panelHook = f }
+
+/* SavedUser reads one user's failures and last step from a guards file. */
+func SavedUser(path string, key *[32]byte, id int64) (failures, lastStep int64, err error) {
+	users, _, err := loadGuards(path, key)
+	return users[id].failures, users[id].lastStep, err
+}
