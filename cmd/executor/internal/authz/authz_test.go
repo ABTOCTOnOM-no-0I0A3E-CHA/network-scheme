@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/internal/execadmin"
+	"github.com/beekamai/network-scheme/internal/store"
 	"github.com/beekamai/network-scheme/internal/testdb"
 	"github.com/beekamai/network-scheme/internal/ticket"
 )
@@ -64,6 +66,8 @@ func (c *clock) Advance(d time.Duration) {
 /* fixture is one executor: registry, freeze, host administration and the authorizer, over the test database. */
 type fixture struct {
 	env    *testdb.Env
+	pool   *pgxpool.Pool /* nms_executor, bounded and pinned as in main */
+	dir    string        /* the state directory */
 	keys   *seal.Keys
 	reg    *registry.Registry
 	guard  *freeze.Guard
@@ -83,10 +87,17 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{env: env, keys: k, clk: &clock{t: time.Now().UTC().Truncate(time.Second)},
+	f := &fixture{env: env, keys: k, clk: &clock{t: time.Now().UTC().Truncate(time.Second)}, dir: t.TempDir(),
 		policy: filepath.Join(t.TempDir(), "executor.yaml"), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	f.reg = registry.New(env.Pool("nms_executor"), k, filepath.Join(t.TempDir(), "state"))
-	f.guard = freeze.New(f.reg, env.Pool("nms_executor"), f.log)
+	cfg, pw := env.Config("nms_executor")
+	pool, err := store.Open(context.Background(), cfg, pw, registry.PinSession, registry.BoundMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	f.pool = pool
+	f.reg = registry.New(pool, k, filepath.Join(f.dir, "state"))
+	f.guard = freeze.New(f.reg, pool, f.log)
 	if err := f.guard.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +112,7 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) authorizer(t *testing.T) *authz.Authorizer {
 	t.Helper()
 	a, err := authz.New(authz.Config{Guard: f.guard, Reg: f.reg, Keys: f.keys, Policy: f.pol, Log: f.log,
-		TicketKey: ticketPub, Started: f.clk.Now(), Now: f.clk.Now})
+		TicketKey: ticketPub, Started: f.clk.Now(), Now: f.clk.Now, GuardsFile: filepath.Join(f.dir, "guards")})
 	if err != nil {
 		t.Fatal(err)
 	}

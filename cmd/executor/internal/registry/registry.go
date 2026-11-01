@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
@@ -76,6 +78,26 @@ const Sentinel = "initialized"
 /* PinSession sets the pool's sessions to resolve only pg_catalog (main passes it to store.Open). */
 func PinSession(cfg *pgxpool.Config) {
 	cfg.ConnConfig.RuntimeParams["search_path"] = "pg_catalog, pg_temp"
+}
+
+/*
+MaxMessage bounds every message the executor's connections receive. What
+the executor reads in this phase is small (registry rows and audit rows are
+bounded to 64 KiB by their CHECKs, core.user names to a few bytes); a value
+planted by a database superuser (a huge user name, a view in place of a
+table) would otherwise be read whole into memory. A larger message fails
+its query (and drops the connection). Reading session snapshots and
+recordings (task 4c, up to 4 MiB a row) needs a raised bound there.
+*/
+const MaxMessage = 1 << 20
+
+/* BoundMessages sets MaxMessage on the pool's connections (main passes it to store.Open). */
+func BoundMessages(cfg *pgxpool.Config) {
+	cfg.ConnConfig.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
+		f := pgproto3.NewFrontend(r, w)
+		f.SetMaxBodyLen(MaxMessage)
+		return f
+	}
 }
 
 /* Registry verifies and changes the registry. */

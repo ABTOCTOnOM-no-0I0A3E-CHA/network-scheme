@@ -93,7 +93,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession)
+	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession, registry.BoundMessages)
 	pw.Wipe()
 	if err != nil {
 		return err
@@ -115,7 +115,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	az, err := authz.New(authz.Config{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log,
-		TicketKey: ed25519.PublicKey(pub[:]), Started: started})
+		TicketKey: ed25519.PublicKey(pub[:]), Started: started, GuardsFile: filepath.Join(cfg.StateDir, "guards")})
 	if err != nil {
 		return err
 	}

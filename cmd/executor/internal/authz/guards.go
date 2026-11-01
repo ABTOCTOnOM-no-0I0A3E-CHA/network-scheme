@@ -1,0 +1,114 @@
+package authz
+
+import (
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"slices"
+	"time"
+
+	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
+)
+
+/*
+The in-memory guards (per-user lockout state and the global failure window)
+also live in a file of their own next to the state file, MACed with the
+state subkey and replaced atomically: what only memory knew (a failure or a
+used step whose registry write failed or whose outcome is unknown) survives
+a restart, so restarting the executor never resets the guess budget. It is
+written after every evaluated decision and every host reset, and merged
+back at start the same strict way as memory and registry are.
+*/
+const (
+	guardsLabel    = "authz-guards"
+	guardsVersion  = 1
+	maxGuardsBytes = 1 << 20
+)
+
+type guardUser struct {
+	ID        int64 `json:"id"`
+	LastStep  int64 `json:"last_step"`
+	Failures  int64 `json:"failures"`
+	LockCount int64 `json:"lock_count"`
+	LockUntil int64 `json:"lock_until"` /* Unix microseconds, 0: none */
+}
+
+type guardsBody struct {
+	V      int         `json:"v"`
+	Users  []guardUser `json:"users"`
+	Window []failure   `json:"window"`
+}
+
+/* loadGuards reads the guards file strictly; a missing file is an empty one, anything invalid is an error (the executor does not start). */
+func loadGuards(path string, key *[32]byte) (map[int64]userState, []failure, error) {
+	users := map[int64]userState{}
+	raw, err := state.LoadSealed(path, key, guardsLabel, maxGuardsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return users, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("authz: guards file %s: %w", path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var b guardsBody
+	if err := dec.Decode(&b); err != nil || b.V != guardsVersion || b.Users == nil || b.Window == nil {
+		return nil, nil, fmt.Errorf("authz: guards file %s: %w", path, state.ErrInvalid)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, nil, fmt.Errorf("authz: guards file %s: %w", path, state.ErrInvalid)
+	}
+	seen := map[int64]bool{}
+	for _, u := range b.Users {
+		if u.ID <= 0 || u.LastStep < 0 || u.Failures < 0 || u.Failures >= MaxFailures || u.LockCount < 0 || u.LockCount > MaxLocks ||
+			u.LockUntil < 0 || seen[u.ID] {
+			return nil, nil, fmt.Errorf("authz: guards file %s: bad entry for user %d: %w", path, u.ID, state.ErrInvalid)
+		}
+		seen[u.ID] = true
+		st := userState{lastStep: u.LastStep, failures: u.Failures, lockCount: u.LockCount}
+		if u.LockUntil != 0 {
+			st.lockUntil = time.UnixMicro(u.LockUntil).UTC()
+		}
+		users[u.ID] = st
+	}
+	for _, f := range b.Window {
+		if f.U <= 0 || f.T <= 0 {
+			return nil, nil, fmt.Errorf("authz: guards file %s: bad window entry: %w", path, state.ErrInvalid)
+		}
+	}
+	return users, b.Window, nil
+}
+
+/*
+saveGuards writes the in-memory guards (the caller holds sem, so saves are
+ordered like the decisions). A failure is logged: the guards stay in memory,
+only a restart would lose them.
+*/
+func (a *Authorizer) saveGuards() {
+	a.mu.Lock()
+	b := guardsBody{V: guardsVersion, Users: make([]guardUser, 0, len(a.users)), Window: mergeWindow(a.c.Now(), a.window)}
+	for id, st := range a.users {
+		u := guardUser{ID: id, LastStep: st.lastStep, Failures: st.failures, LockCount: st.lockCount}
+		if !st.lockUntil.IsZero() {
+			u.LockUntil = st.lockUntil.UnixMicro()
+		}
+		b.Users = append(b.Users, u)
+	}
+	a.mu.Unlock()
+	slices.SortFunc(b.Users, func(x, y guardUser) int { return cmp.Compare(x.ID, y.ID) })
+	body, err := json.Marshal(b)
+	if err == nil && len(body) > maxGuardsBytes-128 {
+		err = errors.New("too many users")
+	}
+	if err == nil {
+		err = state.SaveSealed(a.c.GuardsFile, a.c.Keys.State(), guardsLabel, body)
+	}
+	if err != nil {
+		a.c.Log.Error("authz: cannot persist the lockout guards (a restart would lose what only memory knows)", slog.Any("err", err))
+	}
+}

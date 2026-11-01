@@ -10,20 +10,24 @@ and the user's change TOTP code; the decision, in this order:
     seen before (kept 2 minutes, longer than a ticket lives);
   - deny-only checks against the api's data (core.user): the user exists,
     is not disabled and still has the ticket's name;
-  - in one registry write, on the verified snapshot: the user's change TOTP
-    row and every grant the action needs exist and carry the ticket's name
-    as their snapshot; the user is not locked; the secret opens under
-    AAD user_id|change-totp|key_version; the code is valid for a step above
-    the last one used. The outcome (step used, or failure and lockout, and
-    the global failure window) and its audit row commit together.
+  - in one registry write, on the verified snapshot: the policy still
+    enables the executor; the user's change TOTP row exists and carries the
+    ticket's name as its snapshot; the user is not locked (before the
+    grants, so a locked user's answer says nothing about its grants); every
+    grant the action needs exists with the same name snapshot; the secret
+    opens under AAD user_id|change-totp|key_version; the code is valid for
+    a step above the last one used. The outcome (step used, or failure and
+    lockout, and the global failure window, and the freeze it trips) and
+    its audit row commit together.
 
 Rights come only from the registry, never from the ticket or the api. The
 registry write may fail, and an error other than tampering leaves its
 outcome unknown (registry.Write): so the step used and every failure are
-also kept in memory, merged with the registry by taking the stricter of
-both, and a code is accepted only when its use committed. An attacker who
-can make the recording writes fail (a database superuser) gains no attempt
-and no replay in this process; across a restart only what committed counts.
+also kept in memory and in the guards file next to the state file (MACed,
+see guards.go), merged with the registry by taking the stricter of both,
+and a code is accepted only when its use committed. An attacker who can
+make the recording writes fail (a database superuser) gains no attempt and
+no replay, in this process or after a restart.
 
 Refusals tell the caller only ErrDisabled, ErrFrozen, ErrLocked,
 ErrUnavailable or ErrDenied; why exactly (a class, never the code or a
@@ -97,13 +101,15 @@ const (
 
 /* Bounds of the in-memory state and of a request. */
 const (
-	startSkew  = 5 * time.Second
-	nonceTTL   = 2 * time.Minute
-	maxNonces  = 1 << 16
-	maxWindow  = 256 /* failure entries kept in the window; far more than ever needed to trip it */
-	maxCode    = 16
-	maxGroups  = 64
-	decideTime = 2 * registry.OpTimeout /* bound of a decision's write and of its audit row, apart from the caller's context */
+	startSkew   = 5 * time.Second
+	nonceTTL    = 2 * time.Minute
+	maxNonces   = 1 << 16
+	maxWindow   = 256 /* failure entries kept in the window; far more than ever needed to trip it */
+	maxCode     = 16
+	maxGroups   = 64
+	panelReads  = 4                      /* concurrent core.user reads */
+	decideTime  = 2 * registry.OpTimeout /* bound of a decision's write and of its audit row, apart from the caller's context */
+	tripMessage = "change TOTP: %d failures of %d users within an hour"
 )
 
 var actionRe = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
@@ -153,6 +159,14 @@ type Config struct {
 	TicketKey ed25519.PublicKey /* ticket.pub */
 	Started   time.Time         /* the process start: earlier tickets are refused */
 	Now       func() time.Time  /* nil: time.Now */
+	/* GuardsFile keeps the in-memory guards across restarts (in the state directory, next to the state file). */
+	GuardsFile string
+}
+
+/* nonceEntry keeps a spent nonce until both a monotonic TTL and the ticket's wall-clock end (plus skew) are past. */
+type nonceEntry struct {
+	mono time.Duration /* monotonic elapsed time after which it may go */
+	wall int64         /* Unix seconds after which it may go */
 }
 
 /* userState is a user's lockout state: from the registry row, or kept in memory. */
@@ -170,18 +184,30 @@ type failure struct {
 /* Authorizer decides; one per process (its in-memory guards are the process's). */
 type Authorizer struct {
 	c Config
-	/* sem orders decisions, so the in-memory guards are up to date when the next one reads them. */
+	/* sem orders decisions and the host's resets, so the in-memory guards (and their file) are up to date when the next one reads them. */
 	sem chan struct{}
+	/* panel bounds the concurrent core.user reads. */
+	panel chan struct{}
+	/* mono is the monotonic time since New (a seam: the tests step it apart from the wall clock). */
+	mono     func() time.Duration
+	nonceCap int
 
 	mu     sync.Mutex
-	nonces map[[ticket.NonceSize]byte]time.Time
+	nonces map[[ticket.NonceSize]byte]nonceEntry
 	users  map[int64]userState
 	window []failure
 	lastMs int64 /* the last failure time handed out: failure times are unique in this process */
 
-	/* Test seams: abortWrite fails a decision's write after it declared its outcome; afterWrite replaces its result. */
-	abortWrite func() error
-	afterWrite func(error) error
+	/*
+		Test seams: abortWrite fails a decision's write after it declared its
+		outcome; afterWrite replaces its result; beforeDecide runs once the
+		decision holds sem; noTrigger skips the freeze after a tripped window
+		(a crash right after the COMMIT).
+	*/
+	abortWrite   func() error
+	afterWrite   func(error) error
+	beforeDecide func()
+	noTrigger    bool
 }
 
 /* New returns the Authorizer of cfg. */
@@ -189,34 +215,48 @@ func New(cfg Config) (*Authorizer, error) {
 	if len(cfg.TicketKey) != ed25519.PublicKeySize {
 		return nil, errors.New("authz: the ticket verification key must be an Ed25519 public key")
 	}
-	if cfg.Guard == nil || cfg.Reg == nil || cfg.Keys == nil || cfg.Policy == nil || cfg.Log == nil || cfg.Started.IsZero() {
+	if cfg.Guard == nil || cfg.Reg == nil || cfg.Keys == nil || cfg.Policy == nil || cfg.Log == nil || cfg.Started.IsZero() || cfg.GuardsFile == "" {
 		return nil, errors.New("authz: incomplete configuration")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Authorizer{c: cfg, sem: make(chan struct{}, 1), nonces: map[[ticket.NonceSize]byte]time.Time{},
-		users: map[int64]userState{}}, nil
+	users, window, err := loadGuards(cfg.GuardsFile, cfg.Keys.State())
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	return &Authorizer{c: cfg, sem: make(chan struct{}, 1), panel: make(chan struct{}, panelReads),
+		mono: func() time.Duration { return time.Since(start) }, nonceCap: maxNonces,
+		nonces: map[[ticket.NonceSize]byte]nonceEntry{}, users: users, window: window}, nil
 }
 
 /*
 ResetUser is called by the host's enroll and unlock (once committed): the
 in-memory failures and locks of the user are dropped, the registry row is
-what counts again. The last step used stays: a step is never reused.
+what counts again. The last step used stays: a step is never reused. It
+waits for the decision in progress (sem), so none writes back a state
+older than the reset.
 */
 func (a *Authorizer) ResetUser(id int64) {
+	a.sem <- struct{}{}
+	defer func() { <-a.sem }()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if st, ok := a.users[id]; ok {
 		a.users[id] = userState{lastStep: st.lastStep}
 	}
+	a.mu.Unlock()
+	a.saveGuards()
 }
 
-/* ResetGlobal drops the in-memory global failure window (nmsctl executor unlock --global, registry reset). */
+/* ResetGlobal drops the in-memory global failure window (nmsctl executor unlock --global, registry reset), ordered like ResetUser. */
 func (a *Authorizer) ResetGlobal() {
+	a.sem <- struct{}{}
+	defer func() { <-a.sem }()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.window = nil
+	a.mu.Unlock()
+	a.saveGuards()
 }
 
 /* decision is one Authorize call on its way. */
@@ -292,25 +332,42 @@ func (a *Authorizer) checkTicket(tok string, now time.Time) (ticket.Claims, stri
 	if time.Unix(c.IssuedAt, 0).Before(a.c.Started.Add(-startSkew)) {
 		return c, "ticket_before_start"
 	}
+	/*
+		A spent nonce stays until the ticket can no longer verify by the wall
+		clock (exp plus skew) and the monotonic TTL has passed: a wall clock
+		stepped back cannot make a ticket valid again after its nonce went.
+	*/
+	mono, wall := a.mono(), now.Unix()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for n, until := range a.nonces {
-		if !now.Before(until) {
+	for n, e := range a.nonces {
+		if mono >= e.mono && wall > e.wall {
 			delete(a.nonces, n)
 		}
 	}
 	switch _, seen := a.nonces[c.Nonce]; {
 	case seen:
 		return c, "ticket_replayed"
-	case len(a.nonces) >= maxNonces:
+	case len(a.nonces) >= a.nonceCap:
 		return c, "ticket_cache_full" /* fail closed: a nonce that cannot be remembered is not accepted */
 	}
-	a.nonces[c.Nonce] = now.Add(nonceTTL)
+	a.nonces[c.Nonce] = nonceEntry{mono: mono + nonceTTL, wall: max(c.Expires, wall) + int64(ticket.Skew/time.Second)}
 	return c, ""
 }
 
-/* panelUser is the deny-only check against core.user (D10): it may refuse, never grant. */
+/*
+panelUser is the deny-only check against core.user (D10): it may refuse,
+never grant. At most panelReads run at once, and every message the
+executor's connections receive is bounded (registry.BoundMessages), so a
+huge value planted in core.user cannot exhaust the executor's memory.
+*/
 func (a *Authorizer) panelUser(ctx context.Context, c ticket.Claims) *refusal {
+	select {
+	case a.panel <- struct{}{}:
+	case <-ctx.Done():
+		return &refusal{"busy", ErrUnavailable}
+	}
+	defer func() { <-a.panel }()
 	var name string
 	var disabled, found bool
 	err := a.c.Reg.Read(ctx, registry.OpTimeout, func(ctx context.Context, tx pgx.Tx) error {
@@ -361,10 +418,18 @@ not stretch the code's window).
 func (a *Authorizer) decide(ctx context.Context, d *decision, c ticket.Claims) (Decision, error) {
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decideTime)
 	defer cancel()
+	if a.beforeDecide != nil {
+		a.beforeDecide()
+	}
 	var out outcome
 	ran := false
 	err := a.c.Guard.Write(wctx, func(_ context.Context, s *registry.Snapshot, tx *registry.Tx) error {
 		ran = true
+		/* The policy again: a decision that waited for the registry must not pass after nmsctl executor disable. */
+		if st := a.c.Policy.Current(); !st.Enabled() || st.Policy.ConfirmMode != execpolicy.ConfirmTOTP {
+			out = outcome{refuse: &refusal{"disabled", ErrDisabled}}
+			return errAbort
+		}
 		out = a.evaluate(s, c, d.req, a.c.Now())
 		if out.refuse != nil || out.tamper != "" {
 			return errAbort
@@ -395,6 +460,7 @@ func (a *Authorizer) decide(ctx context.Context, d *decision, c ticket.Claims) (
 			rem.next.lastStep = max(out.cur.lastStep, out.next.lastStep)
 		}
 		a.remember(c.UserID, rem)
+		a.saveGuards()
 	}
 	switch {
 	case ran && out.tamper != "":
@@ -482,9 +548,6 @@ func (a *Authorizer) evaluate(s *registry.Snapshot, c ticket.Claims, req Request
 	if snap, _ := row.Get("username_snapshot").(string); snap != c.Username {
 		return outcome{refuse: &refusal{"snapshot_mismatch", ErrDenied}}
 	}
-	if r := granted(s, c, req.Need); r != nil {
-		return outcome{refuse: r}
-	}
 	a.mu.Lock()
 	mem, seen := a.users[c.UserID]
 	memWindow := slices.Clone(a.window)
@@ -493,8 +556,12 @@ func (a *Authorizer) evaluate(s *registry.Snapshot, c ticket.Claims, req Request
 	if seen {
 		cur = stricter(cur, mem)
 	}
+	/* The lock before the grants: a locked user's answer is the same whatever grants it holds (no oracle on the registry). */
 	if l := cur.lock(now); l != nil {
 		return outcome{refuse: &refusal{"locked", l}}
+	}
+	if r := granted(s, c, req.Need); r != nil {
+		return outcome{refuse: r}
 	}
 	if kv, _ := row.Get("key_version").(int64); kv != seal.KeyVersion {
 		return outcome{refuse: &refusal{"key_version", ErrUnavailable}}
@@ -600,7 +667,21 @@ func tripped(w []failure) bool {
 	return len(users) >= GlobalUsers && len(w) > GlobalFailures
 }
 
-/* declare writes an evaluated outcome: the user's row, and on failure the global window. */
+/* tripReason is the freeze reason of a tripped window. */
+func tripReason(w []failure) string {
+	users := map[int64]bool{}
+	for _, f := range w {
+		users[f.U] = true
+	}
+	return fmt.Sprintf(tripMessage, len(w), len(users))
+}
+
+/*
+declare writes an evaluated outcome: the user's row, and on failure the
+global window, with the freeze it trips in the same transaction (a crash
+right after the COMMIT still leaves the registry frozen; Trigger then adds
+the alert and the sticky flag).
+*/
 func (a *Authorizer) declare(s *registry.Snapshot, tx *registry.Tx, c ticket.Claims, out outcome) error {
 	row, _ := s.Get("change_totp", c.UserID)
 	var lockUntil any
@@ -620,7 +701,11 @@ func (a *Authorizer) declare(s *registry.Snapshot, tx *registry.Tx, c ticket.Cla
 	if err != nil {
 		return err
 	}
-	return tx.Put("exec_state", map[string]any{"singleton": true, "freeze": st.Get("freeze"), "freeze_reason": st.Get("freeze_reason"),
+	frz, reason := st.Get("freeze"), st.Get("freeze_reason")
+	if tripped(out.window) {
+		frz, reason = true, tripReason(out.window)
+	}
+	return tx.Put("exec_state", map[string]any{"singleton": true, "freeze": frz, "freeze_reason": reason,
 		"global_fail_window": json.RawMessage(w)})
 }
 
@@ -651,15 +736,10 @@ func (a *Authorizer) trip(ctx context.Context, out outcome) {
 	a.mu.Lock()
 	w := mergeWindow(a.c.Now(), a.window)
 	a.mu.Unlock()
-	if !tripped(w) {
+	if !tripped(w) || a.noTrigger {
 		return
 	}
-	users := map[int64]bool{}
-	for _, f := range w {
-		users[f.U] = true
-	}
-	a.c.Guard.Trigger(context.WithoutCancel(ctx), freeze.KindBruteforce,
-		fmt.Sprintf("change TOTP: %d failures of %d users within an hour", len(w), len(users)))
+	a.c.Guard.Trigger(context.WithoutCancel(ctx), freeze.KindBruteforce, tripReason(w))
 }
 
 /* event is the audit row of a decision; the class says why, never with the code. */

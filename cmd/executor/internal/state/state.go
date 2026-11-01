@@ -32,8 +32,9 @@ const Version = 1
 const MaxReason = 1024
 
 const (
-	macLabel = "nms/executor/state/v1\x00"
-	maxSize  = 64 << 10
+	macLabel    = "nms/executor/state/v1\x00"
+	sealedLabel = "nms/executor/sealed/v1\x00"
+	maxSize     = 64 << 10
 )
 
 /* ErrInvalid means the file is malformed, of another format or of another key (another install). */
@@ -177,7 +178,46 @@ func Save(path string, key *[32]byte, f File) error {
 	if err != nil {
 		return err
 	}
-	data := append([]byte(hex.EncodeToString(mac(key, body))+"\n"), body...)
+	return write(path, append([]byte(hex.EncodeToString(mac(key, body))+"\n"), body...))
+}
+
+/*
+SaveSealed writes body to path as Save writes the state file (MACed with the
+state subkey, atomically and durably), under label: a file of another kind
+never passes for this one. LoadSealed reads it back, refusing a file over
+limit bytes or with another MAC (ErrInvalid); a missing file yields an error
+matching os.ErrNotExist.
+*/
+func SaveSealed(path string, key *[32]byte, label string, body []byte) error {
+	return write(path, append([]byte(hex.EncodeToString(sealedMAC(key, label, body))+"\n"), body...))
+}
+
+/* LoadSealed reads a file SaveSealed wrote under label, at most limit bytes. */
+func LoadSealed(path string, key *[32]byte, label string, limit int) ([]byte, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- path inside the executor's state directory
+	if err != nil {
+		return nil, err
+	}
+	sum, body, ok := bytes.Cut(raw, []byte("\n"))
+	if !ok || len(raw) > limit {
+		return nil, ErrInvalid
+	}
+	want, err := hex.DecodeString(string(sum))
+	if err != nil || !hmac.Equal(want, sealedMAC(key, label, body)) {
+		return nil, ErrInvalid
+	}
+	return body, nil
+}
+
+func sealedMAC(key *[32]byte, label string, body []byte) []byte {
+	h := hmac.New(sha256.New, key[:])
+	h.Write([]byte(sealedLabel + label + "\x00"))
+	h.Write(body)
+	return h.Sum(nil)
+}
+
+/* write replaces path with data: a temporary file in the same directory, fsync, rename, directory fsync. */
+func write(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".state-")
 	if err != nil {
