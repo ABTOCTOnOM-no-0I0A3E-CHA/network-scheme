@@ -221,8 +221,10 @@ services:
       - caddy-data:/data
       - "/etc/nms/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "/var/lib/nms/gateway/keys.json:/srv/keys/keys.json:ro"
+    # A static address in edge: the executor origin (:9443) listens only there, never in core or xnet.
     networks:
-      edge: {}
+      edge:
+        ipv4_address: "172.30.3.2"
       core:
         ipv4_address: "172.30.0.2"
       xnet: {}
@@ -249,7 +251,12 @@ services:
       core: {}
 
 networks:
-  edge: {}
+  # The only routed network of the gateway: Docker publishes its ports here.
+  edge:
+    ipam:
+      config:
+        - subnet: "172.30.3.0/24"
+          ip_range: "172.30.3.128/25"
   core:
     internal: true
     ipam:

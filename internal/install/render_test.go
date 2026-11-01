@@ -191,13 +191,15 @@ func TestCaddyExecutorSite(t *testing.T) {
 	in := sampleInput()
 	in.XnetSubnet = "10.77.3.0/24"
 	in.ExecutorPort = 9000
+	in.EdgeSubnet = "10.77.4.0/24"
 	out := render(t, in)
 	site := caddySite(t, out["Caddyfile"], ":9443")
 	for _, want := range []string{
 		"reverse_proxy https://10.77.3.2:8444 {", "tls_client_auth /certs/gateway_client.crt /certs/gateway_client.key",
-		"tls_trust_pool file /certs/ca.crt", "tls_server_name executor", "header_up -Cookie", "header_up X-Forwarded-For {remote_host}",
+		"tls_trust_pool file /certs/ca.crt", "tls_server_name executor", "header_up -Cookie", "header_up X-Forwarded-For {remote_host}", "header_up Host {http.request.hostport}",
 		"header_down -Set-Cookie", "header_down -Service-Worker-Allowed", "respond @sw 403", "handle /api/* {\n\t\t\terror 404",
-		"import executor_headers", "max_size 64KiB", "handle /x/* {",
+		"import executor_headers", "max_size 64KiB", "handle /x/* {", "\tbind 10.77.4.2\n",
+		"@foreign_host not host nms.example.org", "route {\n\t\terror @foreign_host 421\n\t\trespond @sw 403",
 	} {
 		if !strings.Contains(site, want) {
 			t.Errorf("executor site lacks %q", want)
@@ -256,6 +258,10 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		"exec image tag":       func(in *install.RenderInput) { in.ExecutorImage = "nms/executor:latest" },
 		"xnet overlaps core":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.0.0/24" },
 		"xnet overlaps devs":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.1.0/25" },
+		"edge overlaps core":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.0.128/25" },
+		"edge overlaps xnet":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.2.0/24" },
+		"edge overlaps devs":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.0.0/16" },
+		"edge not network":     func(in *install.RenderInput) { in.EdgeSubnet = "172.30.3.1/24" },
 		"xnet ipv6":            func(in *install.RenderInput) { in.XnetSubnet = "fd00::/64" },
 		"xnet host bits":       func(in *install.RenderInput) { in.XnetSubnet = "172.30.2.1/24" },
 		"host executor":        func(in *install.RenderInput) { in.PublicHost = "executor" },
@@ -554,5 +560,45 @@ func TestRenderedEventdConfigLoads(t *testing.T) {
 	if c.DB.User != "nms_eventd" || c.DB.Name != "nms" || c.DB.PasswordFile != "/run/secrets/db_eventd_password" ||
 		c.ReadKeyFile != "/run/secrets/domain_read_key" || c.TLSCertFile != "/run/secrets/syslog_crt" || c.TLSKeyFile != "/run/secrets/syslog_key" || c.SyslogUDP != "0.0.0.0:1514" || c.TrapUDP != "0.0.0.0:1162" {
 		t.Errorf("unexpected config: %+v", c)
+	}
+}
+
+/*
+The executor origin listens only on the gateway's static address in edge, the
+gateway's only routed network (where Docker publishes the ports): edge has a
+fixed subnet, the gateway its second host address there, and the :9443 site
+binds to exactly that address; the panel site does not bind.
+*/
+func TestExecutorOriginBoundToEdge(t *testing.T) {
+	in := sampleInput()
+	in.EdgeSubnet = "10.66.5.0/24"
+	out := render(t, in)
+	var c compose
+	if err := yaml.Unmarshal(out["compose.yaml"], &c); err != nil {
+		t.Fatal(err)
+	}
+	edge := c.Networks["edge"]
+	if edge.Internal || len(edge.IPAM.Config) != 1 || edge.IPAM.Config[0].Subnet != "10.66.5.0/24" {
+		t.Errorf("edge = %+v, want routed with subnet 10.66.5.0/24", edge)
+	}
+	if e, _ := c.Services["gateway"].Networks["edge"].(map[string]any); e["ipv4_address"] != "10.66.5.2" {
+		t.Errorf("gateway edge = %v, want the static address 10.66.5.2", c.Services["gateway"].Networks["edge"])
+	}
+	for name, s := range c.Services {
+		if _, ok := s.Networks["edge"]; ok != (name == "gateway") {
+			t.Errorf("%s: edge membership %v, want only the gateway", name, ok)
+		}
+	}
+	/* Only edge may be routed for the gateway, or Docker could publish its ports on another network. */
+	for n := range c.Services["gateway"].Networks {
+		if n != "edge" && !c.Networks[n].Internal {
+			t.Errorf("gateway network %s is routed", n)
+		}
+	}
+	if site := caddySite(t, out["Caddyfile"], ":9443"); !strings.Contains(site, "\n\tbind 10.66.5.2\n") {
+		t.Errorf("the executor origin is not bound to the gateway's edge address:\n%s", site)
+	}
+	if strings.Contains(caddySite(t, out["Caddyfile"], ":8443"), "bind ") {
+		t.Error("the panel site binds")
 	}
 }

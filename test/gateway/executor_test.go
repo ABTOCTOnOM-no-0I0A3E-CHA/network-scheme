@@ -35,6 +35,9 @@ pools, so it never collides with a network Docker allocated itself.
 const (
 	xnetSubnet = "10.213.47.0/24"
 	executorIP = "10.213.47.2" /* the rendered static address: the second host address of xnetSubnet */
+	/* The gateways' edges (the routed network of the published ports), one per gateway. */
+	edgeSubnet     = "10.213.48.0/24"
+	bareEdgeSubnet = "10.213.49.0/24"
 )
 
 var executorHeaders = map[string]string{
@@ -175,7 +178,7 @@ func probe(t *testing.T, networks []string, cases ...string) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	args := []string{"/webstub", "probe", "-ca", "/p/ca.crt"}
+	args := []string{"/webstub", "probe", "-ca", "/p/ca.crt", "-host", publicHost + ":8443"}
 	for i := 0; i+2 < len(cases); i += 3 {
 		cert := cases[i+2]
 		if cert != "-" {
@@ -312,6 +315,9 @@ func TestExecutorHeadersFilteredBothWays(t *testing.T) {
 	if v, ok := seen["Cookie"]; ok {
 		t.Errorf("the executor received Cookie %q", v)
 	}
+	if h := seen["Host"]; len(h) != 1 || h[0] != publicHost {
+		t.Errorf("Host at the executor = %q, want the browser's %q (the executor checks it)", h, publicHost)
+	}
 	xff := seen["X-Forwarded-For"]
 	if len(xff) != 1 {
 		t.Fatalf("X-Forwarded-For at the executor = %q, want one value", xff)
@@ -409,6 +415,54 @@ func TestExecutorErrorsKeepHeaders(t *testing.T) {
 		if c.isJSON {
 			only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
 		}
+	}
+}
+
+/*
+I1: the api (core) cannot use the gateway as a door to the executor. The
+executor origin listens only on the gateway's address in edge, so from core
+(and from xnet) the gateway's own address refuses port 9443 before any TLS
+(no /x/status, no /x/confirm/issue, no handshake), while the panel port of
+the same address answers (core reaches the gateway at all) and the
+published port still serves the executor origin (TestExecutorStatusThroughGateway).
+*/
+func TestExecutorOriginNotReachableFromInternalNetworks(t *testing.T) {
+	s := gateway(t)
+	core, xn := s.inner[nw.Name], s.inner[xnw.Name]
+	if core == "" || xn == "" {
+		t.Fatalf("gateway addresses: %v", s.inner)
+	}
+	got := probe(t, []string{nw.Name}, "core-9443", core+":9443", "gateway", "core-8443", core+":8443", "gateway")
+	if !strings.HasPrefix(got["core-9443"], "ERR refused") {
+		t.Errorf("from core, the gateway's executor origin: %q, want connection refused", got["core-9443"])
+	}
+	if !strings.HasPrefix(got["core-8443"], "ERR tls") && !strings.HasPrefix(got["core-8443"], "OK") {
+		t.Fatalf("from core, the gateway's panel port: %q, want a TLS session (the refusal above proves nothing without it)", got["core-8443"])
+	}
+	if got := probe(t, []string{xnw.Name}, "xnet-9443", xn+":9443", "gateway"); !strings.HasPrefix(got["xnet-9443"], "ERR refused") {
+		t.Errorf("from xnet, the gateway's executor origin: %q, want connection refused", got["xnet-9443"])
+	}
+}
+
+/* A request for another host on the executor origin is refused by the gateway (421) with the headers. */
+func TestExecutorOriginRefusesForeignHost(t *testing.T) {
+	s := gateway(t)
+	/* / is the gateway's own file: only its matcher can refuse it; /x/status is refused by both. */
+	for _, p := range []string{"/", "/x/status"} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.base+p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "api"
+		resp, err := s.xclient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMisdirectedRequest {
+			t.Errorf("Host api, %s on the executor origin = %d, want 421", p, resp.StatusCode)
+		}
+		executorHeadersOnce(t, "foreign host "+p, resp.Header)
 	}
 }
 

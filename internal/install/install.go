@@ -59,6 +59,7 @@ type Options struct {
 	DevicesSubnet           string   /* DefaultDevicesSubnet when empty */
 	CoreSubnet              string   /* DefaultCoreSubnet when empty */
 	XnetSubnet              string   /* DefaultXnetSubnet when empty */
+	EdgeSubnet              string   /* DefaultEdgeSubnet when empty */
 	AdminUser               string   /* DefaultAdminUser when empty */
 	AdminPasswordFile       string
 	AdminPassword           secret.Secret /* set by the caller after an interactive prompt; else read from AdminPasswordFile */
@@ -130,7 +131,7 @@ func (o Options) renderInput() RenderInput {
 		PublicHost: strings.ToLower(o.PublicHost), ImageTag: o.ImageTag,
 		APIImage: DefaultAPIImage, GatewayImage: DefaultGatewayImage, ExecutorImage: DefaultExecutorImage, Paths: o.paths(),
 		DevicesSubnet: cmp.Or(o.DevicesSubnet, DefaultDevicesSubnet), CoreSubnet: cmp.Or(o.CoreSubnet, DefaultCoreSubnet),
-		XnetSubnet: cmp.Or(o.XnetSubnet, DefaultXnetSubnet),
+		XnetSubnet: cmp.Or(o.XnetSubnet, DefaultXnetSubnet), EdgeSubnet: cmp.Or(o.EdgeSubnet, DefaultEdgeSubnet),
 	}
 }
 
@@ -154,6 +155,7 @@ func prepareInstall(o Options) (prepared, error) {
 	for _, m := range eg.MgmtSubnets {
 		for _, own := range []struct{ flag, subnet string }{
 			{"--core-subnet", in.CoreSubnet}, {"--devices-subnet", in.DevicesSubnet}, {"--xnet-subnet", in.XnetSubnet},
+			{"--edge-subnet", in.EdgeSubnet},
 		} {
 			if m.Overlaps(netip.MustParsePrefix(own.subnet)) {
 				return prepared{}, fmt.Errorf("install: management subnet %s overlaps %s %s", m, own.flag, own.subnet)

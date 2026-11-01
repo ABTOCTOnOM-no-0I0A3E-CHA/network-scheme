@@ -154,11 +154,18 @@
 # The executor origin (published as {{.ExecutorPort}}): its bundle and keys.json from the gateway's own files,
 # /x/* to the executor's static address in xnet over mutual TLS. Nothing of the api is served here.
 :9443 {
+	# Only the gateway's address in edge, where Docker publishes the port: nothing listens on 9443 in core or
+	# xnet, so the api (core) cannot use the gateway's client certificate to reach the executor.
+	bind {{.GatewayEdgeIP}}
+
 	tls /certs/web.crt /certs/web.key {
 		protocols tls1.3
 	}
 
 	import executor_headers
+
+	# Only requests for the executor origin's host (the port is the published one, not checked here).
+	@foreign_host not host {{.PublicHost}}
 
 	request_body {
 		max_size 64KiB
@@ -169,6 +176,7 @@
 	@sw header Service-Worker *
 
 	route {
+		error @foreign_host 421
 		respond @sw 403
 
 		# Cookies are dropped (a cookie set on :443 is sent to :8443 too; the executor never reads one) and never
@@ -177,6 +185,8 @@
 		handle /x/* {
 			reverse_proxy https://{{.ExecutorIP}}:{{.ExecutorListenPort}} {
 				header_up -Cookie
+				# The browser's Host (checked above), not the upstream address: the executor checks it too.
+				header_up Host {http.request.hostport}
 				header_up X-Forwarded-For {remote_host}
 				header_down -Set-Cookie
 				header_down -Service-Worker-Allowed

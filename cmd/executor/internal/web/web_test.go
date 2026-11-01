@@ -168,6 +168,13 @@ func (f *fakeConfirm) Issue(user int64, _ authz.Need, d confirm.Description) (co
 	return c, nil
 }
 
+/* counts returns how many challenges were issued and how many confirmations asked. */
+func (f *fakeConfirm) counts() (issued, calls int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.issued), len(f.calls)
+}
+
 func (f *fakeConfirm) call(i int) authz.Request {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -237,7 +244,7 @@ func startWith(t *testing.T, c *certs, mod func(*Config)) *harness {
 	h := &harness{certs: c, auth: &fakeAuth{}, conf: &fakeConfirm{}, enabled: true}
 	cfg := Config{CertFile: h.certs.file("executor.crt"), KeyFile: h.certs.file("executor.key"), ClientCAFile: h.certs.file("ca.crt"),
 		ExecutorOrigin: executorOrigin, PanelOrigin: panelOrigin, Auth: h.auth, Confirm: h.conf, State: h.state,
-		Actions: map[string]Action{"test.echo": testAction}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Actions: map[string]Action{"test.echo": testAction, "test.liar": liarAction}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Now: func() time.Time { return fixedNow }} /* a stopped clock: no bucket refills during a test */
 	if mod != nil {
 		mod(&cfg)
@@ -306,6 +313,7 @@ func (h *harness) do(t *testing.T, method, path, body string, headers map[string
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Host = "nms.test:8443" /* what the gateway passes on: the browser's Host */
 	for k, v := range headers {
 		req.Header[k] = v
 	}
@@ -332,6 +340,7 @@ func TestOnlyTheGatewayCertificate(t *testing.T) {
 	h := start(t, nil)
 	get := func(c *http.Client) error {
 		req, _ := http.NewRequest(http.MethodGet, "https://executor/x/status", nil)
+		req.Host = "nms.test:8443"
 		req.Header.Set("X-Forwarded-For", "192.0.2.10")
 		resp, err := c.Do(req)
 		if err == nil {
@@ -493,6 +502,7 @@ and get the same answer.
 func TestCookieIgnored(t *testing.T) {
 	h := start(t, nil)
 	r := httptest.NewRequest(http.MethodGet, "/x/status", nil)
+	r.Host = "nms.test"
 	r.Header.Set("Cookie", "nms_session=forged; x=1")
 	r.Header.Set("X-Forwarded-For", "192.0.2.1")
 	w := httptest.NewRecorder()
@@ -623,6 +633,7 @@ func TestBodyChecks(t *testing.T) {
 		req.Header[k] = v
 	}
 	req.ContentLength = -1
+	req.Host = "nms.test:8443"
 	w := httptest.NewRecorder()
 	h.srv.ServeHTTP(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
@@ -852,5 +863,85 @@ func TestIPv6LimitedPerPrefix(t *testing.T) {
 	}
 	if ipKey("192.0.2.1") != "192.0.2.1" || ipKey("2001:db8::1") != "2001:db8::/64" {
 		t.Errorf("keys %q %q", ipKey("192.0.2.1"), ipKey("2001:db8::1"))
+	}
+}
+
+/* liarAction describes another action than its own name: issuing must refuse it. */
+var liarAction = Action{
+	Describe: func(context.Context, authz.Decision, json.RawMessage) (authz.Need, confirm.Description, error) {
+		return authz.Need{Kind: "write-admin"}, confirm.Description{Action: "test.echo", Fields: []confirm.Field{{Key: "device", Value: "x"}}}, nil
+	},
+	Run: testAction.Run,
+}
+
+/* An action whose description names another action gets no challenge (confirm would run the other one). */
+func TestIssueRefusesMislabelledDescription(t *testing.T) {
+	h := start(t, nil)
+	a := h.do(t, http.MethodPost, "/x/confirm/issue", `{"ticket":"user-1","action":"test.liar","params":{}}`, hdr())
+	if n, _ := h.conf.counts(); a.status != http.StatusInternalServerError || n != 0 {
+		t.Fatalf("mislabelled description: %d %s, %d challenges", a.status, a.body, n)
+	}
+}
+
+/* A challenge id longer than any issued one is refused before confirm. */
+func TestConfirmBoundsChallengeID(t *testing.T) {
+	h := start(t, nil)
+	body := `{"ticket":"user-1","challenge_id":"` + strings.Repeat("c", 65) + `","h":"` + strings.Repeat("00", 32) + `","code":"1"}`
+	a := h.do(t, http.MethodPost, "/x/confirm", body, hdr())
+	if _, n := h.conf.counts(); a.status != http.StatusBadRequest || n != 0 {
+		t.Fatalf("65-character challenge id: %d %s, %d confirm calls", a.status, a.body, n)
+	}
+}
+
+/* A Host other than the executor origin's is refused (421) before anything else; the port and case do not matter. */
+func TestHostChecked(t *testing.T) {
+	h := start(t, nil)
+	for _, host := range []string{"executor", "10.0.0.1:8443", "nms.test.evil:8443", "api:8080", ""} {
+		r := httptest.NewRequest(http.MethodGet, "/x/status", nil)
+		r.Host = host
+		r.Header.Set("X-Forwarded-For", "192.0.2.1")
+		w := httptest.NewRecorder()
+		h.srv.ServeHTTP(w, r)
+		if w.Code != http.StatusMisdirectedRequest {
+			t.Errorf("Host %q: %d", host, w.Code)
+		}
+		checkHeaders(t, "host "+host, w.Result().Header)
+	}
+	for _, host := range []string{"nms.test", "NMS.test:8443", "nms.test:9000"} {
+		r := httptest.NewRequest(http.MethodGet, "/x/status", nil)
+		r.Host = host
+		r.Header.Set("X-Forwarded-For", "192.0.2.1")
+		w := httptest.NewRecorder()
+		h.srv.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("Host %q: %d", host, w.Code)
+		}
+	}
+}
+
+/* A body that never arrives is cut off by the read timeout; headers over the bound get 431. */
+func TestSlowBodyAndLargeHeaders(t *testing.T) {
+	old := readTimeout
+	readTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { readTimeout = old })
+	h := start(t, nil)
+	c, err := tls.Dial("tcp", h.addr, &tls.Config{RootCAs: h.certs.roots, ServerName: "executor", MinVersion: tls.VersionTLS13,
+		Certificates: []tls.Certificate{h.certs.clients["gateway"]}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Write([]byte("POST /x/confirm/issue HTTP/1.1\r\nHost: nms.test:8443\r\nX-Forwarded-For: 192.0.2.1\r\n" +
+		"Origin: " + executorOrigin + "\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(4 * time.Second))
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatalf("a body that never arrived kept the request open: %v", err)
+	}
+	hd := hdr()
+	hd["X-Padding"] = []string{strings.Repeat("a", 2*maxHeader)}
+	if a := h.do(t, http.MethodGet, "/x/status", "", hd); a.status != http.StatusRequestHeaderFieldsTooLarge {
+		t.Errorf("headers of %d bytes: %d", 2*maxHeader, a.status)
 	}
 }

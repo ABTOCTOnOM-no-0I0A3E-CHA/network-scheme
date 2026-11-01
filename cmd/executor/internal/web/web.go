@@ -9,7 +9,7 @@ configured).
 Every request passes, in this order: the Cookie header is dropped (cookies
 are never read and never set: a cookie set on :443 reaches :8443 too); the
 security headers are set (so every answer, errors included, carries them);
-the client's address is the one the gateway wrote into X-Forwarded-For (the
+the Host must name the executor origin's host, any port (421); the client's address is the one the gateway wrote into X-Forwarded-For (the
 gateway overwrites the header, a single address, else 400); the Origin, if
 any, must be the executor origin and a non-GET request must have one (403);
 the per-IP rate limit (429); with the executor disabled by the host's
@@ -38,9 +38,11 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
@@ -116,6 +118,7 @@ type Config struct {
 /* Server serves /x. */
 type Server struct {
 	c                Config
+	host             string /* the executor origin's host: the only Host accepted */
 	tls              *tls.Config
 	csp              string
 	ip, user, global *limiter
@@ -138,11 +141,15 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	u, err := url.Parse(cfg.ExecutorOrigin)
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("web: executor origin %q", cfg.ExecutorOrigin)
+	}
 	tc, err := serverTLS(cfg)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{c: cfg, tls: tc,
+	s := &Server{c: cfg, tls: tc, host: u.Hostname(),
 		csp: "default-src 'self'; script-src " + cfg.ExecutorOrigin + "/assets/; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
 			"frame-ancestors " + cfg.PanelOrigin + "; frame-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'",
 		ip:     newLimiter(ipRate, ipBurst, maxKeys, cfg.Now),
@@ -189,6 +196,11 @@ func gatewayOnly(cs tls.ConnectionState, pin []byte) error {
 		return errors.New("web: no verified client certificate")
 	}
 	leaf := cs.PeerCertificates[0]
+	/*
+		The handshake already verified the chain for clientAuth; the EKU and
+		IsCA checks repeat it on purpose (defense in depth: a change of the
+		TLS settings alone must not let a server or CA certificate through).
+	*/
 	switch {
 	case leaf.Subject.CommonName != GatewayCN:
 		return fmt.Errorf("web: client certificate CN %q is not %s", leaf.Subject.CommonName, GatewayCN)
@@ -323,6 +335,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
+	if !s.ownHost(r.Host) {
+		fail(w, http.StatusMisdirectedRequest, "misdirected")
+		return
+	}
 	ip, ok := clientIP(r)
 	if !ok {
 		fail(w, http.StatusBadRequest, "bad_request")
@@ -358,6 +374,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Set("Allow", allow[0])
 	fail(w, http.StatusMethodNotAllowed, "method_not_allowed")
+}
+
+/*
+ownHost reports whether a Host header names the executor origin's host
+(any port: the gateway passes the browser's Host, whose port is the
+published one).
+*/
+func (s *Server) ownHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.EqualFold(strings.Trim(host, "[]"), s.host)
 }
 
 /*

@@ -150,6 +150,7 @@ func TestRunServesXOnlyOnXnet(t *testing.T) {
 		t.Fatalf("run listened on %q, want only listen_xnet", call.asked)
 	}
 	req, _ := http.NewRequest(http.MethodGet, "https://executor/x/status", nil)
+	req.Host = "nms.example.org:8443"
 	req.Header.Set("X-Forwarded-For", "192.0.2.7")
 	resp, err := gatewayClient(t, secrets, call.real).Do(req)
 	if err != nil {

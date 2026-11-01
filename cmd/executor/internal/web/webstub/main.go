@@ -119,6 +119,7 @@ func evil(w http.ResponseWriter, r *http.Request) {
 	for k, v := range r.Header {
 		got[k] = v
 	}
+	got["Host"] = []string{r.Host}
 	_ = json.NewEncoder(w).Encode(got)
 }
 
@@ -130,6 +131,7 @@ one line per case: "name OK <status>" or "name ERR <refused|timeout|tls|other> <
 func probe(args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	ca := fs.String("ca", "", "CA that signed the server certificate")
+	host := fs.String("host", "", "Host header (default: the address)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,6 +155,9 @@ func probe(args []string) error {
 		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg,
 			DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext}}
 		req, _ := http.NewRequest(http.MethodGet, "https://"+addr+"/x/status", nil)
+		if *host != "" {
+			req.Host = *host
+		}
 		req.Header.Set("X-Forwarded-For", "192.0.2.1")
 		resp, err := client.Do(req)
 		if err != nil {

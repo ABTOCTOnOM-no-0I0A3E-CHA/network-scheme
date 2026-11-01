@@ -35,6 +35,8 @@ const (
 	DefaultExecutorPort = 8443
 	/* DefaultXnetSubnet is the internal network between the gateway and the executor only. */
 	DefaultXnetSubnet = "172.30.2.0/24"
+	/* DefaultEdgeSubnet is the gateway's routed network for the published ports; the executor origin listens only on its address there. */
+	DefaultEdgeSubnet = "172.30.3.0/24"
 )
 
 /* initDBScript is shipped as-is next to compose.yaml and mounted into postgres. */
@@ -64,6 +66,8 @@ type RenderInput struct {
 	ExecutorPort  int    /* host port of the executor origin; must differ from HTTPSPort */
 	/* XnetSubnet is the IPv4 subnet of xnet; must overlap neither CoreSubnet nor DevicesSubnet. */
 	XnetSubnet string
+	/* EdgeSubnet is the IPv4 subnet of edge (published ports); must overlap none of the other three. */
+	EdgeSubnet string
 }
 
 /* view is what the templates see: validated, defaulted, derived values. */
@@ -80,6 +84,9 @@ type view struct {
 	ExecutorIP         string
 	XnetIPRange        string /* upper half of XnetSubnet, as CoreIPRange */
 	ExecutorListenPort int    /* port of the executor's xnet listener */
+	/* GatewayEdgeIP is the gateway's static address in edge (second host address): the only address the executor origin listens on. */
+	GatewayEdgeIP string
+	EdgeIPRange   string /* upper half of EdgeSubnet */
 }
 
 var (
@@ -163,6 +170,9 @@ func prepare(in RenderInput) (view, error) {
 	if in.XnetSubnet == "" {
 		in.XnetSubnet = DefaultXnetSubnet
 	}
+	if in.EdgeSubnet == "" {
+		in.EdgeSubnet = DefaultEdgeSubnet
+	}
 	if in.Paths.Etc == "" {
 		in.Paths.Etc = DefaultEtc
 	}
@@ -218,7 +228,14 @@ func prepare(in RenderInput) (view, error) {
 	if xnet.Overlaps(subnet) || xnet.Overlaps(devs) {
 		return view{}, fmt.Errorf("xnet subnet %s (--xnet-subnet) overlaps the core subnet %s (--core-subnet) or the devices subnet %s (--devices-subnet)", xnet, subnet, devs)
 	}
-	in.CoreSubnet, in.DevicesSubnet, in.XnetSubnet = subnet.String(), devs.String(), xnet.String()
+	edge, err := parseSubnet("edge", in.EdgeSubnet)
+	if err != nil {
+		return view{}, err
+	}
+	if edge.Overlaps(subnet) || edge.Overlaps(devs) || edge.Overlaps(xnet) {
+		return view{}, fmt.Errorf("edge subnet %s (--edge-subnet) overlaps the core %s, devices %s or xnet %s subnet", edge, subnet, devs, xnet)
+	}
+	in.CoreSubnet, in.DevicesSubnet, in.XnetSubnet, in.EdgeSubnet = subnet.String(), devs.String(), xnet.String(), edge.String()
 	ipRange := netip.PrefixFrom(upperHalf(subnet), subnet.Bits()+1)
 	if in.GatewayIP == "" {
 		in.GatewayIP = subnet.Addr().Next().Next().String()
@@ -242,7 +259,8 @@ func prepare(in RenderInput) (view, error) {
 	}
 	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080,
 		ReadKeyVersion: keys.InitialKeyVersion, ExecutorAuthority: exAuthority, ExecutorIP: xnet.Addr().Next().Next().String(),
-		XnetIPRange: netip.PrefixFrom(upperHalf(xnet), xnet.Bits()+1).String(), ExecutorListenPort: 8444}, nil
+		XnetIPRange: netip.PrefixFrom(upperHalf(xnet), xnet.Bits()+1).String(), ExecutorListenPort: 8444,
+		GatewayEdgeIP: edge.Addr().Next().Next().String(), EdgeIPRange: netip.PrefixFrom(upperHalf(edge), edge.Bits()+1).String()}, nil
 }
 
 /* parseSubnet accepts an IPv4 network address with a /16../28 prefix. */
