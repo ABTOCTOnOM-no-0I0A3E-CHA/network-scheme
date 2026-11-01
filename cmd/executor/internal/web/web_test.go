@@ -896,7 +896,8 @@ func TestConfirmBoundsChallengeID(t *testing.T) {
 /* A Host other than the executor origin's is refused (421) before anything else; the port and case do not matter. */
 func TestHostChecked(t *testing.T) {
 	h := start(t, nil)
-	for _, host := range []string{"executor", "10.0.0.1:8443", "nms.test.evil:8443", "api:8080", ""} {
+	for _, host := range []string{"executor", "10.0.0.1:8443", "nms.test.evil:8443", "api:8080", "",
+		"[nms.test", "nms.test]", "[[nms.test]]", "]nms.test[", "[]nms.test"} {
 		r := httptest.NewRequest(http.MethodGet, "/x/status", nil)
 		r.Host = host
 		r.Header.Set("X-Forwarded-For", "192.0.2.1")
@@ -907,7 +908,7 @@ func TestHostChecked(t *testing.T) {
 		}
 		checkHeaders(t, "host "+host, w.Result().Header)
 	}
-	for _, host := range []string{"nms.test", "NMS.test:8443", "nms.test:9000"} {
+	for _, host := range []string{"nms.test", "NMS.test:8443", "nms.test:9000", "[nms.test]"} {
 		r := httptest.NewRequest(http.MethodGet, "/x/status", nil)
 		r.Host = host
 		r.Header.Set("X-Forwarded-For", "192.0.2.1")

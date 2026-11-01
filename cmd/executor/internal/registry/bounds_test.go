@@ -96,6 +96,46 @@ func TestByteBound(t *testing.T) {
 	}
 }
 
+/*
+fits counts every op it is handed, the counter row included: over a
+snapshot without a counter (the bootstrap's shape) a bound with room for
+the declared row but not for the counter row refuses with ErrFull. In
+Write the counter row always replaces an equal-size counter row of the
+snapshot, so there it adds nothing (the review's revert of the call site to
+w.ops is an equivalent mutant on Write; this pins fits itself).
+*/
+func TestFitsCountsTheCounterRow(t *testing.T) {
+	counter, err := newPut(counterTable, map[string]any{"singleton": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := newPut("write_grant", grantRow(1, "u"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := func(o op) int {
+		n := 0
+		for _, v := range o.vals {
+			n += rowSize([]*string{v.canon})
+		}
+		return n
+	}
+	empty := &Snapshot{byKey: map[string]*row{}}
+	old := maxSnapshotBytes
+	defer func() { maxSnapshotBytes = old }()
+	maxSnapshotBytes = size(g) + size(counter) - 1
+	if err := fits(empty, []op{g}); err != nil {
+		t.Fatalf("the declared row alone: %v", err)
+	}
+	if err := fits(empty, []op{counter, g}); !errors.Is(err, ErrFull) {
+		t.Fatalf("declared row and counter row over the bound: %v, want ErrFull", err)
+	}
+	maxSnapshotBytes = size(g) + size(counter)
+	if err := fits(empty, []op{counter, g}); err != nil {
+		t.Fatalf("declared row and counter row at the bound: %v", err)
+	}
+}
+
 /* Every registry table has a row bound (a missing entry is 0: its first row would freeze), and no bound names a table that is gone. */
 func TestEveryTableHasRowBound(t *testing.T) {
 	for _, tb := range tables {

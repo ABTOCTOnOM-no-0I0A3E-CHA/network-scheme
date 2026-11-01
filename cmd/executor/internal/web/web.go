@@ -384,8 +384,10 @@ published one).
 func (s *Server) ownHost(host string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
+	} else if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1] /* an IPv6 literal without a port: only a matching pair */
 	}
-	return strings.EqualFold(strings.Trim(host, "[]"), s.host)
+	return strings.EqualFold(host, s.host)
 }
 
 /*
