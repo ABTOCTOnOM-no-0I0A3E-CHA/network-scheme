@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mdp/qrterminal/v3"
 
@@ -197,13 +198,19 @@ func printResponse(d deps, resp execadmin.Response) error {
 
 /*
 terminalSafe replaces C0 (but newline and tab), DEL and C1 control
-characters with "?": the daemon's texts carry database error messages and
-names the api controls, which must never reach the operator's terminal as
-escape sequences (OSC 52 clipboard writes, cursor tricks).
+characters, and the bidirectional and invisible format characters, with
+"?": the daemon's texts carry database error messages and names the api
+controls, which must never reach the operator's terminal as escape
+sequences (OSC 52 clipboard writes, cursor tricks) nor reorder what the
+operator reads (U+202E). Other text, Cyrillic included, is kept.
 */
 func terminalSafe(s string) string {
 	return strings.Map(func(r rune) rune {
-		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+		switch {
+		case (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f):
+			return '?'
+		case r == 0x061c || r == 0x200b || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) ||
+			(r >= 0x2066 && r <= 0x2069) || r == 0xfeff || r == utf8.RuneError:
 			return '?'
 		}
 		return r

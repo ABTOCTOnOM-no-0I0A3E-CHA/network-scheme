@@ -296,3 +296,12 @@ func TestDaemonTextIsTerminalSafe(t *testing.T) {
 		t.Fatalf("output %q", out)
 	}
 }
+
+/* Re-review minor 2: bidirectional and invisible format characters are neutralized too; ordinary text, Cyrillic included, is kept. */
+func TestTerminalSafeBidi(t *testing.T) {
+	in := "user \u202Egnp.exe\u202C \u2066x\u2069 \u200Fy\u200E \u061Cz\uFEFF \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C\tok\n"
+	want := "user ?gnp.exe? ?x? ?y? ?z? \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C\tok\n"
+	if got := terminalSafe(in); got != want {
+		t.Fatalf("%q, want %q", got, want)
+	}
+}
