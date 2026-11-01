@@ -1,4 +1,4 @@
-# gateway image: Caddy serving the panel bundle, non-root. Build from the repo root:
+# gateway image: Caddy serving the panel and executor bundles, non-root. Build from the repo root:
 #   docker build -f deploy/docker/gateway.Dockerfile .
 FROM oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373 AS web
 WORKDIR /src/web/app
@@ -13,4 +13,6 @@ FROM caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f43
 # /data and /config are chowned so the named volume is initialized writable.
 RUN setcap -r /usr/bin/caddy && chown 65532:65532 /data /config
 COPY --from=web /src/web/app/dist /srv/app
+# The executor origin's bundle (a placeholder until web/executor is built here, task 4a.8).
+COPY deploy/gateway/executor/ /srv/executor/
 USER 65532:65532

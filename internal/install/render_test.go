@@ -163,6 +163,72 @@ func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	}
 }
 
+/*
+caddySite returns the block of the Caddyfile that starts with the line
+header (a site or snippet), up to its closing brace at column 0.
+*/
+func caddySite(t *testing.T, caddyfile []byte, header string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(string(caddyfile), "\n"+header+" {\n")
+	if !ok {
+		t.Fatalf("no %q block", header)
+	}
+	block, _, ok := strings.Cut(rest, "\n}\n")
+	if !ok {
+		t.Fatalf("%q block not closed", header)
+	}
+	return block
+}
+
+/*
+The executor origin (:9443) proxies only /x/* to the executor's static xnet
+address with the gateway's client certificate, trusting only the internal
+CA and naming the server executor; the api is never proxied there, cookies
+are dropped both ways and the client address is overwritten. The panel
+frames only the executor origin and never proxies to the executor.
+*/
+func TestCaddyExecutorSite(t *testing.T) {
+	in := sampleInput()
+	in.XnetSubnet = "10.77.3.0/24"
+	in.ExecutorPort = 9000
+	out := render(t, in)
+	site := caddySite(t, out["Caddyfile"], ":9443")
+	for _, want := range []string{
+		"reverse_proxy https://10.77.3.2:8444 {", "tls_client_auth /certs/gateway_client.crt /certs/gateway_client.key",
+		"tls_trust_pool file /certs/ca.crt", "tls_server_name executor", "header_up -Cookie", "header_up X-Forwarded-For {remote_host}",
+		"header_down -Set-Cookie", "header_down -Service-Worker-Allowed", "respond @sw 403", "handle /api/* {\n\t\t\terror 404",
+		"import executor_headers", "max_size 64KiB", "handle /x/* {",
+	} {
+		if !strings.Contains(site, want) {
+			t.Errorf("executor site lacks %q", want)
+		}
+	}
+	if n := strings.Count(site, "reverse_proxy"); n != 1 || strings.Contains(site, "api:") {
+		t.Errorf("executor site: %d reverse_proxy, api mentioned %v; want only the executor", n, strings.Contains(site, "api:"))
+	}
+	if strings.Contains(site, "tls_insecure_skip_verify") {
+		t.Error("executor upstream verification is off")
+	}
+	headers := caddySite(t, out["Caddyfile"], "(executor_headers)")
+	for _, want := range []string{"frame-ancestors https://nms.example.org;", "script-src https://nms.example.org:9000/assets/;", "-Set-Cookie", "defer"} {
+		if !strings.Contains(headers, want) {
+			t.Errorf("executor headers lack %q", want)
+		}
+	}
+	for _, bad := range []string{"unsafe-inline", "unsafe-eval"} {
+		if strings.Contains(headers, bad) || strings.Contains(caddySite(t, out["Caddyfile"], "(panel_headers)"), "script-src "+bad) {
+			t.Errorf("CSP allows %s", bad)
+		}
+	}
+	panel := caddySite(t, out["Caddyfile"], ":8443")
+	if strings.Contains(panel, "10.77.3.2") || strings.Contains(panel, "gateway_client") {
+		t.Error("the panel site reaches the executor")
+	}
+	if !strings.Contains(caddySite(t, out["Caddyfile"], "(panel_headers)"), "frame-src https://nms.example.org:9000;") {
+		t.Error("the panel CSP must frame only the executor origin")
+	}
+}
+
 func TestRenderRejectsBadInput(t *testing.T) {
 	cases := map[string]func(*install.RenderInput){
 		"empty host":           func(in *install.RenderInput) { in.PublicHost = "" },

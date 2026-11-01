@@ -894,3 +894,106 @@ func TestRefusalsAreUniform(t *testing.T) {
 		}
 	}
 }
+
+/*
+Identify (the gate of a confirmation challenge) checks policy, freeze,
+ticket and core.user like Authorize, spends the ticket's nonce, writes one
+audit row, and never looks at a code or touches the user's TOTP state.
+*/
+func TestIdentifyTicketOnly(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	tok := f.ticketFor(t, u)
+	ident := func(tok string, user int64) (authz.Decision, error) {
+		return f.az.Identify(context.Background(), authz.Request{Ticket: tok, Code: "000000", Need: authz.Need{Kind: "unmask"},
+			Action: "confirm.issue", Object: "x", User: user, IP: "192.0.2.1", UA: "tester"})
+	}
+	before := f.row(t, u.id)
+	f.oneAudit(t, "ok", "identified", func() {
+		if d, err := ident(tok, 0); err != nil || d.UserID != u.id || d.Username != u.name {
+			t.Fatalf("%+v %v", d, err)
+		}
+	})
+	if got := f.row(t, u.id); got != before {
+		t.Fatalf("Identify changed the TOTP row: %+v -> %+v", before, got)
+	}
+	f.oneAudit(t, "denied", "ticket_replayed", func() {
+		if _, err := ident(tok, 0); err != authz.ErrDenied {
+			t.Fatal(err)
+		}
+	})
+	f.oneAudit(t, "denied", "wrong_user", func() {
+		if _, err := ident(f.ticketFor(t, u), u.id+1); err != authz.ErrDenied {
+			t.Fatal(err)
+		}
+	})
+	ghost := user{id: 990001, name: "ghost"}
+	f.oneAudit(t, "denied", "unknown_user", func() {
+		if _, err := ident(f.ticketFor(t, ghost), 0); err != authz.ErrDenied {
+			t.Fatal(err)
+		}
+	})
+	f.oneAudit(t, "denied", "ticket_signature", func() {
+		forged, _, _ := ticket.Issue(otherPriv, u.id, u.name, f.clk.Now())
+		if _, err := ident(forged, 0); err != authz.ErrDenied {
+			t.Fatal(err)
+		}
+	})
+	f.setPolicy(t, "enabled: false\n")
+	f.oneAudit(t, "denied", "disabled", func() {
+		if _, err := ident(f.ticketFor(t, u), 0); err != authz.ErrDisabled {
+			t.Fatal(err)
+		}
+	})
+	f.setPolicy(t, "enabled: true\n")
+	f.host(t, execadmin.Request{Cmd: execadmin.CmdFreezeOn, Reason: "drill"})
+	f.oneAudit(t, "denied", "frozen", func() {
+		if _, err := ident(f.ticketFor(t, u), 0); err != authz.ErrFrozen {
+			t.Fatal(err)
+		}
+	})
+}
+
+/* TicketUser reads a ticket that verifies without spending it; a forged or expired one gives no user. */
+func TestTicketUserSpendsNothing(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	tok := f.ticketFor(t, u)
+	before := f.lastAuditID(t)
+	if id, ok := f.az.TicketUser(tok); !ok || id != u.id {
+		t.Fatalf("TicketUser = %d %v", id, ok)
+	}
+	if f.lastAuditID(t) != before {
+		t.Fatal("TicketUser wrote an audit row")
+	}
+	forged, _, _ := ticket.Issue(otherPriv, u.id, u.name, f.clk.Now())
+	if _, ok := f.az.TicketUser(forged); ok {
+		t.Fatal("a forged ticket gave a user")
+	}
+	if err := f.ask(tok, f.code(t, u), writeCore); err != nil {
+		t.Fatalf("the nonce was spent: %v", err)
+	}
+	old := f.ticketFor(t, u)
+	f.clk.Advance(2 * time.Minute)
+	if _, ok := f.az.TicketUser(old); ok {
+		t.Fatal("an expired ticket gave a user")
+	}
+}
+
+/* Identify accepts nobody whose accepting audit row cannot be written (a superuser's lock blocks the append). */
+func TestIdentifyFailsClosedWithoutAudit(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	ctx := context.Background()
+	tx, err := f.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE exec.audit_event IN SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.az.Identify(ctx, authz.Request{Ticket: f.ticketFor(t, u), Action: "confirm.issue", Object: "x"}); err != authz.ErrUnavailable {
+		t.Fatalf("Identify without its audit row: %v", err)
+	}
+}

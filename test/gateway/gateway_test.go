@@ -52,7 +52,7 @@ const evilCaddyfile = `{
 
 var panelHeaders = map[string]string{
 	"Content-Security-Policy": "default-src 'self'; script-src https://" + publicHost + "/assets/; style-src 'self'; img-src 'self' data:; " +
-		"font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+		"font-src 'self'; connect-src 'self'; frame-src https://" + publicHost + ":8443; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
 	"Strict-Transport-Security":    "max-age=31536000",
 	"X-Content-Type-Options":       "nosniff",
 	"Referrer-Policy":              "no-referrer",
@@ -62,9 +62,10 @@ var panelHeaders = map[string]string{
 }
 
 type stack struct {
-	client *http.Client
-	base   string
-	bare   *stack /* same gateway without a reachable upstream */
+	client  *http.Client /* the panel origin (:443, the container's 8443) */
+	xclient *http.Client /* the executor origin (:8443, the container's 9443) */
+	base    string
+	bare    *stack /* same gateway without a reachable upstream */
 }
 
 var (
@@ -83,8 +84,10 @@ func TestMain(m *testing.M) {
 	for _, c := range containers {
 		_ = c.Terminate(ctx)
 	}
-	if nw != nil {
-		_ = nw.Remove(ctx)
+	for _, n := range []*testcontainers.DockerNetwork{nw, xnw} {
+		if n != nil {
+			_ = n.Remove(ctx)
+		}
 	}
 	cancel()
 	os.Exit(code)
@@ -128,7 +131,7 @@ func start() (*stack, error) {
 		return nil, err
 	}
 	rendered, err := install.Render(install.RenderInput{
-		PublicHost: publicHost, ImageTag: "test", APIImage: "nms/api", GatewayImage: "nms/gateway",
+		PublicHost: publicHost, ImageTag: "test", APIImage: "nms/api", GatewayImage: "nms/gateway", XnetSubnet: xnetSubnet,
 	})
 	if err != nil {
 		return nil, err
@@ -154,27 +157,34 @@ func start() (*stack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("evil upstream: %w", err)
 	}
+	/* The executor (a stub around its real /x server) on xnet at its static address, and in core like the real one. */
+	executorFiles, err := startExecutor(ctx, caCert, caKey)
+	if err != nil {
+		return nil, err
+	}
 
 	/* Fresh readers per container: a ContainerFile reader is consumed by the copy. */
 	files := func() []testcontainers.ContainerFile {
-		return []testcontainers.ContainerFile{
+		return append([]testcontainers.ContainerFile{
 			file("/etc/caddy/Caddyfile", rendered["Caddyfile"]),
 			file("/certs/web.crt", webCert),
 			file("/certs/web.key", webKey),
 			file("/srv/app/index.html", []byte("<!doctype html><title>nms</title>")),
 			file("/srv/app/assets/app.js", []byte("console.log(1)")),
 			file("/srv/keys/keys.json", []byte(`{"domains":[]}`)),
-		}
+			file("/srv/executor/index.html", []byte("<!doctype html><title>nms executor</title>")),
+			file("/srv/executor/assets/x.js", []byte("console.log(2)")),
+		}, executorFiles()...)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caCert) {
 		return nil, errors.New("bad test CA")
 	}
-	s, err := startGateway(ctx, []string{nw.Name}, files(), roots)
+	s, err := startGateway(ctx, []string{nw.Name, xnw.Name}, files(), roots)
 	if err != nil {
 		return nil, err
 	}
-	/* A second gateway on the default bridge, where the name "api" does not resolve. */
+	/* A second gateway on the default bridge, where the name "api" does not resolve and the executor is not reachable. */
 	if s.bare, err = startGateway(ctx, nil, files(), roots); err != nil {
 		return nil, err
 	}
@@ -185,7 +195,7 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 	gw, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        caddyImage,
-			ExposedPorts: []string{"8443/tcp"},
+			ExposedPorts: []string{"8443/tcp", "9443/tcp"},
 			Networks:     networks,
 			Files:        files,
 			/* Log-based: the port probe dials the IPv6 loopback, which Docker Desktop on Windows may refuse. */
@@ -207,16 +217,30 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 	if host == "localhost" {
 		host = "127.0.0.1" /* avoid the IPv6 loopback, which Docker Desktop on Windows may not publish */
 	}
-	port, err := gw.MappedPort(ctx, "8443/tcp")
+	client := func(containerPort string) (*http.Client, error) {
+		port, err := gw.MappedPort(ctx, containerPort)
+		if err != nil {
+			return nil, err
+		}
+		return httpsClient(net.JoinHostPort(host, port.Port()), roots), nil
+	}
+	panel, err := client("8443/tcp")
 	if err != nil {
 		return nil, err
 	}
-	target := net.JoinHostPort(host, port.Port())
+	x, err := client("9443/tcp")
+	if err != nil {
+		return nil, err
+	}
+	return &stack{client: panel, xclient: x, base: "https://" + publicHost}, nil
+}
+
+/* httpsClient dials target whatever the URL says: the URL names publicHost for SNI and verification. */
+func httpsClient(target string, roots *x509.CertPool) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	client := &http.Client{
+	return &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
-			/* The URL names publicHost for SNI and verification; the socket goes to the mapped port. */
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "tcp", target)
 			},
@@ -224,7 +248,6 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &stack{client: client, base: "https://" + publicHost}, nil
 }
 
 func file(path string, content []byte) testcontainers.ContainerFile {

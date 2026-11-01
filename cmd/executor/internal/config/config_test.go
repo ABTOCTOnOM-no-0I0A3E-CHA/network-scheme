@@ -91,9 +91,15 @@ func TestLoadRejects(t *testing.T) {
 		"xnet host bits":        set("xnet_subnet", `"172.30.2.1/24"`),
 		"xnet ipv6":             set("xnet_subnet", `"fd00::/64"`),
 		"subnets overlap":       set("core_subnet", `"172.30.0.0/16"`),
+		"spki pin short":        base + "gateway_spki_sha256: \"abcd\"\n",
+		"spki pin uppercase":    base + "gateway_spki_sha256: \"" + strings.Repeat("AB", 32) + "\"\n",
 	} {
 		if _, err := load(t, body); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	pin := strings.Repeat("ab", 32)
+	if c, err := load(t, base+"gateway_spki_sha256: \""+pin+"\"\n"); err != nil || c.GatewaySPKI != pin {
+		t.Errorf("a valid pin: %v %q", err, c.GatewaySPKI)
 	}
 }

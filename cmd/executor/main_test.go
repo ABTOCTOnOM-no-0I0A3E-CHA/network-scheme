@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/internal/install"
 	"github.com/beekamai/network-scheme/internal/store"
@@ -22,6 +27,7 @@ func TestMain(m *testing.M) { testdb.Main(m) }
 func writeConfig(t *testing.T) (cfgPath, secrets string) {
 	t.Helper()
 	env := testdb.New(t)
+	attacktest.Reset(t, env) /* a fresh install: each test has a new state directory */
 	dir := t.TempDir()
 	secrets = filepath.Join(dir, "secrets")
 	if err := install.WriteSecrets(secrets, install.SecretsInput{PublicHost: "nms.example.org", Chown: func(string, int, int) error { return nil }}); err != nil {
@@ -75,7 +81,91 @@ egress_file: %q
 	old := adminSocket
 	adminSocket = filepath.Join(sock, "admin.sock")
 	t.Cleanup(func() { adminSocket = old })
+	/* listen_xnet is not an address of this machine: record what run asks for and listen on loopback instead. */
+	oldListen := listen
+	listened = make(chan listenCall, 1)
+	listen = func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			listened <- listenCall{network + " " + addr, ln.Addr().String()}
+		}
+		return ln, err
+	}
+	t.Cleanup(func() { listen = oldListen })
 	return cfgPath, secrets
+}
+
+/* listenCall is what run asked to listen on, and where the test listener really is. */
+type listenCall struct{ asked, real string }
+
+var listened chan listenCall
+
+/* gatewayClient is an HTTPS client with the installer's gateway certificate, dialing addr whatever the URL. */
+func gatewayClient(t *testing.T, secrets, addr string) *http.Client {
+	t.Helper()
+	cert, err := tls.LoadX509KeyPair(filepath.Join(secrets, "gateway_client.crt"), filepath.Join(secrets, "gateway_client.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := os.ReadFile(filepath.Join(secrets, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(ca)
+	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		},
+		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "executor", Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
+	}}
+}
+
+/*
+run serves /x only on listen_xnet, with the installer's certificates: the
+gateway's client certificate gets /x/status (disabled after install), a
+client without one gets no TLS session.
+*/
+func TestRunServesXOnlyOnXnet(t *testing.T) {
+	cfgPath, secrets := writeConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"run", "--config", cfgPath}) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run after cancel: %v", err)
+		}
+	}()
+	var call listenCall
+	select {
+	case call = <-listened:
+	case err := <-done:
+		done <- nil /* for the deferred wait */
+		t.Fatalf("run: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not listen")
+	}
+	if call.asked != "tcp 172.30.2.2:8444" {
+		t.Fatalf("run listened on %q, want only listen_xnet", call.asked)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://executor/x/status", nil)
+	req.Header.Set("X-Forwarded-For", "192.0.2.7")
+	resp, err := gatewayClient(t, secrets, call.real).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"enabled":false,"frozen":false}` {
+		t.Fatalf("GET /x/status = %d %s", resp.StatusCode, body)
+	}
+	bare := gatewayClient(t, secrets, call.real)
+	bare.Transport.(*http.Transport).TLSClientConfig.Certificates = nil
+	if resp, err := bare.Do(req); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a client without the gateway certificate was served")
+	}
 }
 
 /* run connects as nms_executor with the installer's secrets, bootstraps the registry, is healthy while up and stops on cancel. */

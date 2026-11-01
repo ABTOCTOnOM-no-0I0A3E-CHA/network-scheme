@@ -11,11 +11,13 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,10 +29,12 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/execadmin"
 	"github.com/beekamai/network-scheme/internal/store"
@@ -78,12 +82,13 @@ func run(ctx context.Context, args []string) error {
 serve checks that every file the executor needs is present and well-formed,
 opens the database, verifies the registry (bootstrapping a fresh install,
 freezing on tampering), loads the policy, serves the host-only
-administration socket and keeps verifying the registry every 30 s and
-rereading the policy until SIGTERM/SIGINT. The authorizer of session
-tickets and change TOTP (authz) is built here and follows the host's
-unlocks; the :8443 layer that calls it is task 4a.6. It touches no device yet. It
-returns (and wipes the keys) only after every administration command and
-the policy loop ended.
+administration socket and /x (web: TLS with the gateway's client
+certificate, bound only to the executor's address in xnet), and keeps
+verifying the registry every 30 s and rereading the policy until
+SIGTERM/SIGINT. The authorizer of session tickets and change TOTP (authz)
+and the confirm(H) store are built here; authz follows the host's unlocks.
+It touches no device yet. It returns (and wipes the keys) only after every
+administration command, every /x request and the policy loop ended.
 */
 func serve(ctx context.Context, cfg config.Config) error {
 	started := time.Now() /* tickets issued before (minus authz's skew) are refused: none survives a restart */
@@ -117,6 +122,24 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az}
+	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
+	if len(pin) == 0 {
+		pin = nil
+	}
+	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
+		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
+		State: func() (bool, bool) {
+			frozen, _ := guard.Frozen()
+			return pol.Current().Enabled(), frozen
+		}})
+	if err != nil {
+		return err
+	}
+	/* Only the executor's own address in xnet: nothing listens in core. */
+	ln, err := listen("tcp", cfg.ListenXnet.String())
+	if err != nil {
+		return fmt.Errorf("listen_xnet: %w", err)
+	}
 	old, cur, _ := pol.Reload(true)
 	adm.PolicyChanged(ctx, "start", old, cur)
 	frozen, _ := guard.Frozen()
@@ -132,6 +155,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		served <- srv.Serve(ctx)
 		cancel() /* no administration socket: stop, the container restarts */
 	}()
+	webbed := make(chan error, 1)
+	go func() {
+		webbed <- x.Serve(ctx, ln)
+		cancel() /* no /x: stop, the container restarts */
+	}()
 	reloads := make(chan struct{})
 	go func() {
 		defer close(reloads)
@@ -139,15 +167,16 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}()
 	guard.Run(ctx)
 	log.Info("shutting down")
-	err = <-served
+	err = errors.Join(<-served, <-webbed)
 	<-reloads
 	return err
 }
 
-/* adminSocket and policyEvery are variables for the tests. */
+/* adminSocket, policyEvery and listen are variables for the tests. */
 var (
 	adminSocket = admin.SocketPath
 	policyEvery = 2 * time.Second
+	listen      = net.Listen
 )
 
 /*

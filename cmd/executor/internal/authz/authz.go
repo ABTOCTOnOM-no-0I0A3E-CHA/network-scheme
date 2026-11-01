@@ -323,26 +323,9 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 	if !req.Need.Valid() {
 		return Decision{}, a.refuse(ctx, d, &refusal{"bad_need", ErrDenied})
 	}
-	st := a.c.Policy.Current()
-	switch {
-	case !st.Enabled():
-		return Decision{}, a.refuse(ctx, d, &refusal{"disabled", ErrDisabled})
-	case st.Policy.ConfirmMode != execpolicy.ConfirmTOTP:
-		return Decision{}, a.refuse(ctx, d, &refusal{"confirm_mode", ErrDisabled})
-	}
-	if frozen, _ := a.c.Guard.Frozen(); frozen {
-		return Decision{}, a.refuse(ctx, d, &refusal{"frozen", ErrFrozen})
-	}
-	c, class := a.checkTicket(req.Ticket, now)
-	if class != "" {
-		return Decision{}, a.refuse(ctx, d, &refusal{class, ErrDenied})
-	}
-	d.user, d.ticket = &c.UserID, c.ID()
-	if req.User != 0 && req.User != c.UserID {
-		return Decision{}, a.refuse(ctx, d, &refusal{"wrong_user", ErrDenied})
-	}
-	if r := a.panelUser(ctx, c); r != nil {
-		return Decision{}, a.refuse(ctx, d, r)
+	c, err := a.admit(ctx, d, now)
+	if err != nil {
+		return Decision{}, err
 	}
 	select {
 	case a.sem <- struct{}{}:
@@ -351,6 +334,71 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 	}
 	defer func() { <-a.sem }()
 	return a.decide(ctx, d, c)
+}
+
+/*
+admit runs the checks before the registry: the policy enables the executor
+with TOTP, nothing is frozen, the ticket (its nonce spent), the user it
+must be for, the deny-only core.user check. A refusal is audited.
+*/
+func (a *Authorizer) admit(ctx context.Context, d *decision, now time.Time) (ticket.Claims, error) {
+	st := a.c.Policy.Current()
+	switch {
+	case !st.Enabled():
+		return ticket.Claims{}, a.refuse(ctx, d, &refusal{"disabled", ErrDisabled})
+	case st.Policy.ConfirmMode != execpolicy.ConfirmTOTP:
+		return ticket.Claims{}, a.refuse(ctx, d, &refusal{"confirm_mode", ErrDisabled})
+	}
+	if frozen, _ := a.c.Guard.Frozen(); frozen {
+		return ticket.Claims{}, a.refuse(ctx, d, &refusal{"frozen", ErrFrozen})
+	}
+	c, class := a.checkTicket(d.req.Ticket, now)
+	if class != "" {
+		return ticket.Claims{}, a.refuse(ctx, d, &refusal{class, ErrDenied})
+	}
+	d.user, d.ticket = &c.UserID, c.ID()
+	if d.req.User != 0 && d.req.User != c.UserID {
+		return ticket.Claims{}, a.refuse(ctx, d, &refusal{"wrong_user", ErrDenied})
+	}
+	if r := a.panelUser(ctx, c); r != nil {
+		return ticket.Claims{}, a.refuse(ctx, d, r)
+	}
+	return c, nil
+}
+
+/*
+Identify checks who asks, for a step that takes no action yet (issuing a
+confirmation challenge): the same checks as Authorize before the registry
+(policy, freeze, ticket with its nonce spent, req.User, core.user), but no
+TOTP code and no grant: the action itself is decided later by Authorize
+(through confirm). req.Need is ignored. One audit row either way; when the
+accepting row cannot be written the request is refused (ErrUnavailable).
+*/
+func (a *Authorizer) Identify(ctx context.Context, req Request) (Decision, error) {
+	req.Need = Need{}
+	d := &decision{req: req}
+	if !actionRe.MatchString(req.Action) {
+		d.req.Action = "authz.request"
+		return Decision{}, a.refuse(ctx, d, &refusal{"bad_action", ErrDenied})
+	}
+	c, err := a.admit(ctx, d, a.c.Now())
+	if err != nil {
+		return Decision{}, err
+	}
+	if a.record(ctx, a.event(d, audit.OK, "identified")) != nil {
+		return Decision{}, ErrUnavailable /* no row, no identity: fail closed */
+	}
+	return Decision{UserID: c.UserID, Username: c.Username, Ticket: d.ticket}, nil
+}
+
+/*
+TicketUser returns the user of a ticket whose signature and lifetime
+verify, without spending its nonce or writing anything: the :8443 rate
+limit keys on it before anything is decided. It grants nothing.
+*/
+func (a *Authorizer) TicketUser(tok string) (int64, bool) {
+	c, err := ticket.Verify(a.c.TicketKey, tok, a.c.Now())
+	return c.UserID, err == nil
 }
 
 /* checkTicket verifies the ticket and spends its nonce; a non-empty class refuses it. */
@@ -845,7 +893,10 @@ context (a client that goes away does not cancel the record); an IP that is
 not a plain address is dropped (it comes from the request). Tampering with
 the chain freezes, any other failure is logged.
 */
-func (a *Authorizer) Record(ctx context.Context, ev audit.Event) {
+func (a *Authorizer) Record(ctx context.Context, ev audit.Event) { _ = a.record(ctx, ev) }
+
+/* record is Record, reporting whether the row was written. */
+func (a *Authorizer) record(ctx context.Context, ev audit.Event) error {
 	ev.IP = cleanIP(ev.IP)
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decideTime)
 	defer cancel()
@@ -856,4 +907,5 @@ func (a *Authorizer) Record(ctx context.Context, ev audit.Event) {
 	if err != nil {
 		a.c.Log.Error("executor audit: cannot record", slog.String("action", ev.Action), slog.Any("err", err))
 	}
+	return err
 }

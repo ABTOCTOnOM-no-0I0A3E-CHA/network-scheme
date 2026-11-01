@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +43,8 @@ type Config struct {
 	TLSCertFile  string `yaml:"tls_cert_file"`
 	TLSKeyFile   string `yaml:"tls_key_file"`
 	ClientCAFile string `yaml:"client_ca_file"`
+	/* GatewaySPKI, optional: hex SHA-256 of the gateway client certificate's public key (SubjectPublicKeyInfo); any other key is refused. */
+	GatewaySPKI string `yaml:"gateway_spki_sha256"`
 	/* ListenXnet is the executor's own address in xnet: a specific IPv4 address, never a wildcard. */
 	ListenXnet netip.AddrPort `yaml:"listen_xnet"`
 	/* CoreSubnet and XnetSubnet are the stack's own networks; ListenXnet lies in XnetSubnet. */
@@ -116,6 +119,9 @@ func (c *Config) validate() error {
 	case !c.XnetSubnet.Contains(a) || a == c.XnetSubnet.Addr() || a == lastAddr(c.XnetSubnet):
 		return fmt.Errorf("listen_xnet %s: must be a host address in xnet_subnet %s", c.ListenXnet, c.XnetSubnet)
 	}
+	if c.GatewaySPKI != "" && !spkiRe.MatchString(c.GatewaySPKI) {
+		return errors.New("gateway_spki_sha256 must be 64 lowercase hex digits")
+	}
 	var err error
 	if c.PanelOrigin, err = httpsOrigin("panel_origin", c.PanelOrigin); err != nil {
 		return err
@@ -128,6 +134,8 @@ func (c *Config) validate() error {
 	}
 	return nil
 }
+
+var spkiRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 /* lastAddr is the broadcast address of an IPv4 prefix. */
 func lastAddr(p netip.Prefix) netip.Addr {
