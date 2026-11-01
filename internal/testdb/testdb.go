@@ -92,7 +92,8 @@ func New(t *testing.T) *Env {
 	}
 	once.Do(func() { shared, startErr = start() })
 	if startErr != nil {
-		unavailable(t, os.Getenv("CI") != "", startErr)
+		_, ci := os.LookupEnv("CI")
+		unavailable(t, ci, startErr)
 	}
 	return shared
 }
