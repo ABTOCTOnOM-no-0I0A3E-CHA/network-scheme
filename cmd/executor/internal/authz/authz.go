@@ -176,6 +176,9 @@ type nonceEntry struct {
 type userState struct {
 	lastStep, failures, lockCount int64
 	lockUntil                     time.Time
+	/* pending: the guards file's pessimistic record of an attempt whose outcome never replaced it (the process died); prevStep is the step before it. */
+	pending  bool
+	prevStep int64
 }
 
 /* failure is one entry of the global failure window (exec_state.global_fail_window): user and time in Unix milliseconds. */
@@ -552,6 +555,19 @@ func stricter(a, b userState) userState {
 	return out
 }
 
+/*
+committedSince reports whether mem is the pessimistic record of an attempt
+that committed as a success before the process died: the registry's step is
+past the one the attempt started from, and the row holds no failure and no
+lock (a success writes exactly that; a failure never moves the step). The
+record is then dropped for the registry row, so a crash right after a right
+code's COMMIT does not lock the user out. Its entry in the global window
+stays (the stricter side).
+*/
+func committedSince(reg, mem userState) bool {
+	return mem.pending && reg.lastStep > mem.prevStep && reg.failures == 0 && reg.lockCount == 0 && reg.lockUntil.IsZero()
+}
+
 /* lock reports the lock st is under at now, if any. */
 func (st userState) lock(now time.Time) *LockedError {
 	switch {
@@ -591,7 +607,7 @@ func (a *Authorizer) evaluate(ctx context.Context, s *registry.Snapshot, c ticke
 	memWindow := slices.Clone(a.window)
 	a.mu.Unlock()
 	cur := registryState(row)
-	if seen {
+	if seen && !committedSince(cur, mem) {
 		cur = stricter(cur, mem)
 	}
 	/* The lock before the grants: a locked user's answer is the same whatever grants it holds (no oracle on the registry). */
@@ -627,6 +643,7 @@ func (a *Authorizer) evaluate(ctx context.Context, s *registry.Snapshot, c ticke
 	fail := failure{U: c.UserID, T: a.stamp(now)}
 	pess := cur.failed(now)
 	pess.lastStep = max(cur.lastStep, now.Unix()/totpPeriod+1)
+	pess.pending, pess.prevStep = true, cur.lastStep
 	if a.saveGuards(ctx, &pessimism{user: c.UserID, st: pess, fail: fail}) != nil {
 		return outcome{refuse: &refusal{"guards_unwritable", ErrUnavailable}}
 	}

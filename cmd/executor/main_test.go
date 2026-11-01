@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/internal/install"
+	"github.com/beekamai/network-scheme/internal/store"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
 
@@ -101,6 +103,43 @@ func TestRunStaysUpAndIsHealthy(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not stop")
+	}
+}
+
+/*
+The healthcheck's connections carry the same message bound as the daemon's:
+a superuser's login trigger that sends nms_executor a 2 MiB notice fails the
+healthcheck instead of being read into memory (a connection without the
+bound reads it and succeeds, so the trigger does fire).
+*/
+func TestHealthcheckBoundsMessages(t *testing.T) {
+	cfgPath, _ := writeConfig(t)
+	env := testdb.New(t)
+	ctx := context.Background()
+	su := env.Pool("postgres")
+	for _, q := range []string{
+		`CREATE SCHEMA hc_test`,
+		`GRANT USAGE ON SCHEMA hc_test TO nms_executor`,
+		`CREATE FUNCTION hc_test.big() RETURNS event_trigger LANGUAGE plpgsql AS $$
+		BEGIN IF session_user = 'nms_executor' THEN RAISE NOTICE '%', repeat('a', 2097152); END IF; END $$`,
+		`CREATE EVENT TRIGGER hc_test_big ON login EXECUTE FUNCTION hc_test.big()`,
+	} {
+		if _, err := su.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = su.Exec(ctx, `DROP EVENT TRIGGER IF EXISTS hc_test_big`)
+		_, _ = su.Exec(ctx, `DROP SCHEMA IF EXISTS hc_test CASCADE`)
+	})
+	db, pw := env.Config("nms_executor")
+	unbounded, err := store.Open(ctx, db, pw, registry.PinSession)
+	if err != nil {
+		t.Fatalf("without the bound the notice is read: %v", err)
+	}
+	unbounded.Close()
+	if err := run(ctx, []string{"healthcheck", "--config", cfgPath}); err == nil {
+		t.Fatal("the healthcheck read a 2 MiB message")
 	}
 }
 

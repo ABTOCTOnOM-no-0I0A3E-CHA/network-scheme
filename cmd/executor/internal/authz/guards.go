@@ -39,6 +39,8 @@ type guardUser struct {
 	Failures  int64 `json:"failures"`
 	LockCount int64 `json:"lock_count"`
 	LockUntil int64 `json:"lock_until"` /* Unix microseconds, 0: none */
+	/* PrevStep is set on the pessimistic record of an attempt still being decided: the last step before it. */
+	PrevStep *int64 `json:"prev_step,omitempty"`
 }
 
 type guardsBody struct {
@@ -69,11 +71,14 @@ func loadGuards(path string, key *[32]byte) (map[int64]userState, []failure, err
 	seen := map[int64]bool{}
 	for _, u := range b.Users {
 		if u.ID <= 0 || u.LastStep < 0 || u.Failures < 0 || u.Failures >= MaxFailures || u.LockCount < 0 || u.LockCount > MaxLocks ||
-			u.LockUntil < 0 || seen[u.ID] {
+			u.LockUntil < 0 || seen[u.ID] || (u.PrevStep != nil && (*u.PrevStep < 0 || *u.PrevStep > u.LastStep)) {
 			return nil, nil, fmt.Errorf("authz: guards file %s: bad entry for user %d: %w", path, u.ID, state.ErrInvalid)
 		}
 		seen[u.ID] = true
 		st := userState{lastStep: u.LastStep, failures: u.Failures, lockCount: u.LockCount}
+		if u.PrevStep != nil {
+			st.pending, st.prevStep = true, *u.PrevStep
+		}
 		if u.LockUntil != 0 {
 			st.lockUntil = time.UnixMicro(u.LockUntil).UTC()
 		}
@@ -124,6 +129,9 @@ func (a *Authorizer) saveGuards(ctx context.Context, over *pessimism) error {
 		u := guardUser{ID: id, LastStep: st.lastStep, Failures: st.failures, LockCount: st.lockCount}
 		if !st.lockUntil.IsZero() {
 			u.LockUntil = st.lockUntil.UnixMicro()
+		}
+		if st.pending {
+			u.PrevStep = &st.prevStep
 		}
 		b.Users = append(b.Users, u)
 	}

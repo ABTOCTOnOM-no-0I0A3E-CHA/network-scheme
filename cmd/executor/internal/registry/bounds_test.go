@@ -34,7 +34,11 @@ func TestPlantedRowsDoNotFillMemory(t *testing.T) {
 	}
 }
 
-/* A table over its row bound is tampering, even with valid MACs (fail closed). */
+/*
+The writer refuses a change that would cross a table's row bound with
+ErrFull before writing (no freeze: the registry still verifies); a table
+over its bound when read is tampering, even with valid MACs (fail closed).
+*/
 func TestRowBound(t *testing.T) {
 	_, r := fresh(t)
 	ctx := context.Background()
@@ -46,8 +50,75 @@ func TestRowBound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := grant(ctx, r, 3); !errors.Is(err, ErrTampered) {
-		t.Fatalf("third grant: %v", err)
+	if err := grant(ctx, r, 3); !errors.Is(err, ErrFull) || errors.Is(err, ErrTampered) {
+		t.Fatalf("third grant: %v, want ErrFull", err)
+	}
+	if err := grant(ctx, r, 2); err != nil {
+		t.Fatalf("replacing a row at the bound: %v", err)
+	}
+	if _, err := r.Verify(ctx); err != nil {
+		t.Fatalf("a refused write froze the registry: %v", err)
+	}
+	maxRows["write_grant"] = 1
+	if _, err := r.Verify(ctx); !errors.Is(err, ErrTampered) {
+		t.Fatalf("two rows read over a bound of one: %v", err)
+	}
+}
+
+/* The same for the byte bound of the snapshot. */
+func TestByteBound(t *testing.T) {
+	_, r := fresh(t)
+	ctx := context.Background()
+	if err := grant(ctx, r, 1); err != nil {
+		t.Fatal(err)
+	}
+	size := 0
+	if err := r.View(ctx, func(s *Snapshot) error {
+		for _, rw := range s.rows {
+			size += rowSize(rw.pk) + rowSize(rw.content)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := maxSnapshotBytes
+	defer func() { maxSnapshotBytes = old }()
+	maxSnapshotBytes = size + 4 /* one more grant row does not fit */
+	if err := grant(ctx, r, 2); !errors.Is(err, ErrFull) || errors.Is(err, ErrTampered) {
+		t.Fatalf("grant over the byte bound: %v, want ErrFull", err)
+	}
+	if _, err := r.Verify(ctx); err != nil {
+		t.Fatalf("a refused write froze the registry: %v", err)
+	}
+	maxSnapshotBytes = size - 1
+	if _, err := r.Verify(ctx); !errors.Is(err, ErrTampered) {
+		t.Fatalf("a snapshot read over the byte bound: %v", err)
+	}
+}
+
+/* Every registry table has a row bound (a missing entry is 0: its first row would freeze), and no bound names a table that is gone. */
+func TestEveryTableHasRowBound(t *testing.T) {
+	for _, tb := range tables {
+		if maxRows[tb.name] <= 0 {
+			t.Errorf("table %s has no row bound", tb.name)
+		}
+	}
+	if len(maxRows) != len(tables) {
+		t.Errorf("%d row bounds for %d tables", len(maxRows), len(tables))
+	}
+}
+
+/* The bounds are the ones security.md 5.2 documents. */
+func TestBoundsAsDocumented(t *testing.T) {
+	want := map[string]int{"registry_counter": 1, "exec_state": 1, "write_device": 10000, "write_credential": 10000,
+		"write_grant": 20000, "change_totp": 10000, "model_profile": 1024}
+	for k, v := range want {
+		if maxRows[k] != v {
+			t.Errorf("maxRows[%s] = %d, documented %d", k, maxRows[k], v)
+		}
+	}
+	if maxSnapshotBytes != 64<<20 || MaxMessage != 1<<20 {
+		t.Errorf("maxSnapshotBytes = %d, MaxMessage = %d; documented 64 MiB and 1 MiB", maxSnapshotBytes, MaxMessage)
 	}
 }
 

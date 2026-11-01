@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
@@ -89,12 +91,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err := checkFiles(cfg); err != nil {
 		return err
 	}
-	pw, err := nmsconfig.ReadSecretFile(cfg.DB.PasswordFile)
-	if err != nil {
-		return err
-	}
-	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession, registry.BoundMessages)
-	pw.Wipe()
+	pool, err := openPool(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -208,16 +205,25 @@ func checkFiles(cfg config.Config) error {
 	return errors.Join(probe.Close(), os.Remove(probe.Name()))
 }
 
+/*
+openPool connects as the executor's database role, every connection pinned
+to pg_catalog and bounded to registry.MaxMessage (the daemon and the
+healthcheck alike: a planted oversized message never reaches memory).
+*/
+func openPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+	pw, err := nmsconfig.ReadSecretFile(cfg.DB.PasswordFile)
+	if err != nil {
+		return nil, err
+	}
+	defer pw.Wipe()
+	return store.Open(ctx, cfg.DB, pw, registry.PinSession, registry.BoundMessages)
+}
+
 /* healthcheck exits 0 when the executor's database role can connect. */
 func healthcheck(ctx context.Context, cfg config.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	pw, err := nmsconfig.ReadSecretFile(cfg.DB.PasswordFile)
-	if err != nil {
-		return err
-	}
-	pool, err := store.Open(ctx, cfg.DB, pw, registry.PinSession, registry.BoundMessages)
-	pw.Wipe()
+	pool, err := openPool(ctx, cfg)
 	if err != nil {
 		return err
 	}

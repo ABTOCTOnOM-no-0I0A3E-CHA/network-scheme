@@ -423,6 +423,93 @@ func TestGuardsPersistBeforeEvaluate(t *testing.T) {
 	}
 }
 
+/*
+crashAt runs one attempt of u with code and puts the guards file back as a
+crash at the hook (a registry write failing with abort, or returning) would
+have left it: the attempt's pessimistic record, before its outcome replaced
+it. It returns the attempt's result.
+*/
+func (f *fixture) crashAt(t *testing.T, u user, code string, abort bool) error {
+	t.Helper()
+	path := filepath.Join(f.dir, "guards")
+	var saved []byte
+	keep := func() {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Error(err)
+		}
+		saved = b
+	}
+	if abort {
+		authz.SetAbortWrite(f.az, func() error { keep(); return errors.New("injected crash") })
+	} else {
+		authz.SetAfterWrite(f.az, func(err error) error { keep(); return err })
+	}
+	err := f.try(t, u, code)
+	if saved == nil {
+		t.Fatal("the guards file was not captured")
+	}
+	if werr := os.WriteFile(path, saved, 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	return err
+}
+
+/*
+A crash right after a right code's COMMIT, before the guards file took the
+outcome, leaves the attempt's pessimistic record there (a fifth failure: a
+15 min lock). The restarted executor sees the registry step past the
+attempt's own with no failure: the attempt succeeded, the user is not locked.
+*/
+func TestCrashAfterAcceptedCodeDoesNotLock(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	for range authz.MaxFailures - 1 {
+		_ = f.try(t, u, f.wrong(t, u))
+	}
+	if err := f.crashAt(t, u, f.code(t, u), false); err != nil {
+		t.Fatalf("the right code: %v", err)
+	}
+	if r := f.row(t, u.id); r.failures != 0 || r.lockCount != 0 || r.lastStep == 0 {
+		t.Fatalf("the success did not commit: %+v", r)
+	}
+	f.clk.Advance(30 * time.Second)
+	/* Another user's decision rewrites the guards file before alice's next one, then a second restart: the record keeps what it is. */
+	f.az = f.authorizer(t)
+	bob := f.enrolled(t, "bob")
+	if err := f.try(t, bob, f.wrong(t, bob)); err != authz.ErrDenied {
+		t.Fatal(err)
+	}
+	f.az = f.authorizer(t)
+	if err := f.try(t, u, f.code(t, u)); err != nil {
+		t.Fatalf("locked out by the record of a committed success: %v", err)
+	}
+}
+
+/*
+The same crash when the right code's write did not commit (the registry row
+is unchanged: no failure, the same step): the record stands and the attempt
+counts as a failure, so four more lock the user.
+*/
+func TestCrashBeforeCommitKeepsPessimisticRecord(t *testing.T) {
+	f := newFixture(t)
+	u := f.enrolled(t, "alice")
+	if err := f.crashAt(t, u, f.code(t, u), true); err != authz.ErrUnavailable {
+		t.Fatalf("the uncommitted right code: %v", err)
+	}
+	if r := f.row(t, u.id); r.failures != 0 || r.lastStep != 0 {
+		t.Fatalf("the aborted write committed: %+v", r)
+	}
+	f.clk.Advance(30 * time.Second)
+	f.az = f.authorizer(t)
+	for i := range authz.MaxFailures - 1 {
+		err := f.try(t, u, f.wrong(t, u))
+		if last := i == authz.MaxFailures-2; last != errors.Is(err, authz.ErrLocked) {
+			t.Fatalf("wrong code %d after the crash: %v (the crash forgave the unrecorded attempt)", i+1, err)
+		}
+	}
+}
+
 /* At most 4 core.user reads run at once. */
 func TestPanelReadsBounded(t *testing.T) {
 	f := newFixture(t)

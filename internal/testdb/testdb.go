@@ -81,7 +81,9 @@ var (
 
 /*
 New returns the package-wide Env, starting the container on first use. The
-test is skipped under -short or when Docker is unavailable.
+test is skipped under -short or when Docker is unavailable, except in CI
+(the environment variable CI is set): there a missing Docker fails the test,
+so a loaded runner cannot pass the database tests by skipping them.
 */
 func New(t *testing.T) *Env {
 	t.Helper()
@@ -90,12 +92,18 @@ func New(t *testing.T) *Env {
 	}
 	once.Do(func() { shared, startErr = start() })
 	if startErr != nil {
-		if errors.Is(startErr, errNoDocker) {
-			t.Skipf("testdb: Docker is unavailable: %v", startErr)
-		}
-		t.Fatalf("testdb: %v", startErr)
+		unavailable(t, os.Getenv("CI") != "", startErr)
 	}
 	return shared
+}
+
+/* unavailable ends a test whose database could not start: skipped without Docker outside CI, failed otherwise. */
+func unavailable(t testing.TB, ci bool, err error) {
+	t.Helper()
+	if errors.Is(err, errNoDocker) && !ci {
+		t.Skipf("testdb: Docker is unavailable: %v", err)
+	}
+	t.Fatalf("testdb: %v", err)
 }
 
 /*

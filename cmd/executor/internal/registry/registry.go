@@ -264,13 +264,74 @@ them, and its MAC verified, as it streams in: rows planted by someone
 without the MAC key stop the read at the first one, and no number of them
 can make the executor hold more than the bounds (a superuser could
 otherwise exhaust its memory and have it restarted). Legitimate data beyond
-the bounds is refused as well (fail closed).
+the bounds is refused as well (fail closed). Every table needs a bound (a
+missing one is 0: its first row would freeze); the writer checks them
+before anything is written (fits) and refuses a change that would cross
+them with ErrFull, so only rows the executor did not write can.
 */
 var (
 	maxRows = map[string]int{counterTable: 1, stateTable: 1, "write_device": 10000, "write_credential": 10000,
 		"write_grant": 20000, "change_totp": 10000, "model_profile": 1024}
 	maxSnapshotBytes = 64 << 20
 )
+
+/* ErrFull refuses a change that would take a table over its row bound or the registry over its byte bound; nothing was written. */
+var ErrFull = errors.New("registry: full")
+
+/* rowSize is what a row counts against maxSnapshotBytes: its key and content in canonical form. */
+func rowSize(vals []*string) int {
+	n := 0
+	for _, v := range vals {
+		if v != nil {
+			n += len(*v)
+		}
+	}
+	return n
+}
+
+/*
+fits checks that pre with ops applied stays within the bounds scan enforces,
+counted the same way, before anything is written.
+*/
+func fits(pre *Snapshot, ops []op) error {
+	type entry struct {
+		table string
+		size  int
+	}
+	rows, count, size := map[string]entry{}, map[string]int{}, 0
+	for k, r := range pre.byKey {
+		s := rowSize(r.pk) + rowSize(r.content)
+		rows[k] = entry{r.t.name, s}
+		count[r.t.name]++
+		size += s
+	}
+	for _, o := range ops {
+		if old, ok := rows[o.key]; ok {
+			delete(rows, o.key)
+			count[old.table]--
+			size -= old.size
+		}
+		if o.del {
+			continue
+		}
+		s := 0
+		for _, v := range o.vals {
+			s += rowSize([]*string{v.canon})
+		}
+		rows[o.key] = entry{o.t.name, s}
+		count[o.t.name]++
+		size += s
+	}
+	for t, n := range count {
+		if n > maxRows[t] {
+			return fmt.Errorf("%w: %s would hold %d rows (bound %d)", ErrFull, t, n, maxRows[t])
+		}
+	}
+	if size > maxSnapshotBytes {
+		return fmt.Errorf("%w: the registry would hold %d bytes (bound %d)", ErrFull, size, maxSnapshotBytes)
+	}
+	return nil
+}
 
 /*
 scan reads the whole registry into Go values. Values that cannot be
@@ -329,12 +390,7 @@ func scan(ctx context.Context, q pgx.Tx, macKey *[32]byte) (*Snapshot, error) {
 				rows.Close()
 				return nil, tampered("bad MAC in %s", t.name)
 			}
-			for _, v := range append(append([]*string(nil), r.pk...), r.content...) {
-				if v != nil {
-					size += len(*v)
-				}
-			}
-			if size > maxSnapshotBytes {
+			if size += rowSize(r.pk) + rowSize(r.content); size > maxSnapshotBytes {
 				rows.Close()
 				return nil, tampered("the registry holds more than %d bytes", maxSnapshotBytes)
 			}
@@ -736,7 +792,8 @@ other writes). Each attempt runs within OpTimeout; waiting for the
 registry's lock ends with ctx.
 
 A nil error means the change committed. An ErrTampered error means freeze.
-Any other error does NOT mean the change was not applied: the COMMIT may
+ErrFull (the change would cross the snapshot bounds) means nothing was
+written. Any other error does NOT mean the change was not applied: the COMMIT may
 have succeeded and only recording it in the state file failed, or the
 COMMIT failed ambiguously and its fate could not be read in time (the next
 verification settles it). Callers must treat such an error as "unknown":
@@ -809,6 +866,9 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	pre.frozen, pre.reason = frozen(pre, f)
 	w := &Tx{seq: seq + 1}
 	if err := fn(ctx, pre, w); err != nil {
+		return err
+	}
+	if err := fits(pre, w.ops); err != nil {
 		return err
 	}
 	r.step("verified", tx)
