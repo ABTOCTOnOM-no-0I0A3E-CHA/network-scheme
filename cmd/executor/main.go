@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
@@ -75,11 +77,14 @@ serve checks that every file the executor needs is present and well-formed,
 opens the database, verifies the registry (bootstrapping a fresh install,
 freezing on tampering), loads the policy, serves the host-only
 administration socket and keeps verifying the registry every 30 s and
-rereading the policy until SIGTERM/SIGINT. It touches no device yet. It
+rereading the policy until SIGTERM/SIGINT. The authorizer of session
+tickets and change TOTP (authz) is built here and follows the host's
+unlocks; the :8443 layer that calls it is task 4a.6. It touches no device yet. It
 returns (and wipes the keys) only after every administration command and
 the policy loop ended.
 */
 func serve(ctx context.Context, cfg config.Config) error {
+	started := time.Now() /* tickets issued before (minus authz's skew) are refused: none survives a restart */
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := checkFiles(cfg); err != nil {
 		return err
@@ -105,7 +110,16 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	pol := policy.New(cfg.PolicyFile)
-	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log}
+	pub, err := nmsconfig.ReadKeyFile(cfg.TicketPubKeyFile)
+	if err != nil {
+		return err
+	}
+	az, err := authz.New(authz.Config{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log,
+		TicketKey: ed25519.PublicKey(pub[:]), Started: started})
+	if err != nil {
+		return err
+	}
+	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az}
 	old, cur, _ := pol.Reload(true)
 	adm.PolicyChanged(ctx, "start", old, cur)
 	frozen, _ := guard.Frozen()

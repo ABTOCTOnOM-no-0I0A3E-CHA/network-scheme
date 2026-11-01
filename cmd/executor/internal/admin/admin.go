@@ -44,8 +44,29 @@ type Admin struct {
 	Keys   *seal.Keys
 	Policy *policy.Holder
 	Log    *slog.Logger
+	/* Lockouts, if set, hears of every committed enroll, unlock and registry reset, so the in-memory TOTP guards follow the host. */
+	Lockouts Lockouts
 	/* writeHook, if set, replaces the result of every host registry write (test seam: an error after a COMMIT). */
 	writeHook func(error) error
+}
+
+/* Lockouts are the in-memory change TOTP guards (authz.Authorizer). */
+type Lockouts interface {
+	ResetUser(id int64)
+	ResetGlobal()
+}
+
+/* resetUser and resetGlobal tell Lockouts, if set, that the host reset a user's lockout or the global window. */
+func (a *Admin) resetUser(id int64) {
+	if a.Lockouts != nil {
+		a.Lockouts.ResetUser(id)
+	}
+}
+
+func (a *Admin) resetGlobal() {
+	if a.Lockouts != nil {
+		a.Lockouts.ResetGlobal()
+	}
 }
 
 /* hostWrite is Guard.HostWrite, through writeHook. */
@@ -355,6 +376,7 @@ func (a *Admin) enroll(ctx context.Context, req execadmin.Request) execadmin.Res
 			return resp
 		}
 	}
+	a.resetUser(u.ID)
 	resp.Text = fmt.Sprintf("change TOTP enrolled for %q (#%d)", u.Username, u.ID)
 	resp.Enrollment = &execadmin.Enrollment{URI: uri, Secret: sec.Reveal()}
 	return resp
@@ -566,6 +588,7 @@ func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Res
 				return resp
 			}
 		}
+		a.resetGlobal()
 		resp.Text = "global change TOTP failure window cleared"
 		return resp
 	}
@@ -595,6 +618,7 @@ func (a *Admin) unlock(ctx context.Context, req execadmin.Request) execadmin.Res
 			return resp
 		}
 	}
+	a.resetUser(id)
 	resp.Text = fmt.Sprintf("change TOTP of #%d unlocked", id)
 	return resp
 }
@@ -718,6 +742,7 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 	if err != nil {
 		return a.refuse(ctx, req, "registry", err, details)
 	}
+	a.resetGlobal()
 	return execadmin.Response{OK: true, Text: resetText(rep, plan)}
 }
 

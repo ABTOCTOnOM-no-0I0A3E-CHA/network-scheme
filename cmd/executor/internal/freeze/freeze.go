@@ -35,6 +35,7 @@ const (
 	KindUnverifiable  = "executor_unverifiable"   /* high: the registry cannot be verified (decisions refused) */
 	KindHostFreeze    = "executor_freeze"         /* warning: the host froze the executor (nmsctl executor freeze on) */
 	KindPolicyInvalid = "executor_policy_invalid" /* high: the policy file is invalid, the executor is disabled */
+	KindBruteforce    = "executor_bruteforce"     /* disaster: change TOTP failures of several users within an hour froze the executor */
 )
 
 /* severity of the freezes Trigger alerts; any other kind is a disaster. */
