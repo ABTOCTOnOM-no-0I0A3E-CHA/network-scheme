@@ -13,6 +13,7 @@ import (
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
 	"github.com/beekamai/network-scheme/internal/execadmin"
 )
 
@@ -536,5 +537,30 @@ func TestPanelReadsBounded(t *testing.T) {
 	wg.Wait()
 	if p := peak.Load(); p != 4 {
 		t.Fatalf("%d concurrent core.user reads, want 4", p)
+	}
+}
+
+/* A guards file whose pending record's prev_step is negative or above its last step does not load (the executor does not start). */
+func TestGuardsPrevStepRange(t *testing.T) {
+	f := newFixture(t)
+	path := filepath.Join(t.TempDir(), "guards")
+	load := func(prev string) error {
+		body := `{"v":1,"users":[{"id":1,"last_step":5,"failures":0,"lock_count":0,"lock_until":0,"prev_step":` + prev + `}],"window":[]}`
+		if err := state.SaveSealed(path, f.keys.State(), authz.GuardsLabel, []byte(body)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := authz.New(authz.Config{Guard: f.guard, Reg: f.reg, Keys: f.keys, Policy: f.pol, Log: f.log,
+			TicketKey: ticketPub, Started: f.clk.Now(), Now: f.clk.Now, GuardsFile: path})
+		return err
+	}
+	for _, bad := range []string{"6", "-1"} {
+		if load(bad) == nil {
+			t.Errorf("prev_step %s accepted", bad)
+		}
+	}
+	for _, good := range []string{"5", "0"} {
+		if err := load(good); err != nil {
+			t.Errorf("prev_step %s: %v", good, err)
+		}
 	}
 }

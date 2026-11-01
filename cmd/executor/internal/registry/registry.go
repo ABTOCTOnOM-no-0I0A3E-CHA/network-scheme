@@ -868,15 +868,17 @@ func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Sn
 	if err := fn(ctx, pre, w); err != nil {
 		return err
 	}
-	if err := fits(pre, w.ops); err != nil {
-		return err
-	}
-	r.step("verified", tx)
 	counter, err := newPut(counterTable, map[string]any{"singleton": true})
 	if err != nil {
 		return err
 	}
-	return r.apply(ctx, tx, f, pre, append([]op{counter}, w.ops...), w.seq, f.Committed.AuditHead, w.audit)
+	ops := append([]op{counter}, w.ops...)
+	/* Every row the write puts, the counter included, is counted. */
+	if err := fits(pre, ops); err != nil {
+		return err
+	}
+	r.step("verified", tx)
+	return r.apply(ctx, tx, f, pre, ops, w.seq, f.Committed.AuditHead, w.audit)
 }
 
 /*

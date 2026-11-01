@@ -28,3 +28,6 @@ func SavedUser(path string, key *[32]byte, id int64) (failures, lastStep int64, 
 	users, _, err := loadGuards(path, key)
 	return users[id].failures, users[id].lastStep, err
 }
+
+/* GuardsLabel is the MAC label of the guards file. */
+const GuardsLabel = guardsLabel
