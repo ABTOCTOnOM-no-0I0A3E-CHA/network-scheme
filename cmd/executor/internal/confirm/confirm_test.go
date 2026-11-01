@@ -93,7 +93,7 @@ func newFixture(t *testing.T) *fixture {
 	pol.Reload(true)
 	clk := &clock{t: time.Now().UTC().Truncate(time.Second)}
 	az, err := authz.New(authz.Config{Guard: guard, Reg: reg, Keys: k, Policy: pol, Log: log,
-		TicketKey: ticketPriv.Public().(ed25519.PublicKey), Started: clk.Now(), Now: clk.Now})
+		TicketKey: ticketPriv.Public().(ed25519.PublicKey), Started: clk.Now(), Now: clk.Now, GuardsFile: filepath.Join(t.TempDir(), "guards")})
 	if err != nil {
 		t.Fatal(err)
 	}

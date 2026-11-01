@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
@@ -61,7 +62,24 @@ type Description struct {
 	Fields []Field
 }
 
-/* Validate checks the action, the keys (strictly increasing) and the values (UTF-8, bounded). */
+/*
+displayable: valid UTF-8 without control (C0, C1) or format characters
+(Cf: bidirectional overrides and isolates, zero-width characters), so what
+the user is shown is what H covers, character for character.
+*/
+func displayable(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return false
+		}
+	}
+	return true
+}
+
+/* Validate checks the action, the keys (strictly increasing) and the values (displayable UTF-8, bounded). */
 func (d Description) Validate() error {
 	if !actionRe.MatchString(d.Action) {
 		return fmt.Errorf("confirm: bad action %q", d.Action)
@@ -74,7 +92,7 @@ func (d Description) Validate() error {
 		if !keyRe.MatchString(f.Key) || (i > 0 && f.Key <= d.Fields[i-1].Key) {
 			return fmt.Errorf("confirm: bad or unordered key %q", f.Key)
 		}
-		if len(f.Value) > maxValue || !utf8.ValidString(f.Value) {
+		if len(f.Value) > maxValue || !displayable(f.Value) {
 			return fmt.Errorf("confirm: bad value of %q", f.Key)
 		}
 		total += len(f.Key) + len(f.Value)

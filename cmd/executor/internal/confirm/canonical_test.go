@@ -27,11 +27,11 @@ func TestCanonicalVector(t *testing.T) {
 func TestDescriptionValidate(t *testing.T) {
 	for _, d := range []Description{
 		{Action: ""}, {Action: "Bad"}, {Action: strings.Repeat("a", 57)}, {Action: ".x"},
-		{Action: "a", Fields: []Field{{"b", "1"}, {"a", "2"}}},  /* unordered */
-		{Action: "a", Fields: []Field{{"a", "1"}, {"a", "2"}}},  /* duplicate */
-		{Action: "a", Fields: []Field{{"", "1"}}},               /* empty key */
-		{Action: "a", Fields: []Field{{"A", "1"}}},              /* key form */
-		{Action: "a", Fields: []Field{{"a", "\xff"}}},           /* not UTF-8 */
+		{Action: "a", Fields: []Field{{"b", "1"}, {"a", "2"}}}, /* unordered */
+		{Action: "a", Fields: []Field{{"a", "1"}, {"a", "2"}}}, /* duplicate */
+		{Action: "a", Fields: []Field{{"", "1"}}},              /* empty key */
+		{Action: "a", Fields: []Field{{"A", "1"}}},             /* key form */
+		{Action: "a", Fields: []Field{{"a", "\xff"}}},          /* not UTF-8 */
 		{Action: "a", Fields: []Field{{"a", strings.Repeat("x", maxValue+1)}}},
 	} {
 		if _, err := d.Hash(); err == nil {
@@ -97,4 +97,17 @@ func FuzzCanonical(f *testing.F) {
 			}
 		}
 	})
+}
+
+/* M5: what is shown is what H covers: control and format characters (newline, tab, C1, bidi overrides, zero width) are refused in values. */
+func TestDescriptionRefusesInvisibleCharacters(t *testing.T) {
+	for _, v := range []string{"a\x0ab", "a\x09b", "a\x00b", "a\x7fb", "a\xc2\x85b", "adm\xe2\x80\xaein", "a\xe2\x81\xa6b", "a\xe2\x80\x8bb", "\xef\xbb\xbfa"} {
+		d := Description{Action: "a", Fields: []Field{{"v", v}}}
+		if _, err := d.Hash(); err == nil {
+			t.Errorf("accepted value %q", v)
+		}
+	}
+	if _, err := (Description{Action: "a", Fields: []Field{{"v", "Ёлка 192.0.2.7 sw-1/0"}}}).Hash(); err != nil {
+		t.Errorf("plain text refused: %v", err)
+	}
 }

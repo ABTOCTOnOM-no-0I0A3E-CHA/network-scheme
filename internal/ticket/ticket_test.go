@@ -189,3 +189,21 @@ func FuzzTicket(f *testing.F) {
 		}
 	})
 }
+
+/* The signature covers exactly "nms/ticket/v1" NUL payload (a known-answer check of the domain label, independent of the constant). */
+func TestSignatureDomainLabel(t *testing.T) {
+	tok, _, err := Issue(priv, 7, "alice", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, s, _ := strings.Cut(tok, ".")
+	payload, _ := b64.DecodeString(p)
+	sig, _ := b64.DecodeString(s)
+	msg := append([]byte("nms/ticket/v1\x00"), payload...)
+	if !ed25519.Verify(pub, msg, sig) {
+		t.Fatal("the signature does not cover the domain label and the payload")
+	}
+	if ed25519.Verify(pub, payload, sig) {
+		t.Fatal("the signature covers the bare payload")
+	}
+}
