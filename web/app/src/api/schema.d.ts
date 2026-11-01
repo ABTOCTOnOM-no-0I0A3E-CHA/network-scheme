@@ -4892,6 +4892,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/executor/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Session ticket for the executor (origin :8443)
+         * @description Signs a session ticket v1 for the caller ({v, aud "executor", user_id, username, iat,
+         *     exp = iat + 60 s, nonce}, Ed25519). The ticket is only the api's claim about who the user
+         *     is: the executor takes rights from its own registry and needs the user's change TOTP for
+         *     every action, and accepts each ticket once. At most 20 tickets a minute per user (429
+         *     rate_limited); every issue is audited (executor.ticket), refusals by the limit at most once
+         *     a minute per user. A disabled or deleted user gets 401 session_expired.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The ticket (opaque to the client; never stored) */
+                200: {
+                    headers: {
+                        "Cache-Control"?: "no-store";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ticket: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {

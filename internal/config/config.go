@@ -50,6 +50,8 @@ type API struct {
 	TrustedProxyCIDRs []netip.Prefix `yaml:"trusted_proxy_cidrs"`
 	DB                DB             `yaml:"db"`
 	DataKeyFile       string         `yaml:"data_key_file"`
+	/* TicketKeyFile is the Ed25519 seed that signs the executor's session tickets (security.md 5.2). */
+	TicketKeyFile string `yaml:"ticket_key_file"`
 	/* ReadKeyVersion is the key_version of the read domain in keys.json; sealed credentials under any other version are refused. */
 	ReadKeyVersion int `yaml:"read_key_version"`
 }

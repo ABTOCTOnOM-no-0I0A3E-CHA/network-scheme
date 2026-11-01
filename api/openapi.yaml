@@ -2682,6 +2682,34 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /api/executor/ticket:
+    post:
+      summary: Session ticket for the executor (origin :8443)
+      description: |
+        Signs a session ticket v1 for the caller ({v, aud "executor", user_id, username, iat,
+        exp = iat + 60 s, nonce}, Ed25519). The ticket is only the api's claim about who the user
+        is: the executor takes rights from its own registry and needs the user's change TOTP for
+        every action, and accepts each ticket once. At most 20 tickets a minute per user (429
+        rate_limited); every issue is audited (executor.ticket), refusals by the limit at most once
+        a minute per user. A disabled or deleted user gets 401 session_expired.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "200":
+          description: The ticket (opaque to the client; never stored)
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at]
+                properties:
+                  ticket: { type: string, maxLength: 1024 }
+                  expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:

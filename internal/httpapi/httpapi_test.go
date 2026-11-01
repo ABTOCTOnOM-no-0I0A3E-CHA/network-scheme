@@ -95,6 +95,7 @@ func newFixture(t *testing.T, mutate func(*httpapi.Deps)) *fixture {
 		Clock:         clk.Now,
 		Logger:        slog.New(slog.NewJSONHandler(&lockedWriter{w: logs}, nil)),
 		AuthRateLimit: 1000,
+		TicketKey:     ticketKey,
 	}
 	if mutate != nil {
 		mutate(&d)

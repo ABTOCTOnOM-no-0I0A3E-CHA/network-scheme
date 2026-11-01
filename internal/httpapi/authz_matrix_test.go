@@ -138,6 +138,7 @@ var matrix = map[string]map[string]int{
 	"GET /api/stats/top-devices":                              {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/stats/top-interfaces":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/stats/config-drift":                             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/executor/ticket":                               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
 }
 
 /*
@@ -389,6 +390,8 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 		return req{method: "DELETE", path: fmt.Sprintf("/api/groups/%d", m.group())}
 	case "GET /api/audit":
 		return req{method: "GET", path: "/api/audit?limit=5"}
+	case "POST /api/executor/ticket":
+		return req{method: "POST", path: "/api/executor/ticket"}
 	}
 	if r, ok := m.deviceRequest(key); ok {
 		return r
