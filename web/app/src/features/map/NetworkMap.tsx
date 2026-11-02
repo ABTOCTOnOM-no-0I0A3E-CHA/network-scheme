@@ -11,7 +11,7 @@ import { MapHoverCard } from "./MapHoverCard";
 import { NodeLabels, type LabelItem } from "./NodeLabels";
 import { PositionSaver, type PositionItem } from "./positions";
 import { buildModel, deviceEid, isCollapsed, OPEN_ZOOM, type Topology } from "./semanticZoom";
-import { buildStylesheet, LABEL_W, NODE_H } from "./style";
+import { buildStylesheet, LABEL_H, LABEL_W, NODE_H } from "./style";
 import { syncElements } from "./sync";
 import type { EventSeverity } from "@/features/problems/api";
 
@@ -337,6 +337,23 @@ export function NetworkMap({ topology, severity, problems, backgroundUrl, save, 
     }
   }, []);
 
+  /* the whole picture in view: devices with their labels and the zones (HTML over the canvas, so cy.fit misses them), at most 125 % */
+  const fit = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy || cy.width() === 0) return;
+    const pad = compact ? 16 : 48;
+    const b = cy.elements().boundingBox();
+    let [x1, y1, x2, y2] = [b.x1, b.y1, b.x2, b.y2 + LABEL_H];
+    for (const a of live.current.topology.areas) {
+      [x1, y1, x2, y2] = [Math.min(x1, a.x), Math.min(y1, a.y), Math.max(x2, a.x + a.w), Math.max(y2, a.y + a.h)];
+    }
+    if (!(x2 > x1 && y2 > y1)) return;
+    /* the zoom buttons take a column on the right */
+    const right = pad + 40;
+    const zoom = Math.min((cy.width() - pad - right) / (x2 - x1), (cy.height() - 2 * pad) / (y2 - y1), 1.25);
+    cy.viewport({ zoom, pan: { x: pad + (cy.width() - pad - right - zoom * (x2 - x1)) / 2 - zoom * x1, y: (cy.height() - zoom * (y1 + y2)) / 2 } });
+  }, [compact]);
+
   /* model -> canvas; devices without a position are laid out once */
   useEffect(() => {
     const cy = cyRef.current;
@@ -350,12 +367,9 @@ export function NetworkMap({ topology, severity, problems, backgroundUrl, save, 
       void applyLayout(new Set(fresh), true);
     } else if (!fitted.current && model.nodes.length > 0 && need.length === 0) {
       fitted.current = true;
-      cy.fit(undefined, compact ? 16 : 48);
-      if (cy.zoom() > 1.25) cy.zoom({ level: 1.25, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+      fit();
     }
-  }, [model, canDrag, applyLayout, placeLabel, compact]);
-
-  const fit = () => cyRef.current?.fit(undefined, compact ? 16 : 48);
+  }, [model, canDrag, applyLayout, placeLabel, fit]);
   const zoomBy = (f: number) => {
     const cy = cyRef.current;
     if (cy) cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
