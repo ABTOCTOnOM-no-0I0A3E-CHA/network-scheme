@@ -56,7 +56,7 @@ docker cp test/fixtures/snmp "$HOST:/opt/demo/snmp"
 docker cp test/fixtures/configs "$HOST:/opt/demo/configs"
 docker cp test/e2e/send_events.py "$HOST:/opt/demo/send_events.py"
 # scripts and tables without CR, whatever the checkout's line endings
-for f in devices.sh devices.txt; do sed 's/\r$//' "$DEMO/$f" | docker exec -i "$HOST" sh -c "cat > /opt/demo/$f"; done
+for f in devices.sh devices.txt enrich.py; do sed 's/\r$//' "$DEMO/$f" | docker exec -i "$HOST" sh -c "cat > /opt/demo/$f"; done
 in_host install -m 0755 /opt/demo/bin/nmsctl /usr/local/bin/nmsctl
 # nmsctl install refuses to run in a container (it looks for /.dockerenv); this container plays the server, so drop the marker
 in_host rm -f /.dockerenv

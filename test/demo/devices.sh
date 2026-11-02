@@ -12,6 +12,8 @@ SSH_USER=demo-read SSH_PASSWORD=demo-read-pw
 addr() { docker inspect -f "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}" "$1"; }
 EVENTD="$(addr "$(docker compose -f /etc/nms/compose.yaml ps -q eventd)")"
 [ -n "$EVENTD" ] || { echo "eventd has no address on $NET"; exit 1; }
+# stand copies of the fixtures: the Eltex ones get moving traffic counters and the tables of a live device (enrich.py)
+docker run --rm -v "$D:$D" "$IMAGE" python3 "$D/enrich.py" "$D/snmp" "$D/snmp-demo"
 
 # show_outputs DIR MODEL PROMPT: the outputs sshemud serves, one file per allowlisted command line without arguments
 show_outputs() {
@@ -39,7 +41,7 @@ ready() { local logs; logs="$(docker logs "$1" 2>&1)"; grep -q 'Listening at UDP
 while read -r name address fixture community ssh events <&3; do
   [ "$fixture" = - ] && continue
   c="nms-demo-$name"
-  args=(-d --name "$c" --network "$NET" --ip "$address" -v "$D/snmp/$fixture.snmprec:/data/$community.snmprec:ro" -v "$D/send_events.py:/send_events.py:ro")
+  args=(-d --name "$c" --network "$NET" --ip "$address" -v "$D/snmp-demo/$fixture.snmprec:/data/$community.snmprec:ro" -v "$D/send_events.py:/send_events.py:ro")
   sshd=""
   if [ "$ssh" != - ]; then
     show_outputs "$D/ssh-$name" "$ssh" "$name#"
