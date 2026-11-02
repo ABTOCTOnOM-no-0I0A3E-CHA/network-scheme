@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { MousePointer2, Pencil, RefreshCw, Settings2, SquareDashed } from "lucide-react";
+import { Check, MousePointer2, Pencil, RefreshCw, Settings2, SquareDashed } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -138,7 +138,6 @@ export function MapPage({ canManage, initialViewId }: { canManage: boolean; init
         <h1 className="mr-auto text-xl font-semibold">{t("nav.map")}</h1>
         {editing && (
           <div className="flex items-center gap-2">
-            <span className="hidden text-xs text-muted-foreground 2xl:inline">{t(tool === "draw" ? "map.drawHint" : "map.editHint")}</span>
             <div role="group" aria-label={t("map.tools")} className="flex rounded-md border p-0.5">
               <Button size="xs" variant={tool === "select" ? "secondary" : "ghost"} aria-pressed={tool === "select"} onClick={() => setTool("select")}>
                 <MousePointer2 />
@@ -177,6 +176,18 @@ export function MapPage({ canManage, initialViewId }: { canManage: boolean; init
           </>
         )}
       </div>
+      {/* edit mode is unmistakable: a strip with what to do and a way out */}
+      {editing && (
+        <div role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-sm">
+          <Pencil className="size-4 shrink-0 text-primary" aria-hidden />
+          <span className="font-medium">{t("map.editMode")}</span>
+          <span className="min-w-0 flex-1 text-muted-foreground">{t(tool === "draw" ? "map.drawHint" : "map.editHint")}</span>
+          <Button size="xs" onClick={() => void toggleEdit()}>
+            <Check />
+            {t("map.editDone")}
+          </Button>
+        </div>
+      )}
       {(views.error || topo.error || error !== undefined) && (
         <p role="alert" className="text-sm text-destructive">
           {errText(t, views.error ?? topo.error ?? error)}

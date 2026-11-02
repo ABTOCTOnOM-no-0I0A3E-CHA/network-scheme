@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey } from "@/features/auth/errors";
@@ -248,6 +248,12 @@ type CardProps = {
 function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: CardProps) {
   const { t, i18n } = useTranslation();
   const speed = useSpeed();
+  /* the card opens below the panel: bring it into view (in a window it would open off-screen) */
+  const self = useRef<HTMLElement>(null);
+  /* a block body: newer browsers return a promise from scrollIntoView, which React would take for a cleanup */
+  useEffect(() => {
+    self.current?.scrollIntoView?.({ block: "nearest" });
+  }, [port.if_index]);
   const facts: [string, string][] = [
     [t("card.col.ifIndex"), String(port.if_index)],
     [t("card.col.alias"), safeText(port.alias) || "-"],
@@ -259,7 +265,7 @@ function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: Ca
     [t("card.col.seenAt"), new Date(port.seen_at).toLocaleString(i18n.language)],
   ];
   return (
-    <section aria-label={t("phys.card", { name: safeText(port.name) })} className="grid gap-3 rounded-md border p-4">
+    <section ref={self} aria-label={t("phys.card", { name: safeText(port.name) })} className="grid scroll-mb-4 gap-3 rounded-md border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="min-w-0 font-semibold break-all">{safeText(port.name)}</h3>
         <div className="flex gap-2">
@@ -284,7 +290,7 @@ function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: Ca
           <span className="text-xs text-muted-foreground">{t("phys.neighbors")}</span>
           {neighbors.map((n, i) => (
             <span key={i} className="break-all">
-              {safeText(n.sys_name) || safeText(n.chassis_id)} - {safeText(n.port_id)}
+              {safeText(n.sys_name) || safeText(n.chassis_id)} · {safeText(n.port_id)}
             </span>
           ))}
         </div>

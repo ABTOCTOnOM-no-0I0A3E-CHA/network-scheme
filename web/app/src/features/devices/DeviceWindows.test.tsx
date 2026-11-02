@@ -49,7 +49,7 @@ describe("device windows", () => {
     expect(z("core-sw")).toBeGreaterThan(z("edge-rtr"));
   });
 
-  it("opens at about 860x640 beside the click that opened it, the next one cascaded", async () => {
+  it("opens at 860 px wide and 80 % of the screen high beside the click that opened it, the next one cascaded", async () => {
     /* a desktop-height viewport, so the cascade is not clamped at the bottom */
     vi.stubGlobal("innerHeight", 1000);
     onTestFinished(() => void vi.unstubAllGlobals());
@@ -57,7 +57,7 @@ describe("device windows", () => {
     fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
     fireEvent.click(screen.getByRole("button", { name: "open 1" }));
     const a = screen.getByRole("dialog", { name: "core-sw" });
-    expect([a.style.width, a.style.height]).toEqual(["860px", "640px"]);
+    expect([a.style.width, a.style.height]).toEqual(["860px", "760px"]);
     expect([a.style.left, a.style.top]).toEqual(["132px", "102px"]);
     fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
     fireEvent.click(screen.getByRole("button", { name: "open 2" }));

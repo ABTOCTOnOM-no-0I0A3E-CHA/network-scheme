@@ -165,6 +165,21 @@ describe("Физика", () => {
     expect(second).toHaveAttribute("tabindex", "0");
   });
 
+  it("brings the port card into view and unmounts cleanly where scrollIntoView returns a promise", async () => {
+    ifaces = MES_INTERFACES;
+    const scroll = vi.fn(() => Promise.resolve());
+    Element.prototype.scrollIntoView = scroll as unknown as Element["scrollIntoView"];
+    try {
+      const { unmount } = wrap(<PhysicalTab deviceId={7} onShowChart={() => {}} />);
+      await userEvent.click(await screen.findByRole("button", { name: /^Порт gi1\/0\/1:/ }));
+      expect(await screen.findByRole("region", { name: "Карточка порта gi1/0/1" })).toBeInTheDocument();
+      expect(scroll).toHaveBeenCalled();
+      expect(() => unmount()).not.toThrow();
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
   it("orders ports naturally and leaves logical interfaces off the panel", () => {
     const p = frontPanel([...MES_INTERFACES].reverse());
     expect(p.rj45.map((r) => r.name).slice(0, 3)).toEqual(["gi1/0/1", "gi1/0/2", "gi1/0/3"]);

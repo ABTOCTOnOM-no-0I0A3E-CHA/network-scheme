@@ -9,6 +9,8 @@ import type { DeviceTable } from "./api";
 import { InventoryTable, Text, type Column } from "./InventoryTable";
 import { DATA_TABS } from "./tabs";
 
+const ENT_CLASSES = new Set(["chassis", "module", "port", "powerSupply", "fan", "sensor", "container", "backplane", "stack", "cpu"]);
+
 type Props = { deviceId: number; table: DeviceTable; onTable: (t: DeviceTable) => void; onShowChart: (ifIndex: number) => void };
 
 /** "Данные": the inventory tables of the device (FR-UI-DEV-4), one sub-tab each. */
@@ -153,7 +155,8 @@ function Table({ deviceId, table, onShowChart }: { deviceId: number; table: Devi
           seenAt={seen}
           columns={[
             col("entIndex", (r: { ent_index: number }) => num(r.ent_index)),
-            col("class", (r: { class: string }) => <Text value={r.class} />),
+            /* ENTITY-MIB classes in words; anything else stays the device's text */
+            col("class", (r: { class: string }) => <Text value={ENT_CLASSES.has(r.class) ? t(`card.col.entClass.${r.class}`) : r.class} />),
             col("name", (r: { name: string }) => <Text value={r.name} />),
             col("model", (r: { model: string }) => <Text value={r.model} />),
             col("serial", (r: { serial: string }) => <Text value={r.serial} mono />),

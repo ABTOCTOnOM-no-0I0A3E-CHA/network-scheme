@@ -91,7 +91,7 @@ describe("widget helpers", () => {
     render(<>{def.render([{ ts: new Date().toISOString(), kind: "syslog", device_id: 4, device_name: "sw-1", severity: "high", app: "a", text: "t", identified: true }], {})}</>);
     const row = screen.getByTestId("log-stream").querySelector("li")!;
     expect(row.dataset.severity).toBe("high");
-    expect(row.className).toMatch(/bg-orange/);
+    expect(row.className).toMatch(/bg-red/);
     expect(screen.getByRole("button", { name: "sw-1" })).toBeInTheDocument();
   });
 

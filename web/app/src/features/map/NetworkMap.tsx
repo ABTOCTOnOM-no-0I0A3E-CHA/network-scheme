@@ -231,7 +231,11 @@ export function NetworkMap({ topology, severity, problems, backgroundUrl, save, 
       const n = e.target;
       if (!n.isNode()) return;
       const kind = n.data("kind") as string;
-      if (kind === "device") live.current.onOpenDevice(devId(n.id()), String(n.data("label")));
+      if (kind === "device") {
+        /* the window opens beside the device: the hover card would only cover it */
+        setHover(undefined);
+        live.current.onOpenDevice(devId(n.id()), String(n.data("label")));
+      }
       else if (kind === "group") cy.animate({ zoom: { level: OPEN_ZOOM, position: n.position() }, duration: 250 });
     });
 

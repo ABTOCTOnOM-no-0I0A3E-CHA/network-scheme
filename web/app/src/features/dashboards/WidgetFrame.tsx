@@ -13,8 +13,11 @@ export type GridItem = { key: string; id?: number; type: string; x: number; y: n
 /** CSS class of the drag handle: only the handle moves a widget, so its content stays usable in edit mode. */
 export const DRAG_HANDLE = "widget-drag";
 
-/** The edge a bubble widget grows away from: the grid side it touches, so it never grows off the dashboard. */
-export type BubbleOrigin = "left" | "center" | "right";
+/**
+ * Where a bubble widget grows from: the grid side it touches (so it never grows off the dashboard sideways), and its top
+ * edge in the first row, else its middle (so a widget low on the screen does not grow past the bottom of the window).
+ */
+export type BubbleOrigin = `${"top" | "middle"}-${"left" | "center" | "right"}`;
 
 /*
  * Bubble (FR-MAP-7): after a short hover, or while focus is inside, the whole widget grows a fifth over its neighbours with
@@ -22,7 +25,14 @@ export type BubbleOrigin = "left" | "center" | "right";
  */
 const BUBBLE =
   "motion-safe:transition-[scale,box-shadow] motion-safe:duration-300 motion-safe:ease-out motion-safe:hover:delay-150 motion-safe:hover:scale-[1.2] motion-safe:hover:shadow-2xl motion-safe:focus-within:scale-[1.2] motion-safe:focus-within:shadow-2xl";
-const ORIGIN: Record<BubbleOrigin, string> = { left: "origin-top-left", center: "origin-top", right: "origin-top-right" };
+const ORIGIN: Record<BubbleOrigin, string> = {
+  "top-left": "origin-top-left",
+  "top-center": "origin-top",
+  "top-right": "origin-top-right",
+  "middle-left": "origin-left",
+  "middle-center": "origin-center",
+  "middle-right": "origin-right",
+};
 
 const NONE = { queryKey: ["widgets", "none"] as const, queryFn: async () => null };
 

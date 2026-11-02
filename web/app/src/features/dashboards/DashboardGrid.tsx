@@ -34,7 +34,7 @@ export function DashboardGrid({ items, editing, onLayout, onSettings, onRemove }
   const stacked = width > 0 && width < STACK_BELOW;
   /* a bubble widget grows away from the grid edge it touches; not while editing, nor stacked (it would leave the screen) */
   const bubbleOf = (it: GridItem): BubbleOrigin | undefined =>
-    editing || stacked || !getWidget(it.type)?.bubble ? undefined : it.x === 0 ? "left" : it.x + it.w >= COLS ? "right" : "center";
+    editing || stacked || !getWidget(it.type)?.bubble ? undefined : `${it.y === 0 ? "top" : "middle"}-${it.x === 0 ? "left" : it.x + it.w >= COLS ? "right" : "center"}`;
   const frame = (it: GridItem) => <WidgetFrame item={it} editing={editing} bubble={bubbleOf(it)} onSettings={() => onSettings(it.key)} onRemove={() => onRemove(it.key)} />;
 
   return (

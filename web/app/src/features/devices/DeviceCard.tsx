@@ -89,7 +89,8 @@ function DeviceCardBody({ id, canPoll, canManage, canAck = false, canListGroups 
     <section className="@container grid gap-4" data-variant={variant}>
       <Header device={d} canPoll={canPoll} canManage={canManage} canListGroups={canListGroups} variant={variant} />
       {/* one row that scrolls sideways when the window is narrow, never a second row */}
-      <div role="tablist" aria-label={t("card.tabs")} className="flex overflow-x-auto border-b">
+      {/* in a window the tab bar stays in view while the tab content scrolls */}
+      <div role="tablist" aria-label={t("card.tabs")} className={cn("flex overflow-x-auto border-b", variant === "window" && "sticky -top-4 z-10 bg-background pt-1")}>
         {TABS.filter((k) => k !== "cli" || canShow).map((k) => (
           <button
             key={k}
@@ -182,7 +183,7 @@ function Header({ device, canPoll, canManage, canListGroups, variant }: HeaderPr
     [t("devices.col.model"), device.model],
     [t("devices.col.firmware"), device.firmware],
     [t("devices.col.role"), device.role ? t(`devices.role.${device.role}`) : ""],
-    [t("devices.col.address"), `${device.address}:${device.snmp_port}`],
+    [t("devices.col.address"), device.snmp_port === 161 ? device.address : `${device.address}:${device.snmp_port}`],
     ...(device.state === "up" && device.state_since ? [[t("card.uptime"), ago(device.state_since)] as [string, string]] : []),
   ];
   const parentId = device.parent_id ?? null;

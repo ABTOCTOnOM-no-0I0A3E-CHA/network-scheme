@@ -17,26 +17,27 @@ type Config = z.infer<typeof schema>;
 /* the feed of the last day, as the logs screen opens with */
 const WINDOW_MS = 24 * 3600_000;
 
-/* severity marker (the bar at the row start) and the row tint from warning up; info and unnamed traps stay neutral */
+/* severity marker (the bar at the row start), row tint from warning up and the severity word: one hue per level */
 const MARK: Record<EventSeverity | "none", string> = {
   none: "bg-muted-foreground/30",
   info: "bg-sky-500/70",
-  warning: "bg-yellow-500",
-  average: "bg-amber-500",
-  high: "bg-orange-600",
-  disaster: "bg-red-600",
+  warning: "bg-yellow-400",
+  average: "bg-orange-500",
+  high: "bg-red-500",
+  disaster: "bg-red-800 dark:bg-red-600",
 };
 const TINT: Partial<Record<EventSeverity, string>> = {
-  warning: "bg-yellow-500/8 dark:bg-yellow-400/8",
-  average: "bg-amber-500/10 dark:bg-amber-400/10",
-  high: "bg-orange-500/12 dark:bg-orange-500/14",
-  disaster: "bg-red-500/12 dark:bg-red-500/16",
+  warning: "bg-yellow-400/10 dark:bg-yellow-400/8",
+  average: "bg-orange-500/10 dark:bg-orange-500/12",
+  high: "bg-red-500/10 dark:bg-red-500/14",
+  disaster: "bg-red-700/15 dark:bg-red-600/22",
 };
-const LABEL: Partial<Record<EventSeverity, string>> = {
-  warning: "text-yellow-700 dark:text-yellow-400",
-  average: "text-amber-700 dark:text-amber-400",
-  high: "text-orange-700 dark:text-orange-400",
-  disaster: "text-red-700 dark:text-red-400",
+const LABEL: Record<EventSeverity, string> = {
+  info: "text-sky-700 dark:text-sky-400",
+  warning: "text-yellow-700 dark:text-yellow-300",
+  average: "text-orange-700 dark:text-orange-400",
+  high: "text-red-600 dark:text-red-400",
+  disaster: "text-red-800 dark:text-red-300",
 };
 
 /** Events of the feed with the same device, kind, severity, source and text folded into one row (newest first). */
@@ -85,19 +86,18 @@ function EventRows({ items }: { items: NmsEvent[] }) {
     <ul className="grid gap-1" data-testid="log-stream">
       {groupRepeats(items).map(({ e, count, first }) => {
         const sev = e.severity ?? "none";
-        const source = safeText(e.kind === "syslog" ? e.app : e.name);
-        const text = safeText(e.text);
+        /* a named trap reads by its name (linkDown), with the OID as a muted detail; syslog by its message */
+        const named = e.kind === "trap" && !!e.name;
+        const source = named ? t("events.kind.trap") : safeText(e.kind === "syslog" ? e.app : e.name);
+        const text = safeText(named ? e.name : e.text);
+        const detail = named ? safeText(e.text) : "";
         return (
           <li key={`${e.ts}-${e.device_id}-${e.kind}-${text}`} data-severity={sev} className={cn("flex gap-2.5 rounded-md py-1.5 pr-2 pl-1.5", e.severity ? TINT[e.severity] : undefined)}>
             <span aria-hidden="true" className={cn("w-1 shrink-0 self-stretch rounded-full", MARK[sev])} />
             <div className="grid min-w-0 flex-1 gap-0.5">
               <div className="flex min-w-0 items-center gap-2 text-xs">
                 <DeviceChip id={e.device_id} name={e.device_name} />
-                {e.severity && e.severity !== "info" ? (
-                  <span className={cn("shrink-0 font-semibold", LABEL[e.severity])}>{t(`events.severity.${e.severity}`)}</span>
-                ) : (
-                  <span className="sr-only">{t(`events.severity.${sev}`)}</span>
-                )}
+                {e.severity && <span className={cn("shrink-0 font-semibold", LABEL[e.severity])}>{t(`events.severity.${e.severity}`)}</span>}
                 {source && (
                   <span className="min-w-0 truncate text-muted-foreground" title={source}>
                     {source}
@@ -108,8 +108,9 @@ function EventRows({ items }: { items: NmsEvent[] }) {
                 </time>
               </div>
               <p className="flex min-w-0 items-start gap-2 text-sm">
-                <span className="line-clamp-2 min-w-0 flex-1 font-medium break-words text-foreground" title={text}>
+                <span className="line-clamp-2 min-w-0 flex-1 font-medium break-words text-foreground" title={detail || text}>
                   {text}
+                  {detail && <span className="ml-2 font-mono text-xs font-normal text-muted-foreground">{detail}</span>}
                 </span>
                 {count > 1 && (
                   <span className="shrink-0 rounded-full bg-foreground/10 px-1.5 text-xs font-semibold tabular-nums" title={t("widgets.logStream.repeats", { count })}>

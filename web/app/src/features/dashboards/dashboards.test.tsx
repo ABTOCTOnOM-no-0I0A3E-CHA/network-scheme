@@ -202,7 +202,7 @@ describe("dashboard helpers", () => {
 });
 
 describe("bubble widgets", () => {
-  const frame = (props: { editing: boolean; bubble?: "left" | "right" }) =>
+  const frame = (props: { editing: boolean; bubble?: "top-left" | "middle-right" }) =>
     render(
       <QueryClientProvider client={new QueryClient()}>
         <WidgetFrame item={{ key: "k", type: "device_status", x: 0, y: 0, w: 3, h: 3, config: {} }} onSettings={() => {}} onRemove={() => {}} {...props} />
@@ -210,10 +210,10 @@ describe("bubble widgets", () => {
     );
 
   it("grow the whole frame from the grid edge they touch, only with motion allowed", () => {
-    const { container } = frame({ editing: false, bubble: "right" });
+    const { container } = frame({ editing: false, bubble: "middle-right" });
     const cls = container.querySelector("section")!.className;
     expect(cls).toContain("motion-safe:hover:scale-");
-    expect(cls).toContain("origin-top-right");
+    expect(cls).toContain("origin-right");
     cleanup();
     expect(frame({ editing: false }).container.querySelector("section")!.className).not.toMatch(/scale/);
   });

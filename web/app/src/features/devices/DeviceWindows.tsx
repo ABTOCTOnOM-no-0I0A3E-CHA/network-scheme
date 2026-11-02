@@ -88,7 +88,8 @@ export function DeviceWindowsProvider({ children, renderBody, renderTitle, onOpe
       const ws = winsRef.current;
       const n = ws.length % 6;
       const w = Math.min(DEFAULT_W, vp.w - 48);
-      const h = Math.min(DEFAULT_H, vp.h - 48);
+      /* most of the screen height: the tabs need the room more than the map behind */
+      const h = Math.min(Math.max(DEFAULT_H, Math.round(vp.h * 0.8)), 760, vp.h - 48);
       /* beside the click that opened it (the device on the map), else centred; each further window steps down and right */
       const press = lastPress.current;
       const fresh = press && performance.now() - press.t < POINTER_FRESH_MS ? press : undefined;

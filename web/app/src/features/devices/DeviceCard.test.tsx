@@ -201,7 +201,8 @@ describe("DeviceCard", () => {
     expect(screen.getByText("4.0.1")).toBeInTheDocument();
     expect(screen.getByText(ru.devices.role.l3switch)).toBeInTheDocument();
     expect(screen.getByText("eltex-mes")).toBeInTheDocument();
-    expect(screen.getByText("192.0.2.10:161")).toBeInTheDocument();
+    /* the default SNMP port is left out */
+    expect(screen.getByText("192.0.2.10")).toBeInTheDocument();
     expect(screen.getByText("#1")).toBeInTheDocument();
     expect(screen.getByText(ru.state.up)).toBeInTheDocument();
   });
