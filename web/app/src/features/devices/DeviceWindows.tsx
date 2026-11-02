@@ -20,6 +20,10 @@ export const useDeviceWindows = () => useContext(Ctx);
 type Win = { id: number; title: string; x: number; y: number; w: number; h: number; opener: Element | null };
 
 const MAX_WINDOWS = 8;
+const DEFAULT_W = 760;
+const DEFAULT_H = 560;
+/* a pointer press this recent opened the window: it opens beside that point */
+const POINTER_FRESH_MS = 1500;
 const MIN_W = 420;
 const MIN_H = 260;
 const CASCADE = 28;
@@ -37,11 +41,13 @@ type Props = {
   children: ReactNode;
   /** The window body for a device (the device card). */
   renderBody: (deviceId: number) => ReactNode;
+  /** Live extras of the title bar next to the name (the state badge). */
+  renderTitle?: (deviceId: number) => ReactNode;
   /** "Open as a page": leaves the window for the device page. */
   onOpenPage: (deviceId: number) => void;
 };
 
-export function DeviceWindowsProvider({ children, renderBody, onOpenPage }: Props) {
+export function DeviceWindowsProvider({ children, renderBody, renderTitle, onOpenPage }: Props) {
   /* windows render in the order they opened (moving DOM nodes would drop focus and scroll); the stacking is kept apart, last on top */
   const [wins, setWins] = useState<Win[]>([]);
   const [order, setOrder] = useState<number[]>([]);
@@ -49,6 +55,24 @@ export function DeviceWindowsProvider({ children, renderBody, onOpenPage }: Prop
   useEffect(() => {
     winsRef.current = wins;
   });
+  /* where the pointer was last pressed, to place a window beside what opened it; a key press since then (Enter in the search) voids it */
+  const lastPress = useRef<{ x: number; y: number; t: number } | undefined>(undefined);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      /* a press inside a window (its close button) or a dialog (the search palette) is not a place to open beside */
+      const inWin = e.target instanceof Element && e.target.closest('dialog, [role="dialog"]');
+      lastPress.current = inWin ? undefined : { x: e.clientX, y: e.clientY, t: performance.now() };
+    };
+    const onKey = () => {
+      lastPress.current = undefined;
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, []);
 
   const focus = useCallback((id: number) => setOrder((o) => (o.at(-1) === id ? o : [...o.filter((x) => x !== id), id])), []);
 
@@ -63,9 +87,14 @@ export function DeviceWindowsProvider({ children, renderBody, onOpenPage }: Prop
       const vp = view();
       const ws = winsRef.current;
       const n = ws.length % 6;
-      const w = Math.min(920, vp.w - 48);
-      const h = Math.min(680, vp.h - 48);
-      const next = clampWin({ id, title: safeText(title) || `#${id}`, x: Math.max(24, (vp.w - w) / 2 - 60) + n * CASCADE, y: 72 + n * CASCADE, w, h, opener }, vp);
+      const w = Math.min(DEFAULT_W, vp.w - 48);
+      const h = Math.min(DEFAULT_H, vp.h - 48);
+      /* beside the click that opened it (the device on the map), else centred; each further window steps down and right */
+      const press = lastPress.current;
+      const fresh = press && performance.now() - press.t < POINTER_FRESH_MS ? press : undefined;
+      /* right of the click, or left of it when the right has no room, so the window does not cover what was clicked */
+      const at = fresh ? { x: fresh.x + 32 + w <= vp.w ? fresh.x + 32 : fresh.x - 32 - w, y: fresh.y - 48 } : { x: (vp.w - w) / 2, y: 72 };
+      const next = clampWin({ id, title: safeText(title) || `#${id}`, x: at.x + n * CASCADE, y: at.y + n * CASCADE, w, h, opener }, vp);
       /* past the limit the window lowest in the stack goes */
       const drop = ws.length >= MAX_WINDOWS ? order[0] : undefined;
       const kept = ws.filter((x) => x.id !== drop);
@@ -105,7 +134,7 @@ export function DeviceWindowsProvider({ children, renderBody, onOpenPage }: Prop
         const i = order.indexOf(w.id);
         return (
           /* below the app's dialogs (z-50), so a step-up prompt from a window shows on top */
-          <DeviceWindowFrame key={w.id} win={w} z={30 + i} top={i === order.length - 1} onFocus={focus} onClose={close} onChange={update} onOpenPage={onOpenPage}>
+          <DeviceWindowFrame key={w.id} win={w} z={30 + i} top={i === order.length - 1} extra={renderTitle?.(w.id)} onFocus={focus} onClose={close} onChange={update} onOpenPage={onOpenPage}>
             <Body id={w.id} render={renderBody} />
           </DeviceWindowFrame>
         );
@@ -124,6 +153,7 @@ type FrameProps = {
   win: Win;
   z: number;
   top: boolean;
+  extra?: ReactNode;
   children: ReactNode;
   onFocus: (id: number) => void;
   onClose: (id: number) => void;
@@ -131,7 +161,7 @@ type FrameProps = {
   onOpenPage: (id: number) => void;
 };
 
-function DeviceWindowFrame({ win, z, top, children, onFocus, onClose, onChange, onOpenPage }: FrameProps) {
+function DeviceWindowFrame({ win, z, top, extra, children, onFocus, onClose, onChange, onOpenPage }: FrameProps) {
   const { t } = useTranslation();
   const titleId = useId();
   const self = useRef<HTMLElement>(null);
@@ -187,9 +217,10 @@ function DeviceWindowFrame({ win, z, top, children, onFocus, onClose, onChange, 
         onPointerUp={end}
         onPointerCancel={end}
       >
-        <h2 id={titleId} className="min-w-0 flex-1 truncate text-sm font-semibold">
+        <h2 id={titleId} className="min-w-0 truncate text-sm font-semibold" title={win.title}>
           {win.title}
         </h2>
+        <div className="flex min-w-0 flex-1 items-center gap-2">{extra}</div>
         <Button size="xs" variant="ghost" onClick={() => onOpenPage(win.id)}>
           <ExternalLink />
           {t("windows.openPage")}

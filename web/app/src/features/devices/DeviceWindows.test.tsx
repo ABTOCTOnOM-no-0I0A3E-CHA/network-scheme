@@ -49,6 +49,32 @@ describe("device windows", () => {
     expect(z("core-sw")).toBeGreaterThan(z("edge-rtr"));
   });
 
+  it("opens at about 760x560 beside the click that opened it, the next one cascaded", async () => {
+    setup();
+    fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
+    fireEvent.click(screen.getByRole("button", { name: "open 1" }));
+    const a = screen.getByRole("dialog", { name: "core-sw" });
+    expect([a.style.width, a.style.height]).toEqual(["760px", "560px"]);
+    expect([a.style.left, a.style.top]).toEqual(["132px", "102px"]);
+    fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
+    fireEvent.click(screen.getByRole("button", { name: "open 2" }));
+    const b = screen.getByRole("dialog", { name: "edge-rtr" });
+    expect([b.style.left, b.style.top]).toEqual(["160px", "130px"]);
+    /* opened from the keyboard after a click: centred, not beside the old click */
+    fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
+    fireEvent.keyDown(window, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "open 3" }));
+    expect(screen.getAllByRole("dialog").at(-1)!.style.top).toBe(`${72 + 2 * 28}px`);
+  });
+
+  it("opens left of a click near the right edge", () => {
+    setup();
+    fireEvent.pointerDown(window, { clientX: window.innerWidth - 100, clientY: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "open 1" }));
+    const a = screen.getByRole("dialog", { name: "core-sw" });
+    expect(parseFloat(a.style.left) + 760).toBeLessThanOrEqual(window.innerWidth - 100);
+  });
+
   it("brings a window to the front when it is clicked", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "open 1" }));

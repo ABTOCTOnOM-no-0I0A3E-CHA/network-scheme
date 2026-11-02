@@ -11,6 +11,7 @@ import { fingerprint } from "@/lib/keys";
 import { toBase64 } from "@/lib/seal";
 import { safeText } from "@/lib/text";
 import { DeviceCard } from "./DeviceCard";
+import type { TabRef } from "./tabs";
 
 const err = (status: number, code: string) => HttpResponse.json({ error: { code, message: "RAW SERVER MESSAGE" } }, { status });
 const detail = (over: Record<string, unknown> = {}) => ({
@@ -101,13 +102,19 @@ afterEach(() => {
 });
 afterAll(() => server.close());
 
-function setup(canPoll: boolean, canManage = false) {
+function setup(canPoll: boolean, canManage = false, tab?: TabRef, variant?: "page" | "window") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <DeviceCard id={7} canPoll={canPoll} canManage={canManage} />
+      <DeviceCard id={7} canPoll={canPoll} canManage={canManage} tab={tab} variant={variant} />
     </QueryClientProvider>,
   );
+}
+
+/* opens "Данные" and one of its tables */
+async function openData(table: string) {
+  await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.data }));
+  await userEvent.click(await screen.findByRole("tab", { name: table }));
 }
 
 describe("DeviceCard", () => {
@@ -132,12 +139,12 @@ describe("DeviceCard", () => {
     const { rerender } = render(ui(7));
     await userEvent.click(await screen.findByRole("button", { name: ru.card.edit.open }));
     expect(within(screen.getByRole("form", { name: ru.card.edit.title })).getByLabelText(ru.devices.addDialog.address)).toHaveValue("192.0.2.10");
-    await userEvent.click(screen.getByRole("tab", { name: ru.card.tab.lldp }));
+    await openData(ru.card.tab.lldp);
 
     rerender(ui(8));
     expect(await screen.findByRole("heading", { name: "edge-sw" })).toBeInTheDocument();
     expect(screen.queryByRole("form", { name: ru.card.edit.title })).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: ru.card.tab.interfaces })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: ru.card.tab.physical })).toHaveAttribute("aria-selected", "true");
     /* opening the form again shows the new device's values; saving unchanged values sends nothing */
     await userEvent.click(screen.getByRole("button", { name: ru.card.edit.open }));
     const form = screen.getByRole("form", { name: ru.card.edit.title });
@@ -148,14 +155,19 @@ describe("DeviceCard", () => {
     expect(patched).toBeUndefined();
   });
 
-  it("shows last_error as truncated plain text and hides it when empty", async () => {
+  it("maps the poller's fixed last_error texts to messages, never shows unknown server text, hides an empty one", async () => {
+    deviceFn = () => HttpResponse.json(detail({ last_error: "no usable SNMP credential" }));
+    setup(false);
+    let line = (await screen.findByText(ru.card.lastError + ":")).closest("p")!;
+    expect(line).toHaveTextContent(ru.lastError.noProfile);
+    expect(line).not.toHaveTextContent("no usable SNMP credential");
+    cleanup();
     deviceFn = () => HttpResponse.json(detail({ last_error: HOSTILE }));
     setup(false);
-    const line = (await screen.findByText(ru.card.lastError + ":")).closest("p")!;
-    expect(line).toHaveClass("truncate");
-    expect(line).toHaveAttribute("title", safeText(HOSTILE));
+    line = (await screen.findByText(ru.card.lastError + ":")).closest("p")!;
+    expect(line).toHaveTextContent(ru.lastError.other);
+    expect(line.textContent).not.toContain("evil");
     expect(line.querySelector("script")).toBeNull();
-    expect(line.textContent).not.toContain("");
     cleanup();
     deviceFn = () => HttpResponse.json(detail({ last_error: "" }));
     setup(false);
@@ -210,7 +222,7 @@ describe("DeviceCard", () => {
 
   it("renders hostile device strings as text and keeps long ones wrappable", async () => {
     deviceFn = () => HttpResponse.json(detail({ model: LONG, firmware: HOSTILE, name: HOSTILE }));
-    setup(false);
+    setup(false, false, "data/interfaces");
     const safe = safeText(HOSTILE);
     expect(safe).toBe("<script>alert(1)</script>��evil");
     expect(await screen.findByRole("heading", { name: safe })).toBeInTheDocument();
@@ -224,13 +236,14 @@ describe("DeviceCard", () => {
     expect(alias).toHaveAttribute("title", LONG);
     await userEvent.click(screen.getByRole("tab", { name: ru.card.tab.lldp }));
     expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
-    expect(document.querySelector("img")).toBeNull();
+    /* the only image is the role pictogram of the header */
+    expect(document.querySelector("img:not([data-slot=role-icon])")).toBeNull();
     expect(screen.getByText("�p")).toBeInTheDocument();
   });
 
   it("the chart button of an interface opens the graphs tab for it", async () => {
     deviceFn = () => HttpResponse.json(detail());
-    setup(false);
+    setup(false, false, "data/interfaces");
     await userEvent.click(await screen.findByRole("button", { name: ru.card.chartBtn.replace("{{name}}", "ge0/2") }));
     expect(screen.getByRole("tab", { name: ru.card.tab.graphs })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByText(ru.chart.empty)).toBeInTheDocument();
@@ -253,7 +266,7 @@ describe("DeviceCard", () => {
 
   it("pages with next_offset", async () => {
     deviceFn = () => HttpResponse.json(detail());
-    setup(false);
+    setup(false, false, "data/interfaces");
     await screen.findByText("ge0/2");
     expect(screen.getByRole("button", { name: ru.card.prev })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: ru.card.next }));
@@ -267,7 +280,7 @@ describe("DeviceCard", () => {
   it("profiles tab shows status and date for a viewer, never content", async () => {
     deviceFn = () => HttpResponse.json(detail());
     setup(false, false);
-    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.profiles }));
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.access }));
     expect(await screen.findByText(new RegExp(ru.profile.status.weak))).toBeInTheDocument();
     expect(screen.getAllByText(new RegExp(ru.profile.status.none))).toHaveLength(2);
     expect(document.querySelector("input")).toBeNull();
@@ -276,7 +289,7 @@ describe("DeviceCard", () => {
   it("manager gets the credential forms and the charts slot tab", async () => {
     deviceFn = () => HttpResponse.json(detail());
     setup(false, true);
-    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.profiles }));
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.access }));
     expect(await screen.findAllByRole("button", { name: ru.profile.save })).toHaveLength(3);
     expect(screen.getByRole("tab", { name: ru.card.tab.graphs })).toBeInTheDocument();
   });
@@ -305,10 +318,12 @@ describe("DeviceCard", () => {
     expect(await within(form).findByRole("alert")).toHaveTextContent("от 60 до 86400");
   });
 
-  it("problems tab lists the problems of this device only", async () => {
+  it("journal lists the problems of this device only and has no backup list", async () => {
     deviceFn = () => HttpResponse.json(detail());
     setup(false);
-    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.problems }));
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.journal }));
+    expect(screen.getByRole("region", { name: ru.journal.sessions })).toHaveTextContent(ru.journal.sessionsEmpty);
+    expect(screen.queryByText(ru.backup.versions)).not.toBeInTheDocument();
     expect(await screen.findByText(ru.problems.empty)).toBeInTheDocument();
     expect(problemQuery?.get("device_id")).toBe("7");
   });
@@ -363,5 +378,42 @@ describe("DeviceCard", () => {
     await userEvent.selectOptions(role, "");
     await userEvent.click(within(form).getByRole("button", { name: ru.profile.save }));
     await waitFor(() => expect(patched).toEqual({ role: null }));
+  });
+
+  it("has the FR-UI-DEV tabs in order with Физика first and selected", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(false);
+    await screen.findByRole("heading", { name: "core-sw" });
+    const bar = screen.getAllByRole("tablist")[0];
+    const tabs = within(bar).getAllByRole("tab");
+    /* CLI is hidden without devices.show */
+    expect(tabs.map((t) => t.textContent)).toEqual([ru.card.tab.physical, ru.card.tab.config, ru.card.tab.data, ru.card.tab.graphs, ru.card.tab.backups, ru.card.tab.journal, ru.card.tab.access]);
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(bar).not.toHaveClass("flex-wrap");
+    await userEvent.click(screen.getByRole("tab", { name: ru.card.tab.data }));
+    const sub = screen.getAllByRole("tablist")[1];
+    expect(
+      within(sub)
+        .getAllByRole("tab")
+        .map((t) => t.textContent),
+    ).toEqual([ru.card.tab.interfaces, ru.card.tab.arp, ru.card.tab.mac, ru.card.tab.vlans, ru.card.tab.lldp, ru.card.tab.routes, ru.card.tab.entities]);
+    expect(ru.card.tab.entities).toBe("Компоненты");
+  });
+
+  it("opens a data table from a deep link", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(false, false, "data/lldp");
+    expect(await screen.findByRole("tab", { name: ru.card.tab.data })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: ru.card.tab.lldp })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
+  });
+
+  it("in a window shows no name heading of its own; the facts and actions stay", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    setup(true, false, undefined, "window");
+    expect(await screen.findByText("MES2324")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "core-sw" })).not.toBeInTheDocument();
+    expect(screen.queryByText("core-sw")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: ru.card.pollNow })).toBeInTheDocument();
   });
 });

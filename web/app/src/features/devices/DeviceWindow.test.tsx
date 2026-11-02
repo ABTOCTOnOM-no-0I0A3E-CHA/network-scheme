@@ -12,6 +12,7 @@ import { CliTab } from "./CliTab";
 import { ConfigTab } from "./ConfigTab";
 import { DeviceCard } from "./DeviceCard";
 import { ESR_INTERFACES, GENERIC_INTERFACES, MES_INTERFACES } from "./fixtures";
+import { layoutPanel } from "./FrontPanel";
 import { frontPanel, PhysicalTab } from "./PhysicalTab";
 import type { TableRows } from "./api";
 
@@ -27,7 +28,26 @@ let ifaces: TableRows["interfaces"][] = [];
 let stateFn: () => Response;
 let showBody: unknown;
 const server = setupServer(
-  http.get("*/api/devices/7", () => HttpResponse.json({ id: 7, name: "sw", address: "192.0.2.10", group_id: 1, driver: "eltex-mes", model: "MES2324", firmware: "", insecure_protocols: false, state: "up", state_since: seen, snmp_port: 161, interval_avail_s: null, interval_metrics_s: null, interval_inventory_s: null, parent_id: null, last_error: null })),
+  http.get("*/api/devices/7", () =>
+    HttpResponse.json({
+      id: 7,
+      name: "sw",
+      address: "192.0.2.10",
+      group_id: 1,
+      driver: "eltex-mes",
+      model: "MES2324",
+      firmware: "",
+      insecure_protocols: false,
+      state: "up",
+      state_since: seen,
+      snmp_port: 161,
+      interval_avail_s: null,
+      interval_metrics_s: null,
+      interval_inventory_s: null,
+      parent_id: null,
+      last_error: null,
+    }),
+  ),
   http.get("*/api/devices/7/interfaces", () => HttpResponse.json({ items: ifaces, next_offset: null })),
   http.get("*/api/devices/7/mac", () => HttpResponse.json({ items: [{ mac: "00:11:22:33:44:55", vlan: 10, if_index: 49, seen_at: seen }], next_offset: null })),
   http.get("*/api/devices/7/lldp", () => HttpResponse.json({ items: [], next_offset: null })),
@@ -36,12 +56,21 @@ const server = setupServer(
   http.get("*/api/devices/7/backups", () => HttpResponse.json({ items: [version(2), version(1, { drift: true })], next_cursor: null })),
   http.get("*/api/devices/7/backups/diff", () => HttpResponse.json({ a: { id: 1, taken_at: seen }, b: { id: 2, taken_at: seen }, diff: `--- a\n+++ b\n@@ -1 +1 @@\n-hostname old\n+${HOSTILE}\n` })),
   http.get("*/api/devices/7/backups/:vid", () => HttpResponse.json({ ...version(2), text: `hostname sw\ninterface gi1/0/1\n description ${HOSTILE}\nexit\nsnmp-server community *** ro\n` })),
-  http.get("*/api/devices/7/show-commands", () => HttpResponse.json({ commands: [{ key: "interface_status", args: ["interface"] }, { key: "vlan", args: ["vlan"] }] })),
+  http.get("*/api/devices/7/show-commands", () =>
+    HttpResponse.json({
+      commands: [
+        { key: "interface_status", args: ["interface"] },
+        { key: "vlan", args: ["vlan"] },
+      ],
+    }),
+  ),
   http.post("*/api/devices/7/show", async ({ request }) => {
     showBody = await request.json();
     return HttpResponse.json({ id: 5 }, { status: 202 });
   }),
-  http.get("*/api/show/5", () => HttpResponse.json({ id: 5, device_id: 7, key: "interface_status", args: {}, status: "done", requested_at: seen, finished_at: seen, output: `Port  Status\n${HOSTILE}\n`, truncated: true })),
+  http.get("*/api/show/5", () =>
+    HttpResponse.json({ id: 5, device_id: 7, key: "interface_status", args: {}, status: "done", requested_at: seen, finished_at: seen, output: `Port  Status\n${HOSTILE}\n`, truncated: true }),
+  ),
   http.get("*/api/events", () => HttpResponse.json({ items: [], next_cursor: null })),
 );
 
@@ -83,6 +112,57 @@ describe("Физика", () => {
     expect(ports).toHaveLength(rj45 + sfp);
     /* status indicators follow oper_up */
     expect(container.querySelectorAll('[data-oper="up"]')).toHaveLength(rows.filter((r) => r.port_kind !== "other" && r.oper_up).length);
+  });
+
+  it.each([
+    ["MES", MES_INTERFACES],
+    ["ESR", ESR_INTERFACES],
+    ["generic", GENERIC_INTERFACES],
+  ])("lays out the %s faceplate: odd ports on top, even below, SFP cages right of the RJ-45 block", (_name, rows) => {
+    const p = frontPanel(rows);
+    const { ports, width } = layoutPanel(p.rj45, p.sfp);
+    expect(ports.filter((x) => x.kind === "rj45")).toHaveLength(p.rj45.length);
+    expect(ports.filter((x) => x.kind === "sfp")).toHaveLength(p.sfp.length);
+    for (const x of ports) expect(x.row).toBe(Number(x.label) % 2 === 1 ? 0 : 1);
+    const rjRight = Math.max(0, ...ports.filter((x) => x.kind === "rj45").map((x) => x.x));
+    for (const x of ports.filter((q) => q.kind === "sfp")) expect(x.x).toBeGreaterThan(rjRight);
+    for (const x of ports) expect(x.x).toBeLessThan(width);
+  });
+
+  it("scales from a 48-port switch down to a small router", () => {
+    const big = Array.from({ length: 48 }, (_, i) => ({ ...MES_INTERFACES[0], if_index: i + 1, name: `gi1/0/${i + 1}` }));
+    const wide = layoutPanel(big, frontPanel(MES_INTERFACES).sfp).width;
+    const narrow = layoutPanel(frontPanel(ESR_INTERFACES).rj45, frontPanel(ESR_INTERFACES).sfp).width;
+    expect(wide).toBeGreaterThan(layoutPanel(frontPanel(MES_INTERFACES).rj45, frontPanel(MES_INTERFACES).sfp).width);
+    expect(narrow).toBeLessThan(wide);
+  });
+
+  it("draws the faceplate with brand, model and console; hostile port names stay text", async () => {
+    ifaces = [...GENERIC_INTERFACES, { ...GENERIC_INTERFACES[0], if_index: 77, name: "<img src=x onerror=alert(1)>7" }];
+    const { container } = wrap(<PhysicalTab deviceId={7} onShowChart={() => {}} device={{ model: "MES2324<b>", driver: "eltex-mes", state: "up" }} />);
+    await screen.findByText(ru.phys.hoverHint);
+    expect(container.querySelector("[data-slot=faceplate]")).not.toBeNull();
+    expect(container.querySelector("[data-slot=console]")).not.toBeNull();
+    expect(screen.getByText("ELTEX")).toBeInTheDocument();
+    expect(container.querySelector("[data-slot=faceplate-model]")?.textContent).toBe("MES2324<b>");
+    expect(container.querySelector("img, b")).toBeNull();
+    expect(screen.getByRole("button", { name: /^Порт <img src=x onerror=alert\(1\)>7:/ })).toBeInTheDocument();
+  });
+
+  it("is one tab stop: arrows move between ports, Enter opens the port card", async () => {
+    ifaces = MES_INTERFACES;
+    const { container } = wrap(<PhysicalTab deviceId={7} onShowChart={() => {}} />);
+    await screen.findByText(ru.phys.hoverHint);
+    expect(container.querySelectorAll('[data-port-kind][tabindex="0"]')).toHaveLength(1);
+    const first = screen.getByRole("button", { name: /^Порт gi1\/0\/1:/ });
+    first.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    const second = screen.getByRole("button", { name: /^Порт gi1\/0\/2:/ });
+    expect(second).toHaveFocus();
+    expect(screen.getByTestId("port-hint")).toHaveTextContent("gi1/0/2");
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByRole("region", { name: "Карточка порта gi1/0/2" })).toBeInTheDocument();
+    expect(second).toHaveAttribute("tabindex", "0");
   });
 
   it("orders ports naturally and leaves logical interfaces off the panel", () => {
@@ -215,7 +295,7 @@ describe("device window tabs", () => {
       </QueryClientProvider>
     );
     const { rerender } = render(card(false));
-    expect(await screen.findByRole("tab", { name: ru.card.tab.interfaces })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: ru.card.tab.physical })).toHaveAttribute("aria-selected", "true");
     rerender(card(true));
     expect(await screen.findByRole("tab", { name: ru.card.tab.cli })).toHaveAttribute("aria-selected", "true");
   });
@@ -233,7 +313,7 @@ describe("device window tabs", () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
       link = { href: this.getAttribute("href") ?? "", download: this.download };
     });
-    wrap(<DeviceCard id={7} canPoll={false} canManage={false} />);
+    wrap(<DeviceCard id={7} canPoll={false} canManage={false} tab="data/interfaces" />);
     const table = await screen.findByRole("table", { name: ru.card.tab.interfaces });
     await within(table).findByText("Gi1/0/2");
     await userEvent.type(screen.getByLabelText(ru.data.search), "gi1/0/2");

@@ -104,9 +104,12 @@ test("device added through the UI is polled, charted and a scan is scheduled", a
     )
     .toEqual({ state: "up", interfaces: true });
 
+  /* the card opens on Физика; the interface table is under Данные */
   await page.reload();
   await expect(page.getByText("Доступно", { exact: true })).toBeVisible();
-  await expect(page.getByRole("tabpanel").getByRole("row").nth(1)).toBeVisible();
+  await expect(page.locator('[data-slot="faceplate"]')).toBeVisible();
+  await page.getByRole("tab", { name: "Данные" }).click();
+  await expect(page.getByRole("table", { name: "Интерфейсы" }).getByRole("row").nth(1)).toBeVisible();
 
   /* Charts: rates need two metric samples (the default interval is a minute); give them time, then open the chart. */
   const to = new Date();

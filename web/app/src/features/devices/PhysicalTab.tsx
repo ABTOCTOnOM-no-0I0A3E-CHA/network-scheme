@@ -6,7 +6,10 @@ import { formatBps } from "@/features/charts/series";
 import { ApiError } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
+import type { DeviceState } from "@/features/common/StateBadge";
+import { EmptyState } from "@/features/common/EmptyState";
 import { useDeviceTable, useIfMetrics, type TableRows } from "./api";
+import { FrontPanel } from "./FrontPanel";
 
 type Iface = TableRows["interfaces"];
 type Kind = "rj45" | "sfp";
@@ -25,15 +28,18 @@ export function frontPanel(rows: Iface[]): Record<Kind, Iface[]> {
   return out;
 }
 
-/* the number printed on a port: the last number of its name, else its if_index */
-function portLabel(r: Iface): string {
-  return /(\d+)\s*$/.exec(r.name)?.[1] ?? String(r.if_index);
-}
+type Props = {
+  deviceId: number;
+  onShowChart: (ifIndex: number) => void;
+  /** Faceplate print: model, driver (for the brand text) and state (for the system LEDs). */
+  device?: { model: string; driver: string; state: DeviceState };
+};
 
-type Props = { deviceId: number; onShowChart: (ifIndex: number) => void };
+/* the brand printed on the faceplate, as text: only for drivers of a known vendor */
+const brandOf = (driver: string | undefined) => (driver?.startsWith("eltex") ? "ELTEX" : undefined);
 
 /** "Физика" tab: front panel built from the interface inventory; hover shows speed, VLAN and traffic, a click opens the port card. */
-export function PhysicalTab({ deviceId, onShowChart }: Props) {
+export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
   const { t } = useTranslation();
   const ifaces = useDeviceTable(deviceId, "interfaces", { limit: 1000 });
   const macs = useDeviceTable(deviceId, "mac", { limit: 1000 });
@@ -64,53 +70,41 @@ export function PhysicalTab({ deviceId, onShowChart }: Props) {
   }
   const all = rows ?? [];
   const others = all.length - panel.rj45.length - panel.sfp.length;
+  const up = panel.rj45.filter((r) => r.oper_up).length + panel.sfp.filter((r) => r.oper_up).length;
   const byIndex = (i: number | undefined) => all.find((r) => r.if_index === i);
   const hovered = byIndex(hover);
   const opened = byIndex(open);
 
   return (
-    <div className="grid gap-4" data-slot="front-panel">
+    <div className="grid gap-3" data-slot="front-panel">
       {panel.rj45.length + panel.sfp.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t("phys.noPorts")}</p>
+        <EmptyState title={t("phys.noPorts")} hint={t("phys.noPortsHint")} />
       ) : (
-        <div className="flex flex-wrap items-start gap-6 overflow-x-auto rounded-md border bg-muted/40 p-4">
-          {KINDS.filter((k) => panel[k].length > 0).map((k) => (
-            <div key={k} className="grid gap-1">
-              <span className="text-xs text-muted-foreground">{t(`phys.kind.${k}`, { count: panel[k].length })}</span>
-              <div role="group" aria-label={t(`phys.kind.${k}`, { count: panel[k].length })} className="grid grid-flow-col grid-rows-2 gap-1">
-                {panel[k].map((r) => (
-                  <button
-                    key={r.if_index}
-                    type="button"
-                    data-port-kind={k}
-                    data-oper={r.oper_up ? "up" : "down"}
-                    aria-label={t("phys.port", { name: safeText(r.name), state: t(r.oper_up ? "card.up" : "card.down") })}
-                    aria-pressed={open === r.if_index}
-                    title={safeText(r.name)}
-                    className={cn(
-                      "flex items-end justify-center border-2 font-mono text-[10px] leading-none",
-                      k === "sfp" ? "h-7 w-10 rounded-sm" : "h-8 w-8 rounded-[3px]",
-                      r.oper_up ? "border-emerald-700 bg-emerald-500 text-white dark:border-emerald-400" : "border-border bg-background text-muted-foreground",
-                      open === r.if_index && "ring-2 ring-primary",
-                    )}
-                    onMouseEnter={() => setHover(r.if_index)}
-                    onMouseLeave={() => setHover(undefined)}
-                    onFocus={() => setHover(r.if_index)}
-                    onBlur={() => setHover(undefined)}
-                    onClick={() => setOpen(open === r.if_index ? undefined : r.if_index)}
-                  >
-                    {safeText(portLabel(r))}
-                  </button>
-                ))}
-              </div>
+        <>
+          <div className="flex justify-center overflow-x-auto rounded-xl border bg-gradient-to-b from-muted/40 to-muted px-3 py-4 dark:from-muted/20 dark:to-muted/60">
+            <FrontPanel
+              rj45={panel.rj45}
+              sfp={panel.sfp}
+              model={device?.model ?? ""}
+              brand={brandOf(device?.driver)}
+              state={device?.state}
+              hover={hover}
+              selected={open}
+              onHover={setHover}
+              onSelect={(i) => setOpen(open === i ? undefined : i)}
+            />
+          </div>
+          <div className="grid gap-1 text-xs text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <Legend tone="bg-emerald-400" label={t("phys.legend.link")} />
+              <Legend tone="bg-amber-400" label={t("phys.legend.slow")} />
+              <Legend tone="bg-zinc-500" label={t("phys.legend.noLink")} />
             </div>
-          ))}
-        </div>
+            <span>{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
+          </div>
+        </>
       )}
-      <p className="text-xs text-muted-foreground">
-        {t("phys.summary", { rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}
-      </p>
-      <div aria-live="polite" className="min-h-10 text-sm" data-testid="port-hint">
+      <div aria-live="polite" className="min-h-10 rounded-md border bg-muted/30 px-3 py-2 text-sm" data-testid="port-hint">
         {hovered ? <PortHint deviceId={deviceId} port={hovered} vlans={vlans.get(hovered.if_index)} /> : <span className="text-muted-foreground">{t("phys.hoverHint")}</span>}
       </div>
       {opened && (
@@ -124,6 +118,15 @@ export function PhysicalTab({ deviceId, onShowChart }: Props) {
         />
       )}
     </div>
+  );
+}
+
+function Legend({ tone, label }: { tone: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span aria-hidden="true" className={cn("inline-block h-1.5 w-3 rounded-sm", tone)} />
+      {label}
+    </span>
   );
 }
 

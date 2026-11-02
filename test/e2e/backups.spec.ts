@@ -209,8 +209,11 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   await goto(`/devices/${mes}`);
   await expect(page.getByRole("heading", { name: "e2e-mes" })).toBeVisible();
   await page.getByRole("tab", { name: "Физика" }).click();
-  await expect(page.getByRole("group", { name: "RJ-45: 24" }).getByRole("button", { name: /^Порт gi1\/0\/1:/ })).toBeVisible();
-  await expect(page.getByRole("group", { name: "SFP: 4" }).getByRole("button", { name: /^Порт te1\/0\/1:/ })).toBeVisible();
+  const faceplate = page.getByRole("group", { name: /^Передняя панель / });
+  await expect(faceplate.locator('[data-port-kind="rj45"]')).toHaveCount(24);
+  await expect(faceplate.locator('[data-port-kind="sfp"]')).toHaveCount(4);
+  await expect(faceplate.getByRole("button", { name: /^Порт gi1\/0\/1:/ })).toBeVisible();
+  await expect(faceplate.getByRole("button", { name: /^Порт te1\/0\/1:/ })).toBeVisible();
   await seen.page(page, "physical");
 
   /* Конфиг: the masked copy split into sections. */
@@ -292,8 +295,10 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   await expect(shown.locator("div").filter({ hasText: /^\+\s+description uplink-e2e$/ })).toHaveCount(1);
   await expect(shown.locator("div").filter({ hasText: /^-\s+description uplink$/ })).toHaveCount(1);
   await seen.page(page, "diff");
+  /* the journal holds the device's problems, events and sessions; backups (and drift) live on their own tab only */
   await page.getByRole("tab", { name: "Журнал" }).click();
-  await expect(page.getByText("Конфигурация изменена вне панели (вручную)")).toBeVisible();
+  await expect(page.getByRole("region", { name: "История сессий изменений" })).toBeVisible();
+  await expect(page.getByText("Конфигурация изменена вне панели")).toHaveCount(0);
   await seen.page(page, "journal");
 
   /* Not one known secret anywhere the test looked. */

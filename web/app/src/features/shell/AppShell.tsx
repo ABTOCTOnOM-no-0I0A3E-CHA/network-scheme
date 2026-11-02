@@ -7,7 +7,7 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { canAckProblems, canBackupDevices, canListGroups, canManageDevices, canPollDevices, canShowDevices } from "@/features/auth/permissions";
 import { logout, useSession } from "@/features/auth/useSession";
-import { DeviceCard } from "@/features/devices/DeviceCard";
+import { DeviceCard, DeviceStateBadge } from "@/features/devices/DeviceCard";
 import { DeviceWindowsProvider } from "@/features/devices/DeviceWindows";
 import { StepUpDialog } from "@/features/common/StepUpDialog";
 import { NotificationCenter } from "@/features/notify/NotificationCenter";
@@ -52,11 +52,20 @@ export function AppShell() {
   };
 
   const deviceBody = (id: number) => (
-    <DeviceCard id={id} canPoll={canPollDevices(session)} canManage={canManageDevices(session)} canAck={canAckProblems(session)} canListGroups={canListGroups(session)} canShow={canShowDevices(session)} canBackup={canBackupDevices(session)} />
+    <DeviceCard
+      id={id}
+      canPoll={canPollDevices(session)}
+      canManage={canManageDevices(session)}
+      canAck={canAckProblems(session)}
+      canListGroups={canListGroups(session)}
+      canShow={canShowDevices(session)}
+      canBackup={canBackupDevices(session)}
+      variant="window"
+    />
   );
 
   return (
-    <DeviceWindowsProvider renderBody={deviceBody} onOpenPage={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}>
+    <DeviceWindowsProvider renderBody={deviceBody} renderTitle={(id) => <DeviceStateBadge id={id} />} onOpenPage={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}>
       <SidebarProvider>
         <Sidebar />
         <SidebarInset>
