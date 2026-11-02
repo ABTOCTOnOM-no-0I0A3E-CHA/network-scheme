@@ -3,8 +3,10 @@ package pub_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
@@ -406,10 +409,16 @@ func TestPublisherWriters(t *testing.T) {
 		_, _ = e.env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = 900001;
 			DELETE FROM execpub.session_summary WHERE device_id = 900001`)
 	})
-	if err := p.Busy(ctx, 900001, a); err != nil {
+	if err := p.Busy(ctx, 900001, netip.Addr{}, a); err == nil {
+		t.Error("busy without the executor's address accepted")
+	}
+	if err := p.Busy(ctx, 900001, netip.MustParseAddr("::ffff:10.9.9.9"), a); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Busy(ctx, 900001, b); !errors.Is(err, pub.ErrDeviceBusy) {
+	if n := e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001 AND address = '10.9.9.9'`); n != 1 {
+		t.Fatal("busy address not stored unmapped")
+	}
+	if err := p.Busy(ctx, 900001, netip.MustParseAddr("10.9.9.9"), b); !errors.Is(err, pub.ErrDeviceBusy) {
 		t.Fatalf("second session on a busy device: %v", err)
 	}
 	if err := p.Free(ctx, 900001, b); err != nil || e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001`) != 1 {
@@ -476,5 +485,184 @@ func TestFailedFreezeWriteKeepsTheRequest(t *testing.T) {
 	}
 	if n := e.count(t, `SELECT count(*) FROM execpub.freeze_request`); n != 0 || !e.recorded(t) {
 		t.Fatalf("retry: %d requests, recorded %v", n, e.recorded(t))
+	}
+}
+
+/* The status row is rewritten every heartbeat even when nothing changes, so its "at" tells the panel the executor is alive. */
+func TestStatusHeartbeat(t *testing.T) {
+	defer pub.SetTiming(300*time.Millisecond, time.Hour)()
+	e := fresh(t)
+	e.run(t)
+	at := func() (ts time.Time) {
+		t.Helper()
+		if err := e.env.Pool("postgres").QueryRow(context.Background(), `SELECT coalesce(max(at), '2000-01-01') FROM execpub.status`).Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+	within(t, 5*time.Second, "status published", func() bool { return time.Since(at()) < time.Minute })
+	first := at()
+	within(t, 5*time.Second, "status rewritten without a change", func() bool { return at().After(first) })
+}
+
+/* A flood of wake-ups (anyone may NOTIFY) reads freeze_request at most once every minProbe. */
+func TestWakeFloodIsBounded(t *testing.T) {
+	defer pub.SetPace(time.Hour, time.Hour)()
+	e := fresh(t)
+	e.run(t)
+	time.Sleep(500 * time.Millisecond)
+	before := e.c.Probes()
+	start := time.Now()
+	for time.Since(start) < 2*time.Second {
+		e.c.Wake()
+		time.Sleep(time.Millisecond)
+	}
+	got := e.c.Probes() - before
+	if limit := int64(2*time.Second/pub.MinProbe) + 2; got > limit || got < 2 {
+		t.Fatalf("%d reads in 2 s of wake-ups, want 2..%d", got, limit)
+	}
+}
+
+/* A lost LISTEN connection is opened again: with polling off, a request still freezes through the new one. */
+func TestListenReconnects(t *testing.T) {
+	defer pub.SetPace(time.Hour, time.Hour)()
+	defer pub.SetTiming(30*time.Second, 200*time.Millisecond)()
+	e := fresh(t)
+	e.run(t)
+	listener := func() (pid int) {
+		t.Helper()
+		_ = e.env.Pool("postgres").QueryRow(context.Background(), `SELECT coalesce(max(pid), 0) FROM pg_stat_activity
+			WHERE usename = 'nms_executor' AND query ILIKE 'LISTEN%'`).Scan(&pid)
+		return pid
+	}
+	within(t, 5*time.Second, "listening", func() bool { return listener() != 0 })
+	old := listener()
+	if _, err := e.env.Pool("postgres").Exec(context.Background(), `SELECT pg_terminate_backend($1)`, old); err != nil {
+		t.Fatal(err)
+	}
+	within(t, 5*time.Second, "listening again", func() bool { p := listener(); return p != 0 && p != old })
+	time.Sleep(200 * time.Millisecond)
+	e.request(t, 12)
+	within(t, 5*time.Second, "frozen through the new LISTEN", e.frozen)
+}
+
+/* A panel request on an executor the host already froze keeps the host's reason in exec_state. */
+func TestRequestKeepsAnExistingFreezeReason(t *testing.T) {
+	e := fresh(t)
+	ctx := context.Background()
+	e.g.Trigger(ctx, freeze.KindHostFreeze, "host: maintenance")
+	e.request(t, 13)
+	if err := e.c.Consume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	if err := e.env.Pool("postgres").QueryRow(ctx, `SELECT freeze_reason FROM exec.exec_state`).Scan(&reason); err != nil || reason != "host: maintenance" {
+		t.Fatalf("freeze_reason %q (%v)", reason, err)
+	}
+}
+
+/* The guard's own alerts (reasons carry database errors) are cleaned at the database boundary as well. */
+func TestGuardAlertTextIsCleaned(t *testing.T) {
+	e := fresh(t)
+	e.g.Trigger(context.Background(), freeze.KindTamper, "bad MAC\x1b[31m in \u202eexec\x00"+strings.Repeat("я", 800))
+	var text string
+	if err := e.env.Pool("postgres").QueryRow(context.Background(), `SELECT text FROM execpub.alert WHERE kind = 'executor_tamper'`).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(text, "bad MAC [31m in  exec ") || len(text) > freeze.MaxAlertText || !utf8.ValidString(text) {
+		t.Fatalf("alert text %q (%d bytes)", text[:min(len(text), 40)], len(text))
+	}
+}
+
+/*
+A request that freezes an unfrozen executor owes its executor_freeze alert
+until a write succeeds: the first write fails (registry locked), the retry
+on the then frozen executor still publishes it, once.
+*/
+func TestFreezeAlertOwedAcrossAFailedWrite(t *testing.T) {
+	e := fresh(t)
+	ctx := context.Background()
+	e.request(t, 14)
+	tx, err := e.env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE exec.exec_state IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	cerr := e.c.Consume(ctx)
+	_ = tx.Rollback(ctx)
+	if cerr == nil || !e.frozen() {
+		t.Fatalf("first consumption: %v, frozen %v", cerr, e.frozen())
+	}
+	if n := e.count(t, `SELECT count(*) FROM execpub.alert WHERE kind = 'executor_freeze'`); n != 0 {
+		t.Fatalf("%d alerts before any write succeeded", n)
+	}
+	if err := e.c.Consume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(t, `SELECT count(*) FROM execpub.alert WHERE kind = 'executor_freeze'`); n != 1 {
+		t.Fatalf("%d executor_freeze alerts, want the owed one", n)
+	}
+}
+
+/*
+The host drops the pending request in its freeze off transaction while a
+consumption that already read it waits for the registry: the consumption
+finds nothing in its own transaction, writes nothing, does not latch again,
+and the freeze off lifts the freeze (no "new freeze arrived"). The
+consumption is held inside freeze off's write, so it always comes second.
+*/
+func TestDroppedRequestDoesNotFreeze(t *testing.T) {
+	e := fresh(t)
+	ctx := context.Background()
+	e.g.Trigger(ctx, freeze.KindHostFreeze, "host: drill")
+	e.request(t, 15)
+	done := make(chan error, 1)
+	err := e.g.FreezeOff(ctx, nil, func(tx *registry.Tx) error {
+		tx.Audit(func(ctx context.Context, tx pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+			if n, _, _, err := pub.DropRequests(ctx, tx); err != nil || n != 1 {
+				return head, fmt.Errorf("dropped %d: %v", n, err)
+			}
+			/* The consumption starts now: it reads the request (not deleted yet for it) and waits for the registry's lock. */
+			go func() { done <- e.c.Consume(context.Background()) }()
+			time.Sleep(300 * time.Millisecond)
+			return audit.Append(audit.Event{UA: "nmsctl", Action: "admin.freeze-off", Object: "executor", Result: audit.OK})(ctx, tx, head)
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("freeze off: %v", err)
+	}
+	if cerr := <-done; !errors.Is(cerr, freeze.ErrNoRequest) {
+		t.Fatalf("consumption after the drop: %v, want freeze.ErrNoRequest", cerr)
+	}
+	if e.frozen() || e.recorded(t) || e.restart(t).frozen() {
+		t.Fatal("a dropped request froze the executor")
+	}
+}
+
+/* The consumption finds the request gone in its own transaction: freeze.ErrNoRequest, nothing written, the early latch undone. */
+func TestRequestGoneInTheTransaction(t *testing.T) {
+	e := fresh(t)
+	ctx := context.Background()
+	e.request(t, 16)
+	err := e.g.Request(ctx, "panel: test", func(ctx context.Context, tx pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+		if _, _, _, err := pub.DropRequests(ctx, tx); err != nil {
+			return head, err
+		}
+		return pub.ConsumeRequest(ctx, tx, head)
+	})
+	if !errors.Is(err, freeze.ErrNoRequest) {
+		t.Fatalf("request gone: %v", err)
+	}
+	if e.frozen() || e.recorded(t) || e.restart(t).frozen() {
+		t.Fatal("frozen without a request")
+	}
+	if n := e.count(t, `SELECT count(*) FROM execpub.freeze_request`); n != 1 {
+		t.Fatalf("%d requests: the rolled back transaction must keep it", n)
+	}
+	if n := e.count(t, `SELECT count(*) FROM execpub.alert WHERE kind = 'executor_freeze'`); n != 0 {
+		t.Fatalf("%d alerts for a freeze that did not happen", n)
 	}
 }

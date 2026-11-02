@@ -765,3 +765,74 @@ func TestExecMigrationOnPhase3Database(t *testing.T) {
 		t.Errorf("api USAGE on exec after upgrade: %v %v", usage, err)
 	}
 }
+
+/*
+The wake-up trigger of 00026 runs with the inserting role's rights and a
+pinned search_path, nobody may call its function directly, and it is the only
+trigger on freeze_request: one statement-level AFTER INSERT.
+*/
+func TestFreezeRequestNotifyTriggerCatalog(t *testing.T) {
+	root := testdb.New(t).Pool("postgres")
+	ctx := context.Background()
+	var secdef bool
+	var config, owner string
+	if err := root.QueryRow(ctx, `SELECT p.prosecdef, coalesce(array_to_string(p.proconfig, ','), ''), pg_get_userbyid(p.proowner)
+		FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'execpub' AND p.proname = 'freeze_request_notify'`).Scan(&secdef, &config, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if secdef || config != "search_path=pg_catalog, pg_temp" || owner != "nms_migrator" {
+		t.Fatalf("function: security definer %v, config %q, owner %q", secdef, config, owner)
+	}
+	for _, role := range []string{"public", "nms_api", "nms_poller", "nms_executor", "nms_eventd", "nms_cli"} {
+		var can bool
+		if err := root.QueryRow(ctx, `SELECT has_function_privilege($1::text, 'execpub.freeze_request_notify()', 'EXECUTE')`, role).Scan(&can); err != nil {
+			t.Fatal(err)
+		}
+		if can {
+			t.Errorf("%s may execute execpub.freeze_request_notify()", role)
+		}
+	}
+	var name string
+	var tgtype int16
+	var n int
+	if err := root.QueryRow(ctx, `SELECT count(*) OVER (), tgname, tgtype FROM pg_trigger
+		WHERE tgrelid = 'execpub.freeze_request'::regclass AND NOT tgisinternal`).Scan(&n, &name, &tgtype); err != nil {
+		t.Fatal(err)
+	}
+	/* tgtype bits: 1 row-level, 2 before, 4 insert, 8 delete, 16 update, 32 truncate, 64 instead. */
+	if n != 1 || name != "freeze_request_notify" || tgtype != 4 {
+		t.Fatalf("triggers on freeze_request: %d, %q type %d; want one statement-level AFTER INSERT", n, name, tgtype)
+	}
+	var funcs int
+	if err := root.QueryRow(ctx, `SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'execpub'`).Scan(&funcs); err != nil || funcs != 1 {
+		t.Fatalf("execpub functions: %d (%v), want 1", funcs, err)
+	}
+}
+
+/*
+00027: device_busy carries the executor's address (host addresses only);
+the executor writes it, the api and the poller read it, nobody else.
+*/
+func TestDeviceBusyAddress(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	exe := env.Pool("nms_executor")
+	t.Cleanup(func() {
+		_, _ = env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id IN (910001, 910002)`)
+	})
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address) VALUES (910001, gen_random_uuid(), '10.1.2.3')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address) VALUES (910002, gen_random_uuid(), '10.1.2.0/24')`); err == nil {
+		t.Error("a network accepted as a busy address")
+	}
+	for _, role := range []string{"nms_poller", "nms_api"} {
+		var n int
+		if err := env.Pool(role).QueryRow(ctx, `SELECT count(*) FROM execpub.device_busy WHERE address = '10.1.2.3'`).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s reads the busy address: %d, %v", role, n, err)
+		}
+		requireDenied(t, role, `UPDATE execpub.device_busy SET address = '10.9.9.9'`)
+	}
+	requireDenied(t, "nms_eventd", `SELECT address FROM execpub.device_busy`)
+}

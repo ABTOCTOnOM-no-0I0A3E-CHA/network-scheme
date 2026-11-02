@@ -156,6 +156,7 @@ func TestExecutorFreezeProblemFollowsTheFreeze(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 	h.alert("executor_unfrozen", "info", 0, "lifted", 0)
+	h.exec(exe, `UPDATE execpub.status SET frozen = false, at = now()`)
 	h.settle()
 	if _, ok := h.sysOpen("executor_freeze", "executor", 0); ok {
 		t.Fatal("a lifted freeze is still a problem")
@@ -204,12 +205,74 @@ func TestEverySystemKindHasNames(t *testing.T) {
 		triggers.SystemSSHMismatch, triggers.SystemConfigDrift, triggers.SystemExecutorTamper, triggers.SystemExecutorBruteforce,
 		triggers.SystemExecutorFreeze, triggers.SystemExecutorPolicyInvalid, triggers.SystemExecutorGuards,
 		triggers.SystemExecutorUnverifiable, triggers.SystemHostKeyMismatchWrite, triggers.SystemMassUnmask,
-		triggers.SystemSessionInterrupted, triggers.SystemSessionOutsideWindow, triggers.SystemExecutorAlert} {
+		triggers.SystemSessionInterrupted, triggers.SystemSessionOutsideWindow, triggers.SystemExecutorAlert,
+		triggers.SystemExecutorUnreachable} {
 		if triggers.SystemName(k) == "System problem" {
 			t.Errorf("%s has no English name", k)
 		}
 		if strings.TrimSpace(ru.Problems.SystemKind[k]) == "" {
 			t.Errorf("%s has no Russian name in ru.json", k)
 		}
+	}
+}
+
+/*
+Review minor 2: an executor_unfrozen marker whose publication was retried
+can be stored after the freeze that followed it. While the executor's fresh
+status says frozen, the newest freeze alert stays open behind it; it resolves
+once the status says not frozen.
+*/
+func TestLateUnfrozenMarkerDoesNotHideAFreeze(t *testing.T) {
+	h := newHarness(t)
+	exe := h.env.Pool("nms_executor")
+	h.exec(exe, `INSERT INTO execpub.status (enabled, frozen) VALUES (true, true)`)
+	h.alert("executor_freeze", "warning", 0, "panel: freeze requested", 2*time.Second)
+	h.alert("executor_unfrozen", "info", 0, "the host lifted the freeze (freeze off)", 0)
+	h.settle()
+	if _, ok := h.sysOpen("executor_freeze", "executor", 0); !ok {
+		t.Fatal("a late marker hid the freeze of a frozen executor")
+	}
+	h.exec(exe, `UPDATE execpub.status SET frozen = false, at = now()`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_freeze", "executor", 0); ok {
+		t.Fatal("freeze problem open on an executor that is not frozen")
+	}
+}
+
+/*
+Review minor 5: a stale status (older than 90 s) never hides a freeze problem
+(its "not frozen" may be old news), and a stale status of an enabled executor
+is a problem of its own, which resolves when the status is fresh again; a
+disabled executor that stopped publishing is not.
+*/
+func TestStaleExecutorStatus(t *testing.T) {
+	h := newHarness(t)
+	exe := h.env.Pool("nms_executor")
+	h.alert("executor_tamper", "disaster", 0, "bad MAC", 30*time.Hour)
+	h.exec(exe, `INSERT INTO execpub.status (enabled, frozen, at) VALUES (true, false, now() - interval '5 minutes')`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); !ok {
+		t.Fatal("a stale 'not frozen' hid the tamper problem")
+	}
+	p, ok := h.sysOpen("executor_unreachable", "executor", 0)
+	if !ok {
+		t.Fatal("a stale status of an enabled executor is no problem")
+	}
+	var sev string
+	if err := h.root.QueryRow(h.ctx, `SELECT severity FROM problems.problem WHERE id = $1`, p.ID).Scan(&sev); err != nil || sev != "high" {
+		t.Fatalf("severity %q (%v)", sev, err)
+	}
+	h.exec(exe, `UPDATE execpub.status SET at = now()`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_unreachable", "executor", 0); ok {
+		t.Fatal("unreachable while the status is fresh")
+	}
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); ok {
+		t.Fatal("a 30 h old tamper alert open on a fresh, not frozen executor")
+	}
+	h.exec(exe, `UPDATE execpub.status SET enabled = false, at = now() - interval '5 minutes'`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_unreachable", "executor", 0); ok {
+		t.Fatal("a disabled executor that stopped publishing raised executor_unreachable")
 	}
 }

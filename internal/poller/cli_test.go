@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -75,7 +77,7 @@ func newCLIEnv(t *testing.T) *cliEnv {
 	return e
 }
 
-/* busy marks the device as held by a change session, as the executor does. */
+/* busy marks the device as held by a change session, as the executor does (with the address it connects to). */
 func (e *cliEnv) busy(on bool) {
 	e.t.Helper()
 	exe := e.env.Pool("nms_executor")
@@ -85,12 +87,37 @@ func (e *cliEnv) busy(on bool) {
 		}
 		return
 	}
-	if _, err := exe.Exec(context.Background(), `INSERT INTO execpub.device_busy (device_id, session_id) VALUES ($1, gen_random_uuid())`, e.d.ID); err != nil {
+	if _, err := exe.Exec(context.Background(), `INSERT INTO execpub.device_busy (device_id, session_id, address) VALUES ($1, gen_random_uuid(), $2)`,
+		e.d.ID, e.d.Addr.Addr()); err != nil {
 		e.t.Fatal(err)
 	}
 	e.t.Cleanup(func() {
 		_, _ = exe.Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = $1`, e.d.ID)
 	})
+}
+
+/* alias adds a device row of the api's with the given address text and SNMP port and a read credential, and returns it as the poller loads it. */
+func (e *cliEnv) alias(address string, snmpPort int) (device, bool) {
+	e.t.Helper()
+	var id int64
+	if err := e.env.Pool("nms_api").QueryRow(context.Background(), `INSERT INTO core.device (name, address, snmp_port, group_id, poller_id)
+		VALUES ('alias-' || gen_random_uuid(), $1::inet, $2, $3, $4) RETURNING id`, address, snmpPort, e.group, e.pollerID).Scan(&id); err != nil {
+		e.t.Logf("the api cannot add %s: %v", address, err)
+		return device{}, false
+	}
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
+	e.profile(id, "ssh_read", credstest.Seal(e.pub, owner, "ssh_read", map[string]string{"username": "u", "password": "twelve-chars-x"}, time.Now().Add(-time.Minute)))
+	devs, err := e.p.loadDevices(context.Background())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, d := range devs {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	e.t.Fatalf("alias %d not loaded", id)
+	return device{}, false
 }
 
 /* allSites runs the three ways the poller opens a device's CLI and checks each refused with the change-session reason. */
@@ -155,35 +182,177 @@ func TestUnreadableBusyTableGetsNoSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	/* SNMP is not gated: the availability path never asks. */
-	if err := e.p.checkNotInSession(ctx, e.d.ID); err != nil {
+	if err := e.p.checkNotInSession(ctx, e.d.ID, e.d.Addr.Addr()); err != nil {
 		t.Fatalf("check with the table readable again: %v", err)
 	}
 }
 
-/* ssh.Dial is called in one place of the poller only (dialSSH), so no CLI path can skip the check. */
+/*
+I1: the api adds rows of its own for the address of a device in a change
+session (another snmp_port, the IPv4-mapped form, leading zeros): none of
+them gets an SSH connection, because the address about to be dialed is
+checked too, in the form that is dialed.
+*/
+func TestAliasOfABusyDeviceGetsNoSSH(t *testing.T) {
+	e := newCLIEnv(t)
+	e.busy(true)
+	busy := e.d
+	for i, address := range []string{"127.0.0.1", "::ffff:127.0.0.1", "127.000.000.001", "0127.0.0.1"} {
+		d, ok := e.alias(address, 30000+int(cliPort.Add(1)))
+		if !ok {
+			continue
+		}
+		if d.ID == busy.ID {
+			t.Fatal("alias is the busy device")
+		}
+		e.d, e.cache = d, newDevCache()
+		e.allSites(fmt.Sprintf("alias %d %s (loaded as %s)", i, address, d.Addr.Addr()))
+	}
+	/*
+		dialSSH normalizes for itself, not only the loader (which unmaps today): a
+		device handed to it with the IPv4-mapped form of the busy address gets
+		no connection either.
+	*/
+	if d, ok := e.alias("127.0.0.1", 30000+int(cliPort.Add(1))); ok {
+		d.Addr = netip.AddrPortFrom(netip.AddrFrom16(d.Addr.Addr().As16()), d.Addr.Port())
+		if !d.Addr.Addr().Is4In6() {
+			t.Fatal("test address not mapped")
+		}
+		e.d, e.cache = d, newDevCache()
+		e.allSites("mapped address handed to dialSSH")
+	}
+	/* The busy device's own address freed: the alias reaches the emulator (the test would see a dial). */
+	e.d = busy
+	e.busy(false)
+	d, _ := e.alias("127.0.0.1", 30000+int(cliPort.Add(1)))
+	e.d, e.cache = d, newDevCache()
+	_, _ = e.p.sshFetch(context.Background(), e.d, e.cache, e.drv)
+	eventually(t, 5*time.Second, "an SSH connection once nothing is busy", func() bool { return e.ln.n.Load() >= 1 })
+}
+
+/*
+cliDials lists, in one source file of the poller, every way to a device's
+CLI other than the one ssh.Dial reference inside dialSSH (cli.go): a call or
+a value (f := ssh.Dial) of internal/ssh's Dial, the x/crypto/ssh package
+itself, and net's dialers.
+*/
+func cliDials(fset *token.FileSet, f *ast.File, name string) (inDialSSH int, bad []string) {
+	alias := map[string]string{}
+	for _, im := range f.Imports {
+		path := strings.Trim(im.Path.Value, `"`)
+		local := path[strings.LastIndex(path, "/")+1:]
+		if im.Name != nil {
+			local = im.Name.Name
+		}
+		switch path {
+		case "github.com/beekamai/network-scheme/internal/ssh", "net":
+			alias[local] = path
+		case "golang.org/x/crypto/ssh":
+			bad = append(bad, fmt.Sprintf("%s imports golang.org/x/crypto/ssh", name))
+		}
+	}
+	for _, decl := range f.Decls {
+		fn, _ := decl.(*ast.FuncDecl)
+		ast.Inspect(decl, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			at := fset.Position(sel.Pos()).String()
+			switch alias[x.Name] {
+			case "github.com/beekamai/network-scheme/internal/ssh":
+				if sel.Sel.Name != "Dial" {
+					return true
+				}
+				if name == "cli.go" && fn != nil && fn.Name.Name == "dialSSH" {
+					inDialSSH++
+				} else {
+					bad = append(bad, "ssh.Dial at "+at)
+				}
+			case "net":
+				if strings.HasPrefix(sel.Sel.Name, "Dial") {
+					bad = append(bad, "net."+sel.Sel.Name+" at "+at)
+				}
+			}
+			return true
+		})
+	}
+	return inDialSSH, bad
+}
+
+/* ssh.Dial is referenced once in the poller, inside dialSSH, and nothing else reaches a device's CLI, so no path skips the check. */
 func TestOnlyDialSSHDialsSSH(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fset := token.NewFileSet()
 	n := 0
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		b, err := os.ReadFile(f) // #nosec G304 -- the package's own sources
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := strings.Count(string(b), "ssh.Dial(")
-		if c > 0 && f != "cli.go" {
-			t.Errorf("%s calls ssh.Dial directly", f)
+		in, bad := cliDials(fset, f, name)
+		n += in
+		for _, b := range bad {
+			t.Errorf("%s: a way to a device's CLI outside dialSSH", b)
 		}
-		n += c
 	}
 	if n != 1 {
-		t.Fatalf("ssh.Dial called %d times, want once (dialSSH)", n)
+		t.Fatalf("ssh.Dial referenced %d times in dialSSH, want once", n)
 	}
+}
+
+/* The checker catches each bypass it is meant to catch, and lets dialSSH and SNMP through. */
+func TestCLIDialsCatchesBypasses(t *testing.T) {
+	head := "package poller\nimport (\n\t\"net\"\n\t\"net/netip\"\n\tx \"github.com/beekamai/network-scheme/internal/ssh\"\n\t\"github.com/beekamai/network-scheme/internal/ssh\"\n)\n"
+	for _, src := range []string{
+		"func f() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		"func f() { g := ssh.Dial; g(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		"var g = ssh.Dial",
+		"func f() { x.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		"func f() { net.Dial(\"tcp\", \"10.0.0.1:22\") }",
+		"func f() { d := net.Dialer{}; _ = d }",
+		"func f() { net.DialTimeout(\"tcp\", \"10.0.0.1:22\", 0) }",
+		"func dialSSH() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) } /* not in cli.go */",
+	} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "worker.go", head+src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		if _, bad := cliDials(fset, f, "worker.go"); len(bad) == 0 {
+			t.Errorf("not caught: %s", src)
+		}
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "cli.go", "package poller\nimport \"github.com/beekamai/network-scheme/internal/ssh\"\nfunc dialSSH() { ssh.Dial(nil, a, 0, c, nil, d) }\nfunc g() { _ = ssh.Dialect{} }\n", parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in, bad := cliDials(fset, f, "cli.go"); in != 1 || len(bad) != 0 {
+		t.Errorf("dialSSH itself: %d, %v", in, bad)
+	}
+	if _, bad := cliDials(fset, mustParse(t, fset, "package poller\nimport gossh \"golang.org/x/crypto/ssh\"\nvar _ = gossh.NewClientConn\n"), "show.go"); len(bad) == 0 {
+		t.Error("x/crypto/ssh not caught")
+	}
+}
+
+func mustParse(t *testing.T, fset *token.FileSet, src string) *ast.File {
+	t.Helper()
+	f, err := parser.ParseFile(fset, "x.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
 }
 
 /*

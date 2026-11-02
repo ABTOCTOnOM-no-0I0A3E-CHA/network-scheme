@@ -29,11 +29,12 @@ const executorUsage = `usage:
   nmsctl executor enroll U [--replace] [--yes] [--totp-secret-out F]
   nmsctl executor grant U write G|write-admin|unmask|audit-read [--yes]
   nmsctl executor revoke U write G|write-admin|unmask|audit-read|--all
-  nmsctl executor freeze on|off [--reason TEXT]
+  nmsctl executor freeze on [--reason TEXT]
+  nmsctl executor freeze off [--reason TEXT] [--drop-panel-request]
   nmsctl executor unlock U|--global
   nmsctl executor model-verify --driver mes6|mes10|esr --model RE --firmware RE [--strategy k=v ...] --note TEXT
       (RE matches the whole model or firmware string: stored as ^(?:RE)$)
-  nmsctl executor registry verify|reset [--i-understand]
+  nmsctl executor registry verify | reset [--i-understand] [--drop-panel-request]
   nmsctl executor audit verify
   nmsctl executor device add|accept-hostkey|writes on|off
 (U: a panel user name or #id)`
@@ -89,14 +90,15 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 	case "freeze on", "freeze off":
 		fs := newFlags(cmd)
 		reason := fs.String("reason", "", "why (recorded in the executor audit)")
-		if err := fs.Parse(rest); err != nil || fs.NArg() > 0 {
-			return errors.New("usage: nmsctl executor freeze on|off [--reason TEXT]")
+		drop := fs.Bool("drop-panel-request", false, "off: discard a pending freeze request from the panel (it would freeze again)")
+		if err := fs.Parse(rest); err != nil || fs.NArg() > 0 || (cmd == "freeze on" && *drop) {
+			return errors.New("usage: nmsctl executor freeze on [--reason TEXT] | off [--reason TEXT] [--drop-panel-request]")
 		}
 		c := execadmin.CmdFreezeOn
 		if cmd == "freeze off" {
 			c = execadmin.CmdFreezeOff
 		}
-		return show(ctx, d, execadmin.Request{Cmd: c, Reason: *reason})
+		return show(ctx, d, execadmin.Request{Cmd: c, Reason: *reason, DropPanel: *drop})
 	case "unlock":
 		if len(rest) != 1 {
 			return errors.New("usage: nmsctl executor unlock U|--global")
@@ -110,13 +112,14 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 	case "registry verify", "registry reset":
 		fs := newFlags(cmd)
 		sure := fs.Bool("i-understand", false, "reset: revoke every grant, disable writes on every device, clear host keys and model profiles")
-		if err := fs.Parse(rest); err != nil || fs.NArg() > 0 || (cmd == "registry verify" && *sure) {
-			return errors.New("usage: nmsctl executor registry verify|reset [--i-understand]")
+		drop := fs.Bool("drop-panel-request", false, "reset: discard a pending freeze request from the panel (it would freeze again)")
+		if err := fs.Parse(rest); err != nil || fs.NArg() > 0 || (cmd == "registry verify" && (*sure || *drop)) {
+			return errors.New("usage: nmsctl executor registry verify | reset [--i-understand] [--drop-panel-request]")
 		}
 		if cmd == "registry verify" {
 			return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryVerify})
 		}
-		return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryReset, IUnderstand: *sure})
+		return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryReset, IUnderstand: *sure, DropPanel: *drop})
 	case "audit verify":
 		if len(rest) > 0 {
 			return errors.New(executorUsage)

@@ -23,6 +23,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
@@ -1061,4 +1062,69 @@ func TestGrantOutcomeUnknown(t *testing.T) {
 	if resp.OK || !strings.Contains(resp.Error, "outcome unknown") {
 		t.Fatalf("grant under a lock: %+v", resp)
 	}
+}
+
+/*
+Review minor 1: a freeze request the panel left pending would freeze the
+executor again right after the host's freeze off or registry reset. Both
+report it; with --drop-panel-request they discard it in their own
+transaction (recorded in their audit row), and nothing freezes again.
+*/
+func TestHostRecoveryReportsAndDropsPanelRequest(t *testing.T) {
+	f := newFixture(t)
+	f.admin.Panel = pub.New(f.env.Pool("nms_executor"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	request := func() {
+		t.Helper()
+		if _, err := f.env.Pool("nms_api").Exec(ctx, `INSERT INTO execpub.freeze_request (requested_by) VALUES (42) ON CONFLICT DO NOTHING`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending := func() int {
+		t.Helper()
+		return f.count(t, `SELECT count(*) FROM execpub.freeze_request`)
+	}
+	t.Cleanup(func() { _, _ = f.env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.freeze_request`) })
+
+	f.guard.Trigger(ctx, freeze.KindHostFreeze, "host: drill")
+	request()
+	resp := f.do(execadmin.Request{Cmd: "freeze-off"})
+	if !resp.OK || !strings.Contains(resp.Text, "freeze request from the panel is pending (panel user #42") || !strings.Contains(resp.Text, "--drop-panel-request") {
+		t.Fatalf("freeze off with a pending request: %+v", resp)
+	}
+	if r := f.lastAudit(t); r.details["panel_pending"] != float64(1) || pending() != 1 {
+		t.Fatalf("audit %+v, %d pending", r, pending())
+	}
+
+	f.guard.Trigger(ctx, freeze.KindHostFreeze, "host: drill 2")
+	resp = f.do(execadmin.Request{Cmd: "freeze-off", DropPanel: true})
+	if !resp.OK || !strings.Contains(resp.Text, "panel freeze requests dropped: 1") || pending() != 0 {
+		t.Fatalf("freeze off --drop-panel-request: %+v, %d pending", resp, pending())
+	}
+	if r := f.lastAudit(t); r.action != "admin.freeze-off" || r.details["panel_requests_dropped"] != float64(1) || r.details["panel_claimed_user_id"] != float64(42) {
+		t.Fatalf("audit %+v", r)
+	}
+	if frozen, _ := f.guard.Frozen(); frozen {
+		t.Fatal("still frozen")
+	}
+
+	request()
+	attacktest.Tamper(t, f.env, `UPDATE exec.exec_state SET freeze_reason = 'evil'`)
+	if err := f.guard.Check(ctx); !errors.Is(err, freeze.ErrFrozen) {
+		t.Fatalf("tampering: %v", err)
+	}
+	resp = f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK || !strings.Contains(resp.Text, "freeze request from the panel is pending") || pending() != 1 {
+		t.Fatalf("reset with a pending request: %+v, %d pending", resp, pending())
+	}
+	attacktest.Tamper(t, f.env, `UPDATE exec.exec_state SET freeze_reason = 'evil again'`)
+	_ = f.guard.Check(ctx)
+	resp = f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true, DropPanel: true})
+	if !resp.OK || !strings.Contains(resp.Text, "panel freeze requests dropped: 1") || pending() != 0 {
+		t.Fatalf("reset --drop-panel-request: %+v, %d pending", resp, pending())
+	}
+	if r := f.lastAudit(t); r.action != "admin.registry-reset" || r.details["panel_requests_dropped"] != float64(1) {
+		t.Fatalf("audit %+v", r)
+	}
+	f.chainIntact(t)
 }

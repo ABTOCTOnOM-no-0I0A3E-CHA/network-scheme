@@ -16,11 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
-	"strings"
+	"sync/atomic"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,7 +34,7 @@ import (
 const Channel = "execpub_freeze"
 
 /* MaxAlertText mirrors the CHECK on execpub.alert.text (bytes). */
-const MaxAlertText = 1024
+const MaxAlertText = freeze.MaxAlertText
 
 /* Pace of Run (variables for the tests). */
 var (
@@ -87,29 +86,6 @@ func (p *Publisher) Status(ctx context.Context, enabled, frozen bool) error {
 	return err
 }
 
-/*
-CleanText makes text that may carry device or user data fit for an alert:
-valid UTF-8, control and format characters (bidi overrides among them) as
-spaces, at most MaxAlertText bytes cut on a character boundary. The panel
-renders it as text only all the same (rule 10).
-*/
-func CleanText(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return ' '
-		}
-		return r
-	}, strings.ToValidUTF8(s, "?"))
-	if len(s) <= MaxAlertText {
-		return s
-	}
-	n := MaxAlertText
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
 /* Alert publishes an alert of kind (a system problem kind of the panel) about deviceID (0: none). */
 func (p *Publisher) Alert(ctx context.Context, kind, severity string, deviceID int64, text string) error {
 	if !kindRe.MatchString(kind) || !severities[severity] || deviceID < 0 {
@@ -119,13 +95,23 @@ func (p *Publisher) Alert(ctx context.Context, kind, severity string, deviceID i
 	if deviceID > 0 {
 		dev = &deviceID
 	}
-	_, err := p.exec(ctx, `INSERT INTO execpub.alert (kind, severity, device_id, text) VALUES ($1, $2, $3, $4)`, kind, severity, dev, CleanText(text))
+	_, err := p.exec(ctx, `INSERT INTO execpub.alert (kind, severity, device_id, text) VALUES ($1, $2, $3, $4)`, kind, severity, dev, freeze.CleanText(text))
 	return err
 }
 
-/* Busy marks a device as held by session (the poller opens no SSH to it); a device another session holds is refused. */
-func (p *Publisher) Busy(ctx context.Context, deviceID int64, session [16]byte) error {
-	n, err := p.exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id) VALUES ($1, $2) ON CONFLICT (device_id) DO NOTHING`, deviceID, session)
+/*
+Busy marks a device as held by session: the poller opens no SSH to the
+device id nor to address, which must be the address the executor connects
+to (the address of its registry row, write_device, never core.device:
+the api may give another device row that address). A device another session
+holds is refused.
+*/
+func (p *Publisher) Busy(ctx context.Context, deviceID int64, address netip.Addr, session [16]byte) error {
+	if !address.IsValid() || address.Zone() != "" {
+		return fmt.Errorf("pub: bad address %v", address)
+	}
+	n, err := p.exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address) VALUES ($1, $2, $3) ON CONFLICT (device_id) DO NOTHING`,
+		deviceID, session, address.Unmap())
 	if err == nil && n == 0 {
 		return ErrDeviceBusy
 	}
@@ -169,20 +155,50 @@ type Freezer interface {
 	Request(ctx context.Context, reason string, consume registry.Appender) error
 }
 
+/* deleteRequests deletes every pending request (no WHERE) and reads one aggregate row: count, last claimed requester, last time. */
+const deleteRequests = `WITH d AS (DELETE FROM execpub.freeze_request RETURNING requested_by, at)
+	SELECT count(*), (SELECT requested_by FROM d ORDER BY at DESC LIMIT 1), max(at) FROM d`
+
+/*
+Pending reports the panel's pending freeze request, if any (count, the api's
+claimed requester and time): the host's freeze off and registry reset show
+it, since it would freeze the executor again right after them.
+*/
+func (p *Publisher) Pending(ctx context.Context) (n int64, by *int64, at *time.Time, err error) {
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	err = p.pool.QueryRow(ctx, `SELECT count(*), (SELECT requested_by FROM execpub.freeze_request ORDER BY at DESC LIMIT 1),
+		max(at) FROM execpub.freeze_request`).Scan(&n, &by, &at)
+	return n, by, at, err
+}
+
+/*
+DropRequests deletes the panel's pending freeze requests inside tx (the
+host's freeze off or registry reset, --drop-panel-request), so they go in
+the transaction that lifts the freeze and its audit row records them.
+*/
+func DropRequests(ctx context.Context, tx pgx.Tx) (n int64, by *int64, at *time.Time, err error) {
+	err = tx.QueryRow(ctx, deleteRequests).Scan(&n, &by, &at)
+	return n, by, at, err
+}
+
 /*
 consumeRequest is the registry.Appender of a freeze request: inside the registry
 transaction that records the freeze it deletes the request (no WHERE: every
 row, whatever a superuser planted) and appends one audit row, reading one
 aggregate row whatever the table holds. requested_by is the api's claim,
-recorded as such.
+recorded as such. A request gone by then (the host dropped it) is
+freeze.ErrNoRequest: the transaction is rolled back and nothing freezes.
 */
 func consumeRequest(ctx context.Context, tx pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
 	var n int64
 	var by *int64
 	var at *time.Time
-	if err := tx.QueryRow(ctx, `WITH d AS (DELETE FROM execpub.freeze_request RETURNING requested_by, at)
-		SELECT count(*), (SELECT requested_by FROM d ORDER BY at DESC LIMIT 1), max(at) FROM d`).Scan(&n, &by, &at); err != nil {
+	if err := tx.QueryRow(ctx, deleteRequests).Scan(&n, &by, &at); err != nil {
 		return head, fmt.Errorf("pub: consume freeze request: %w", err)
+	}
+	if n == 0 {
+		return head, freeze.ErrNoRequest /* dropped by the host meanwhile: nothing to freeze */
 	}
 	return audit.Append(audit.Event{UA: "panel", Action: "executor.freeze.panel", Object: "executor", Result: audit.OK,
 		Details: map[string]any{"requests": n, "claimed_user_id": by, "requested_at": at}})(ctx, tx, head)
@@ -197,6 +213,8 @@ type Consumer struct {
 	g     Freezer
 	state func() (enabled, frozen bool)
 	wake  chan struct{}
+	/* probes counts the reads of freeze_request (the tests check the wake-up bound). */
+	probes atomic.Int64
 }
 
 /* NewConsumer returns the loop of g; state reports what execpub.status publishes. */
@@ -250,12 +268,13 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 		if probeBlocked = time.Since(lastProbe) < minProbe; !probeBlocked {
 			lastProbe = time.Now()
+			c.probes.Add(1)
 			frozen, _ := c.g.Frozen()
 			if !frozen || !time.Now().Before(next) {
 				switch err := c.consume(ctx); {
 				case err == nil:
 					backoff, next = 0, time.Now().Add(frozenEvery)
-				case errors.Is(err, errNoRequest):
+				case errors.Is(err, errNoRequest), errors.Is(err, freeze.ErrNoRequest):
 				default:
 					c.pub.log.Error("freeze request: not consumed, retrying", slog.Any("err", err))
 					backoff = min(max(2*backoff, 2*time.Second), retryMax)

@@ -86,6 +86,7 @@ type Request struct {
 	Replace     bool              `json:"replace,omitempty"`
 	Global      bool              `json:"global,omitempty"`
 	IUnderstand bool              `json:"i_understand,omitempty"`
+	DropPanel   bool              `json:"drop_panel_request,omitempty"` /* freeze off, registry reset: discard a pending panel freeze request */
 	Reason      string            `json:"reason,omitempty"`
 	Action      string            `json:"action,omitempty"`
 	Driver      string            `json:"driver,omitempty"`
@@ -118,17 +119,17 @@ var uses = map[string][]string{
 	CmdGrant:         {"user", "user_id", "user_created_at", "kind", "group"},
 	CmdRevoke:        {"user", "kind", "group", "all"},
 	CmdFreezeOn:      {"reason"},
-	CmdFreezeOff:     {"reason"},
+	CmdFreezeOff:     {"reason", "drop_panel_request"},
 	CmdUnlock:        {"user", "global"},
 	CmdModelVerify:   {"driver", "model", "firmware", "note", "strategies"},
-	CmdRegistryReset: {"i_understand"},
+	CmdRegistryReset: {"i_understand", "drop_panel_request"},
 }
 
 /* fields reports which optional fields are set. */
 func (r Request) fields() map[string]bool {
 	return map[string]bool{
 		"user": r.User != "", "user_id": r.UserID != 0, "user_created_at": !r.UserCreated.IsZero(), "kind": r.Kind != "",
-		"group": r.Group != "", "all": r.All, "replace": r.Replace, "global": r.Global, "i_understand": r.IUnderstand,
+		"group": r.Group != "", "all": r.All, "replace": r.Replace, "global": r.Global, "i_understand": r.IUnderstand, "drop_panel_request": r.DropPanel,
 		"reason": r.Reason != "", "action": r.Action != "", "driver": r.Driver != "", "model": r.Model != "",
 		"firmware": r.Firmware != "", "note": r.Note != "", "strategies": len(r.Strategies) > 0,
 	}

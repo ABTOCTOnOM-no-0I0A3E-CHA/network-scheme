@@ -115,7 +115,8 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	pol := policy.New(cfg.PolicyFile)
 	/* execpub (set before anything runs concurrently): the status for the panel and the panel's only request, "freeze on". */
-	consumer := pub.NewConsumer(pub.New(pool, log), guard, func() (bool, bool) {
+	publisher := pub.New(pool, log)
+	consumer := pub.NewConsumer(publisher, guard, func() (bool, bool) {
 		frozen, _ := guard.Frozen()
 		return pol.Current().Enabled(), frozen
 	})
@@ -129,7 +130,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az}
+	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az, Panel: publisher}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil

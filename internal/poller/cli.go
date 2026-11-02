@@ -24,29 +24,44 @@ var busyCheckTimeout = 5 * time.Second
 /*
 dialSSH is the poller's only way to open a device's CLI (inventory, backup,
 show): the read-only SSH session is opened only when execpub.device_busy has
-no row for the device. It fails closed: when that cannot be read (database
-error, lost grant, timeout) nothing is dialed either, since a session the
-poller cannot see may be running and an extra login would show up in it
-(ESR exclusive mode, `show users`) or race its configuration. This gates SSH
-only: availability, metrics and the SNMP part of inventory never ask, so a
-broken check costs the CLI tables, backups and show commands, never the
-monitoring. The check and the dial are not atomic: a session opened right
-after the check meets a poller session already running (the executor's
-exclusive strategy is the defence there, 4b.5).
+no row for the device, by its id or by the address about to be dialed. The
+address matters because core.device is the api's: it may add a second row
+(another snmp_port) with the address of a device in a session. The address
+is resolved once and that very value is checked and dialed; an IPv4-mapped
+IPv6 address is unmapped first (the dialer would reach the IPv4 host). It
+fails closed: when the table cannot be read (database error, lost grant,
+timeout) nothing is dialed either, since a session the poller cannot see may
+be running and an extra login would show up in it (ESR exclusive mode, `show
+users`) or race its configuration. This gates SSH only: availability, metrics
+and the SNMP part of inventory never ask, so a broken check costs the CLI
+tables, backups and show commands, never the monitoring. The check and the
+dial are not atomic: a session opened right after the check meets a poller
+session already running (the executor's exclusive strategy is the defence
+there, 4b.5).
 */
 func (p *Poller) dialSSH(ctx context.Context, d device, c creds.Credential, dl ssh.Dialect) (*ssh.Runner, error) {
-	if err := p.checkNotInSession(ctx, d.ID); err != nil {
+	addr := d.Addr.Addr().Unmap().WithZone("")
+	if err := p.checkNotInSession(ctx, d.ID, addr); err != nil {
 		return nil, err
 	}
-	return ssh.Dial(ctx, netip.AddrPortFrom(d.Addr.Addr(), p.sshPort), d.ID, c, p.hostKeys, dl)
+	return ssh.Dial(ctx, netip.AddrPortFrom(addr, p.sshPort), d.ID, c, p.hostKeys, dl)
 }
 
-/* checkNotInSession is nil only when execpub.device_busy was read and holds no row for the device. */
-func (p *Poller) checkNotInSession(ctx context.Context, id int64) error {
+/*
+checkNotInSession is nil only when execpub.device_busy was read and holds no
+row for the device id nor for addr (also in its IPv4-mapped form, should the
+executor ever store that).
+*/
+func (p *Poller) checkNotInSession(ctx context.Context, id int64, addr netip.Addr) error {
 	ctx, cancel := context.WithTimeout(ctx, busyCheckTimeout)
 	defer cancel()
+	mapped := addr
+	if addr.Is4() {
+		mapped = netip.AddrFrom16(addr.As16())
+	}
 	var busy bool
-	if err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.device_busy WHERE device_id = $1)`, id).Scan(&busy); err != nil {
+	if err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.device_busy WHERE device_id = $1 OR address = $2 OR address = $3)`,
+		id, addr, mapped).Scan(&busy); err != nil {
 		p.log.Warn("change session check failed: no SSH to the device", slog.Int64("device_id", id), slog.String("err", err.Error()))
 		return fmt.Errorf("%w: check: %w", errInSession, err)
 	}

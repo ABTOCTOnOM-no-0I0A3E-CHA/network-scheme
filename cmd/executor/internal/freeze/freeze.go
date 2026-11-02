@@ -14,9 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
@@ -25,6 +29,32 @@ import (
 
 /* alertRetryEvery spaces the background retries of a failed alert (a variable for the tests). */
 var alertRetryEvery = 2 * time.Second
+
+/* MaxAlertText mirrors the CHECK on execpub.alert.text (bytes). */
+const MaxAlertText = 1024
+
+/*
+CleanText makes text that may carry device, database or user data fit for an
+alert: valid UTF-8, control and format characters (bidi overrides among
+them) as spaces, at most MaxAlertText bytes cut on a character boundary. The
+panel renders it as text only all the same (rule 10).
+*/
+func CleanText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(s, "?"))
+	if len(s) <= MaxAlertText {
+		return s
+	}
+	n := MaxAlertText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 /* ErrFrozen refuses a decision while the executor is frozen. */
 var ErrFrozen = errors.New("executor is frozen")
@@ -76,6 +106,8 @@ type Guard struct {
 	gen int64
 	/* offSeq is the registry counter of the last freeze off: older snapshots no longer latch. */
 	offSeq int64
+	/* owed: a panel request froze an unfrozen executor and its KindHostFreeze alert is not published yet (Request). */
+	owed bool
 	/*
 		Published, if set, is called after the latch changed: set by Trigger or
 		Request (after the alert), lifted by FreezeOff or Reset (hook for
@@ -231,7 +263,7 @@ func (g *Guard) lift(ctx context.Context, gen, seq int64, what string) error {
 		g.mu.Unlock()
 		return fmt.Errorf("%s: state file: %w", what, err)
 	}
-	g.frozen, g.reason, g.offSeq, g.failures = false, "", seq, 0
+	g.frozen, g.reason, g.offSeq, g.failures, g.owed = false, "", seq, 0, false
 	g.alerted = map[string]bool{}
 	g.mu.Unlock()
 	g.alert(ctx, KindUnfrozen, "info", "the host lifted the freeze ("+what+")")
@@ -350,27 +382,56 @@ func (g *Guard) FreezeOff(ctx context.Context, check func(context.Context) error
 	return g.lift(ctx, gen, seq, "freeze off")
 }
 
+/* ErrNoRequest reports that the panel's request was gone in the transaction (consumed, or dropped by the host); nothing was written. */
+var ErrNoRequest = errors.New("freeze: no pending panel request")
+
 /*
 Request freezes at the panel's request (execpub.freeze_request): the only
-thing the api can ask of the executor, and only "on". The latch is set
-first and the sticky flag of the state file next, both before anything is
-committed: a freeze off running meanwhile then lifts nothing (the generation
-moved), and a crash leaves the executor frozen. Then one registry write
+thing the api can ask of the executor, and only "on". One registry write
 records exec_state frozen (keeping the reason of a freeze already recorded)
 and runs consume in that same transaction: consume deletes the request
-(DELETE ... RETURNING) and appends its audit row, so the request is never
-gone without the freeze recorded, nor recorded twice. The registry's lock
-serializes it with FreezeOff. Any error leaves the executor frozen and the
-request in place (the caller retries); tampering freezes as KindTamper. The
-KindHostFreeze alert is published when this request froze an executor
-that was not frozen.
+(DELETE ... RETURNING) and appends its audit row, or answers ErrNoRequest
+when the transaction found none (the host dropped it). Only once the request
+is gone in the transaction is the executor latched (moving the generation)
+and the sticky flag set, still before the commit: a freeze off that started
+earlier then lifts nothing, one that commits a drop of the request first
+leaves nothing to freeze. The registry's lock serializes it with FreezeOff
+and Reset. If the executor was not frozen, it is latched before the write
+as well, so a write that fails leaves it frozen (fail closed) with the
+request in place for the caller to retry; that early latch is undone only
+when the request turned out to be gone and nothing froze since. The
+KindHostFreeze alert is owed from the moment a request freezes an unfrozen
+executor and is published after the first write that succeeds. Tampering
+freezes as KindTamper.
 */
 func (g *Guard) Request(ctx context.Context, reason string, consume registry.Appender) error {
 	reason = state.Reason(reason)
-	frozen, _ := g.Frozen()
-	g.latch(reason, true)
-	if err := g.reg.MarkFrozen(reason); err != nil {
-		g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
+	g.mu.Lock()
+	early, gen := !g.frozen, int64(0)
+	g.mu.Unlock()
+	marked := false
+	if early {
+		g.latchOwed(reason)
+		g.mu.Lock()
+		gen = g.gen
+		g.mu.Unlock()
+		if sticky, err := g.reg.StickyFrozen(); err == nil && !sticky {
+			marked = true
+		}
+		if err := g.reg.MarkFrozen(reason); err != nil {
+			g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
+		}
+	}
+	consumed := func(ctx context.Context, tx pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+		head, err := consume(ctx, tx, head)
+		if err != nil {
+			return head, err
+		}
+		g.latchOwed(reason)
+		if err := g.reg.MarkFrozen(reason); err != nil {
+			g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
+		}
+		return head, nil
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
@@ -386,23 +447,63 @@ func (g *Guard) Request(ctx context.Context, reason string, consume registry.App
 			"global_fail_window": window}); err != nil {
 			return err
 		}
-		tx.Audit(consume)
+		tx.Audit(consumed)
 		return nil
 	})
-	if errors.Is(err, registry.ErrTampered) {
+	switch {
+	case errors.Is(err, ErrNoRequest):
+		if early {
+			g.unlatch(gen, marked)
+		}
+		return err
+	case errors.Is(err, registry.ErrTampered):
 		g.Trigger(ctx, KindTamper, err.Error())
 		return fmt.Errorf("%w: %v", ErrFrozen, err)
-	}
-	if err != nil {
+	case err != nil:
 		return fmt.Errorf("freeze request: %w", err)
 	}
-	if !frozen {
+	g.mu.Lock()
+	owed := g.owed
+	g.owed = false
+	g.mu.Unlock()
+	if owed {
 		g.alert(ctx, KindHostFreeze, "warning", reason)
 	}
 	if g.Published != nil {
 		g.Published(ctx, reason)
 	}
 	return nil
+}
+
+/* latchOwed latches as a new freeze; freezing an unfrozen executor makes the KindHostFreeze alert owed. */
+func (g *Guard) latchOwed(reason string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.frozen {
+		g.frozen, g.reason, g.owed = true, state.Reason(reason), true
+	}
+	g.gen++
+}
+
+/*
+unlatch undoes Request's early latch (and the sticky flag, if Request set
+it) when nothing froze since: the generation is still gen. Under the
+latch's lock, so a concurrent Trigger either moved the generation first or
+latches after this.
+*/
+func (g *Guard) unlatch(gen int64, sticky bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.gen != gen {
+		return
+	}
+	if sticky {
+		if err := g.reg.ClearFrozen(); err != nil {
+			g.log.Error("state file: cannot undo the freeze of a request that was gone", slog.Any("err", err))
+			return
+		}
+	}
+	g.frozen, g.reason, g.owed = false, "", false
 }
 
 /* firstOf reports whether kind is triggered for the first time in this process. */
@@ -416,11 +517,12 @@ func (g *Guard) firstOf(kind string) bool {
 
 /*
 alert publishes to execpub.alert under its own deadline, so nothing held
-elsewhere can suppress it. A failed publication is logged and retried in the
+elsewhere can suppress it. The text goes through CleanText: reasons carry
+database errors and, later, device data. A failed publication is logged and retried in the
 background a bounded number of times; the log line is the record if all fail.
 */
 func (g *Guard) alert(ctx context.Context, kind, severity, text string) {
-	text = state.Reason(text)
+	text = CleanText(text)
 	g.log.Warn("executor alert", slog.String("kind", kind), slog.String("severity", severity), slog.String("text", text))
 	publish := func() error {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)

@@ -19,6 +19,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
@@ -46,8 +47,69 @@ type Admin struct {
 	Log    *slog.Logger
 	/* Lockouts, if set, hears of every committed enroll, unlock and registry reset, so the in-memory TOTP guards follow the host. */
 	Lockouts Lockouts
+	/* Panel, if set, reports the panel's pending freeze request to freeze off and registry reset (pub.Publisher). */
+	Panel PanelRequests
 	/* writeHook, if set, replaces the result of every host registry write (test seam: an error after a COMMIT). */
 	writeHook func(error) error
+}
+
+/* PanelRequests reads the panel's pending freeze request (count, the api's claimed requester, time). */
+type PanelRequests interface {
+	Pending(ctx context.Context) (n int64, by *int64, at *time.Time, err error)
+}
+
+/*
+panelNote reports a pending panel freeze request before freeze off or
+registry reset (into details): without --drop-panel-request it would freeze
+the executor again within seconds, so the host is told.
+*/
+func (a *Admin) panelNote(ctx context.Context, req execadmin.Request, details map[string]any) string {
+	if a.Panel == nil || req.DropPanel {
+		return ""
+	}
+	n, by, at, err := a.Panel.Pending(ctx)
+	switch {
+	case err != nil:
+		details["panel_pending"] = "unknown"
+		return "\nWARNING: whether the panel asked for a freeze could not be read; a pending request would freeze the executor again (--drop-panel-request discards one)."
+	case n == 0:
+		return ""
+	}
+	details["panel_pending"], details["panel_claimed_user_id"], details["panel_requested_at"] = n, by, at
+	who := "unknown"
+	if by != nil {
+		who = fmt.Sprintf("#%d", *by)
+	}
+	return fmt.Sprintf("\nWARNING: a freeze request from the panel is pending (panel user %s as claimed by the api, at %s): the executor freezes again within seconds. Run again with --drop-panel-request to discard it.",
+		who, at.UTC().Format(time.RFC3339))
+}
+
+/*
+withDrop runs next (the command's audit row) after deleting the panel's
+pending freeze requests in the same transaction when the host asked for it
+(--drop-panel-request): what was dropped goes into details, hence into the
+row. A consumption on its way then finds nothing and freezes nothing.
+*/
+func withDrop(req execadmin.Request, details map[string]any, next func() registry.Appender) registry.Appender {
+	if !req.DropPanel {
+		return next()
+	}
+	return func(ctx context.Context, tx pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+		n, by, at, err := pub.DropRequests(ctx, tx)
+		if err != nil {
+			return head, err
+		}
+		details["panel_requests_dropped"], details["panel_claimed_user_id"], details["panel_requested_at"] = n, by, at
+		return next()(ctx, tx, head)
+	}
+}
+
+/* dropText reports the requests withDrop dropped. */
+func dropText(req execadmin.Request, details map[string]any) string {
+	if !req.DropPanel {
+		return ""
+	}
+	return fmt.Sprintf("\npanel freeze requests dropped: %v", details["panel_requests_dropped"])
 }
 
 /*
@@ -560,7 +622,8 @@ only): only a registry reset gets out of that freeze.
 */
 func (a *Admin) freezeOff(ctx context.Context, req execadmin.Request) execadmin.Response {
 	_, reason := a.Guard.Frozen()
-	details := map[string]any{"reason": req.Reason, "was": reason}
+	details := map[string]any{"reason": req.Reason, "was": reason, "drop_panel_request": req.DropPanel}
+	note := a.panelNote(ctx, req, details)
 	check := func(ctx context.Context) error {
 		res, _, err := a.chain(ctx)
 		switch {
@@ -572,13 +635,13 @@ func (a *Admin) freezeOff(ctx context.Context, req execadmin.Request) execadmin.
 		return nil
 	}
 	err := a.Guard.FreezeOff(ctx, check, func(tx *registry.Tx) error {
-		tx.Audit(audit.Append(a.event(req, "executor", audit.OK, details)))
+		tx.Audit(withDrop(req, details, func() registry.Appender { return audit.Append(a.event(req, "executor", audit.OK, details)) }))
 		return nil
 	})
 	if err != nil {
 		return a.refuse(ctx, req, "executor", err, details)
 	}
-	return execadmin.Response{OK: true, Text: "freeze lifted: the audit chain and the registry verified"}
+	return execadmin.Response{OK: true, Text: "freeze lifted: the audit chain and the registry verified" + dropText(req, details) + note}
 }
 
 /* unlock clears a user's change TOTP failures and lockouts, or (Global) the global failure window. */
@@ -736,7 +799,9 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 	if !req.IUnderstand {
 		return a.refuse(ctx, req, "registry", deny("registry reset revokes every grant, removes every change TOTP and model profile, disables writes and clears host keys on every device: confirm with --i-understand"), nil)
 	}
-	var details map[string]any
+	details := map[string]any{}
+	note := a.panelNote(ctx, req, details)
+	pending := details
 	var plan audit.Plan
 	rep, err := a.Guard.Reset(ctx, registry.ResetOptions{
 		Plan: func(ctx context.Context, tx pgx.Tx, old state.Chain, known bool, tail state.AuditHead) (state.Chain, error) {
@@ -752,18 +817,21 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 				"audit_old_anchor": rep.OldAnchor.LastID, "audit_old_anchor_hash": hex.EncodeToString(rep.OldAnchor.Hash),
 				"audit_vouched": vouchedDetails(plan.Vouched), "audit_may_be_forged": plan.Suspect,
 				"audit_tail": rep.Tail.LastID, "audit_tail_hash": hex.EncodeToString(rep.Tail.Hash),
-				"audit_base": rep.Chain.Base.LastID, "audit_sealed": len(rep.Chain.Sealed)}
+				"audit_base": rep.Chain.Base.LastID, "audit_sealed": len(rep.Chain.Sealed), "drop_panel_request": req.DropPanel}
 			if plan.Break != nil {
 				details["audit_break_id"], details["audit_break"] = plan.Break.ID, plan.Break.Reason
 			}
-			return audit.Append(a.event(req, "registry", audit.OK, details))
+			for k, v := range pending {
+				details[k] = v
+			}
+			return withDrop(req, details, func() registry.Appender { return audit.Append(a.event(req, "registry", audit.OK, details)) })
 		},
 	})
 	if err != nil {
 		return a.refuse(ctx, req, "registry", err, details)
 	}
 	a.resetGlobal()
-	return execadmin.Response{OK: true, Text: resetText(rep, plan)}
+	return execadmin.Response{OK: true, Text: resetText(rep, plan) + dropText(req, details) + note}
 }
 
 /* vouchedDetails are the vouched ranges with their endpoint hashes, for the reset's audit row. */

@@ -2,9 +2,12 @@ package triggers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 /*
@@ -38,6 +41,7 @@ const (
 	SystemSessionInterrupted    = "session_interrupted"
 	SystemSessionOutsideWindow  = "session_outside_window"
 	SystemExecutorAlert         = "executor_alert"
+	SystemExecutorUnreachable   = "executor_unreachable"
 	executorUnfrozen            = "executor_unfrozen"
 )
 
@@ -52,11 +56,19 @@ var executorSeverity = map[string]string{
 An executor alert is an event: its problem (one per kind and device, from
 the newest alert) is open while that alert is at most executorAlertFor old,
 like config_drift; acknowledging does not resolve it. The freeze kinds
-(executorFreezeKinds) also stay open, whatever their age, while the
-executor's published status says frozen; and they resolve once the host
-lifted the freeze after them (the executor_unfrozen marker is newer).
+(executorFreezeKinds) resolve once the host lifted the freeze after them
+(the executor_unfrozen marker is newer), and stay open, whatever their age,
+while the executor may be frozen: its status says frozen, or the status is
+stale (older than executorStaleAfter: a stale row never hides a problem).
+While it may be frozen, the newest freeze alert stays open even behind a
+newer marker (a marker whose publication was retried can land after the
+freeze that followed it). A stale status of an enabled executor is itself a
+problem (executor_unreachable, high).
 */
-const executorAlertFor = 24 * time.Hour
+const (
+	executorAlertFor   = 24 * time.Hour
+	executorStaleAfter = 90 * time.Second /* the executor rewrites its status every 30 s; as GET /api/executor/status */
+)
 
 var executorFreezeKinds = []string{SystemExecutorTamper, SystemExecutorBruteforce, SystemExecutorFreeze}
 
@@ -133,6 +145,8 @@ func systemName(kind string) string {
 		return "Change session refused outside its window"
 	case SystemExecutorAlert:
 		return "Executor alert"
+	case SystemExecutorUnreachable:
+		return "Executor does not publish its status"
 	}
 	return "System problem"
 }
@@ -145,19 +159,31 @@ device the panel no longer has is kept as a problem without a device (object
 "device:<id>"), never dropped.
 */
 func (e *Engine) executorAlerts(ctx context.Context, want map[pkey]sysWant, now time.Time) error {
-	var frozen bool
-	if err := e.pool.QueryRow(ctx, `SELECT coalesce((SELECT frozen FROM execpub.status), false)`).Scan(&frozen); err != nil {
+	var known, enabled, frozen, stale bool
+	err := e.pool.QueryRow(ctx, `SELECT enabled, frozen, at < now() - make_interval(secs => $1) FROM execpub.status`,
+		executorStaleAfter.Seconds()).Scan(&enabled, &frozen, &stale)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
 		return fmt.Errorf("triggers: executor status: %w", err)
+	default:
+		known = true
+	}
+	mayBeFrozen := known && (frozen || stale)
+	if known && stale && enabled {
+		want[pkey{sys: SystemExecutorUnreachable, obj: "executor"}] = sysWant{"high",
+			fmt.Sprintf("the executor has not published its status for over %s", executorStaleAfter)}
 	}
 	rows, err := e.pool.Query(ctx, `
 		WITH unfrozen AS (SELECT coalesce(max(at), '-infinity') AS at FROM execpub.alert WHERE kind = $3),
+		newest AS (SELECT coalesce(max(at), '-infinity') AS at FROM execpub.alert WHERE kind = ANY ($2)),
 		last AS (
 		    SELECT DISTINCT ON (a.kind, coalesce(a.device_id, 0)) a.kind, a.device_id, a.severity, a.text, a.at
-		    FROM execpub.alert a, unfrozen u
-		    WHERE a.kind <> $3 AND (a.at > $1 OR (a.kind = ANY ($2) AND a.at > u.at))
+		    FROM execpub.alert a, unfrozen u, newest w
+		    WHERE a.kind <> $3 AND (a.at > $1 OR (a.kind = ANY ($2) AND (a.at > u.at OR a.at = w.at)))
 		    ORDER BY a.kind, coalesce(a.device_id, 0), a.at DESC, a.id DESC)
-		SELECT l.kind, coalesce(l.device_id, 0), d.id IS NOT NULL, l.severity, l.text, l.at > $1, l.at > u.at
-		FROM last l CROSS JOIN unfrozen u LEFT JOIN core.device d ON d.id = l.device_id`,
+		SELECT l.kind, coalesce(l.device_id, 0), d.id IS NOT NULL, l.severity, l.text, l.at > $1, l.at > u.at, l.at = w.at
+		FROM last l CROSS JOIN unfrozen u CROSS JOIN newest w LEFT JOIN core.device d ON d.id = l.device_id`,
 		now.Add(-executorAlertFor), executorFreezeKinds, executorUnfrozen)
 	if err != nil {
 		return fmt.Errorf("triggers: executor alerts: %w", err)
@@ -166,12 +192,15 @@ func (e *Engine) executorAlerts(ctx context.Context, want map[pkey]sysWant, now 
 	for rows.Next() {
 		var kind, sev, text string
 		var dev int64
-		var known, recent, sinceUnfrozen bool
-		if err := rows.Scan(&kind, &dev, &known, &sev, &text, &recent, &sinceUnfrozen); err != nil {
+		var known, recent, sinceUnfrozen, newestFreeze bool
+		if err := rows.Scan(&kind, &dev, &known, &sev, &text, &recent, &sinceUnfrozen, &newestFreeze); err != nil {
 			return fmt.Errorf("triggers: executor alerts: %w", err)
 		}
-		freezeKind := slices.Contains(executorFreezeKinds, kind)
-		if (freezeKind && !sinceUnfrozen) || (!recent && (!freezeKind || !frozen)) {
+		open := recent
+		if slices.Contains(executorFreezeKinds, kind) {
+			open = (recent && sinceUnfrozen) || (mayBeFrozen && (sinceUnfrozen || newestFreeze))
+		}
+		if !open {
 			continue
 		}
 		k := pkey{sys: kind, dev: dev, obj: "executor"}

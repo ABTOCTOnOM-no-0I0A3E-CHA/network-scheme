@@ -20,3 +20,16 @@ func SetPace(poll, frozen time.Duration) (restore func()) {
 	pollEvery, frozenEvery = poll, frozen
 	return func() { pollEvery, frozenEvery = op, of }
 }
+
+/* SetTiming sets the heartbeat and the LISTEN retry for a test and returns the restore function. */
+func SetTiming(beat, retry time.Duration) (restore func()) {
+	ob, or := heartbeat, listenRetry
+	heartbeat, listenRetry = beat, retry
+	return func() { heartbeat, listenRetry = ob, or }
+}
+
+/* Probes is how many times c read freeze_request. */
+func (c *Consumer) Probes() int64 { return c.probes.Load() }
+
+/* MinProbe is the bound on reads per wake-up. */
+var MinProbe = minProbe

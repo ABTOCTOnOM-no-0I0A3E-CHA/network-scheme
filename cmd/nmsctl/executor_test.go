@@ -77,6 +77,8 @@ func TestExecutorCommandsBecomeRequests(t *testing.T) {
 	}{
 		{[]string{"freeze", "on", "--reason", "incident 7"}, execadmin.Request{Cmd: "freeze-on", Reason: "incident 7"}},
 		{[]string{"freeze", "off"}, execadmin.Request{Cmd: "freeze-off"}},
+		{[]string{"freeze", "off", "--drop-panel-request"}, execadmin.Request{Cmd: "freeze-off", DropPanel: true}},
+		{[]string{"registry", "reset", "--i-understand", "--drop-panel-request"}, execadmin.Request{Cmd: "registry-reset", IUnderstand: true, DropPanel: true}},
 		{[]string{"revoke", "alice", "write", "core"}, execadmin.Request{Cmd: "revoke", User: "alice", Kind: "write", Group: "core"}},
 		{[]string{"revoke", "#5", "unmask"}, execadmin.Request{Cmd: "revoke", User: "#5", Kind: "unmask"}},
 		{[]string{"revoke", "alice", "--all"}, execadmin.Request{Cmd: "revoke", User: "alice", All: true}},
@@ -121,6 +123,7 @@ func TestExecutorUsageAndHostOnly(t *testing.T) {
 		{"grant", "alice", "root"}, {"revoke", "alice", "--all", "write", "core"}, {"freeze", "maybe"},
 		{"unlock"}, {"unlock", "alice", "bob"}, {"model-verify", "--driver", "ios", "--model", "x", "--firmware", "y", "--note", "n"},
 		{"model-verify", "--driver", "esr", "--model", "x", "--firmware", "y"}, {"registry", "verify", "--i-understand"},
+		{"registry", "verify", "--drop-panel-request"}, {"freeze", "on", "--drop-panel-request"},
 		{"enroll"}, {"enroll", "--replace"}, {"device", "writes", "maybe"}, {"enable", "now"}, {"grant", "bad\x01name", "unmask"},
 	} {
 		sys := &daemon{}
