@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import ReactGridLayout, { useContainerWidth, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import { getWidget } from "@/widgets/registry";
-import { DRAG_HANDLE, WidgetFrame, type GridItem } from "./WidgetFrame";
+import { DRAG_HANDLE, WidgetFrame, type BubbleOrigin, type GridItem } from "./WidgetFrame";
 
 /** Grid of the server (internal/httpapi/dashboards_handlers.go): 12 columns. */
 export const COLS = 12;
@@ -31,8 +31,11 @@ export function DashboardGrid({ items, editing, onLayout, onSettings, onRemove }
       }),
     [items],
   );
-  const frame = (it: GridItem) => <WidgetFrame item={it} editing={editing} onSettings={() => onSettings(it.key)} onRemove={() => onRemove(it.key)} />;
   const stacked = width > 0 && width < STACK_BELOW;
+  /* a bubble widget grows away from the grid edge it touches; not while editing, nor stacked (it would leave the screen) */
+  const bubbleOf = (it: GridItem): BubbleOrigin | undefined =>
+    editing || stacked || !getWidget(it.type)?.bubble ? undefined : it.x === 0 ? "left" : it.x + it.w >= COLS ? "right" : "center";
+  const frame = (it: GridItem) => <WidgetFrame item={it} editing={editing} bubble={bubbleOf(it)} onSettings={() => onSettings(it.key)} onRemove={() => onRemove(it.key)} />;
 
   return (
     <div ref={containerRef} data-testid="dashboard-grid">
@@ -56,7 +59,10 @@ export function DashboardGrid({ items, editing, onLayout, onSettings, onRemove }
           onLayoutChange={(l) => editing && onLayout(l)}
         >
           {items.map((it) => (
-            <div key={it.key}>{frame(it)}</div>
+            /* the cell of a growing widget rises above its neighbours while it is enlarged */
+            <div key={it.key} className={bubbleOf(it) ? "hover:z-20 focus-within:z-20" : undefined}>
+              {frame(it)}
+            </div>
           ))}
         </ReactGridLayout>
       )}

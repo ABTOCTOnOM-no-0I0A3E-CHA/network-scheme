@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { SquareTerminal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -107,19 +108,26 @@ export function CliTab({ deviceId }: { deviceId: number }) {
           {queryError(t, result.error)}
         </p>
       )}
-      {r && (
-        <section className="grid gap-1">
-          <p role="status" className="text-xs text-muted-foreground">
-            {t(`cli.status.${r.status}`)}
-            {r.truncated && ` · ${t("cli.truncated")}`}
-          </p>
-          {r.output !== null && (
-            <pre data-testid="cli-output" className="max-h-[65vh] overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-xs whitespace-pre">
-              {safeLines(r.output)}
-            </pre>
+      {/* the terminal pane: dark like a console, always there, so the tab reads as a CLI before the first command */}
+      <section aria-label={t("cli.terminal")} className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
+        <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400">
+          <SquareTerminal aria-hidden className="size-3.5" />
+          <span>{t("cli.readOnly")}</span>
+          {r && (
+            <span role="status" className="ml-auto">
+              {t(`cli.status.${r.status}`)}
+              {r.truncated && ` · ${t("cli.truncated")}`}
+            </span>
           )}
-        </section>
-      )}
+        </div>
+        {r?.output != null ? (
+          <pre data-testid="cli-output" className="max-h-[65vh] min-h-64 overflow-auto p-3 font-mono text-xs leading-5 whitespace-pre">
+            {safeLines(r.output)}
+          </pre>
+        ) : (
+          <p className="min-h-64 p-3 font-mono text-xs leading-5 text-zinc-500">{busy ? t("cli.running") : t("cli.idle")}</p>
+        )}
+      </section>
     </div>
   );
 }

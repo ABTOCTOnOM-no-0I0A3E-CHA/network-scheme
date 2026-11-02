@@ -15,6 +15,8 @@ const HEIGHT = 220;
 export type Spec = { label: string; fmt: (v: number) => string };
 
 type Theme = { axis: string; grid: string };
+/** The time column: its legend label and the locale of its dates (24-hour clock in Russian, not uPlot's "pm"). */
+type TimeAxis = { label: string; locale: string };
 
 /* Axis and grid colors follow the active theme through the app's CSS custom properties. */
 function readTheme(): Theme {
@@ -37,7 +39,16 @@ function useThemeVersion(): number {
  * uPlot options: local-time x axis, formatted y axis, gaps for null values
  * (spanGaps off). Exported for tests.
  */
-export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number) => string, theme: Theme = { axis: FALLBACK_AXIS, grid: FALLBACK_GRID }): uPlot.Options {
+export function buildOptions(
+  width: number,
+  series: Spec[],
+  fmtAxis: (v: number) => string,
+  theme: Theme = { axis: FALLBACK_AXIS, grid: FALLBACK_GRID },
+  time: TimeAxis = { label: "", locale: "ru" },
+): uPlot.Options {
+  const clock = new Intl.DateTimeFormat(time.locale, { hour: "2-digit", minute: "2-digit" });
+  const day = new Intl.DateTimeFormat(time.locale, { day: "numeric", month: "short" });
+  const full = new Intl.DateTimeFormat(time.locale, { dateStyle: "short", timeStyle: "short" });
   return {
     width,
     height: HEIGHT,
@@ -45,11 +56,16 @@ export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number)
     cursor: { drag: { x: true, y: false } },
     scales: { x: { time: true }, y: { range: (_u, _min, max) => [0, max > 0 ? max * 1.1 : 1] } },
     axes: [
-      { stroke: theme.axis, grid: { stroke: theme.grid } },
+      {
+        stroke: theme.axis,
+        grid: { stroke: theme.grid },
+        /* ticks a day or more apart show the date, finer ones the time */
+        values: (_u, splits, _ai, _space, incr) => splits.map((v) => (incr >= 86400 ? day : clock).format(new Date(v * 1000))),
+      },
       { stroke: theme.axis, grid: { stroke: theme.grid }, size: 80, values: (_u, splits) => splits.map((v) => fmtAxis(v)) },
     ],
     series: [
-      {},
+      { label: time.label, value: (_u: uPlot, v: number | null) => (v == null ? "-" : full.format(new Date(v * 1000))) },
       ...series.map((s, i) => ({
         label: s.label,
         stroke: COLORS[i % COLORS.length],
@@ -63,20 +79,23 @@ export function buildOptions(width: number, series: Spec[], fmtAxis: (v: number)
 
 /** Canvas plot of the columns; rebuilt when the data or formatting changes. */
 export function Plot({ data, series, fmtAxis, label }: { data: Columns; series: Spec[]; fmtAxis: (v: number) => string; label: string }) {
+  const { t, i18n } = useTranslation();
   const host = useRef<HTMLDivElement>(null);
   const themeVersion = useThemeVersion();
+  const timeLabel = t("chart.time");
+  const locale = i18n.language;
 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const u = new uPlot(buildOptions(el.clientWidth || 640, series, fmtAxis, readTheme()), data as uPlot.AlignedData, el);
+    const u = new uPlot(buildOptions(el.clientWidth || 640, series, fmtAxis, readTheme(), { label: timeLabel, locale }), data as uPlot.AlignedData, el);
     const ro = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => u.setSize({ width: el.clientWidth || 640, height: HEIGHT }));
     ro?.observe(el);
     return () => {
       ro?.disconnect();
       u.destroy();
     };
-  }, [data, series, fmtAxis, themeVersion]);
+  }, [data, series, fmtAxis, themeVersion, timeLabel, locale]);
 
   return <div ref={host} role="img" aria-label={label} className="w-full overflow-hidden" />;
 }

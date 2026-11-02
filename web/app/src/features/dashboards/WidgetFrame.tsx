@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errText } from "@/features/common/errText";
 import { safeText } from "@/lib/text";
+import { cn } from "@/lib/utils";
 import { getWidget } from "@/widgets/registry";
 
 export type GridItem = { key: string; id?: number; type: string; x: number; y: number; w: number; h: number; config: Record<string, unknown> };
@@ -12,13 +13,37 @@ export type GridItem = { key: string; id?: number; type: string; x: number; y: n
 /** CSS class of the drag handle: only the handle moves a widget, so its content stays usable in edit mode. */
 export const DRAG_HANDLE = "widget-drag";
 
+/** The edge a bubble widget grows away from: the grid side it touches, so it never grows off the dashboard. */
+export type BubbleOrigin = "left" | "center" | "right";
+
+/*
+ * Bubble (FR-MAP-7): after a short hover, or while focus is inside, the whole widget grows a fifth over its neighbours with
+ * a deep shadow; the grid cell raises its z-index (DashboardGrid). Only with motion allowed: prefers-reduced-motion keeps it still.
+ */
+const BUBBLE =
+  "motion-safe:transition-[scale,box-shadow] motion-safe:duration-300 motion-safe:ease-out motion-safe:hover:delay-150 motion-safe:hover:scale-[1.2] motion-safe:hover:shadow-2xl motion-safe:focus-within:scale-[1.2] motion-safe:focus-within:shadow-2xl";
+const ORIGIN: Record<BubbleOrigin, string> = { left: "origin-top-left", center: "origin-top", right: "origin-top-right" };
+
 const NONE = { queryKey: ["widgets", "none"] as const, queryFn: async () => null };
 
 /**
  * One cell of a dashboard: looks the widget up in the registry, checks the stored config with the widget's schema, runs
  * its data query and renders it. In edit mode a toolbar offers the drag handle, settings and removal.
  */
-export function WidgetFrame({ item, editing, onSettings, onRemove }: { item: GridItem; editing: boolean; onSettings: () => void; onRemove: () => void }) {
+export function WidgetFrame({
+  item,
+  editing,
+  bubble,
+  onSettings,
+  onRemove,
+}: {
+  item: GridItem;
+  editing: boolean;
+  /** Set for a widget that grows over its neighbours on hover (never while editing). */
+  bubble?: BubbleOrigin;
+  onSettings: () => void;
+  onRemove: () => void;
+}) {
   const { t } = useTranslation();
   const def = getWidget(item.type);
   const parsed = def?.configSchema.safeParse(item.config);
@@ -39,7 +64,12 @@ export function WidgetFrame({ item, editing, onSettings, onRemove }: { item: Gri
 
   const frameless = def?.frameless && !!config;
   return (
-    <section aria-label={heading} data-widget={item.type} className="flex h-full flex-col gap-2 overflow-hidden rounded-lg border bg-card p-3 text-card-foreground">
+    <section
+      aria-label={heading}
+      data-widget={item.type}
+      data-bubble={bubble}
+      className={cn("flex h-full flex-col gap-2 overflow-hidden rounded-lg border bg-card p-3 text-card-foreground shadow-xs", bubble && [BUBBLE, ORIGIN[bubble]])}
+    >
       {(editing || !frameless) && (
         <header className="flex items-center gap-1">
           {editing && (

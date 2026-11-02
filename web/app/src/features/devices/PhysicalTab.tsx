@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey } from "@/features/auth/errors";
@@ -45,7 +45,17 @@ export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
   const macs = useDeviceTable(deviceId, "mac", { limit: 1000 });
   const lldp = useDeviceTable(deviceId, "lldp", { limit: 1000 });
   const [hover, setHover] = useState<number | undefined>();
+  /* where the hovered port is, relative to the panel box: the tooltip sits above it */
+  const [tipAt, setTipAt] = useState<{ x: number; y: number } | undefined>();
   const [open, setOpen] = useState<number | undefined>();
+  const box = useRef<HTMLDivElement>(null);
+  const onHover = (i: number | undefined) => {
+    setHover(i);
+    const port = i === undefined ? null : box.current?.querySelector(`[data-if-index="${i}"]`);
+    const outer = box.current?.getBoundingClientRect();
+    const r = port?.getBoundingClientRect();
+    setTipAt(r && outer ? { x: r.left + r.width / 2 - outer.left, y: r.top - outer.top } : undefined);
+  };
 
   const rows = ifaces.data?.items;
   const panel = useMemo(() => frontPanel(rows ?? []), [rows]);
@@ -81,32 +91,42 @@ export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
         <EmptyState title={t("phys.noPorts")} hint={t("phys.noPortsHint")} />
       ) : (
         <>
-          <div className="flex justify-center overflow-x-auto rounded-xl border bg-gradient-to-b from-muted/40 to-muted px-3 py-4 dark:from-muted/20 dark:to-muted/60">
-            <FrontPanel
-              rj45={panel.rj45}
-              sfp={panel.sfp}
-              model={device?.model ?? ""}
-              brand={brandOf(device?.driver)}
-              state={device?.state}
-              hover={hover}
-              selected={open}
-              onHover={setHover}
-              onSelect={(i) => setOpen(open === i ? undefined : i)}
-            />
-          </div>
-          <div className="grid gap-1 text-xs text-muted-foreground">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              <Legend tone="bg-emerald-400" label={t("phys.legend.link")} />
-              <Legend tone="bg-amber-400" label={t("phys.legend.slow")} />
-              <Legend tone="bg-zinc-500" label={t("phys.legend.noLink")} />
+          <div ref={box} className="relative">
+            <div className="flex justify-center overflow-x-auto rounded-xl border bg-gradient-to-b from-muted/40 to-muted px-3 pt-6 pb-4 dark:from-muted/20 dark:to-muted/60">
+              <FrontPanel
+                rj45={panel.rj45}
+                sfp={panel.sfp}
+                model={device?.model ?? ""}
+                brand={brandOf(device?.driver)}
+                state={device?.state}
+                hover={hover}
+                selected={open}
+                onHover={onHover}
+                onSelect={(i) => setOpen(open === i ? undefined : i)}
+              />
             </div>
-            <span>{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
+            {/* the port tooltip: speed, VLAN and traffic of the hovered or focused port, above it; read out politely */}
+            <div
+              aria-live="polite"
+              data-testid="port-hint"
+              className={cn(
+                "pointer-events-none absolute z-10 w-max max-w-72 -translate-x-1/2 -translate-y-full rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg",
+                !hovered && "sr-only",
+              )}
+              style={tipAt && hovered ? { left: tipAt.x, top: tipAt.y - 6 } : undefined}
+            >
+              {hovered && <PortHint deviceId={deviceId} port={hovered} vlans={vlans.get(hovered.if_index)} />}
+            </div>
           </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <Legend tone="bg-emerald-400" label={t("phys.legend.link")} />
+            <Legend tone="bg-amber-400" label={t("phys.legend.slow")} />
+            <Legend tone="bg-zinc-500" label={t("phys.legend.noLink")} />
+            <span className="ml-auto">{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">{t("phys.hoverHint")}</p>
         </>
       )}
-      <div aria-live="polite" className="min-h-10 rounded-md border bg-muted/30 px-3 py-2 text-sm" data-testid="port-hint">
-        {hovered ? <PortHint deviceId={deviceId} port={hovered} vlans={vlans.get(hovered.if_index)} /> : <span className="text-muted-foreground">{t("phys.hoverHint")}</span>}
-      </div>
       {opened && (
         <PortCard
           port={opened}
@@ -130,10 +150,11 @@ function Legend({ tone, label }: { tone: string; label: string }) {
   );
 }
 
+/* a port speed (0 = not reported); with `rate`, a traffic rate, where 0 is a real value */
 function useSpeed() {
   const { t, i18n } = useTranslation();
   const units = ["bps", "kbps", "mbps", "gbps", "tbps"].map((k) => t(`chart.unit.${k}`));
-  return (bps: number) => (bps > 0 ? formatBps(bps, units, i18n.language) : t("phys.unknown"));
+  return (bps: number, rate = false) => (bps > 0 || (rate && bps === 0) ? formatBps(bps, units, i18n.language) : t("phys.unknown"));
 }
 
 function vlanText(vlans: number[] | undefined, none: string): string {
@@ -151,9 +172,14 @@ function PortHint({ deviceId, port, vlans }: { deviceId: number; port: Iface; vl
   });
   const m = useIfMetrics(deviceId, port.if_index, range, 60_000);
   const last = m.data?.points.at(-1);
+  const alias = safeText(port.alias);
   return (
-    <span className="flex flex-wrap gap-x-4 gap-y-1">
-      <span className="font-medium break-all">{safeText(port.name)}</span>
+    <span className="grid gap-0.5">
+      <span className="flex items-center gap-2 font-semibold break-all">
+        <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", port.oper_up ? "bg-emerald-500" : "bg-zinc-400")} />
+        {safeText(port.name)}
+        {alias && <span className="truncate font-normal text-muted-foreground">{alias}</span>}
+      </span>
       <span>
         {t("phys.speed")}: {speed(port.speed_bps)}
       </span>
@@ -161,7 +187,7 @@ function PortHint({ deviceId, port, vlans }: { deviceId: number; port: Iface; vl
         {t("phys.vlan")}: {vlanText(vlans, t("phys.unknown"))}
       </span>
       <span>
-        {t("phys.traffic")}: {last ? t("phys.inOut", { in: speed(last.in_bps), out: speed(last.out_bps) }) : m.isPending ? t("card.loading") : t("phys.unknown")}
+        {t("phys.traffic")}: {last ? t("phys.inOut", { in: speed(last.in_bps, true), out: speed(last.out_bps, true) }) : m.isPending ? t("card.loading") : t("phys.unknown")}
       </span>
     </span>
   );

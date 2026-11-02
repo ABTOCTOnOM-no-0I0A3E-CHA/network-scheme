@@ -183,7 +183,8 @@ export function NetworkMap({ topology, severity, problems, backgroundUrl, save, 
       autounselectify: true,
       hideEdgesOnViewport: large,
       textureOnViewport: large,
-      pixelRatio: large ? 1 : "auto",
+      /* a compact map renders a quarter finer, so it stays sharp while its dashboard widget is enlarged (bubble) */
+      pixelRatio: large ? 1 : compactRef.current ? (window.devicePixelRatio || 1) * 1.25 : "auto",
     });
     cyRef.current = cy;
 
@@ -410,7 +411,7 @@ export function NetworkMap({ topology, severity, problems, backgroundUrl, save, 
   return (
     <div
       ref={ground}
-      className={`relative h-full w-full overflow-hidden rounded-md border bg-card bg-[radial-gradient(circle,var(--color-border)_1.2px,transparent_1.3px)] ${compact ? "min-h-0" : "min-h-96"}`}
+      className={`relative h-full w-full overflow-hidden rounded-md border bg-card bg-[radial-gradient(circle,var(--color-border)_1.2px,transparent_1.3px)] ${compact ? "min-h-0" : "min-h-96"} ${editing ? "border-primary/60 ring-2 ring-primary/25" : ""}`}
       data-testid="network-map"
       data-editing={editing || undefined}
     >

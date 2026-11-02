@@ -270,6 +270,7 @@ export function FrontPanel({ rj45, sfp, model, brand, state = "unknown", hover, 
             role="button"
             tabIndex={idx === stopIdx ? 0 : -1}
             data-port-idx={idx}
+            data-if-index={port.if_index}
             data-port-kind={kind}
             data-oper={port.oper_up ? "up" : "down"}
             aria-label={t("phys.port", { name, state: t(port.oper_up ? "card.up" : "card.down") })}

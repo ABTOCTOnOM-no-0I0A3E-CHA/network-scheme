@@ -2,6 +2,7 @@ import { useId, type ReactNode } from "react";
 import { LineChart } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { formatBps } from "@/features/charts/series";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
 import type { DeviceTable } from "./api";
@@ -45,6 +46,7 @@ export function DataTab({ deviceId, table, onTable, onShowChart }: Props) {
 
 function Table({ deviceId, table, onShowChart }: { deviceId: number; table: DeviceTable; onShowChart: (ifIndex: number) => void }) {
   const { t, i18n } = useTranslation();
+  const units = ["bps", "kbps", "mbps", "gbps", "tbps"].map((k) => t(`chart.unit.${k}`));
   const num = (n: number) => <span className="tabular-nums">{n}</span>;
   const col = <R,>(cid: string, cell: (r: R) => ReactNode): Column<R> => ({ id: cid, header: t(`card.col.${cid}`), cell });
   const seen = (r: { seen_at: string }) => r.seen_at;
@@ -64,7 +66,12 @@ function Table({ deviceId, table, onShowChart }: { deviceId: number; table: Devi
             col("ifIndex", (r: { if_index: number }) => num(r.if_index)),
             col("name", (r: { name: string }) => <Text value={r.name} />),
             col("alias", (r: { alias: string }) => <Text value={r.alias} />),
-            col("speed", (r: { speed_bps: number }) => t("card.bps", { n: r.speed_bps.toLocaleString(i18n.language) })),
+            /* "1 Гбит/с" rather than "1 000 000 000 бит/с"; the exact figure stays in the tooltip */
+            col("speed", (r: { speed_bps: number }) => (
+              <span className="whitespace-nowrap" title={t("card.bps", { n: r.speed_bps.toLocaleString(i18n.language) })}>
+                {r.speed_bps > 0 ? formatBps(r.speed_bps, units, i18n.language) : "-"}
+              </span>
+            )),
             col("oper", (r: { oper_up: boolean }) => (r.oper_up ? t("card.up") : t("card.down"))),
             col("chart", (r: { if_index: number; name: string }) => (
               <Button type="button" variant="outline" size="sm" aria-label={t("card.chartBtn", { name: safeText(r.name) })} onClick={() => onShowChart(r.if_index)}>

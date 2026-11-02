@@ -7,9 +7,10 @@ import { setupServer } from "msw/node";
 import { z } from "zod";
 import "@/i18n";
 import ru from "@/i18n/ru.json";
-import { registerWidget, unregisterWidget } from "@/widgets/registry";
+import { listWidgets, registerWidget, unregisterWidget } from "@/widgets/registry";
 import { pickDashboard, type Dashboard, type DashboardDetail } from "./api";
 import { addItem, applyLayout, DashboardPage } from "./DashboardPage";
+import { WidgetFrame } from "./WidgetFrame";
 
 vi.mock("@tanstack/react-router", async (orig) => ({ ...(await orig<typeof import("@tanstack/react-router")>()), useNavigate: () => vi.fn() }));
 
@@ -197,5 +198,27 @@ describe("dashboard helpers", () => {
     const added = addItem(items, "mini_map");
     expect(added[1]).toMatchObject({ type: "mini_map", x: 0, y: 4, w: 6, h: 8, config: {} });
     expect(addItem(items, "nope")).toBe(items);
+  });
+});
+
+describe("bubble widgets", () => {
+  const frame = (props: { editing: boolean; bubble?: "left" | "right" }) =>
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <WidgetFrame item={{ key: "k", type: "device_status", x: 0, y: 0, w: 3, h: 3, config: {} }} onSettings={() => {}} onRemove={() => {}} {...props} />
+      </QueryClientProvider>,
+    );
+
+  it("grow the whole frame from the grid edge they touch, only with motion allowed", () => {
+    const { container } = frame({ editing: false, bubble: "right" });
+    const cls = container.querySelector("section")!.className;
+    expect(cls).toContain("motion-safe:hover:scale-");
+    expect(cls).toContain("origin-top-right");
+    cleanup();
+    expect(frame({ editing: false }).container.querySelector("section")!.className).not.toMatch(/scale/);
+  });
+
+  it("mark only the mini-map as a bubble widget", () => {
+    expect(listWidgets().filter((w) => w.bubble).map((w) => w.type)).toEqual(["mini_map"]);
   });
 });
