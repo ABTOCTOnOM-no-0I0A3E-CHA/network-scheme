@@ -24,6 +24,19 @@ export function linkWidth(speedBps: number | null): number {
   return 6;
 }
 
+type Pos = { x: number; y: number };
+type EdgeEnds = { source(): { position(): Pos }; target(): { position(): Pos } };
+
+/**
+ * How far along a link its port name sits from one end: past the device's label chip when the link leaves downwards
+ * (through the chip), close to the device otherwise, so the two names of a short link never meet.
+ */
+export function portLabelOffset(from: Pos, to: Pos): number {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  return dy > Math.abs(dx) * 0.5 ? 46 : 20;
+}
+
 export const LINK_COLOR = { ok: "#64748b", partial: "#d97706", down: "#dc2626", manual: "#7c3aed" } as const;
 /** Links below this confidence are drawn dashed: only one side (or a MAC table) vouches for them. */
 export const CONFIDENCE_SOLID = 0.8;
@@ -131,8 +144,9 @@ export function buildStylesheet(opts: { dark: boolean; large: boolean }): Styles
         "text-border-color": opts.dark ? "#374151" : "#cbd5e1",
         "text-border-width": 1,
         "text-border-opacity": 1,
-        "source-text-offset": 46,
-        "target-text-offset": 46,
+        /* evaluated when the names show (hover), so they follow the current positions */
+        "source-text-offset": ((e: EdgeEnds) => portLabelOffset(e.source().position(), e.target().position())) as unknown as number,
+        "target-text-offset": ((e: EdgeEnds) => portLabelOffset(e.target().position(), e.source().position())) as unknown as number,
       },
     },
     { selector: "edge[?dashed]", style: { "line-style": "dashed" } },

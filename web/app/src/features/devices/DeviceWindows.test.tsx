@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "@/i18n";
@@ -49,12 +49,15 @@ describe("device windows", () => {
     expect(z("core-sw")).toBeGreaterThan(z("edge-rtr"));
   });
 
-  it("opens at about 760x560 beside the click that opened it, the next one cascaded", async () => {
+  it("opens at about 860x640 beside the click that opened it, the next one cascaded", async () => {
+    /* a desktop-height viewport, so the cascade is not clamped at the bottom */
+    vi.stubGlobal("innerHeight", 1000);
+    onTestFinished(() => void vi.unstubAllGlobals());
     setup();
     fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
     fireEvent.click(screen.getByRole("button", { name: "open 1" }));
     const a = screen.getByRole("dialog", { name: "core-sw" });
-    expect([a.style.width, a.style.height]).toEqual(["760px", "560px"]);
+    expect([a.style.width, a.style.height]).toEqual(["860px", "640px"]);
     expect([a.style.left, a.style.top]).toEqual(["132px", "102px"]);
     fireEvent.pointerDown(window, { clientX: 100, clientY: 150 });
     fireEvent.click(screen.getByRole("button", { name: "open 2" }));
@@ -72,7 +75,7 @@ describe("device windows", () => {
     fireEvent.pointerDown(window, { clientX: window.innerWidth - 100, clientY: 200 });
     fireEvent.click(screen.getByRole("button", { name: "open 1" }));
     const a = screen.getByRole("dialog", { name: "core-sw" });
-    expect(parseFloat(a.style.left) + 760).toBeLessThanOrEqual(window.innerWidth - 100);
+    expect(parseFloat(a.style.left) + 860).toBeLessThanOrEqual(window.innerWidth - 100);
   });
 
   it("brings a window to the front when it is clicked", async () => {

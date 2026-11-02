@@ -8,7 +8,7 @@ import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
 import type { DeviceState } from "@/features/common/StateBadge";
 import { EmptyState } from "@/features/common/EmptyState";
-import { useDeviceTable, useIfMetrics, type TableRows } from "./api";
+import { useDeviceTable, useIfMetrics, useSysMetrics, type TableRows } from "./api";
 import { FrontPanel } from "./FrontPanel";
 
 type Iface = TableRows["interfaces"];
@@ -122,11 +122,12 @@ export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
             <Legend tone="bg-emerald-400" label={t("phys.legend.link")} />
             <Legend tone="bg-amber-400" label={t("phys.legend.slow")} />
             <Legend tone="bg-zinc-500" label={t("phys.legend.noLink")} />
-            <span className="ml-auto">{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
+            <span>{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
           </div>
           <p className="text-xs text-muted-foreground">{t("phys.hoverHint")}</p>
         </>
       )}
+      <Hardware deviceId={deviceId} up={up} total={panel.rj45.length + panel.sfp.length} />
       {opened && (
         <PortCard
           port={opened}
@@ -138,6 +139,47 @@ export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
         />
       )}
     </div>
+  );
+}
+
+/* the newest sample within this window gives the chassis temperature */
+const SYS_WINDOW_MS = 15 * 60 * 1000;
+
+/** The chassis at a glance: serial, power supplies, fans (ENTITY-MIB), temperature and ports on link. */
+function Hardware({ deviceId, up, total }: { deviceId: number; up: number; total: number }) {
+  const { t } = useTranslation();
+  const ents = useDeviceTable(deviceId, "entities", { limit: 200 });
+  const [range] = useState(() => {
+    const to = new Date(Math.floor(Date.now() / 60_000) * 60_000);
+    return { from: new Date(to.getTime() - SYS_WINDOW_MS), to };
+  });
+  const sys = useSysMetrics(deviceId, range);
+  const items = ents.data?.items ?? [];
+  const chassis = items.find((e) => e.class === "chassis");
+  const count = (cls: string) => items.filter((e) => e.class === cls).length;
+  const temp = sys.data?.points.findLast((p) => p.temp_c !== null)?.temp_c;
+  const none = t("phys.unknown");
+  const tiles: [string, string][] = [
+    [t("phys.hw.serial"), safeText(chassis?.serial) || none],
+    [t("phys.hw.power"), count("powerSupply") ? t("phys.hw.units", { n: count("powerSupply") }) : none],
+    [t("phys.hw.fans"), count("fan") ? t("phys.hw.units", { n: count("fan") }) : none],
+    [t("phys.hw.temp"), temp == null ? none : t("phys.hw.celsius", { n: Math.round(temp) })],
+    [t("phys.hw.ports"), total ? t("phys.hw.portsUp", { up, total }) : none],
+  ];
+  return (
+    <section aria-label={t("phys.hw.title")} className="grid gap-2">
+      <h3 className="text-sm font-semibold">{t("phys.hw.title")}</h3>
+      <dl className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2">
+        {tiles.map(([k, v]) => (
+          <div key={k} className="min-w-0 rounded-lg border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">{k}</dt>
+            <dd className="truncate text-sm font-medium" title={v}>
+              {v}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   );
 }
 

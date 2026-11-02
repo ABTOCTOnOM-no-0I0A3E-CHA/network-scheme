@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStylesheet, linkStyle, linkWidth, LINK_COLOR, worseState } from "./style";
+import { buildStylesheet, linkStyle, linkWidth, LINK_COLOR, portLabelOffset, worseState } from "./style";
 
 describe("linkWidth", () => {
   it("grows with the speed", () => {
@@ -52,5 +52,13 @@ describe("misc", () => {
   it("shows port names on hovered links and on the links of a hovered device", () => {
     const rule = buildStylesheet({ dark: false, large: false }).find((r) => r.selector === "edge.hover, edge.ports") as unknown as { style: Record<string, unknown> };
     expect(rule.style).toMatchObject({ "source-label": "data(portA)", "target-label": "data(portB)" });
+  });
+});
+
+describe("portLabelOffset", () => {
+  it("puts a port name past the label chip only when the link leaves downwards", () => {
+    expect(portLabelOffset({ x: 0, y: 0 }, { x: 10, y: 100 })).toBe(46);
+    expect(portLabelOffset({ x: 10, y: 100 }, { x: 0, y: 0 })).toBe(20);
+    expect(portLabelOffset({ x: 0, y: 0 }, { x: 200, y: 20 })).toBe(20);
   });
 });

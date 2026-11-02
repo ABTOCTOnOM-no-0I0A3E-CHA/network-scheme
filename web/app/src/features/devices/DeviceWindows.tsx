@@ -20,8 +20,8 @@ export const useDeviceWindows = () => useContext(Ctx);
 type Win = { id: number; title: string; x: number; y: number; w: number; h: number; opener: Element | null };
 
 const MAX_WINDOWS = 8;
-const DEFAULT_W = 760;
-const DEFAULT_H = 560;
+const DEFAULT_W = 860;
+const DEFAULT_H = 640;
 /* a pointer press this recent opened the window: it opens beside that point */
 const POINTER_FRESH_MS = 1500;
 const MIN_W = 420;

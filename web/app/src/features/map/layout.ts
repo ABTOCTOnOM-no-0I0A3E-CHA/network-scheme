@@ -33,7 +33,8 @@ export function buildElkGraph(topo: Topology): ElkNode {
         "elk.algorithm": "layered",
         "elk.direction": "DOWN",
         "elk.spacing.nodeNode": "28",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "44",
+        /* links between layers long enough to carry both port names apart */
+        "elk.layered.spacing.nodeNodeBetweenLayers": "64",
         "elk.layered.nodePlacement.strategy": "SIMPLE",
         "elk.layered.cycleBreaking.strategy": "GREEDY",
         "elk.layered.layering.strategy": "LONGEST_PATH",

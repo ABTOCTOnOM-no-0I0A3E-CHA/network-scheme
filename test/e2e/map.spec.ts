@@ -224,20 +224,23 @@ test("topology and map end to end", async ({ page }) => {
     const box = mini.getByTestId("mini-map-box");
     await expect(box).toBeVisible();
     await expect(mini.locator("[data-testid=map-canvas]")).toBeVisible();
-    expect(await box.getAttribute("class")).toContain("hover:scale-[1.04]");
-    /* Tailwind v4 scales with the CSS `scale` property, not `transform` */
+    /* the bubble grows the whole widget frame over its neighbours (Tailwind v4 scales with the CSS `scale` property), never the map inside it */
+    const frame = page.locator('[data-widget="mini_map"]');
     const scale = (l: typeof box) => l.evaluate((e) => getComputedStyle(e).scale);
-    expect(await scale(box)).toBe("none");
+    expect(await frame.getAttribute("class")).toContain("hover:scale-[1.2]");
+    expect(await scale(frame)).toBe("none");
     await box.hover();
-    await expect.poll(() => scale(box), { timeout: 5_000 }).toBe("1.04");
+    await expect.poll(() => scale(frame), { timeout: 5_000 }).toBe("1.2");
+    expect(await scale(box)).toBe("none");
+    /* no scrollbars inside the enlarged widget */
+    expect(await frame.evaluate((e) => [...e.querySelectorAll("*")].some((c) => c.scrollHeight > c.clientHeight + 1 && getComputedStyle(c).overflowY === "auto"))).toBe(false);
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(home);
-    const calm = page.getByRole("region", { name: "Карта сети" }).getByTestId("mini-map-box");
-    await expect(calm).toBeVisible();
-    expect(await calm.getAttribute("class")).not.toContain("hover:scale");
-    await calm.hover();
-    await sleep(500);
+    const calm = page.locator('[data-widget="mini_map"]');
+    await expect(calm.getByTestId("mini-map-box")).toBeVisible();
+    await calm.getByTestId("mini-map-box").hover();
+    await sleep(800);
     expect(await calm.evaluate((e) => getComputedStyle(e).scale)).toBe("none");
     await page.emulateMedia({ reducedMotion: null });
 

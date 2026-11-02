@@ -13,11 +13,14 @@ type Props = { deviceId: number; ifIndex: number | undefined; onIfIndex: (i: num
 type Sel = { preset: Preset; range: MetricsRange };
 const initial = (): Sel => ({ preset: "1h", range: presetRange("1h", new Date()) });
 
-/** "Графики" tab: interface picker, range picker and the charts of the chosen interface. */
+/** "Графики" tab: interface picker, range picker and the charts of the chosen interface (by default the first one with a link). */
 export function ChartsTab({ deviceId, ifIndex, onIfIndex }: Props) {
   const { t } = useTranslation();
   const [sel, setSel] = useState<Sel>(initial);
   const ifaces = useDeviceTable(deviceId, "interfaces", { limit: 1000 });
+  /* without a chosen interface the tab opens on the first port with a link, so it shows traffic straight away */
+  const auto = ifaces.data?.items.find((i) => i.oper_up && i.port_kind !== "other")?.if_index ?? ifaces.data?.items.find((i) => i.oper_up)?.if_index;
+  const shown = ifIndex ?? auto;
 
   return (
     <div data-slot="device-charts" className="grid gap-4">
@@ -26,11 +29,11 @@ export function ChartsTab({ deviceId, ifIndex, onIfIndex }: Props) {
           {t("chart.interface")}
           <select
             className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground dark:bg-input/30"
-            value={ifIndex ?? ""}
+            value={shown ?? ""}
             onChange={(e) => onIfIndex(Number(e.target.value))}
           >
-            {ifIndex === undefined && <option value="">{t("chart.pick")}</option>}
-            {ifIndex !== undefined && !ifaces.data?.items.some((i) => i.if_index === ifIndex) && <option value={ifIndex}>{ifIndex}</option>}
+            {shown === undefined && <option value="">{t("chart.pick")}</option>}
+            {shown !== undefined && !ifaces.data?.items.some((i) => i.if_index === shown) && <option value={shown}>{shown}</option>}
             {ifaces.data?.items.map((i) => (
               <option key={i.if_index} value={i.if_index}>
                 {i.if_index} {safeText(i.name)}
@@ -49,7 +52,7 @@ export function ChartsTab({ deviceId, ifIndex, onIfIndex }: Props) {
           </Button>
         )}
       </div>
-      {ifIndex === undefined ? <p className="text-sm text-muted-foreground">{t("chart.pick")}</p> : <IfChart key={ifIndex} deviceId={deviceId} ifIndex={ifIndex} range={sel.range} />}
+      {shown === undefined ? <p className="text-sm text-muted-foreground">{t("chart.pick")}</p> : <IfChart key={shown} deviceId={deviceId} ifIndex={shown} range={sel.range} />}
       <SysChart deviceId={deviceId} range={sel.range} />
     </div>
   );

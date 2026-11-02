@@ -31,9 +31,10 @@ function DeviceCounts({ data }: { data: Counts }) {
           <p className="text-xs text-muted-foreground">{t("widgets.deviceStatus.share", { pct: Math.round((data.up / data.total) * 100) })}</p>
         </div>
       )}
-      <dl className="grid grid-cols-2 gap-2 text-sm">
+      {/* two columns where the widget is wide enough, else one: a badge never wraps */}
+      <dl className="grid grid-cols-[repeat(auto-fill,minmax(8rem,1fr))] gap-x-3 gap-y-1 text-sm">
         {STATES.map((s) => (
-          <div key={s} className="flex items-center justify-between gap-2 rounded-md border px-2 py-1">
+          <div key={s} className="flex items-center justify-between gap-2 border-b border-dashed py-0.5 whitespace-nowrap">
             <dt>
               <StateBadge state={s} />
             </dt>

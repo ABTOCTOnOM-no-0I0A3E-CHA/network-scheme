@@ -18,6 +18,8 @@ export type Viewport = { zoom: number; pan: { x: number; y: number } };
 const MIN_SIZE = 10;
 const HANDLE = 10;
 const BAR = 22;
+/* below this zoom the zone title bar would hide the devices it holds */
+const BAR_MIN_ZOOM = 0.6;
 const CORNERS: Corner[] = ["nw", "ne", "sw", "se"];
 const KINDS: AreaKind[] = ["building", "floor", "room", "organization"];
 const MAX_NAME = 100;
@@ -37,7 +39,8 @@ const bySize = (areas: OverlayArea[]) => [...areas].sort((a, b) => b.w * b.h - a
 
 /**
  * Areas as translucent zones with a title bar (name, worst state, kind and device count), under the map canvas. Screen
- * coordinates from the map's zoom and pan; the title bar keeps its size at any zoom. Names are text only.
+ * coordinates from the map's zoom and pan; the title bar keeps its size down to a zoom where it would cover the devices
+ * along the zone's top edge (the mini-map), then the name moves to a small tag in the bottom corner. Names are text only.
  */
 export function AreaZones({ areas, viewport }: { areas: OverlayArea[]; viewport: Viewport }) {
   const { t } = useTranslation();
@@ -48,7 +51,7 @@ export function AreaZones({ areas, viewport }: { areas: OverlayArea[]; viewport:
         const k = KIND_CLASS[a.kind] ?? KIND_CLASS.room;
         return (
           <div key={a.id} data-testid={`zone-${a.id}`} className={cn("absolute rounded-md border-[1.5px]", k.zone)} style={{ left: s.x, top: s.y, width: s.w, height: s.h }}>
-            {s.h >= BAR + 4 && s.w >= 48 && (
+            {viewport.zoom >= BAR_MIN_ZOOM && s.h >= BAR + 4 && s.w >= 48 && (
               <div className={cn("flex h-[22px] items-center gap-1.5 overflow-hidden rounded-t-[5px] px-2 text-xs font-medium", k.bar)}>
                 <span className={cn("size-2 shrink-0 rounded-full ring-1 ring-white/70", DOT[a.status])} />
                 <span className="truncate">{safeText(a.name)}</span>
@@ -58,6 +61,9 @@ export function AreaZones({ areas, viewport }: { areas: OverlayArea[]; viewport:
                   </span>
                 )}
               </div>
+            )}
+            {viewport.zoom < BAR_MIN_ZOOM && s.h >= 20 && s.w >= 40 && (
+              <span className={cn("absolute bottom-0.5 left-0.5 max-w-[calc(100%-4px)] truncate rounded-sm px-1 text-[10px] leading-4 font-medium", k.bar)}>{safeText(a.name)}</span>
             )}
           </div>
         );
