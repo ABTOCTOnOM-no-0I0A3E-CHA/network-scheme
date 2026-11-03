@@ -14,6 +14,16 @@ Sources (cited per value below):
   - [UM] "Ethernet Switches MES23xx, MES33xx, MES35xx, MES5324. User Manual,
     firmware version 4.0.22" (Eltex),
     https://eltex.ru/storage/upload_center/files/35/MES_Series_user_manual_4.0.22_en.pdf
+  - [UM6] "Руководство по эксплуатации MES2300-xx, MES3300-xx, MES3500I,
+    MES5312, MES53xxA, MES5300/5305/5310, MES5400/5410, MES5500-32", firmware
+    6.6.10, document revision 1.39 (Eltex),
+    https://api.eltexsl.ru/app/uploads/2024/07/mes_series_user_manual_6.6.10.pdf
+  - [UM10] "Руководство по эксплуатации MES14xx, MES24xx, MES24xx-xx,
+    MES3400-xx, MES37xx", firmware 10.4.5.2, document revision 8.7 (Eltex),
+    https://eltexcm.ru/assets/files/products/2847/mes_series_user_manual_10.4.5.2.pdf
+
+The two firmware lines (6.x and 10.x) are one read driver, narrowed to a line
+by ForIdentity; see Line.
 */
 package eltexmes
 
@@ -90,11 +100,18 @@ anchors it to the whole line. Not verified on hardware.
 */
 var execPrompt = regexp.MustCompile(`^[\w.-]+# ?$`)
 
-/* Driver is the Eltex MES driver; the generic driver supplies everything it does not override. */
-type Driver struct{ generic.Driver }
+/*
+Driver is the Eltex MES driver; the generic driver supplies everything it does
+not override. line is LineUnknown for the registered driver and is set only by
+ForIdentity.
+*/
+type Driver struct {
+	generic.Driver
+	line Line
+}
 
 /* New returns the MES driver. */
-func New() Driver { return Driver{generic.New()} }
+func New() Driver { return Driver{Driver: generic.New()} }
 
 func init() { drivers.Register(New()) }
 
@@ -110,17 +127,23 @@ func (Driver) Match(sysObjectID, _ string) bool {
 }
 
 /*
-Dialect returns the MES CLI dialect.
+Dialect returns the MES CLI dialect of the driver's firmware line.
 PagerOff: "terminal datadump" shows output without splitting into pages for
 the current terminal session; source: [UM] §5.1 "Basic commands", Table 33
-(EXEC mode). Allowlist: "show version" (current firmware version) and "show
-system" (system information); source: [UM] §5.1, EXEC/privileged EXEC
-command tables. Not verified on hardware.
+(EXEC mode), [UM6] §5. MES 10.x has no "terminal datadump"; its session
+command is "set cli pagination off" (privileged EXEC); source: [UM10]
+pp. 78-85. An unknown line keeps "terminal datadump". Allowlist: "show
+version" (current firmware version) and "show system" (system information);
+source: [UM] §5.1, EXEC/privileged EXEC command tables. Not verified on hardware.
 */
-func (Driver) Dialect() ssh.Dialect {
+func (d Driver) Dialect() ssh.Dialect {
+	pager := []string{"terminal datadump"}
+	if d.line == LineMES10 {
+		pager = []string{"set cli pagination off"}
+	}
 	return ssh.Dialect{
 		ExecPrompt: execPrompt,
-		PagerOff:   []string{"terminal datadump"},
+		PagerOff:   pager,
 		Allowlist:  append(drivers.Allowlist(showDefs, false), ssh.ShowCommand{Name: runningConfig}),
 	}
 }

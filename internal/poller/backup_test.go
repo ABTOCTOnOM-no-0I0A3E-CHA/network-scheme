@@ -218,15 +218,35 @@ func TestBackupStoresAVersionOnlyWhenTheHashChanges(t *testing.T) {
 	}
 }
 
-func TestBackupNeedsWriteIsRecordedAndNotFetched(t *testing.T) {
-	e := newBackupEnv(t, "192.0.2.102:161")
+/*
+Ruling R1: a firmware line whose configuration read needs a write account
+(ESR, MES 10.x) is still backed up by the poller, as in Phase 3, until the
+executor has taken the device over (4b.8).
+*/
+func TestBackupNeedsWriteLineStillBackedUpUntilTheExecutorTakesOver(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.110:161")
 	e.drv.needsWrite = true
 	e.cfg.Store(&fetched{text: "hostname x\n"})
 	if err := e.run(sourceSchedule); err != nil {
 		t.Fatal(err)
 	}
-	if e.fetchN.Load() != 0 {
-		t.Fatal("the configuration was fetched from a model that needs a write account")
+	if e.fetchN.Load() != 1 || len(e.versions(e.dev)) != 1 {
+		t.Fatalf("fetches %d, versions %d: the poller stopped backing up before the executor took over", e.fetchN.Load(), len(e.versions(e.dev)))
+	}
+	if e.count(`SELECT count(*) FROM backups.backup_state WHERE device_id = $1 AND last_ok_at IS NOT NULL AND last_error IS NULL AND NOT needs_write`, e.dev) != 1 {
+		t.Fatal("backup state not ok")
+	}
+}
+
+/* A device that refuses the configuration read (privilege) is recorded as needs_write, which is not a failure, and nothing is stored. */
+func TestBackupRefusalIsRecordedAsNeedsWrite(t *testing.T) {
+	e := newBackupEnv(t, "192.0.2.102:161")
+	e.cfg.Store(&fetched{err: fmt.Errorf("fetch: %w", drivers.ErrConfigRejected)})
+	if err := e.run(sourceSchedule); err != nil {
+		t.Fatal(err)
+	}
+	if e.fetchN.Load() != 1 {
+		t.Fatal("the read was not attempted")
 	}
 	if len(e.versions(e.dev)) != 0 {
 		t.Fatal("a version was stored")
@@ -234,8 +254,8 @@ func TestBackupNeedsWriteIsRecordedAndNotFetched(t *testing.T) {
 	if e.count(`SELECT count(*) FROM backups.backup_state WHERE device_id = $1 AND needs_write AND last_error = $2`, e.dev, errNeedsWrite) != 1 {
 		t.Fatal("needs_write not recorded")
 	}
-	/* Once the model no longer needs it, the flag clears with the next successful backup. */
-	e.drv.needsWrite = false
+	/* Once the device lets the account read, the flag clears with the next successful backup. */
+	e.cfg.Store(&fetched{text: "hostname x\n"})
 	if err := e.run(sourceSchedule); err != nil {
 		t.Fatal(err)
 	}

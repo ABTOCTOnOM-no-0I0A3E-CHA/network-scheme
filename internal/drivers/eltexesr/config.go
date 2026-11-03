@@ -48,8 +48,10 @@ func (d Driver) FetchConfig(ctx context.Context, sh drivers.ShowRunner) (string,
 }
 
 /*
-ConfigNeedsWrite is false by assumption: the ESR documentation shows
-"show running-config" in the privileged mode, which the read prompt (#)
-already is, and says nothing about a write right. The hardware stand must confirm it.
+ConfigNeedsWrite is true: "show running-config" needs privilege level 10,
+and level 10 already allows configuring the device (ESR-Series CLI reference
+1.28, pp. 24, 103; research [R §3], ruling Q4). A level 1..9 account with
+"privilege root level <N> show running-config" is documented in syntax only.
+Not verified on hardware.
 */
-func (Driver) ConfigNeedsWrite() bool { return false }
+func (Driver) ConfigNeedsWrite() bool { return true }

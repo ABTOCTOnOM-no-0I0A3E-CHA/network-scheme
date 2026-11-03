@@ -102,8 +102,8 @@ func fail(text string, err error) error { return &backupFail{text: text, err: er
 /*
 backupDevice backs up one device; the device lock must be held. The outcome is
 recorded in backup_state (last_ok_at, or last_error with a fixed text). It
-returns the failure for the schedule's retry logic; a model that needs a
-write account is not a failure (it is recorded and skipped).
+returns the failure for the schedule's retry logic; a device that refuses the
+read (it needs a write account) is not a failure (it is recorded as needs_write).
 */
 func (p *Poller) backupDevice(ctx context.Context, d device, cache *devCache, source string, jobID *int64) error {
 	if p.backupPub == nil {
@@ -135,11 +135,14 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 	if err != nil {
 		return fail(errIdentify, err)
 	}
-	if drv.ConfigNeedsWrite() {
+	if drv.ConfigNeedsWrite() && p.executorBacksUp(ctx, d) {
+		return nil /* backup_state is the executor's */
+	}
+	raw, err := p.fetchRaw(ctx, d, cache, drv)
+	if errors.Is(err, drivers.ErrConfigRejected) {
 		p.setBackupError(ctx, d.ID, errNeedsWrite, true)
 		return nil
 	}
-	raw, err := p.fetchRaw(ctx, d, cache, drv)
 	if err != nil {
 		return err
 	}
@@ -177,6 +180,19 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 	p.backupVersions.Add(1)
 	return nil
 }
+
+/*
+executorBacksUp reports whether the executor has taken over the backups of d,
+whose firmware line needs a write account to read the configuration (ruling
+R1). Until then the poller keeps backing it up with the read account as in
+Phase 3, so no device loses its backups in the move; a refusal by the device
+is recorded as needs_write.
+
+TODO(4b.8): true only when d is in exec.write_device with backup_via_executor
+and the executor has published a successful backup of it (through execpub,
+never from a table the api writes); the poller then stops fetching it.
+*/
+func (*Poller) executorBacksUp(context.Context, device) bool { return false }
 
 /* sshFetch reads the running configuration over the read-only SSH profile, with the driver's allowlisted command only. */
 func (p *Poller) sshFetch(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) {

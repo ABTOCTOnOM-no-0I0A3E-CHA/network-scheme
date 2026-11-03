@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,8 +92,57 @@ func TestUnknownResourceIsNil(t *testing.T) {
 	}
 }
 
+/* mes10 is the driver narrowed to firmware 10.x. */
+func mes10() drivers.Driver {
+	return drivers.ForIdentity(eltexmes.New(), drivers.Identity{Model: "MES2424", Firmware: "10.4.5.2"})
+}
+
 func TestDialectAllowlistReadOnly(t *testing.T) {
-	d := eltexmes.New().Dialect()
+	for name, drv := range map[string]drivers.Driver{
+		"unknown": eltexmes.New(),
+		"mes6":    drivers.ForIdentity(eltexmes.New(), drivers.Identity{Model: "MES2324", Firmware: "6.6.2"}),
+		"mes10":   mes10(),
+	} {
+		t.Run(name, func(t *testing.T) { dialectReadOnly(t, drv) })
+	}
+}
+
+/* The MES 10.x line has no "terminal datadump"; 6.x and an unknown line keep today's dialect. */
+func TestDialectPerLine(t *testing.T) {
+	base := eltexmes.New().Dialect()
+	for name, c := range map[string]struct {
+		drv   drivers.Driver
+		pager string
+	}{
+		"unknown": {eltexmes.New(), "terminal datadump"},
+		"mes6":    {drivers.ForIdentity(eltexmes.New(), drivers.Identity{Model: "MES2324", Firmware: "6.6.2"}), "terminal datadump"},
+		"mes10":   {mes10(), "set cli pagination off"},
+	} {
+		d := c.drv.Dialect()
+		if !slices.Equal(d.PagerOff, []string{c.pager}) {
+			t.Errorf("%s: PagerOff = %q, want %q", name, d.PagerOff, c.pager)
+		}
+		if !reflect.DeepEqual(d.Allowlist, base.Allowlist) || d.ExecPrompt.String() != base.ExecPrompt.String() || c.drv.Name() != eltexmes.Name {
+			t.Errorf("%s: allowlist, prompt or name differ by line", name)
+		}
+	}
+}
+
+/* Ruling Q4 [R §3]: MES 10.x needs a write account to read the configuration; 6.x and an unknown line do not. */
+func TestConfigNeedsWritePerLine(t *testing.T) {
+	if eltexmes.New().ConfigNeedsWrite() {
+		t.Error("unknown line: needs write")
+	}
+	if drivers.ForIdentity(eltexmes.New(), drivers.Identity{Firmware: "6.6.2"}).ConfigNeedsWrite() {
+		t.Error("mes6: needs write")
+	}
+	if !mes10().ConfigNeedsWrite() {
+		t.Error("mes10: does not need write")
+	}
+}
+
+func dialectReadOnly(t *testing.T, drv drivers.Driver) {
+	d := drv.Dialect()
 	if len(d.Allowlist) == 0 || len(d.PagerOff) == 0 || d.ExecPrompt == nil {
 		t.Fatalf("incomplete dialect %+v", d)
 	}

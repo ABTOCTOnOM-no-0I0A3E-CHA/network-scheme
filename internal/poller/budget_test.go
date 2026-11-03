@@ -113,3 +113,38 @@ func (budgetDriver) ShowCommands() []showspec.Spec           { return nil }
 func (budgetDriver) ShowCommand(string, []string) (ssh.ShowCommand, error) {
 	return ssh.ShowCommand{}, drivers.ErrUnknownShow
 }
+
+/* lineDriver is a budgetDriver that covers several firmware lines and records the identity it was narrowed with. */
+type lineDriver struct {
+	budgetDriver
+	narrowed *drivers.Identity
+}
+
+func (l lineDriver) ForIdentity(id drivers.Identity) drivers.Driver {
+	l.narrowed = &id
+	return l
+}
+
+/* The cached driver is narrowed to the firmware line of the identity the poller read. */
+func TestDriverNarrowedToTheFirmwareLine(t *testing.T) {
+	h := newHarness(t, "")
+	p := New(h.config(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour}), Deps{
+		Pool: h.env.Pool("nms_poller"), Priv: h.priv, Pub: h.pub, Pinger: fakePinger{ok: true},
+		Registry: drivers.NewRegistry(lineDriver{}),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	id := h.device(netip.MustParseAddrPort("198.51.100.151:161"))
+	devs, err := p.loadDevices(context.Background())
+	if err != nil || len(devs) != 1 || devs[0].ID != id {
+		t.Fatalf("devices = %v, %v", devs, err)
+	}
+	cache := newDevCache()
+	drv, err := p.driver(context.Background(), devs[0], cache, fakeReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := drv.(lineDriver)
+	if !ok || l.narrowed == nil || l.narrowed.Model != "fake" || cache.drv != drv {
+		t.Fatalf("driver not narrowed to the identity: %#v", drv)
+	}
+}

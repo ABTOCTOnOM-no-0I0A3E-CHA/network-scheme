@@ -63,6 +63,7 @@ func newDevice(t *testing.T, env *testdb.Env) int64 {
 func dial(t *testing.T, env *testdb.Env, d drivers.Driver, responses map[string]string) (*ssh.Runner, *sshemu.Log) {
 	t.Helper()
 	responses["terminal datadump"] = ""
+	responses["set cli pagination off"] = ""
 	addr, log := sshemu.Start(t, sshemu.Config{HostKey: sshemu.NewHostKey(t), Prompt: "sw1#", Responses: responses, Username: "mon", Password: password})
 	r, err := ssh.Dial(context.Background(), addr, newDevice(t, env), cred, ssh.NewHostKeys(env.Pool("nms_poller")), d.Dialect())
 	if err != nil {
@@ -74,10 +75,19 @@ func dial(t *testing.T, env *testdb.Env, d drivers.Driver, responses map[string]
 
 func TestFetchConfigOnlyAllowlistedCommand(t *testing.T) {
 	env := testdb.New(t)
-	for _, name := range []string{"eltex-mes", "eltex-esr"} {
-		t.Run(name, func(t *testing.T) {
-			d := byName(t, name)
-			cfg := fixture(t, strings.TrimPrefix(name, "eltex-"))
+	for _, c := range []struct {
+		name, driver, fixture, pager string
+		id                           drivers.Identity
+	}{
+		{"eltex-mes", "eltex-mes", "mes", "terminal datadump", drivers.Identity{}},
+		{"eltex-mes 6.x", "eltex-mes", "mes", "terminal datadump", drivers.Identity{Model: "MES2324", Firmware: "6.6.2"}},
+		/* MES 10.x has no "terminal datadump" [R §5] */
+		{"eltex-mes 10.x", "eltex-mes", "mes", "set cli pagination off", drivers.Identity{Model: "MES2424", Firmware: "10.4.5.2"}},
+		{"eltex-esr", "eltex-esr", "esr", "terminal datadump", drivers.Identity{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := drivers.ForIdentity(byName(t, c.driver), c.id)
+			cfg := fixture(t, c.fixture)
 			r, log := dial(t, env, d, map[string]string{runCfg: strings.TrimSuffix(cfg, "\n")})
 			got, err := d.FetchConfig(context.Background(), r)
 			if err != nil {
@@ -86,7 +96,7 @@ func TestFetchConfigOnlyAllowlistedCommand(t *testing.T) {
 			if d.NormalizeConfig(got) != d.NormalizeConfig(cfg) {
 				t.Error("fetched config differs from the device output")
 			}
-			if want := []string{"terminal datadump", runCfg}; !slices.Equal(log.Commands(), want) {
+			if want := []string{c.pager, runCfg}; !slices.Equal(log.Commands(), want) {
 				t.Fatalf("device saw %q, want %q", log.Commands(), want)
 			}
 			/* A command that is not in the allowlist never reaches the device. */
@@ -219,8 +229,9 @@ func TestShowCommandsAllowlistedAndNoConfigDump(t *testing.T) {
 				t.Errorf("%s: key %q resolved: %v", name, k, err)
 			}
 		}
-		if d.ConfigNeedsWrite() {
-			t.Errorf("%s: ConfigNeedsWrite", name)
+		/* ruling Q4 [R §3]: ESR yes; MES of an unknown line no (the poller tries; per-line values are in the driver tests) */
+		if d.ConfigNeedsWrite() != (name == "eltex-esr") {
+			t.Errorf("%s: ConfigNeedsWrite = %v", name, d.ConfigNeedsWrite())
 		}
 		if v, ok := d.(interface{ Verified() bool }); !ok || v.Verified() {
 			t.Errorf("%s must be unverified", name)
