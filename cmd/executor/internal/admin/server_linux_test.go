@@ -34,7 +34,9 @@ func serveOn(t *testing.T, uid int, handled *atomic.Int32, refused *atomic.Int32
 	go func() { done <- s.Serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		_ = <-done /* the server's result after cancel is not under test here */
+		if err := <-done; err != nil { /* a cancelled server returns nil */
+			t.Errorf("Serve: %v", err)
+		}
 	})
 	for range 100 {
 		if _, err := os.Stat(path); err == nil {
