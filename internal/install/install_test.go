@@ -834,7 +834,6 @@ func TestRunChecksStackSubnets(t *testing.T) {
 		"xnet overlaps devices": {func(o *install.Options) { o.XnetSubnet = "172.30.1.0/25" }, "--xnet-subnet"},
 		"core overlaps devices": {func(o *install.Options) { o.CoreSubnet = "172.30.1.0/24" }, "--core-subnet"},
 		"mgmt overlaps core":    {func(o *install.Options) { o.MgmtSubnets = []string{"10.0.0.0/8", "172.30.0.64/26"} }, "--core-subnet"},
-		"mgmt overlaps devices": {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.1.0/24"} }, "--devices-subnet"},
 		"mgmt overlaps xnet":    {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.2.128/25"} }, "--xnet-subnet"},
 		"mgmt overlaps edge":    {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.3.0/24"} }, "--edge-subnet"},
 		"edge overlaps core":    {func(o *install.Options) { o.EdgeSubnet = "172.30.0.0/24" }, "--edge-subnet"},
@@ -861,7 +860,8 @@ func TestRunChecksStackSubnets(t *testing.T) {
 
 	o, root, out := installOptions(t)
 	o.CoreSubnet, o.DevicesSubnet, o.XnetSubnet = "10.99.0.0/24", "10.99.1.0/24", "10.99.2.0/24"
-	o.MgmtSubnets = []string{"192.168.50.0/24"}
+	/* the devices network itself may be a management subnet: devices live on it in CI, the demo stand and labs */
+	o.MgmtSubnets = []string{"192.168.50.0/24", "10.99.1.0/24"}
 	if err := install.Run(context.Background(), o, newFakeSys()); err != nil {
 		t.Fatalf("Run: %v\n%s", err, out)
 	}

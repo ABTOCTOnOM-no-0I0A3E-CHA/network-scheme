@@ -151,11 +151,13 @@ func prepareInstall(o Options) (prepared, error) {
 	if eg.MgmtSubnets, err = ParseMgmtSubnets(o.MgmtSubnets); err != nil {
 		return prepared{}, fmt.Errorf("install: %w", err)
 	}
-	/* The devices network routes to the management subnets: none may be one of the stack's own networks. */
+	/*
+	 * The devices network routes to the management subnets: none may be one of the stack's internal networks.
+	 * The devices network itself is allowed: devices may live on it (simulators in CI, the demo stand, labs).
+	 */
 	for _, m := range eg.MgmtSubnets {
 		for _, own := range []struct{ flag, subnet string }{
-			{"--core-subnet", in.CoreSubnet}, {"--devices-subnet", in.DevicesSubnet}, {"--xnet-subnet", in.XnetSubnet},
-			{"--edge-subnet", in.EdgeSubnet},
+			{"--core-subnet", in.CoreSubnet}, {"--xnet-subnet", in.XnetSubnet}, {"--edge-subnet", in.EdgeSubnet},
 		} {
 			if m.Overlaps(netip.MustParsePrefix(own.subnet)) {
 				return prepared{}, fmt.Errorf("install: management subnet %s overlaps %s %s", m, own.flag, own.subnet)
