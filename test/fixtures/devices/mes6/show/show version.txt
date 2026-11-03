@@ -1,0 +1,4 @@
+Active-image: flash://system/images/mes2300-662.ros
+  Version: 6.6.2
+  Commit: 4b1c6a2e
+  Build: 1 (date 14-Mar-2024 time 11:02:17)

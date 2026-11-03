@@ -1,0 +1,6 @@
+Boot version:
+  1.23.3.2 (date 27/03/2024 time 21:13:26)
+SW version:
+  1.23.3 build 3[a1b2c3d4] (date 27/03/2024 time 21:13:26)
+HW version:
+  2v1

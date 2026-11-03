@@ -1,0 +1,22 @@
+## source: docs [R §1] (the confirm timer reverts running; the changes stay in candidate)
+<<< esr-lab-01#
+>>> configure terminal
+<<< esr-lab-01(config)#
+>>> hostname esr-new
+<<< esr-lab-01(config)#
+>>> end
+<<< esr-lab-01#
+>>> commit confirm-timeout 60
+% Invalid input
+<<< esr-lab-01#
+>>> commit confirm-timeout 120
+Configuration has been successfully applied and saved to flash. Commit timer started, changes will be reverted in 120 seconds.
+<<< esr-new#
+## advance 121s
+>>> confirm
+Nothing to confirm in configuration
+<<< esr-lab-01#
+>>> show configuration changes
+-hostname esr-lab-01
++hostname esr-new
+<<< esr-lab-01#

@@ -1,0 +1,52 @@
+# Eltex MES14xx/24xx/3400/37xx, firmware 10.x CLI as documented. Every entry says where it comes from:
+#   docs [R §N]        .superpowers/research/eltex-cli.md, section N (official manuals unless the section says secondary)
+#   device <model/fw>  captured from a real device (see ../README.md)
+#   guess …            not documented; replace with a device capture
+line: mes10
+model: MES2424, firmware 10.4.x (documentation only)
+source: "docs [R §0]"
+hostname: {text: console, source: "docs [R §5]"}
+banner: {text: "", source: "guess [R §4]"}
+prompts:
+  exec: {text: "{host}>", source: "docs [R §5]"}
+  privileged: {text: "{host}#", source: "docs [R §5]"}
+  config: {text: "{host}(config)#", source: "docs [R §5]"}
+  context: {text: "{host}({ctx})#", source: "docs [R §5]"}
+contexts:
+  - {match: '^interface \S.*$', mode: config-if, source: "docs [R §5]"}
+  - {match: '^line \S+$', mode: config-line, source: "docs [R §5]"}
+  - {match: '^vlan \d+$', mode: config-vlan, source: "guess [R §5]"}
+config:
+  indent: {text: " ", source: "guess [R §2b]"}
+  exit: {text: "!", source: "guess [R §2b] (a 10.x config file starts with \"!\")"}
+  exit_indent: parent
+  comment: {text: "", source: "guess [R §2b]"}
+pager:
+  prompt: {text: "--More--", source: "guess [R §5] (pagination exists, its prompt is not documented)"}
+  lines: 24
+  erase: {text: "\r        \r", source: "guess [R §5]"}
+errors:
+  unknown: {text: "% Invalid Command", source: "guess [R §5] (not documented for 10.x)"}
+  incomplete: {text: "% Incomplete Command", source: "guess [R §5]"}
+  invalid: {text: "% Invalid input", source: "guess [R §5]"}
+confirm:
+  reload: {text: "Do you want to continue (y/n) [n]?", source: "guess [R §5] (set cli prompt exists, its questions are not documented)"}
+messages:
+  copy_done: {text: "Copy operation completed successfully", source: "guess [R §2b]"}
+  reload_none: {text: "No reload is scheduled", source: "guess [R §2b]"}
+  reload_at: {text: "Reload scheduled at {time}", source: "guess [R §2b]"}
+login:
+  user: {text: "User Name:", source: "docs [R §4]"}
+  password: {text: "Password:", source: "docs [R §4]"}
+  failed: {text: "% Authentication failed", source: "guess [R §4]"}
+  expired: {text: "Your password has expired.", source: "guess [R §4]"}
+  new_password: {text: "Enter new password:", source: "guess [R §4]"}
+syslog:
+  pattern: {text: '^[A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}:[A-Z0-9_-]+:', source: "guess [R §5]"}
+  stamp: {text: "Jan 2 15:04:05 2006:SYS:", source: "guess [R §5]"}
+ssh:
+  host_key: ed25519
+  ciphers: [aes128-ctr, aes192-ctr, aes256-ctr]
+  auth: [password]
+  source: "docs [R §4] (aes-ctr ciphers by default; curve25519 and ed25519 supported)"
+defaults: {}

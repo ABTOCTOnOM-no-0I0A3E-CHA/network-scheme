@@ -1,0 +1,23 @@
+## source: docs [R §2a] (reload in as the safety timer: the device comes back with startup-config)
+<<< sw-lab-01#
+>>> configure
+<<< sw-lab-01(config)#
+>>> hostname sw-risky
+<<< sw-risky(config)#
+>>> end
+<<< sw-risky#
+>>> reload in 1000
+% Wrong number of parameters or invalid range, size or characters entered
+<<< sw-risky#
+>>> reload in 00:10
+<<< This command will reset the whole system and disconnect your current session. Do you want to continue (y/n) [n]?
+>>> y
+<<< sw-risky#
+>>> reload cancel
+<<< sw-risky#
+>>> reload in 10
+<<< This command will reset the whole system and disconnect your current session. Do you want to continue (y/n) [n]?
+>>> y
+<<< sw-risky#
+## advance 10m
+>>> show version

@@ -1,0 +1,37 @@
+## source: docs [R §2a] (immediate apply, write + Y)
+<<< sw-lab-01#
+>>> terminal datadump
+<<< sw-lab-01#
+>>> configure
+<<< sw-lab-01(config)#
+>>> interface gigabitethernet1/0/2
+<<< sw-lab-01(config-if)#
+>>> description spare
+<<< sw-lab-01(config-if)#
+>>> no shutdown
+<<< sw-lab-01(config-if)#
+>>> end
+<<< sw-lab-01#
+>>> configure terminal
+<<< sw-lab-01(config)#
+>>> write
+% Unrecognized command
+<<< sw-lab-01(config)#
+>>> do write
+<<< Overwrite file [startup-config].... (Y/N)[N] ?
+>>> N
+<<< sw-lab-01(config)#
+>>> exit
+<<< sw-lab-01#
+>>> write
+<<< Overwrite file [startup-config].... (Y/N)[N] ?
+>>> Y
+01-Jan-2026 00:00:00 %COPY-I-FILECPY: Files Copy - source URL running-config destination URL flash://startup-config
+01-Jan-2026 00:00:00 %COPY-N-TRAP: The copy operation was completed successfully
+Copy succeeded
+<<< sw-lab-01#
+>>> terminal no prompt
+<<< sw-lab-01#
+>>> write memory
+Copy succeeded
+<<< sw-lab-01#

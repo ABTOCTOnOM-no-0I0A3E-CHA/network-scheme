@@ -1,0 +1,26 @@
+## source: docs [R §1] (restore before confirm, rollback of the candidate)
+<<< esr-lab-01#
+>>> restore
+Can't find backup of previous configuration!
+<<< esr-lab-01#
+>>> configure
+<<< esr-lab-01(config)#
+>>> no interface gigabitethernet 1/0/2
+<<< esr-lab-01(config)#
+>>> do commit
+Configuration has been successfully applied and saved to flash. Commit timer started, changes will be reverted in 600 seconds.
+<<< esr-lab-01(config)#
+>>> do restore
+Reversion to the last confirmed configuration is completed.
+<<< esr-lab-01(config)#
+>>> end
+<<< esr-lab-01#
+>>> show configuration changes
+-interface gigabitethernet 1/0/2
+-  shutdown
+<<< esr-lab-01#
+>>> rollback
+All uncommitted changes have been reverted.
+<<< esr-lab-01#
+>>> show configuration changes
+<<< esr-lab-01#

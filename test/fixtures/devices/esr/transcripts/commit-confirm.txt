@@ -1,0 +1,34 @@
+## source: docs [R §1] (candidate, commit, confirm)
+<<< esr-lab-01#
+>>> terminal datadump
+<<< esr-lab-01#
+>>> configure
+<<< esr-lab-01(config)#
+>>> interface gigabitethernet 1/0/2
+<<< esr-lab-01(config-if-gi)#
+>>> description "spare"
+<<< esr-lab-01(config-if-gi)#
+>>> no shutdown
+<<< esr-lab-01(config-if-gi)#
+>>> commit
+% Unrecognized command
+<<< esr-lab-01(config-if-gi)#
+>>> exit
+<<< esr-lab-01(config)#
+>>> end
+<<< esr-lab-01#
+>>> show configuration changes
+-  shutdown
++  description "spare"
+<<< esr-lab-01#
+>>> commit
+Configuration has been successfully applied and saved to flash. Commit timer started, changes will be reverted in 600 seconds.
+<<< esr-lab-01#
+>>> confirm
+Configuration has been confirmed. Commit timer canceled.
+<<< esr-lab-01#
+>>> confirm
+Nothing to confirm in configuration
+<<< esr-lab-01#
+>>> show configuration changes
+<<< esr-lab-01#
