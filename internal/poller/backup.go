@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/beekamai/network-scheme/internal/devices"
 	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/jobs"
-	"github.com/beekamai/network-scheme/internal/ssh"
 )
 
 /*
@@ -54,7 +52,6 @@ const (
 	sourceSchedule = "schedule"
 	sourceEvent    = "event"
 	sourceManual   = "manual"
-	sourcePreSess  = "pre_session"
 )
 
 /* numIntervals counts the interval settings of a device: the poll classes and the backup interval, which has no poll class. */
@@ -85,6 +82,7 @@ const (
 	errStoreFailed   = "storing the configuration failed"
 	errBackupTimeout = "configuration backup timed out"
 	errBusy          = "the poller is busy with other backups; try again later"
+	errChangeSession = "the device is in a change session of the executor; backed up after it"
 )
 
 /* errBackupSkipped: the poller-side gap skipped the run, nothing was fetched (not a success, not a failure). */
@@ -167,12 +165,12 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 		return fail(errSealFailed, err)
 	}
 	/*
-		Drift: a change with an earlier version on record, unless it was taken
-		right before a change session of the panel (source pre_session, which
-		phase 3 never produces: every change is drift). The first version of a
-		device is the baseline, not drift.
+		Drift: a change with an earlier version on record (pre- and post-session
+		versions are the executor's, the database refuses them from the poller),
+		unless it is what a change session just left on the device. The first
+		version of a device is the baseline, not drift.
 	*/
-	drift := last != nil && source != sourcePreSess
+	drift := last != nil && !p.sessionResult(ctx, d.ID, sum)
 	if err := p.storeVersion(ctx, d.ID, source, sum, len(raw), masked, ct, dekCT, drift, jobID); err != nil {
 		return fail(errStoreFailed, err)
 	}
@@ -189,7 +187,10 @@ func (p *Poller) sshFetch(ctx context.Context, d device, cache *devCache, drv dr
 	if err != nil {
 		return "", fail(errNoSSHProfile, err)
 	}
-	runner, err := ssh.Dial(ctx, netip.AddrPortFrom(d.Addr.Addr(), sshPort), d.ID, c, p.hostKeys, drv.Dialect())
+	runner, err := p.dialSSH(ctx, d, c, drv.Dialect())
+	if errors.Is(err, errInSession) {
+		return "", fail(errChangeSession, err)
+	}
 	if err != nil {
 		return "", fail(errSSHFailed, err)
 	}

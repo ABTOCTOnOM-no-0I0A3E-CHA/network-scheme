@@ -1,5 +1,5 @@
 {
-  "comment": "TEST-ONLY keys. Sealed by web/app/src/lib/seal.ts sealCredential; regenerate with bun scripts/gen-seal-vector.ts.",
+  "comment": "TEST-ONLY keys. Sealed by web/shared/src/seal.ts sealCredential; regenerate with bun scripts/gen-seal-vector.ts.",
   "private_key": "ef6528e3febf7db9def1f529160efe2ea02990bef97ca994837c20a588fc6faa",
   "public_key": "704d5f259972a585972bd122bc6af44af4a1ea01b668b50139f4fe6d58881214",
   "owner": "device:7",

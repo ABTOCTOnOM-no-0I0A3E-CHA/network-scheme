@@ -138,6 +138,10 @@ var matrix = map[string]map[string]int{
 	"GET /api/stats/top-devices":                              {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/stats/top-interfaces":                           {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 	"GET /api/stats/config-drift":                             {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"POST /api/executor/ticket":                               {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 200, "admin": 200, "adminA": 200},
+	"POST /api/executor/freeze":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 202, "adminA": 403},
+	"GET /api/executor/status":                                {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 200, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
+	"GET /api/devices/{id}/sessions":                          {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 }
 
 /*
@@ -212,6 +216,7 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/stats/top-devices":                              {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/stats/top-interfaces":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/stats/config-drift":                             {"viewerA": 200, "operatorA": 200, "adminA": 200},
+	"GET /api/devices/{id}/sessions":                          {"viewerA": 404, "operatorA": 404, "adminA": 404},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -389,6 +394,12 @@ func (m *matrixEnv) validRequest(key string, s *subject) req {
 		return req{method: "DELETE", path: fmt.Sprintf("/api/groups/%d", m.group())}
 	case "GET /api/audit":
 		return req{method: "GET", path: "/api/audit?limit=5"}
+	case "POST /api/executor/ticket":
+		return req{method: "POST", path: "/api/executor/ticket"}
+	case "POST /api/executor/freeze":
+		return req{method: "POST", path: "/api/executor/freeze"}
+	case "GET /api/executor/status":
+		return req{method: "GET", path: "/api/executor/status"}
 	}
 	if r, ok := m.deviceRequest(key); ok {
 		return r
@@ -446,6 +457,8 @@ func (m *matrixEnv) deviceRequest(key string) (req, bool) {
 		return req{method: "GET", path: dev("/api/devices/%d/" + strings.TrimPrefix(key, "GET /api/devices/{id}/") + "?limit=10")}, true
 	case "GET /api/devices/{id}/export/{table}":
 		return req{method: "GET", path: dev("/api/devices/%d/export/interfaces")}, true
+	case "GET /api/devices/{id}/sessions":
+		return req{method: "GET", path: dev("/api/devices/%d/sessions")}, true
 	case "GET /api/search":
 		return req{method: "GET", path: "/api/search?q=" + url.QueryEscape(nextAddr().String())}, true
 	case "GET /api/devices/{id}/metrics/if":

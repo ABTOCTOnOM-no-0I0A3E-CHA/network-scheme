@@ -15,7 +15,7 @@ services:
     environment:
       POSTGRES_DB: "{{.DBName}}"
       POSTGRES_PASSWORD_FILE: /run/secrets/db_postgres_password
-    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password, db_eventd_password]
+    secrets: [db_postgres_password, db_migrator_password, db_api_password, db_cli_password, db_poller_password, db_eventd_password, db_executor_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - "{{.Paths.Etc}}/postgres/initdb:/docker-entrypoint-initdb.d:ro"
@@ -59,7 +59,8 @@ services:
     mem_limit: 512m
     environment:
       GOMEMLIMIT: 400MiB # soft heap limit below mem_limit: the collector works harder instead of the kernel killing the api
-    secrets: [db_api_password, api_data_key]
+    # ticket_key signs the session tickets the executor verifies.
+    secrets: [db_api_password, api_data_key, ticket_key]
     volumes:
       - "{{.Paths.Etc}}/config/api.yaml:/etc/nms/api.yaml:ro"
     networks:
@@ -154,6 +155,45 @@ services:
       retries: 5
       start_period: 30s
 
+  # The only service that may change devices: its own image and user, the write, backup and sealing keys.
+  # Listens only on its static address in xnet (gateway, mutual TLS); in core it is a database client only.
+  executor:
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    image: "{{.ExecutorImage}}:{{.ImageTag}}"
+    restart: unless-stopped
+    read_only: true
+    user: "65533:65533"
+    cpus: "1.0"
+    mem_limit: 512m
+    environment:
+      GOMEMLIMIT: 400MiB
+    # The administration socket (nmsctl executor, through docker compose exec) lives here.
+    tmpfs: ["/run/executor:mode=0700,uid=65533,gid=65533,size=1m"]
+    secrets: [db_executor_password, executor_sealing_key, domain_write_key, domain_backup_key, ticket_pub, executor_tls_crt, executor_tls_key, ca_crt]
+    volumes:
+      - executor-state:/var/lib/executor
+      - "{{.Paths.Etc}}/config/executor.yaml:/etc/nms/executor.yaml:ro"
+      - "{{.Paths.Etc}}/config/egress.yaml:/etc/nms/egress.yaml:ro"
+      # The directory, not the file: nmsctl replaces the policy atomically (rename), which a file mount would not see.
+      - "{{.Paths.Etc}}/policies:/etc/nms/policies:ro"
+    networks:
+      core: {}
+      devices: {}
+      xnet:
+        ipv4_address: "{{.ExecutorIP}}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/executor", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   gateway:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -164,20 +204,30 @@ services:
     cpus: "1.0"
     mem_limit: 256m
     tmpfs: [/tmp]
-    ports: ["{{.HTTPSPort}}:8443"]
+    # The panel, and the executor origin (a second site, proxied to the executor over xnet).
+    ports: ["{{.HTTPSPort}}:8443", "{{.ExecutorPort}}:9443"]
     secrets:
       - source: web_crt
         target: /certs/web.crt
       - source: web_key
         target: /certs/web.key
+      - source: gateway_client_crt
+        target: /certs/gateway_client.crt
+      - source: gateway_client_key
+        target: /certs/gateway_client.key
+      - source: ca_crt
+        target: /certs/ca.crt
     volumes:
       - caddy-data:/data
       - "{{.Paths.Etc}}/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "{{.Paths.Var}}/gateway/keys.json:/srv/keys/keys.json:ro"
+    # A static address in edge: the executor origin (:9443) listens only there, never in core or xnet.
     networks:
-      edge: {}
+      edge:
+        ipv4_address: "{{.GatewayEdgeIP}}"
       core:
         ipv4_address: "{{.GatewayIP}}"
+      xnet: {}
     depends_on:
       api:
         condition: service_healthy
@@ -201,7 +251,12 @@ services:
       core: {}
 
 networks:
-  edge: {}
+  # The only routed network of the gateway: Docker publishes its ports here.
+  edge:
+    ipam:
+      config:
+        - subnet: "{{.EdgeSubnet}}"
+          ip_range: "{{.EdgeIPRange}}"
   core:
     internal: true
     ipam:
@@ -215,10 +270,19 @@ networks:
     ipam:
       config:
         - subnet: "{{.DevicesSubnet}}"
+  # Between the gateway and the executor only; no route out.
+  xnet:
+    internal: true
+    ipam:
+      config:
+        - subnet: "{{.XnetSubnet}}"
+          ip_range: "{{.XnetIPRange}}"
 
 volumes:
   pgdata: {}
   caddy-data: {}
+  # The executor's state file (registry high-water mark, audit anchor); no other service mounts it.
+  executor-state: {}
 
 secrets:
   db_postgres_password:
@@ -233,8 +297,30 @@ secrets:
     file: "{{.Paths.Etc}}/secrets/db_poller_password"
   db_eventd_password:
     file: "{{.Paths.Etc}}/secrets/db_eventd_password"
+  db_executor_password:
+    file: "{{.Paths.Etc}}/secrets/db_executor_password"
   domain_read_key:
     file: "{{.Paths.Etc}}/secrets/domain_read.key"
+  domain_write_key:
+    file: "{{.Paths.Etc}}/secrets/domain_write.key"
+  domain_backup_key:
+    file: "{{.Paths.Etc}}/secrets/domain_backup.key"
+  executor_sealing_key:
+    file: "{{.Paths.Etc}}/secrets/executor_sealing_key"
+  ticket_key:
+    file: "{{.Paths.Etc}}/secrets/ticket.key"
+  ticket_pub:
+    file: "{{.Paths.Etc}}/secrets/ticket.pub"
+  executor_tls_crt:
+    file: "{{.Paths.Etc}}/secrets/executor_tls.crt"
+  executor_tls_key:
+    file: "{{.Paths.Etc}}/secrets/executor_tls.key"
+  gateway_client_crt:
+    file: "{{.Paths.Etc}}/secrets/gateway_client.crt"
+  gateway_client_key:
+    file: "{{.Paths.Etc}}/secrets/gateway_client.key"
+  ca_crt:
+    file: "{{.Paths.Etc}}/secrets/ca.crt"
   syslog_crt:
     file: "{{.Paths.Etc}}/secrets/syslog.crt"
   syslog_key:

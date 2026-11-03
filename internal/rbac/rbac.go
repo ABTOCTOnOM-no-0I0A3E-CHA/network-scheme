@@ -53,6 +53,9 @@ const (
 
 	/* Shared dashboards and the default dashboard of each role; global only (not group-scoped). */
 	PermDashboardsManage Perm = "dashboards.manage"
+
+	/* Asking the executor to freeze (execpub.freeze_request, "on" only); global only (not group-scoped). */
+	PermExecutorFreeze Perm = "executor.freeze"
 )
 
 /* matrix is the role to permission mapping; PermSelf is handled in Can. */
@@ -61,7 +64,7 @@ var matrix = map[Role][]Perm{
 	RoleOperator: {PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermSystemRead, PermProblemsAck},
 	RoleAdmin: {PermUsersManage, PermGroupsManage, PermBindingsManage, PermAuditRead, PermEventsManage, PermSystemRead,
 		PermDevicesRead, PermDevicesPoll, PermDevicesBackup, PermDevicesShow, PermDevicesManage, PermDeviceCredentials,
-		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage, PermDashboardsManage},
+		PermProblemsAck, PermTriggersManage, PermMaintenanceManage, PermMapManage, PermDashboardsManage, PermExecutorFreeze},
 	RoleAuditor: {PermAuditRead},
 }
 

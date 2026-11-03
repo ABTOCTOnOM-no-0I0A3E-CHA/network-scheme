@@ -8,7 +8,7 @@ set -eu
 secrets=/run/secrets
 db="${POSTGRES_DB:?POSTGRES_DB must be set}"
 
-for name in db_migrator_password db_api_password db_cli_password db_poller_password db_eventd_password; do
+for name in db_migrator_password db_api_password db_cli_password db_poller_password db_eventd_password db_executor_password; do
 	[ -s "$secrets/$name" ] || { echo "missing or empty secret: $name" >&2; exit 1; }
 done
 
@@ -18,17 +18,20 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" -v db="$db" <
 \set cli_pw `cat /run/secrets/db_cli_password`
 \set poller_pw `cat /run/secrets/db_poller_password`
 \set eventd_pw `cat /run/secrets/db_eventd_password`
+\set executor_pw `cat /run/secrets/db_executor_password`
 
 SELECT format('CREATE ROLE nms_migrator LOGIN PASSWORD %L', :'migrator_pw') \gexec
 SELECT format('CREATE ROLE nms_api LOGIN PASSWORD %L', :'api_pw') \gexec
 SELECT format('CREATE ROLE nms_cli LOGIN PASSWORD %L', :'cli_pw') \gexec
 SELECT format('CREATE ROLE nms_poller LOGIN PASSWORD %L', :'poller_pw') \gexec
 SELECT format('CREATE ROLE nms_eventd LOGIN PASSWORD %L', :'eventd_pw') \gexec
+-- Its schemas and grants come with the migrations.
+SELECT format('CREATE ROLE nms_executor LOGIN PASSWORD %L', :'executor_pw') \gexec
 
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', :'db') \gexec
 -- The application roles reach no other database (template0 refuses connections already).
 REVOKE ALL ON DATABASE postgres, template1 FROM PUBLIC;
-SELECT format('GRANT CONNECT ON DATABASE %I TO nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd', :'db') \gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd, nms_executor', :'db') \gexec
 SELECT format('GRANT CREATE ON DATABASE %I TO nms_migrator', :'db') \gexec
 
 REVOKE ALL ON SCHEMA public FROM PUBLIC;

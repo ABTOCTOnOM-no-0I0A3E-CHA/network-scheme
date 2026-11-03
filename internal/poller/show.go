@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"strings"
 	"time"
 	"unicode"
@@ -51,6 +50,7 @@ const (
 	errShowTimedOut    = "the command timed out"
 	errShowTooSoon     = "too many commands for this device; try again in a few seconds"
 	errShowInterrupted = "the command was interrupted"
+	errShowInSession   = "the device is in a change session of the executor; try again after it"
 )
 
 /* showFailed is a failed command with its fixed text; err is for debugging only and is never logged or stored. */
@@ -257,7 +257,10 @@ func (p *Poller) sshShow(ctx context.Context, d device, cache *devCache, drv dri
 	if err != nil {
 		return "", &showFailed{text: errNoSSHProfile, err: err}
 	}
-	runner, err := ssh.Dial(ctx, netip.AddrPortFrom(d.Addr.Addr(), sshPort), d.ID, c, p.hostKeys, drv.Dialect())
+	runner, err := p.dialSSH(ctx, d, c, drv.Dialect())
+	if errors.Is(err, errInSession) {
+		return "", &showFailed{text: errShowInSession, err: err}
+	}
 	if err != nil {
 		return "", &showFailed{text: errSSHFailed, err: err}
 	}

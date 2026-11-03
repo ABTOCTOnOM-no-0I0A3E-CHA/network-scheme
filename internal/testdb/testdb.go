@@ -34,7 +34,7 @@ const Image = "timescale/timescaledb:2.30.2-pg17@sha256:b346edcdb51a1fd6020e3965
 
 const dbName = "nms"
 
-var roles = []string{"nms_migrator", "nms_api", "nms_cli", "nms_poller", "nms_eventd", "postgres"}
+var roles = []string{"nms_migrator", "nms_api", "nms_cli", "nms_poller", "nms_eventd", "nms_executor", "postgres"}
 
 // Env is a running, migrated test database.
 type Env struct {
@@ -43,7 +43,7 @@ type Env struct {
 	passwords map[string]string
 }
 
-// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd or postgres.
+// Pool returns a pool connected as role: nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd, nms_executor or postgres.
 func (e *Env) Pool(role string) *pgxpool.Pool {
 	p, ok := e.pools[role]
 	if !ok {
@@ -81,7 +81,9 @@ var (
 
 /*
 New returns the package-wide Env, starting the container on first use. The
-test is skipped under -short or when Docker is unavailable.
+test is skipped under -short or when Docker is unavailable, except in CI
+(the environment variable CI is set): there a missing Docker fails the test,
+so a loaded runner cannot pass the database tests by skipping them.
 */
 func New(t *testing.T) *Env {
 	t.Helper()
@@ -90,12 +92,19 @@ func New(t *testing.T) *Env {
 	}
 	once.Do(func() { shared, startErr = start() })
 	if startErr != nil {
-		if errors.Is(startErr, errNoDocker) {
-			t.Skipf("testdb: Docker is unavailable: %v", startErr)
-		}
-		t.Fatalf("testdb: %v", startErr)
+		_, ci := os.LookupEnv("CI")
+		unavailable(t, ci, startErr)
 	}
 	return shared
+}
+
+/* unavailable ends a test whose database could not start: skipped without Docker outside CI, failed otherwise. */
+func unavailable(t testing.TB, ci bool, err error) {
+	t.Helper()
+	if errors.Is(err, errNoDocker) && !ci {
+		t.Skipf("testdb: Docker is unavailable: %v", err)
+	}
+	t.Fatalf("testdb: %v", err)
 }
 
 /*
@@ -163,6 +172,7 @@ func start() (*Env, error) {
 		"nms_cli":      "db_cli_password",
 		"nms_poller":   "db_poller_password",
 		"nms_eventd":   "db_eventd_password",
+		"nms_executor": "db_executor_password",
 	} {
 		pw, err := randomPassword()
 		if err != nil {

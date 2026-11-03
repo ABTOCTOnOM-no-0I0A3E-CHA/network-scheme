@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ProfileForm } from "@/features/devices/ProfileForm";
-import type { CredKind } from "@/lib/seal";
+import type { CredKind } from "@nms/shared/seal";
 
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 const KINDS: CredKind[] = ["snmp2c", "snmp3"];

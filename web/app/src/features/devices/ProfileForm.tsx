@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
-import { loadReadKey, readKeyQueryKey, useReadKey } from "@/lib/keys";
+import { loadReadKey } from "@nms/shared/keys";
+import { readKeyQueryKey, useReadKey } from "@/lib/keys";
 import {
   AUTH_PROTOS,
   PRIV_PROTOS,
@@ -19,7 +20,7 @@ import {
   type CredKind,
   type Owner,
   type SecretOf,
-} from "@/lib/seal";
+} from "@nms/shared/seal";
 import { useSaveProfile, type Profile } from "./profiles";
 
 /* masked text input: a type=password field would be offered to the browser password manager */

@@ -2,6 +2,9 @@ package ssh_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"net"
 	"net/netip"
@@ -525,5 +528,139 @@ func TestLongOutputAndLongInterfaceName(t *testing.T) {
 	}
 	if got := log.Commands(); len(got) != 3 {
 		t.Fatalf("device saw %q", got)
+	}
+}
+
+/*
+A host key whose fingerprint a device in a change session has
+(execpub.device_busy.hostkey_fp) is refused before any credential, whatever
+device row the dial is for and without pinning it; when the busy table
+cannot be read the dial fails closed the same way.
+*/
+func TestBusyHostKeySendsNoCredential(t *testing.T) {
+	env := testdb.New(t)
+	hk := ssh.NewHostKeys(env.Pool("nms_poller"))
+	ctx := context.Background()
+	id := newDevice(t, env)
+	key := sshemu.NewHostKey(t)
+	addr, log := emu(t, key, sshemu.Config{Responses: map[string]string{"terminal datadump": ""}})
+	exe := env.Pool("nms_executor")
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, hostkey_fp) VALUES (990101, gen_random_uuid(), $1)`,
+		gossh.FingerprintSHA256(key.PublicKey())); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = exe.Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = 990101`)
+	})
+	if _, err := ssh.Dial(ctx, addr, id, cred, hk, dialect()); !errors.Is(err, ssh.ErrHostKeyInSession) {
+		t.Fatalf("busy host key: %v", err)
+	}
+	if got := log.AuthAttempts(); len(got) != 0 {
+		t.Fatalf("credentials sent: %q", got)
+	}
+	var pins int
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM ssh_hosts.host_key WHERE device_id = $1`, id).Scan(&pins); err != nil || pins != 0 {
+		t.Fatalf("pinned the busy key: %d %v", pins, err)
+	}
+
+	/* Fail closed: the busy table locked past the callback's deadline. */
+	if _, err := exe.Exec(ctx, `DELETE FROM execpub.device_busy WHERE device_id = 990101`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE execpub.device_busy IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ssh.Dial(ctx, addr, id, cred, hk, dialect())
+	_ = tx.Rollback(ctx)
+	if err == nil || len(log.AuthAttempts()) != 0 {
+		t.Fatalf("unreadable busy table: %v, auth attempts %q", err, log.AuthAttempts())
+	}
+	/* Readable and not busy: the same dial logs in. */
+	r, err := ssh.Dial(ctx, addr, id, cred, hk, dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if len(log.AuthAttempts()) == 0 {
+		t.Fatal("no login: the test cannot see one")
+	}
+}
+
+/*
+4a.7 minor (1): a switch with host keys of two types. The executor accepted
+(and publishes for the busy device) its Ed25519 key; before the session the
+poller had pinned the switch's ECDSA key for the busy device id. An alias row
+of the api's reaching the switch gets that ECDSA key (an alias negotiates the
+type of its own pin): refused before any credential and not pinned for the
+alias; with the device free again the same alias logs in.
+*/
+func TestBusyDevicePinnedKeyOfAnotherTypeSendsNoCredential(t *testing.T) {
+	env := testdb.New(t)
+	hk := ssh.NewHostKeys(env.Pool("nms_poller"))
+	ctx := context.Background()
+	busy, alias := newDevice(t, env), newDevice(t, env)
+	accepted := sshemu.NewHostKey(t) /* Ed25519: the key the executor accepted */
+	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := gossh.NewSignerFromKey(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, log := emu(t, other, sshemu.Config{Responses: map[string]string{"terminal datadump": ""}})
+	r, err := ssh.Dial(ctx, addr, busy, cred, hk, dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if algo, _ := pinned(t, env, busy); algo != gossh.KeyAlgoECDSA256 {
+		t.Fatalf("busy device pinned %q", algo)
+	}
+	logins := len(log.AuthAttempts())
+	exe := env.Pool("nms_executor")
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, hostkey_fp) VALUES ($1, gen_random_uuid(), $2)`,
+		busy, gossh.FingerprintSHA256(accepted.PublicKey())); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = exe.Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = $1`, busy)
+	})
+	if _, err := ssh.Dial(ctx, addr, alias, cred, hk, dialect()); !errors.Is(err, ssh.ErrHostKeyInSession) {
+		t.Fatalf("alias answering with the busy device's pinned key: %v", err)
+	}
+	if got := log.AuthAttempts()[logins:]; len(got) != 0 {
+		t.Fatalf("credentials sent: %q", got)
+	}
+	var pins int
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM ssh_hosts.host_key WHERE device_id = $1`, alias).Scan(&pins); err != nil || pins != 0 {
+		t.Fatalf("pinned the busy device's key for the alias: %d %v", pins, err)
+	}
+	if _, err := exe.Exec(ctx, `DELETE FROM execpub.device_busy WHERE device_id = $1`, busy); err != nil {
+		t.Fatal(err)
+	}
+	if r, err = ssh.Dial(ctx, addr, alias, cred, hk, dialect()); err != nil {
+		t.Fatalf("free again: %v", err)
+	}
+	_ = r.Close()
+	if len(log.AuthAttempts()) == logins {
+		t.Fatal("no login with the device free: the test cannot see one")
+	}
+}
+
+/* The busy check fails closed: a role that cannot read execpub.device_busy refuses every key (ErrHostKeyInSession). */
+func TestBusyHostKeyCheckFailsClosed(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	fp := "SHA256:" + strings.Repeat("b", 43)
+	if err := ssh.NewHostKeys(env.Pool("nms_eventd")).NotInSession(ctx, fp); !errors.Is(err, ssh.ErrHostKeyInSession) {
+		t.Fatalf("unreadable busy table: %v", err)
+	}
+	if err := ssh.NewHostKeys(env.Pool("nms_poller")).NotInSession(ctx, fp); err != nil {
+		t.Fatalf("readable, not busy: %v", err)
 	}
 }

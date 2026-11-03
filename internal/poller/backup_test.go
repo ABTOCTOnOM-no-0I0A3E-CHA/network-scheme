@@ -189,13 +189,13 @@ func TestBackupStoresAVersionOnlyWhenTheHashChanges(t *testing.T) {
 	if len(vs) != 2 || !vs[1].drift || vs[1].source != "event" {
 		t.Fatalf("after a change: %+v", vs[1:])
 	}
-	/* A change taken as the pre-session snapshot is not drift. */
+	/* Session snapshots are the executor's: the database refuses them from the poller. */
 	e.cfg.Store(&fetched{text: raw + "vlan 31\n"})
-	if err := e.run(sourcePreSess); err != nil {
-		t.Fatal(err)
+	if err := e.run("pre_session"); err == nil {
+		t.Error("the poller stored a pre_session version")
 	}
-	if vs = e.versions(e.dev); len(vs) != 3 || vs[2].drift {
-		t.Fatalf("pre_session: %+v", vs[2:])
+	if n := len(e.versions(e.dev)); n != 2 {
+		t.Fatalf("versions after a refused pre_session: %d", n)
 	}
 
 	/* AAD binding: no other hash, no other device, no other key opens a ciphertext. */

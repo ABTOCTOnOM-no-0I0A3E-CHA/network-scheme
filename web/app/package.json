@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && bun scripts/sri.ts dist",
+    "build": "vite build && bun ../shared/scripts/sri.ts dist",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -65,8 +65,5 @@
     "typescript-eslint": "8.72.0",
     "vite": "8.3.4",
     "vitest": "5.0.5"
-  },
-  "overrides": {
-    "minimatch": "11.0.1"
   }
 }

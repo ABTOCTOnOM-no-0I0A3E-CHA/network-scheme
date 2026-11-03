@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/netip"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -24,7 +23,7 @@ import (
 const (
 	collectTimeout   = 2 * time.Minute
 	inventoryTimeout = 4 * time.Minute /* below the default 5-minute inventory interval */
-	sshPort          = 22
+	defaultSSHPort   = 22
 )
 
 /* errDB marks database failures, as opposed to device or credential problems. */
@@ -317,7 +316,11 @@ func (p *Poller) sshRunner(ctx context.Context, d device, cache *devCache, drv d
 		}
 		return nil
 	}
-	runner, err := ssh.Dial(ctx, netip.AddrPortFrom(d.Addr.Addr(), sshPort), d.ID, c, p.hostKeys, dl)
+	runner, err := p.dialSSH(ctx, d, c, dl)
+	if errors.Is(err, errInSession) {
+		p.log.Info("device in a change session: inventory without SSH", slog.Int64("device_id", d.ID))
+		return nil
+	}
 	if err != nil {
 		p.log.Warn("ssh session failed", slog.Int64("device_id", d.ID), slog.String("err", drivers.CleanText([]byte(err.Error()))))
 		return nil

@@ -30,6 +30,13 @@ const (
 	DefaultDevicesSubnet = "172.30.1.0/24"
 	DefaultEtc           = "/etc/nms"
 	DefaultVar           = "/var/lib/nms"
+
+	/* DefaultExecutorPort is the host port of the executor origin (gateway, then xnet to the executor). */
+	DefaultExecutorPort = 8443
+	/* DefaultXnetSubnet is the internal network between the gateway and the executor only. */
+	DefaultXnetSubnet = "172.30.2.0/24"
+	/* DefaultEdgeSubnet is the gateway's routed network for the published ports; the executor origin listens only on its address there. */
+	DefaultEdgeSubnet = "172.30.3.0/24"
 )
 
 /* initDBScript is shipped as-is next to compose.yaml and mounted into postgres. */
@@ -54,6 +61,13 @@ type RenderInput struct {
 	/* DevicesSubnet is the IPv4 subnet of the devices network; must not overlap CoreSubnet. */
 	DevicesSubnet string
 	Paths         Paths
+
+	ExecutorImage string /* repository of the executor image, without tag; DefaultExecutorImage */
+	ExecutorPort  int    /* host port of the executor origin; must differ from HTTPSPort */
+	/* XnetSubnet is the IPv4 subnet of xnet; must overlap neither CoreSubnet nor DevicesSubnet. */
+	XnetSubnet string
+	/* EdgeSubnet is the IPv4 subnet of edge (published ports); must overlap none of the other three. */
+	EdgeSubnet string
 }
 
 /* view is what the templates see: validated, defaulted, derived values. */
@@ -64,6 +78,15 @@ type view struct {
 	DBName         string
 	APIListenPort  int
 	ReadKeyVersion int /* key_version of the read domain in keys.json written by the install */
+
+	ExecutorAuthority string /* host[:port] of the executor origin */
+	/* ExecutorIP is the static executor address in xnet (second host address), the only one it listens on. */
+	ExecutorIP         string
+	XnetIPRange        string /* upper half of XnetSubnet, as CoreIPRange */
+	ExecutorListenPort int    /* port of the executor's xnet listener */
+	/* GatewayEdgeIP is the gateway's static address in edge (second host address): the only address the executor origin listens on. */
+	GatewayEdgeIP string
+	EdgeIPRange   string /* upper half of EdgeSubnet */
 }
 
 var (
@@ -74,6 +97,14 @@ var (
 	pathRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
 )
 
+/*
+reservedHosts are the compose service names: inside the stack they resolve
+to the services (and the internal certificates are issued for some), so the
+public host is never one of them. localhost stays allowed (demo stand).
+*/
+var reservedHosts = map[string]bool{"postgres": true, "migrate": true, "api": true, "poller": true, "eventd": true,
+	"executor": true, "gateway": true, "nmsctl": true}
+
 var templates = template.Must(template.New("").Option("missingkey=error").ParseFS(deploy.FS, "templates/*.tmpl"))
 
 /* outputs maps rendered file names (relative to Paths.Etc) to templates. */
@@ -83,11 +114,15 @@ var outputs = map[string]string{
 	"config/api.yaml":    "api.yaml.tmpl",
 	"config/poller.yaml": "poller.yaml.tmpl",
 	"config/eventd.yaml": "eventd.yaml.tmpl",
+
+	"config/executor.yaml": "executor.yaml.tmpl",
+	/* Mounted read-only into the executor; changed only on the host. */
+	"policies/executor.yaml": "executor-policy.yaml.tmpl",
 }
 
 /*
 Render validates in and renders the deployment files, keyed by path relative
-to Paths.Etc: "compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml" and the postgres
+to Paths.Etc: "compose.yaml", "Caddyfile", "config/{api,poller,eventd,executor}.yaml", "policies/executor.yaml" and the postgres
 init script "postgres/initdb/10-roles.sh" (to be written with mode 0755).
 Every value reaching a template is validated against a strict pattern, so
 input cannot inject YAML keys or Caddy directives. Output is deterministic.
@@ -117,6 +152,12 @@ func prepare(in RenderInput) (view, error) {
 	if in.HTTPSPort == 0 {
 		in.HTTPSPort = DefaultHTTPSPort
 	}
+	if in.ExecutorPort == 0 {
+		in.ExecutorPort = DefaultExecutorPort
+	}
+	if in.ExecutorImage == "" {
+		in.ExecutorImage = DefaultExecutorImage
+	}
 	if in.DBImage == "" {
 		in.DBImage = DefaultDBImage
 	}
@@ -125,6 +166,12 @@ func prepare(in RenderInput) (view, error) {
 	}
 	if in.DevicesSubnet == "" {
 		in.DevicesSubnet = DefaultDevicesSubnet
+	}
+	if in.XnetSubnet == "" {
+		in.XnetSubnet = DefaultXnetSubnet
+	}
+	if in.EdgeSubnet == "" {
+		in.EdgeSubnet = DefaultEdgeSubnet
 	}
 	if in.Paths.Etc == "" {
 		in.Paths.Etc = DefaultEtc
@@ -138,12 +185,18 @@ func prepare(in RenderInput) (view, error) {
 	switch {
 	case !hostRe.MatchString(in.PublicHost) || len(in.PublicHost) > 253:
 		return view{}, fmt.Errorf("public host %q is not a valid DNS name or IPv4 address", in.PublicHost)
+	case reservedHosts[in.PublicHost]:
+		return view{}, fmt.Errorf("public host %q is the name of an internal service", in.PublicHost)
 	case in.HTTPSPort < 1 || in.HTTPSPort > 65535:
 		return view{}, fmt.Errorf("https port %d out of range", in.HTTPSPort)
+	case in.ExecutorPort < 1 || in.ExecutorPort > 65535:
+		return view{}, fmt.Errorf("executor port %d out of range", in.ExecutorPort)
+	case in.ExecutorPort == in.HTTPSPort:
+		return view{}, fmt.Errorf("executor port %d must differ from the https port: the executor is a separate origin", in.ExecutorPort)
 	case !tagRe.MatchString(in.ImageTag):
 		return view{}, fmt.Errorf("image tag %q is invalid", in.ImageTag)
 	}
-	for name, repo := range map[string]string{"api": in.APIImage, "gateway": in.GatewayImage} {
+	for name, repo := range map[string]string{"api": in.APIImage, "gateway": in.GatewayImage, "executor": in.ExecutorImage} {
 		if !repoRe.MatchString(repo) {
 			return view{}, fmt.Errorf("%s image %q must be a repository without tag or digest", name, repo)
 		}
@@ -166,9 +219,23 @@ func prepare(in RenderInput) (view, error) {
 		return view{}, err
 	}
 	if devs.Overlaps(subnet) {
-		return view{}, fmt.Errorf("devices subnet %s overlaps the core subnet %s", devs, subnet)
+		return view{}, fmt.Errorf("devices subnet %s (--devices-subnet) overlaps the core subnet %s (--core-subnet)", devs, subnet)
 	}
-	in.CoreSubnet, in.DevicesSubnet = subnet.String(), devs.String()
+	xnet, err := parseSubnet("xnet", in.XnetSubnet)
+	if err != nil {
+		return view{}, err
+	}
+	if xnet.Overlaps(subnet) || xnet.Overlaps(devs) {
+		return view{}, fmt.Errorf("xnet subnet %s (--xnet-subnet) overlaps the core subnet %s (--core-subnet) or the devices subnet %s (--devices-subnet)", xnet, subnet, devs)
+	}
+	edge, err := parseSubnet("edge", in.EdgeSubnet)
+	if err != nil {
+		return view{}, err
+	}
+	if edge.Overlaps(subnet) || edge.Overlaps(devs) || edge.Overlaps(xnet) {
+		return view{}, fmt.Errorf("edge subnet %s (--edge-subnet) overlaps the core %s, devices %s or xnet %s subnet", edge, subnet, devs, xnet)
+	}
+	in.CoreSubnet, in.DevicesSubnet, in.XnetSubnet, in.EdgeSubnet = subnet.String(), devs.String(), xnet.String(), edge.String()
 	ipRange := netip.PrefixFrom(upperHalf(subnet), subnet.Bits()+1)
 	if in.GatewayIP == "" {
 		in.GatewayIP = subnet.Addr().Next().Next().String()
@@ -183,12 +250,17 @@ func prepare(in RenderInput) (view, error) {
 	}
 	in.GatewayIP = gw.String()
 
-	authority := in.PublicHost
+	authority, exAuthority := in.PublicHost, in.PublicHost
 	if in.HTTPSPort != DefaultHTTPSPort {
 		authority += ":" + strconv.Itoa(in.HTTPSPort)
 	}
+	if in.ExecutorPort != DefaultHTTPSPort {
+		exAuthority += ":" + strconv.Itoa(in.ExecutorPort)
+	}
 	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080,
-		ReadKeyVersion: keys.InitialKeyVersion}, nil
+		ReadKeyVersion: keys.InitialKeyVersion, ExecutorAuthority: exAuthority, ExecutorIP: xnet.Addr().Next().Next().String(),
+		XnetIPRange: netip.PrefixFrom(upperHalf(xnet), xnet.Bits()+1).String(), ExecutorListenPort: 8444,
+		GatewayEdgeIP: edge.Addr().Next().Next().String(), EdgeIPRange: netip.PrefixFrom(upperHalf(edge), edge.Bits()+1).String()}, nil
 }
 
 /* parseSubnet accepts an IPv4 network address with a /16../28 prefix. */

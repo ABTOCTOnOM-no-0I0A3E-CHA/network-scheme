@@ -22,11 +22,20 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Check
         run: scripts/check.sh
+      - name: Traced attack tests ran (none skipped or absent)
+        run: |
+          # The packages of TestTraceability's index once more, as JSON: every traced test must report pass
+          # (a skip or an absent test fails; a package missing here shows as absent tests).
+          go test -json -count=1 -p 2 ./cmd/executor/... ./cmd/nmsctl ./internal/httpapi ./internal/store \
+            ./internal/poller ./internal/ssh ./internal/install ./test/gateway > /tmp/nms-traced.json || true
+          NMS_TRACE_JSON=/tmp/nms-traced.json go test -count=1 -run '^TestTraceability$' -v ./cmd/executor/internal/attacktest
       - name: Race detector
         run: |
           go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
           # -short: the 5 000 events/s throughput test measures speed, which the race detector distorts
           go test -race -short ./internal/eventd/...
+          # the executor trust boundary: freeze latch, authz guards, the freeze consumer and the confirm store
+          go test -race -p 2 -timeout 20m ./cmd/executor/... ./internal/ticket/... ./internal/execadmin/... ./internal/execpolicy/...
       - name: Isolation check detects violations
         run: "! scripts/check-isolation.sh test/fixtures/isolation"
       - name: eventd (network-facing) has no write code
@@ -50,9 +59,12 @@ jobs:
         run: scripts/check-licenses.sh go .
       - name: Install web dependencies
         run: bun install --frozen-lockfile
-        working-directory: web/app
+        working-directory: web
       - name: JS licenses
-        run: scripts/check-licenses.sh js web/app
+        run: |
+          scripts/check-licenses.sh js web/app
+          scripts/check-licenses.sh js web/executor
+          scripts/check-licenses.sh js web/shared
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -66,21 +78,24 @@ jobs:
           scripts/expect-license-failure.sh js test/fixtures/licenses/js-private-gpl sneaky-dep
           scripts/expect-license-failure.sh go test/fixtures/licenses/go-gpl example.com/gpldep
 
+  # One Bun workspace: the panel (app), the executor UI (executor) and the build-time package they share (shared).
   web:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web/app
+        working-directory: web
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run lint
-      - run: bun run test
-      - run: bun run build
+      - run: bun run typecheck && bun run lint && bun run test && bun run build
+        working-directory: web/app
+      - run: bun run typecheck && bun run lint && bun run test && bun run build
+        working-directory: web/executor
+      - run: bun run typecheck && bun run lint && bun run test
+        working-directory: web/shared
 
   sbom:
     runs-on: ubuntu-latest
@@ -157,6 +172,7 @@ jobs:
         run: |
           docker build -t nms/api:ci -f deploy/docker/api.Dockerfile .
           docker build -t nms/gateway:ci -f deploy/docker/gateway.Dockerfile .
+          docker build -t nms/executor:ci -f deploy/docker/executor.Dockerfile .
           docker build -t nms-snmpsim:ci test/sim/snmpsim
       - name: Build nmsctl
         run: |
@@ -192,8 +208,8 @@ jobs:
       - name: Start egress capture
         run: |
           test/egress/capture.sh start
-          # recreate the services with a route out (gateway: edge, poller and eventd: devices) so their startup is captured too
-          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller eventd
+          # recreate the services with a route out (gateway: edge, poller, eventd and executor: devices) so their startup is captured too
+          sudo docker compose -f "$COMPOSE" up -d --wait --no-deps --force-recreate gateway poller eventd executor
       - name: Start the event sources on the devices network
         run: |
           # Two containers of the simulator image, each sending syslog (UDP, TCP) and a v2c linkDown trap to eventd
@@ -327,6 +343,44 @@ jobs:
             echo "$model at $addr"
             echo "NMS_E2E_$(echo "$model" | tr a-z A-Z)=$addr" >> "$GITHUB_ENV"
           done
+      - name: The executor is off after install (C1), then enable, enroll and grant
+        run: |
+          # C1: the policy nmsctl install wrote keeps the executor off: every /x/* but /x/status answers 503
+          # executor_disabled (POST /x/sessions too, before any route or authz) and the bundle is still served.
+          # nmsctl executor enable then lets requests go down the chain (executor.spec.ts "C1"); the admin gets
+          # a change TOTP (a throwaway CI value) and write-admin for the executor tests.
+          sudo install -m 0644 /etc/nms/secrets/ca.crt /tmp/nms-e2e-ca.crt
+          X=https://localhost:8443
+          x() { # METHOD PATH [BODY]: prints the status code, the body goes to /tmp/nms-x.json
+            curl -sS --cacert /tmp/nms-e2e-ca.crt -o /tmp/nms-x.json -w '%{http_code}' -X "$1" -H "Origin: $X" \
+              -H 'Content-Type: application/json' ${3:+--data "$3"} "$X$2"
+          }
+          sudo /usr/local/bin/nmsctl executor policy show | tee /tmp/nms-policy.txt
+          grep -qx 'executor enabled: false' /tmp/nms-policy.txt
+          [ "$(x GET /x/status)" = 200 ]
+          grep -qx '{"enabled":false,"frozen":false}' /tmp/nms-x.json
+          [ "$(x GET /)" = 200 ]
+          for req in "POST /x/sessions" "POST /x/confirm/issue" "POST /x/confirm" "GET /x/sessions" "POST /x/nowhere"; do
+            code="$(x $req '{"ticket":"forged.ticket"}')"
+            echo "disabled: $req -> $code $(cat /tmp/nms-x.json)"
+            [ "$code" = 503 ]
+            grep -q '"executor_disabled"' /tmp/nms-x.json
+          done
+          sudo /usr/local/bin/nmsctl executor enable
+          [ "$(x GET /x/status)" = 200 ]
+          grep -qx '{"enabled":true,"frozen":false}' /tmp/nms-x.json
+          code="$(x POST /x/sessions '{"ticket":"forged.ticket"}')"
+          echo "enabled: POST /x/sessions -> $code (no route in 4a)"
+          [ "$code" = 404 ]
+          # the output holds the QR code and the secret: print only allowlisted lines, and prove they hold no secret
+          sudo /usr/local/bin/nmsctl executor enroll admin --yes --totp-secret-out "$E2E_DIR/change-totp-secret" > "$E2E_DIR/enroll.log"
+          shown="$(grep -E '^Panel user #' "$E2E_DIR/enroll.log" || true)"
+          secret="$(sudo cat "$E2E_DIR/change-totp-secret")"
+          [ -n "$secret" ]
+          if grep -qiF -- "$secret" <<<"$shown"; then echo "the printed enroll lines contain the change TOTP secret"; exit 1; fi
+          echo "$shown"
+          rm -f "$E2E_DIR/enroll.log"
+          sudo /usr/local/bin/nmsctl executor grant admin write-admin --yes
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e

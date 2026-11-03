@@ -1,0 +1,24 @@
+# Rendered by nmsctl install. Secrets are referenced by docker-secret file paths only.
+db:
+  host: "postgres"
+  port: 5432
+  name: "nms"
+  user: "nms_executor"
+  password_file: "/run/secrets/db_executor_password"
+sealing_key_file: "/run/secrets/executor_sealing_key"
+write_key_file: "/run/secrets/domain_write_key"
+backup_key_file: "/run/secrets/domain_backup_key"
+ticket_pub_key_file: "/run/secrets/ticket_pub"
+tls_cert_file: "/run/secrets/executor_tls_crt"
+tls_key_file: "/run/secrets/executor_tls_key"
+client_ca_file: "/run/secrets/ca_crt"
+# Only the static address in xnet, never core; the gateway is the only client (mutual TLS).
+listen_xnet: "172.30.2.2:8444"
+# The stack's own networks: no device address may fall into them (the devices subnet is in egress.yaml).
+core_subnet: "172.30.0.0/24"
+xnet_subnet: "172.30.2.0/24"
+panel_origin: "https://nms.example.org"
+executor_origin: "https://nms.example.org:8443"
+state_dir: "/var/lib/executor"
+policy_file: "/etc/nms/policies/executor.yaml"
+egress_file: "/etc/nms/egress.yaml"

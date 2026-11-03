@@ -93,7 +93,7 @@ func TestConfigVersionChecks(t *testing.T) {
 		_, err := poller.Exec(ctx, insertVersion, dev, source, sha, size, masked, ct, dek)
 		return err
 	}
-	if err := ok("pre_session", sum, mib4, "x", []byte("c"), []byte("d")); err != nil {
+	if err := ok("manual", sum, mib4, "x", []byte("c"), []byte("d")); err != nil {
 		t.Fatal(err)
 	}
 	for name, err := range map[string]error{

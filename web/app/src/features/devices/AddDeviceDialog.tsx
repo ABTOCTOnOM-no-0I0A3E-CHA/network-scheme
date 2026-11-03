@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
-import type { CredKind } from "@/lib/seal";
+import type { CredKind } from "@nms/shared/seal";
 import { useCreateDevice, type Group } from "./api";
 import { ProfileForm } from "./ProfileForm";
 

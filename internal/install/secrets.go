@@ -1,6 +1,8 @@
 package install
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -22,6 +24,8 @@ keep the host owner and mode, so every secret is owned by its consumer.
 const (
 	/* ContainerUID is the distroless "nonroot" user of api, migrate, nmsctl, poller, eventd and gateway. */
 	ContainerUID = 65532
+	/* ExecutorUID is the user of the executor image, so no other container user can read its keys. */
+	ExecutorUID = 65533
 	/*
 		PostgresUID is uid and gid of "postgres" in DefaultDBImage, found with
 		docker run --rm --entrypoint id <DefaultDBImage> postgres
@@ -37,6 +41,16 @@ var ErrSecretsExist = errors.New("install: secrets already exist")
 const (
 	caValidity  = 10 * 365 * 24 * time.Hour
 	webValidity = 365 * 24 * time.Hour
+)
+
+/*
+Names in the internal xnet certificates: the executor serves "executor" (the
+gateway checks it as the TLS server name) and accepts only the client
+certificate with common name "gateway".
+*/
+const (
+	executorServerName = "executor"
+	gatewayClientCN    = "gateway"
 )
 
 // DomainKeyFiles maps key domains to their private key file in the secrets directory.
@@ -64,10 +78,12 @@ type SecretsInput struct {
 
 /*
 WriteSecrets creates dir (0700) with every installation secret: role
-passwords db_{postgres,migrator,api,cli,poller,eventd}_password (32 random bytes,
+passwords db_{postgres,migrator,api,cli,poller,eventd,executor}_password (32 random bytes,
 base64url), api_data_key and executor_sealing_key (32 random bytes, base64),
-domain_{read,write,backup}.key (X25519 private keys, base64), ca.crt/ca.key
-web.crt/web.key and syslog.crt/syslog.key. Files are created with O_EXCL in a temporary sibling
+domain_{read,write,backup}.key (X25519 private keys, base64), ticket.key and
+ticket.pub (Ed25519 seed and public key of the session tickets, base64),
+ca.crt/ca.key, web.crt/web.key, syslog.crt/syslog.key, executor_tls.crt/.key
+(xnet server) and gateway_client.crt/.key (xnet client). Files are created with O_EXCL in a temporary sibling
 directory and owned by their consumer container user, then the directory is
 renamed into place, so an existing dir is an error (ErrSecretsExist) and a
 failure leaves nothing behind. Existing secrets are never touched.
@@ -147,6 +163,7 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("db_cli_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_poller_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_eventd_password", nil, ContainerUID, PostgresUID, 0o440)
+	add("db_executor_password", nil, ExecutorUID, PostgresUID, 0o440)
 	for i := range files {
 		b, err := keys.NewSymmetricKey()
 		if err != nil {
@@ -160,7 +177,7 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 		if err != nil {
 			return nil, err
 		}
-		uid := 0
+		uid := ExecutorUID
 		if name == "api_data_key" {
 			uid = ContainerUID
 		}
@@ -171,7 +188,8 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 		if err != nil {
 			return nil, err
 		}
-		uid := 0
+		/* write and backup: only the executor opens them */
+		uid := ExecutorUID
 		if d == "read" { /* opened by the poller to verify read credentials */
 			uid = ContainerUID
 		}
@@ -182,8 +200,31 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("install: CA: %w", err)
 	}
-	add("ca.crt", caCrt, 0, 0, 0o400)
+	/* Public, and read by two users (executor and gateway): world-readable. The key never leaves the host. */
+	add("ca.crt", caCrt, 0, 0, 0o444)
 	add("ca.key", caKey, 0, 0, 0o400)
+
+	/* Session tickets: the api signs (ticket.key), the executor only verifies (ticket.pub). */
+	tpub, tpriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("install: ticket key: %w", err)
+	}
+	add("ticket.key", []byte(base64.StdEncoding.EncodeToString(tpriv.Seed())), ContainerUID, ContainerUID, 0o400)
+	add("ticket.pub", []byte(base64.StdEncoding.EncodeToString(tpub)), ExecutorUID, ExecutorUID, 0o400)
+
+	/* xnet: mutual TLS between the gateway and the executor, both issued by the internal CA. */
+	exCrt, exKey, err := pki.IssueServerCert(caCrt, caKey, []string{executorServerName}, nil, webValidity)
+	if err != nil {
+		return nil, fmt.Errorf("install: executor certificate: %w", err)
+	}
+	add("executor_tls.crt", exCrt, ExecutorUID, ExecutorUID, 0o400)
+	add("executor_tls.key", exKey, ExecutorUID, ExecutorUID, 0o400)
+	gwCrt, gwKey, err := pki.IssueClientCert(caCrt, caKey, gatewayClientCN, webValidity)
+	if err != nil {
+		return nil, fmt.Errorf("install: gateway client certificate: %w", err)
+	}
+	add("gateway_client.crt", gwCrt, ContainerUID, ContainerUID, 0o400)
+	add("gateway_client.key", gwKey, ContainerUID, ContainerUID, 0o400)
 
 	var dns []string
 	var ips []net.IP

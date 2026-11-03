@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -112,13 +113,19 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" || cfg.PublicOrigin == "" || cfg.ReadKeyVersion == 0 {
-		return errors.New("config: listen_addr, public_origin, data_key_file and read_key_version are required")
+	if cfg.ListenAddr == "" || cfg.DataKeyFile == "" || cfg.TicketKeyFile == "" || cfg.PublicOrigin == "" || cfg.ReadKeyVersion == 0 {
+		return errors.New("config: listen_addr, public_origin, data_key_file, ticket_key_file and read_key_version are required")
 	}
 	key, err := config.ReadKeyFile(cfg.DataKeyFile)
 	if err != nil {
 		return err
 	}
+	seed, err := config.ReadKeyFile(cfg.TicketKeyFile)
+	if err != nil {
+		return err
+	}
+	ticketKey := ed25519.NewKeyFromSeed(seed[:])
+	clear(seed[:])
 	pw, err := config.ReadSecretFile(cfg.DB.PasswordFile)
 	if err != nil {
 		return err
@@ -158,7 +165,7 @@ func serve(ctx context.Context, args []string) error {
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Auth: auth.NewService(pool, key, nil), Users: auth.NewUserStore(pool), RBAC: rbac.NewStore(pool), Pool: pool,
 			Devices: devices.NewStore(pool), Inventory: inventory.NewStore(pool), Metrics: mstore, Jobs: enq, Cfg: cfg, Clock: time.Now, Logger: log,
-			Hub: hub, Shutdown: closing, ConfigChanged: func() { eng.Reload(); topo.Reload() },
+			TicketKey: ticketKey, Hub: hub, Shutdown: closing, ConfigChanged: func() { eng.Reload(); topo.Reload() },
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,

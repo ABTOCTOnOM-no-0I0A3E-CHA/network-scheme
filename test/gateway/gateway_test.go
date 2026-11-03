@@ -14,12 +14,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	mobynet "github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -52,7 +54,7 @@ const evilCaddyfile = `{
 
 var panelHeaders = map[string]string{
 	"Content-Security-Policy": "default-src 'self'; script-src https://" + publicHost + "/assets/; style-src 'self'; img-src 'self' data:; " +
-		"font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+		"font-src 'self'; connect-src 'self'; frame-src https://" + publicHost + ":8443; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
 	"Strict-Transport-Security":    "max-age=31536000",
 	"X-Content-Type-Options":       "nosniff",
 	"Referrer-Policy":              "no-referrer",
@@ -62,9 +64,11 @@ var panelHeaders = map[string]string{
 }
 
 type stack struct {
-	client *http.Client
-	base   string
-	bare   *stack /* same gateway without a reachable upstream */
+	client  *http.Client /* the panel origin (:443, the container's 8443) */
+	xclient *http.Client /* the executor origin (:8443, the container's 9443) */
+	base    string
+	bare    *stack            /* same gateway without a reachable upstream */
+	inner   map[string]string /* the gateway's address in each internal network, by network name */
 }
 
 var (
@@ -73,6 +77,7 @@ var (
 	startErr   error
 	containers []testcontainers.Container
 	nw         *testcontainers.DockerNetwork
+	edges      []*testcontainers.DockerNetwork
 )
 
 var errNoDocker = errors.New("docker daemon not reachable")
@@ -83,8 +88,10 @@ func TestMain(m *testing.M) {
 	for _, c := range containers {
 		_ = c.Terminate(ctx)
 	}
-	if nw != nil {
-		_ = nw.Remove(ctx)
+	for _, n := range append([]*testcontainers.DockerNetwork{nw, xnw}, edges...) {
+		if n != nil {
+			_ = n.Remove(ctx)
+		}
 	}
 	cancel()
 	os.Exit(code)
@@ -97,7 +104,8 @@ func gateway(t *testing.T) *stack {
 	}
 	once.Do(func() { shared, startErr = start() })
 	if startErr != nil {
-		if errors.Is(startErr, errNoDocker) {
+		/* in CI a missing Docker fails, as in testdb: a skipped attack test proves nothing */
+		if _, ci := os.LookupEnv("CI"); errors.Is(startErr, errNoDocker) && !ci {
 			t.Skipf("gateway: Docker is unavailable: %v", startErr)
 		}
 		t.Fatalf("gateway: %v", startErr)
@@ -127,14 +135,23 @@ func start() (*stack, error) {
 	if err != nil {
 		return nil, err
 	}
-	rendered, err := install.Render(install.RenderInput{
-		PublicHost: publicHost, ImageTag: "test", APIImage: "nms/api", GatewayImage: "nms/gateway",
-	})
+	/* Each gateway has an edge of its own (the executor origin binds to the gateway's address there). */
+	render := func(edge string) ([]byte, error) {
+		out, err := install.Render(install.RenderInput{PublicHost: publicHost, ImageTag: "test", APIImage: "nms/api",
+			GatewayImage: "nms/gateway", XnetSubnet: xnetSubnet, EdgeSubnet: edge})
+		return out["Caddyfile"], err
+	}
+	caddyfile, err := render(edgeSubnet)
+	if err != nil {
+		return nil, err
+	}
+	bareCaddyfile, err := render(bareEdgeSubnet)
 	if err != nil {
 		return nil, err
 	}
 
-	nw, err = network.New(ctx)
+	/* core, as in the deployment: internal (no route anywhere, Docker publishes nothing there). */
+	nw, err = network.New(ctx, network.WithInternal())
 	if err != nil {
 		return nil, fmt.Errorf("network: %w", err)
 	}
@@ -154,40 +171,64 @@ func start() (*stack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("evil upstream: %w", err)
 	}
+	/* The executor (a stub around its real /x server) on xnet at its static address, and in core like the real one. */
+	executorFiles, err := startExecutor(ctx, caCert, caKey)
+	if err != nil {
+		return nil, err
+	}
 
 	/* Fresh readers per container: a ContainerFile reader is consumed by the copy. */
-	files := func() []testcontainers.ContainerFile {
-		return []testcontainers.ContainerFile{
-			file("/etc/caddy/Caddyfile", rendered["Caddyfile"]),
+	files := func(caddyfile []byte) []testcontainers.ContainerFile {
+		return append([]testcontainers.ContainerFile{
+			file("/etc/caddy/Caddyfile", caddyfile),
 			file("/certs/web.crt", webCert),
 			file("/certs/web.key", webKey),
 			file("/srv/app/index.html", []byte("<!doctype html><title>nms</title>")),
 			file("/srv/app/assets/app.js", []byte("console.log(1)")),
 			file("/srv/keys/keys.json", []byte(`{"domains":[]}`)),
-		}
+			file("/srv/executor/index.html", []byte("<!doctype html><title>nms executor</title>")),
+			file("/srv/executor/assets/x.js", []byte("console.log(2)")),
+		}, executorFiles()...)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caCert) {
 		return nil, errors.New("bad test CA")
 	}
-	s, err := startGateway(ctx, []string{nw.Name}, files(), roots)
+	s, err := startGateway(ctx, edgeSubnet, []string{nw.Name, xnw.Name}, files(caddyfile), roots)
 	if err != nil {
 		return nil, err
 	}
-	/* A second gateway on the default bridge, where the name "api" does not resolve. */
-	if s.bare, err = startGateway(ctx, nil, files(), roots); err != nil {
+	/* A second gateway on its edge only, where the name "api" does not resolve and the executor is not reachable. */
+	if s.bare, err = startGateway(ctx, bareEdgeSubnet, nil, files(bareCaddyfile), roots); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func startGateway(ctx context.Context, networks []string, files []testcontainers.ContainerFile, roots *x509.CertPool) (*stack, error) {
+/*
+startGateway starts a gateway on a new edge network of subnet edge (routed,
+the only one Docker can publish its ports on), at its second host address
+as rendered, and on the internal networks.
+*/
+func startGateway(ctx context.Context, edge string, networks []string, files []testcontainers.ContainerFile, roots *x509.CertPool) (*stack, error) {
+	en, err := network.New(ctx, network.WithIPAM(&mobynet.IPAM{Config: []mobynet.IPAMConfig{{Subnet: netip.MustParsePrefix(edge)}}}))
+	if err != nil {
+		return nil, fmt.Errorf("edge network: %w", err)
+	}
+	edges = append(edges, en)
+	edgeIP := netip.MustParsePrefix(edge).Addr().Next().Next()
 	gw, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        caddyImage,
-			ExposedPorts: []string{"8443/tcp"},
-			Networks:     networks,
+			ExposedPorts: []string{"8443/tcp", "9443/tcp"},
+			Networks:     append([]string{en.Name}, networks...),
 			Files:        files,
+			EndpointSettingsModifier: func(es map[string]*mobynet.EndpointSettings) {
+				if es[en.Name] == nil {
+					es[en.Name] = &mobynet.EndpointSettings{}
+				}
+				es[en.Name].IPAMConfig = &mobynet.EndpointIPAMConfig{IPv4Address: edgeIP}
+			},
 			/* Log-based: the port probe dials the IPv6 loopback, which Docker Desktop on Windows may refuse. */
 			WaitingFor: wait.ForLog("serving initial configuration").WithStartupTimeout(time.Minute),
 		},
@@ -199,6 +240,16 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
+	ins, err := gw.Inspect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inner := map[string]string{}
+	for _, n := range networks {
+		if ep, ok := ins.NetworkSettings.Networks[n]; ok {
+			inner[n] = fmt.Sprint(ep.IPAddress)
+		}
+	}
 
 	host, err := gw.Host(ctx)
 	if err != nil {
@@ -207,16 +258,30 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 	if host == "localhost" {
 		host = "127.0.0.1" /* avoid the IPv6 loopback, which Docker Desktop on Windows may not publish */
 	}
-	port, err := gw.MappedPort(ctx, "8443/tcp")
+	client := func(containerPort string) (*http.Client, error) {
+		port, err := gw.MappedPort(ctx, containerPort)
+		if err != nil {
+			return nil, err
+		}
+		return httpsClient(net.JoinHostPort(host, port.Port()), roots), nil
+	}
+	panel, err := client("8443/tcp")
 	if err != nil {
 		return nil, err
 	}
-	target := net.JoinHostPort(host, port.Port())
+	x, err := client("9443/tcp")
+	if err != nil {
+		return nil, err
+	}
+	return &stack{client: panel, xclient: x, base: "https://" + publicHost, inner: inner}, nil
+}
+
+/* httpsClient dials target whatever the URL says: the URL names publicHost for SNI and verification. */
+func httpsClient(target string, roots *x509.CertPool) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	client := &http.Client{
+	return &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
-			/* The URL names publicHost for SNI and verification; the socket goes to the mapped port. */
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "tcp", target)
 			},
@@ -224,7 +289,6 @@ func startGateway(ctx context.Context, networks []string, files []testcontainers
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &stack{client: client, base: "https://" + publicHost}, nil
 }
 
 func file(path string, content []byte) testcontainers.ContainerFile {

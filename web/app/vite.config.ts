@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
+      "@nms/shared": path.resolve(import.meta.dirname, "../shared/src"),
       /* CSP: the real package injects a runtime <style>; see the stub for details */
       "react-remove-scroll": path.resolve(import.meta.dirname, "src/lib/remove-scroll-noop.tsx"),
     },
@@ -24,7 +25,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts", "../shared/src/**/*.test.ts"],
     testTimeout: 60000,
   },
 });

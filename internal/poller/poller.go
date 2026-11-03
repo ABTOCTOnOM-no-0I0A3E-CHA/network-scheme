@@ -92,6 +92,7 @@ type Poller struct {
 	metrics        *metrics.Store
 	inv            *inventory.Store
 	hostKeys       *ssh.HostKeys
+	sshPort        uint16 /* of every device's CLI; replaced in tests */
 	disc           *discovery
 	discEvery      time.Duration
 	scanRecheck    time.Duration
@@ -119,6 +120,7 @@ func New(cfg Config, d Deps) *Poller {
 		scanFloor: minScanInterval, scanGap: minScanGap,
 	}
 	p.recheck = p.scanState
+	p.sshPort = defaultSSHPort
 	p.fetchRaw = p.sshFetch
 	p.showEvery = showGap
 	p.runShowCmd, p.showBusy, p.showAt = p.sshShow, map[int64]bool{}, map[int64]time.Time{}

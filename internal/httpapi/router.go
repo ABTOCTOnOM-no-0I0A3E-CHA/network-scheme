@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,10 +38,12 @@ type Deps struct {
 	Clock         func() time.Time /* timestamps of audit records; nil: time.Now */
 	Logger        *slog.Logger     /* nil: slog.Default() */
 	AuthRateLimit int              /* requests per minute per client IP on credential endpoints; 0: 10 */
-	Hub           *notify.Hub      /* problem notifications served on /api/ws; nil: a private hub nobody publishes to */
-	WSRecheck     time.Duration    /* how often an open socket re-checks session and scope; 0: 30 s */
-	WSHeartbeat   time.Duration    /* WebSocket ping interval; 0: 30 s */
-	Shutdown      <-chan struct{}  /* closed on server shutdown: open WebSockets get a close frame; nil: never */
+	/* TicketKey signs the executor's session tickets (POST /api/executor/ticket); nil: that endpoint answers 500. */
+	TicketKey   ed25519.PrivateKey
+	Hub         *notify.Hub     /* problem notifications served on /api/ws; nil: a private hub nobody publishes to */
+	WSRecheck   time.Duration   /* how often an open socket re-checks session and scope; 0: 30 s */
+	WSHeartbeat time.Duration   /* WebSocket ping interval; 0: 30 s */
+	Shutdown    <-chan struct{} /* closed on server shutdown: open WebSockets get a close frame; nil: never */
 	/* ConfigChanged is called (non-blocking) after a committed change of triggers, templates, overrides, maintenance windows, device parents, device create/delete (incl. discovery accept), group membership or group update/delete, so the trigger engine reloads at once; nil: the engine's own 30 s reload applies it. */
 	ConfigChanged func()
 }
@@ -103,6 +106,9 @@ type server struct {
 	showAuditRL userLimiter   /* audit records of refused show requests, one per user a minute */
 
 	backupAuditRL   userLimiter          /* audit records of refused manual backups, one per user a minute */
+	ticketKey       ed25519.PrivateKey   /* signs executor session tickets */
+	ticketRL        userLimiter          /* executor session tickets per user */
+	ticketAuditRL   userLimiter          /* audit records of refused ticket requests, one per user a minute */
 	downloadAuditRL keyLimiter[[2]int64] /* audit records of config downloads, one per user and device a minute */
 	topIf           topIfCache           /* recent interface load rankings */
 
@@ -118,7 +124,7 @@ func newServer(d Deps) *server {
 	s := &server{
 		auth: d.Auth, users: d.Users, rbac: d.RBAC, pool: d.Pool, devices: d.Devices, inventory: d.Inventory, metrics: d.Metrics, jobs: d.Jobs, now: d.Clock, cfg: d.Cfg, log: d.Logger,
 		loginSem: make(chan struct{}, maxConcurrentLogins), uploadSem: make(chan struct{}, 1), serveSem: make(chan struct{}, serveSlots), diffSem: make(chan struct{}, diffSlots), exportSem: make(chan struct{}, exportSlots), loginWait: loginQueueWait,
-		hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
+		ticketKey: d.TicketKey, hub: d.Hub, wsRecheck: d.WSRecheck, wsHeartbeat: d.WSHeartbeat, shutdown: d.Shutdown, onConfig: d.ConfigChanged,
 	}
 	if s.hub == nil {
 		s.hub = notify.NewHub()
@@ -302,6 +308,13 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodGet, "/api/stats/top-devices", read, s.topDevices)
 	s.route(r, http.MethodGet, "/api/stats/top-interfaces", read, s.topInterfaces)
 	s.route(r, http.MethodGet, "/api/stats/config-drift", read, s.configDrift)
+
+	/* The executor's session ticket: the api's claim about who the caller is; rights and TOTP are checked by the executor. */
+	s.route(r, http.MethodPost, "/api/executor/ticket", self, s.executorTicket)
+	/* execpub: the executor's status and session history (read only) and "freeze on", the only request the api can make; no route lifts a freeze. */
+	s.route(r, http.MethodPost, "/api/executor/freeze", Policy{Perm: rbac.PermExecutorFreeze, StepUp: true}, s.executorFreeze)
+	s.route(r, http.MethodGet, "/api/executor/status", Policy{Perm: rbac.PermSystemRead}, s.executorStatusGet)
+	s.route(r, http.MethodGet, "/api/devices/{id}/sessions", read, s.deviceSessions)
 	return r
 }
 

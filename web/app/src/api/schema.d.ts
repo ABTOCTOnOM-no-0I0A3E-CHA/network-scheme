@@ -4894,6 +4894,220 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/executor/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Session ticket for the executor (origin :8443)
+         * @description Signs a session ticket v1 for the caller ({v, aud "executor", user_id, username, iat,
+         *     exp = iat + 60 s, nonce}, Ed25519). The ticket is only the api's claim about who the user
+         *     is: the executor takes rights from its own registry and needs the user's change TOTP for
+         *     every action, and accepts each ticket once. At most 20 tickets a minute per user (429
+         *     rate_limited); every issue is audited (executor.ticket), refusals by the limit at most once
+         *     a minute per user. A disabled or deleted user gets 401 session_expired.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The ticket (opaque to the client; never stored) */
+                200: {
+                    headers: {
+                        "Cache-Control"?: "no-store";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ticket: string;
+                            /** Format: date-time */
+                            expires_at: string;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                429: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/executor/freeze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask the executor to freeze (on only)
+         * @description Inserts the caller's id into execpub.freeze_request, the only request the panel can
+         *     make of the executor; the executor freezes within 5 s. A request already pending is
+         *     as good (still 202). There is no way to lift a freeze here: only nmsctl executor
+         *     freeze off on the host. The body is ignored. Global admin with a fresh step-up;
+         *     every call is audited (executor.freeze, with already_pending).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "X-CSRF-Token": components["parameters"]["CSRF"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The request is pending; the executor freezes within 5 s */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/executor/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the executor last published (enabled, frozen)
+         * @description execpub.status as written by the executor: enabled is its policy, frozen its
+         *     freeze. The executor rewrites the row every 30 s; stale is true when it is older
+         *     than 90 s by the database clock (the executor stopped publishing). known is false
+         *     while it never published.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Executor status */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            known: boolean;
+                            enabled: boolean;
+                            frozen: boolean;
+                            /** Format: date-time */
+                            at: string | null;
+                            stale: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{id}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Change sessions of the device, newest first
+         * @description From execpub.session_summary (written by the executor). username is the user's
+         *     current name in the panel (null once deleted); post_sha256 is a 12-character prefix
+         *     of the hash of the configuration after the session (null while open or unknown).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    id: components["parameters"]["Id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sessions */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: uuid */
+                                session_id: string;
+                                /** Format: int64 */
+                                user_id: number;
+                                username: string | null;
+                                /** Format: date-time */
+                                opened_at: string;
+                                /** Format: date-time */
+                                closed_at: string | null;
+                                /** @enum {string} */
+                                status: "open" | "closed" | "timeout" | "interrupted" | "rolled_back";
+                                post_sha256: string | null;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+                404: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {

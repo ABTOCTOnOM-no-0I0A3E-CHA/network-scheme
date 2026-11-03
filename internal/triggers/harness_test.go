@@ -96,6 +96,7 @@ func (h *harness) reset() {
 		`DELETE FROM events.trap`, `DELETE FROM events.syslog`, `DELETE FROM events.eventd_stats`,
 		`DELETE FROM metrics.if_metrics`, `DELETE FROM metrics.sys_metrics`,
 		`DELETE FROM inventory.poller_heartbeat`,
+		`DELETE FROM execpub.alert`, `DELETE FROM execpub.status`,
 	} {
 		if _, err := h.root.Exec(h.ctx, q); err != nil {
 			h.t.Fatalf("%s: %v", q, err)

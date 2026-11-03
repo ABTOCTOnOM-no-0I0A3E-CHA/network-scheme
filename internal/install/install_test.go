@@ -2,7 +2,9 @@ package install_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -19,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/install"
@@ -141,9 +145,10 @@ func TestPreflightErrors(t *testing.T) {
 /* secretNames is the exact set WriteSecrets must create. */
 var secretNames = []string{
 	"api_data_key", "ca.crt", "ca.key",
-	"db_api_password", "db_cli_password", "db_eventd_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
+	"db_api_password", "db_cli_password", "db_eventd_password", "db_executor_password", "db_migrator_password", "db_poller_password", "db_postgres_password",
 	"domain_backup.key", "domain_read.key", "domain_write.key",
-	"executor_sealing_key", "syslog.crt", "syslog.key", "web.crt", "web.key",
+	"executor_sealing_key", "executor_tls.crt", "executor_tls.key", "gateway_client.crt", "gateway_client.key",
+	"syslog.crt", "syslog.key", "ticket.key", "ticket.pub", "web.crt", "web.key",
 }
 
 /* wantOwner is the owner table: consumer container uid/gid and mode. */
@@ -162,12 +167,19 @@ var wantOwner = map[string]struct {
 	"syslog.key":           {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.crt":              {install.ContainerUID, install.ContainerUID, 0o400},
 	"web.key":              {install.ContainerUID, install.ContainerUID, 0o400},
-	"ca.crt":               {0, 0, 0o400},
+	"ca.crt":               {0, 0, 0o444},
 	"ca.key":               {0, 0, 0o400},
 	"domain_read.key":      {install.ContainerUID, install.ContainerUID, 0o400},
-	"domain_write.key":     {0, 0, 0o400},
-	"domain_backup.key":    {0, 0, 0o400},
-	"executor_sealing_key": {0, 0, 0o400},
+	"domain_write.key":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"domain_backup.key":    {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_sealing_key": {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"db_executor_password": {install.ExecutorUID, install.PostgresUID, 0o440},
+	"ticket.key":           {install.ContainerUID, install.ContainerUID, 0o400},
+	"ticket.pub":           {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_tls.crt":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"executor_tls.key":     {install.ExecutorUID, install.ExecutorUID, 0o400},
+	"gateway_client.crt":   {install.ContainerUID, install.ContainerUID, 0o400},
+	"gateway_client.key":   {install.ContainerUID, install.ContainerUID, 0o400},
 }
 
 func listDir(t *testing.T, dir string) []string {
@@ -213,6 +225,9 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 			owners[filepath.Base(p)] = o
 		}
 	}
+	if len(wantOwner) != len(secretNames) {
+		t.Fatalf("owner table covers %d of %d secrets", len(wantOwner), len(secretNames))
+	}
 	for name, w := range wantOwner {
 		p := filepath.Join(dir, name)
 		if got, ok := owners[name]; !ok || got != [2]int{w.uid, w.gid} {
@@ -239,7 +254,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 
 	/* Contents. */
-	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password"} {
+	for _, n := range []string{"db_postgres_password", "db_migrator_password", "db_api_password", "db_cli_password", "db_poller_password", "db_eventd_password", "db_executor_password"} {
 		raw := readFile(t, filepath.Join(dir, n))
 		b, err := base64.RawURLEncoding.DecodeString(string(raw))
 		if err != nil || len(b) != 32 {
@@ -264,6 +279,7 @@ func TestWriteSecretsPermsAndNoOverwrite(t *testing.T) {
 	}
 	verifyCert(t, dir, "web.crt", "nms.example.org")
 	verifyCert(t, dir, "syslog.crt", "nms.example.org")
+	verifyXnetAndTicketKeys(t, dir)
 
 	/* Second call: refused, nothing changed. */
 	before := snapshot(t, dir)
@@ -321,6 +337,45 @@ func TestWriteSecretsUsesSuppliedWebCert(t *testing.T) {
 	}
 	if _, err := os.Stat(dir2); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("secrets dir created on error: %v", err)
+	}
+}
+
+/*
+The xnet pair: the executor's server certificate for "executor" and the gateway's client-only
+certificate with CN "gateway", both under ca.crt and each matching its key; ticket.pub is the
+public half of ticket.key.
+*/
+func verifyXnetAndTicketKeys(t *testing.T, dir string) {
+	t.Helper()
+	verifyCert(t, dir, "executor_tls.crt", "executor")
+	for _, n := range []string{"executor_tls", "gateway_client"} {
+		if _, err := tls.X509KeyPair(readFile(t, filepath.Join(dir, n+".crt")), readFile(t, filepath.Join(dir, n+".key"))); err != nil {
+			t.Errorf("%s: certificate and key do not form a pair: %v", n, err)
+		}
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(readFile(t, filepath.Join(dir, "ca.crt")))
+	b, _ := pem.Decode(readFile(t, filepath.Join(dir, "gateway_client.crt")))
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Subject.CommonName != "gateway" || !slices.Equal(c.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) {
+		t.Errorf("gateway client certificate: CN %q, EKU %v", c.Subject.CommonName, c.ExtKeyUsage)
+	}
+	if _, err := c.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Errorf("gateway client certificate does not verify against ca.crt: %v", err)
+	}
+	seed, err := config.ReadKeyFile(filepath.Join(dir, "ticket.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := config.ReadKeyFile(filepath.Join(dir, "ticket.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey); !bytes.Equal(got, pub[:]) {
+		t.Error("ticket.pub is not the public key of ticket.key")
 	}
 }
 
@@ -418,7 +473,7 @@ func TestRunInstalls(t *testing.T) {
 	etc, vr := filepath.Join(root, "etc", "nms"), filepath.Join(root, "var", "lib", "nms")
 	for _, p := range []string{
 		"compose.yaml", "Caddyfile", "config/api.yaml", "config/poller.yaml", "config/eventd.yaml", "config/infra.yaml", "config/egress.yaml",
-		"config/domain_read.pub", "config/domain_backup.pub", "postgres/initdb/10-roles.sh", "installed",
+		"config/executor.yaml", "policies/executor.yaml", "config/domain_read.pub", "config/domain_backup.pub", "postgres/initdb/10-roles.sh", "installed",
 	} {
 		if _, err := os.Stat(filepath.Join(etc, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
@@ -432,6 +487,11 @@ func TestRunInstalls(t *testing.T) {
 		st, err = os.Stat(filepath.Join(etc, "postgres", "initdb"))
 		if err != nil || st.Mode().Perm() != 0o755 {
 			t.Errorf("initdb dir mode: %v %v", st, err)
+		}
+		/* Mounted as a directory into the executor (uid 65533), which must list and read it. */
+		st, err = os.Stat(filepath.Join(etc, "policies"))
+		if err != nil || st.Mode().Perm() != 0o755 {
+			t.Errorf("policies dir mode: %v %v", st, err)
 		}
 	}
 	if got := sys.chowns[filepath.Join(vr, "anchors")]; got != [2]int{install.ContainerUID, install.ContainerUID} {
@@ -733,7 +793,7 @@ func TestPreflightHostPorts(t *testing.T) {
 		proto   string
 		port    int
 		culprit string
-	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}} {
+	}{{"udp", 514, "rsyslog"}, {"tcp", 514, "rsyslog"}, {"tcp", 6514, "rsyslog"}, {"udp", 162, "snmptrapd"}, {"tcp", 443, "web server"}, {"tcp", 8443, "executor origin"}} {
 		busy := errors.New("address already in use")
 		err := install.Preflight(install.Options{Root: root, PortFree: func(proto string, port int) error {
 			if proto == c.proto && port == c.port {
@@ -757,5 +817,134 @@ func TestPreflightHostPorts(t *testing.T) {
 	defer func() { _ = l.Close() }()
 	if install.ListenFree("tcp", l.Addr().(*net.TCPAddr).Port) == nil {
 		t.Error("ListenFree accepted a port in use")
+	}
+}
+
+/*
+The stack's own networks may not overlap each other or a management subnet, and the
+public host may not be an internal service name: refused before anything is written,
+naming the flag. Custom core and xnet subnets reach compose.yaml and executor.yaml.
+*/
+func TestRunChecksStackSubnets(t *testing.T) {
+	for name, c := range map[string]struct {
+		mutate func(o *install.Options)
+		want   string
+	}{
+		"xnet overlaps core":    {func(o *install.Options) { o.XnetSubnet = "172.30.0.0/24" }, "--xnet-subnet"},
+		"xnet overlaps devices": {func(o *install.Options) { o.XnetSubnet = "172.30.1.0/25" }, "--xnet-subnet"},
+		"core overlaps devices": {func(o *install.Options) { o.CoreSubnet = "172.30.1.0/24" }, "--core-subnet"},
+		"mgmt overlaps core":    {func(o *install.Options) { o.MgmtSubnets = []string{"10.0.0.0/8", "172.30.0.64/26"} }, "--core-subnet"},
+		"mgmt overlaps xnet":    {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.2.128/25"} }, "--xnet-subnet"},
+		"mgmt overlaps edge":    {func(o *install.Options) { o.MgmtSubnets = []string{"172.30.3.0/24"} }, "--edge-subnet"},
+		"edge overlaps core":    {func(o *install.Options) { o.EdgeSubnet = "172.30.0.0/24" }, "--edge-subnet"},
+		"mgmt covers all":       {func(o *install.Options) { o.MgmtSubnets = []string{"172.16.0.0/12"} }, "overlaps --core-subnet"},
+		"host executor":         {func(o *install.Options) { o.PublicHost = "executor" }, "internal service"},
+		"host gateway":          {func(o *install.Options) { o.PublicHost = "Gateway" }, "internal service"},
+		"host api":              {func(o *install.Options) { o.PublicHost = "api" }, "internal service"},
+		"host postgres":         {func(o *install.Options) { o.PublicHost = "postgres" }, "internal service"},
+		"host nmsctl":           {func(o *install.Options) { o.PublicHost = "nmsctl" }, "internal service"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o, root, _ := installOptions(t)
+			c.mutate(&o)
+			sys := newFakeSys()
+			err := install.Run(context.Background(), o, sys)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Run = %v, want an error naming %q", err, c.want)
+			}
+			if _, err := os.Stat(filepath.Join(root, "etc", "nms")); !errors.Is(err, os.ErrNotExist) || len(sys.cmds) != 0 {
+				t.Fatalf("wrote or ran something on bad input (%v, %v)", err, sys.cmds)
+			}
+		})
+	}
+
+	o, root, out := installOptions(t)
+	o.CoreSubnet, o.DevicesSubnet, o.XnetSubnet = "10.99.0.0/24", "10.99.1.0/24", "10.99.2.0/24"
+	/* the devices network itself may be a management subnet: devices live on it in CI, the demo stand and labs */
+	o.MgmtSubnets = []string{"192.168.50.0/24", "10.99.1.0/24"}
+	if err := install.Run(context.Background(), o, newFakeSys()); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	etc := filepath.Join(root, "etc", "nms")
+	ex := string(readFile(t, filepath.Join(etc, "config", "executor.yaml")))
+	for _, want := range []string{`core_subnet: "10.99.0.0/24"`, `xnet_subnet: "10.99.2.0/24"`, `listen_xnet: "10.99.2.2:8444"`} {
+		if !strings.Contains(ex, want) {
+			t.Errorf("executor.yaml lacks %s:\n%s", want, ex)
+		}
+	}
+	if cf := string(readFile(t, filepath.Join(etc, "compose.yaml"))); !strings.Contains(cf, `- subnet: "10.99.2.0/24"`) || !strings.Contains(cf, `- subnet: "10.99.0.0/24"`) {
+		t.Error("compose.yaml does not use the given core and xnet subnets")
+	}
+}
+
+/* Preflight checks exactly the host ports the rendered compose.yaml publishes. */
+func TestPreflightChecksEveryPublishedPort(t *testing.T) {
+	o, _, _ := installOptions(t)
+	sys := newFakeSys()
+	var checked []string
+	o.PortFree = func(proto string, port int) error {
+		checked = append(checked, fmt.Sprintf("%d/%s", port, proto))
+		return nil
+	}
+	if err := install.Preflight(o, sys); err != nil {
+		t.Fatal(err)
+	}
+	out, err := install.Render(install.RenderInput{PublicHost: o.PublicHost, ImageTag: o.ImageTag, APIImage: "nms/api", GatewayImage: "nms/gateway"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(out["compose.yaml"], &c); err != nil {
+		t.Fatal(err)
+	}
+	var published []string
+	for _, svc := range c.Services {
+		for _, p := range svc.Ports {
+			host, rest, _ := strings.Cut(p, ":")
+			_, proto, _ := strings.Cut(rest, "/")
+			published = append(published, host+"/"+cmp.Or(proto, "tcp"))
+		}
+	}
+	slices.Sort(checked)
+	slices.Sort(published)
+	if len(published) == 0 || !slices.Equal(checked, published) {
+		t.Errorf("preflight checks %v, compose publishes %v", checked, published)
+	}
+}
+
+/* nmsctl executor reaches the daemon only through docker compose exec in the executor container, the request on stdin. */
+func TestRunInExecutor(t *testing.T) {
+	sys := newFakeSys()
+	req := []byte(`{"v":1,"cmd":"registry-verify"}` + "\n")
+	if err := install.RunInExecutor(context.Background(), sys, "/etc/nms", req, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(sys.cmds) != 1 || cmdline(sys.cmds[0]) != "docker compose -f /etc/nms/compose.yaml exec -T executor /executor admin" {
+		t.Fatalf("cmds = %v", sys.cmds)
+	}
+	if sys.stdins[0] != string(req) {
+		t.Fatalf("stdin = %q", sys.stdins[0])
+	}
+}
+
+/* ReplaceFile swaps the whole file (a new inode, mode 0644) and leaves no temporary file behind. */
+func TestReplaceFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "executor.yaml")
+	if err := os.WriteFile(p, []byte("enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := install.ReplaceFile(p, []byte("enabled: true\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, p); string(got) != "enabled: true\n" {
+		t.Fatalf("content %q", got)
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 1 {
+		t.Fatalf("left %v", ents)
+	}
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o644 {
+		t.Fatalf("mode %v", st.Mode())
 	}
 }

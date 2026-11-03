@@ -49,6 +49,9 @@ var goldenFiles = map[string]string{
 	"config/api.yaml":    "api.yaml.golden",
 	"config/poller.yaml": "poller.yaml.golden",
 	"config/eventd.yaml": "eventd.yaml.golden",
+
+	"config/executor.yaml":   "executor.yaml.golden",
+	"policies/executor.yaml": "executor-policy.yaml.golden",
 }
 
 func TestRenderGolden(t *testing.T) {
@@ -135,6 +138,7 @@ func TestRenderedPollerConfigLoads(t *testing.T) {
 func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	in := sampleInput()
 	in.HTTPSPort = 8443
+	in.ExecutorPort = 9443
 	in.CoreSubnet = "10.99.0.0/24"
 	in.DevicesSubnet = "10.99.8.0/22"
 	out := render(t, in)
@@ -149,6 +153,88 @@ func TestRenderNonDefaultPortAndSubnet(t *testing.T) {
 	}
 	if !bytes.Contains(out["config/api.yaml"], []byte(`"10.99.0.2/32"`)) {
 		t.Error("default gateway IP must be derived from CoreSubnet")
+	}
+	if ex := out["config/executor.yaml"]; !bytes.Contains(ex, []byte(`executor_origin: "https://nms.example.org:9443"`)) ||
+		!bytes.Contains(ex, []byte(`panel_origin: "https://nms.example.org:8443"`)) {
+		t.Errorf("executor origins must carry the ports: %s", ex)
+	}
+	if !bytes.Contains(out["compose.yaml"], []byte(`ports: ["8443:8443", "9443:9443"]`)) {
+		t.Error("gateway must publish both ports")
+	}
+}
+
+/*
+caddySite returns the block of the Caddyfile that starts with the line
+header (a site or snippet), up to its closing brace at column 0.
+*/
+func caddySite(t *testing.T, caddyfile []byte, header string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(string(caddyfile), "\n"+header+" {\n")
+	if !ok {
+		t.Fatalf("no %q block", header)
+	}
+	block, _, ok := strings.Cut(rest, "\n}\n")
+	if !ok {
+		t.Fatalf("%q block not closed", header)
+	}
+	return block
+}
+
+/*
+The executor origin (:9443) proxies only /x/* to the executor's static xnet
+address with the gateway's client certificate, trusting only the internal
+CA and naming the server executor; the api is never proxied there, cookies
+are dropped both ways and the client address is overwritten. The panel
+frames only the executor origin and never proxies to the executor.
+*/
+func TestCaddyExecutorSite(t *testing.T) {
+	in := sampleInput()
+	in.XnetSubnet = "10.77.3.0/24"
+	in.ExecutorPort = 9000
+	in.EdgeSubnet = "10.77.4.0/24"
+	out := render(t, in)
+	site := caddySite(t, out["Caddyfile"], ":9443")
+	for _, want := range []string{
+		"reverse_proxy https://10.77.3.2:8444 {", "tls_client_auth /certs/gateway_client.crt /certs/gateway_client.key",
+		"tls_trust_pool file /certs/ca.crt", "tls_server_name executor", "header_up -Cookie", "header_up X-Forwarded-For {remote_host}", "header_up Host {http.request.hostport}",
+		"header_down -Set-Cookie", "header_down -Service-Worker-Allowed", "respond @sw 403", "handle /api/* {\n\t\t\terror 404",
+		"import executor_headers", "max_size 64KiB", "handle /x/* {", "\tbind 10.77.4.2\n",
+		"@foreign_host not host nms.example.org", "route {\n\t\terror @foreign_host 421\n\t\trespond @sw 403",
+	} {
+		if !strings.Contains(site, want) {
+			t.Errorf("executor site lacks %q", want)
+		}
+	}
+	if n := strings.Count(site, "reverse_proxy"); n != 1 || strings.Contains(site, "api:") {
+		t.Errorf("executor site: %d reverse_proxy, api mentioned %v; want only the executor", n, strings.Contains(site, "api:"))
+	}
+	if strings.Contains(site, "tls_insecure_skip_verify") {
+		t.Error("executor upstream verification is off")
+	}
+	headers := caddySite(t, out["Caddyfile"], "(executor_headers)")
+	for _, want := range []string{"frame-ancestors https://nms.example.org;", "script-src https://nms.example.org:9000/assets/;", "-Set-Cookie", "defer"} {
+		if !strings.Contains(headers, want) {
+			t.Errorf("executor headers lack %q", want)
+		}
+	}
+	for _, bad := range []string{"unsafe-inline", "unsafe-eval"} {
+		if strings.Contains(headers, bad) || strings.Contains(caddySite(t, out["Caddyfile"], "(panel_headers)"), "script-src "+bad) {
+			t.Errorf("CSP allows %s", bad)
+		}
+	}
+	panel := caddySite(t, out["Caddyfile"], ":8443")
+	if strings.Contains(panel, "10.77.3.2") || strings.Contains(panel, "gateway_client") {
+		t.Error("the panel site reaches the executor")
+	}
+	if !strings.Contains(caddySite(t, out["Caddyfile"], "(panel_headers)"), "frame-src https://nms.example.org:9000;") {
+		t.Error("the panel CSP must frame only the executor origin")
+	}
+	/* both origins publish the same static /origins.json: the executor UI learns its panel from it, the panel the executor */
+	origins := "respond `{\"panel\":\"https://nms.example.org\",\"executor\":\"https://nms.example.org:9000\"}` 200"
+	for name, s := range map[string]string{"panel": panel, "executor": site} {
+		if !strings.Contains(s, "handle /origins.json {\n") || !strings.Contains(s, origins) || !strings.Contains(s, "header Cache-Control \"no-store\"") {
+			t.Errorf("%s site lacks the static /origins.json", name)
+		}
 	}
 }
 
@@ -174,6 +260,19 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		"devices ipv6":         func(in *install.RenderInput) { in.DevicesSubnet = "fd00::/64" },
 		"devices host bits":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.1/24" },
 		"devices too small":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/30" },
+		"exec port = https":    func(in *install.RenderInput) { in.ExecutorPort = 443 },
+		"exec port range":      func(in *install.RenderInput) { in.ExecutorPort = 70000 },
+		"exec image tag":       func(in *install.RenderInput) { in.ExecutorImage = "nms/executor:latest" },
+		"xnet overlaps core":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.0.0/24" },
+		"xnet overlaps devs":   func(in *install.RenderInput) { in.XnetSubnet = "172.30.1.0/25" },
+		"edge overlaps core":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.0.128/25" },
+		"edge overlaps xnet":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.2.0/24" },
+		"edge overlaps devs":   func(in *install.RenderInput) { in.EdgeSubnet = "172.30.0.0/16" },
+		"edge not network":     func(in *install.RenderInput) { in.EdgeSubnet = "172.30.3.1/24" },
+		"xnet ipv6":            func(in *install.RenderInput) { in.XnetSubnet = "fd00::/64" },
+		"xnet host bits":       func(in *install.RenderInput) { in.XnetSubnet = "172.30.2.1/24" },
+		"host executor":        func(in *install.RenderInput) { in.PublicHost = "executor" },
+		"host gateway":         func(in *install.RenderInput) { in.PublicHost = "GATEWAY" },
 		"devices injection":    func(in *install.RenderInput) { in.DevicesSubnet = "172.30.1.0/24\"\n  x: y" },
 	}
 	for name, mutate := range cases {
@@ -208,6 +307,7 @@ type compose struct {
 		MemLimit    string            `yaml:"mem_limit"`
 		Volumes     []string          `yaml:"volumes"`
 		Networks    map[string]any    `yaml:"networks"`
+		Tmpfs       []string          `yaml:"tmpfs"`
 	} `yaml:"services"`
 	Networks map[string]struct {
 		Internal   bool  `yaml:"internal"`
@@ -225,12 +325,15 @@ type compose struct {
 
 var sensitive = regexp.MustCompile(`(?i)PASSWORD|SECRET|KEY`)
 
+/* executorSecret matches the secrets that belong to the executor. */
+var executorSecret = regexp.MustCompile(`backup|write|sealing|executor|ticket_pub`)
+
 func TestComposeHardening(t *testing.T) {
 	var c compose
 	if err := yaml.Unmarshal(render(t, sampleInput())["compose.yaml"], &c); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"postgres", "migrate", "api", "poller", "eventd", "gateway", "nmsctl"} {
+	for _, want := range []string{"postgres", "migrate", "api", "poller", "eventd", "executor", "gateway", "nmsctl"} {
 		if _, ok := c.Services[want]; !ok {
 			t.Errorf("service %s missing", want)
 		}
@@ -271,7 +374,7 @@ func TestComposeHardening(t *testing.T) {
 			}
 		}
 	}
-	if !slices.Equal(c.Services["gateway"].Ports, []string{"443:8443"}) {
+	if !slices.Equal(c.Services["gateway"].Ports, []string{"443:8443", "8443:9443"}) {
 		t.Errorf("gateway ports = %v", c.Services["gateway"].Ports)
 	}
 	if _, ok := c.Services["postgres"].Networks["edge"]; ok {
@@ -308,13 +411,13 @@ func TestComposeHardening(t *testing.T) {
 		t.Errorf("poller networks = %v", got)
 	}
 	for name, s := range c.Services {
-		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" {
+		if _, ok := s.Networks["devices"]; ok && name != "poller" && name != "eventd" && name != "executor" {
 			t.Errorf("%s must not join devices", name)
 		}
-		/* The backup-domain private key reaches no service (only the future executor); the poller gets the public key. */
+		/* The write and backup private keys, the sealing key and the executor's TLS key reach the executor only; the poller gets the public backup key. */
 		for _, sec := range s.Secrets {
-			if strings.Contains(fmt.Sprint(sec), "backup") {
-				t.Errorf("%s gets secret %v: the backup domain key must stay on the host", name, sec)
+			if executorSecret.MatchString(fmt.Sprint(sec)) && name != "executor" && (name != "postgres" || sec != "db_executor_password") {
+				t.Errorf("%s gets secret %v: it belongs to the executor", name, sec)
 			}
 		}
 		if name == "poller" != slices.ContainsFunc(s.Volumes, func(v string) bool { return strings.Contains(v, "domain_backup.pub") }) {
@@ -345,6 +448,71 @@ func TestComposeHardening(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(e.Networks)); !slices.Equal(got, []string{"core", "devices"}) {
 		t.Errorf("eventd networks = %v", got)
 	}
+	/*
+		executor: its own image and user, a tmpfs only it can enter, its own state volume, a static
+		address in the internal xnet, exactly its secrets; the ticket signing key goes to the api only.
+	*/
+	x := c.Services["executor"]
+	if x.Image != "nms/executor:1.0.0" || x.User != "65533:65533" || len(x.Entrypoint) != 0 || !slices.Equal(x.Healthcheck.Test, []string{"CMD", "/executor", "healthcheck"}) {
+		t.Errorf("executor image/user/entrypoint/healthcheck = %q %q %v %v", x.Image, x.User, x.Entrypoint, x.Healthcheck.Test)
+	}
+	if !slices.Equal(x.Tmpfs, []string{"/run/executor:mode=0700,uid=65533,gid=65533,size=1m"}) {
+		t.Errorf("executor tmpfs = %v", x.Tmpfs)
+	}
+	/* The administration socket lives in the executor's own tmpfs: no other service mounts /run/executor. */
+	for name, s := range c.Services {
+		if name == "executor" {
+			continue
+		}
+		for _, m := range append(slices.Clone(s.Volumes), s.Tmpfs...) {
+			if strings.Contains(m, "/run/executor") {
+				t.Errorf("%s mounts %s", name, m)
+			}
+		}
+	}
+	if want := []any{"db_executor_password", "executor_sealing_key", "domain_write_key", "domain_backup_key", "ticket_pub", "executor_tls_crt", "executor_tls_key", "ca_crt"}; !slices.Equal(x.Secrets, want) {
+		t.Errorf("executor secrets = %v, want %v", x.Secrets, want)
+	}
+	if want := []string{
+		"executor-state:/var/lib/executor", "/etc/nms/config/executor.yaml:/etc/nms/executor.yaml:ro",
+		"/etc/nms/config/egress.yaml:/etc/nms/egress.yaml:ro", "/etc/nms/policies:/etc/nms/policies:ro",
+	}; !slices.Equal(x.Volumes, want) {
+		t.Errorf("executor volumes = %v", x.Volumes)
+	}
+	if got := slices.Sorted(maps.Keys(x.Networks)); !slices.Equal(got, []string{"core", "devices", "xnet"}) {
+		t.Errorf("executor networks = %v", got)
+	}
+	if xn, _ := x.Networks["xnet"].(map[string]any); xn["ipv4_address"] != "172.30.2.2" {
+		t.Errorf("executor xnet = %v, want the static address 172.30.2.2", x.Networks["xnet"])
+	}
+	xnet := c.Networks["xnet"]
+	if !xnet.Internal || len(xnet.IPAM.Config) != 1 || xnet.IPAM.Config[0].Subnet != install.DefaultXnetSubnet {
+		t.Errorf("xnet = %+v, want internal with subnet %s", xnet, install.DefaultXnetSubnet)
+	}
+	for name, s := range c.Services {
+		if _, ok := s.Networks["xnet"]; ok != (name == "executor" || name == "gateway") {
+			t.Errorf("%s: xnet membership %v, want only executor and gateway", name, ok)
+		}
+		if slices.ContainsFunc(s.Volumes, func(v string) bool { return strings.HasPrefix(v, "executor-state:") }) != (name == "executor") {
+			t.Errorf("%s volumes %v: only the executor mounts executor-state", name, s.Volumes)
+		}
+		if slices.Contains(s.Secrets, any("ticket_key")) != (name == "api") {
+			t.Errorf("%s: only the api gets ticket_key", name)
+		}
+	}
+	/* The gateway's client identity towards the executor and its web key exist only in the gateway. */
+	for name, s := range c.Services {
+		for _, sec := range []string{"gateway_client_crt", "gateway_client_key", "web_key", "ca_crt"} {
+			has := slices.ContainsFunc(s.Secrets, func(v any) bool {
+				m, _ := v.(map[string]any)
+				return v == sec || m["source"] == sec
+			})
+			if want := name == "gateway" || (sec == "ca_crt" && name == "executor"); has != want {
+				t.Errorf("%s: secret %s present = %v, want %v", name, sec, has, want)
+			}
+		}
+	}
+
 	dev := c.Networks["devices"]
 	if dev.Internal || len(dev.IPAM.Config) != 1 || dev.IPAM.Config[0].Subnet != install.DefaultDevicesSubnet {
 		t.Errorf("devices network = %+v, want routed with subnet %s", dev, install.DefaultDevicesSubnet)
@@ -399,5 +567,45 @@ func TestRenderedEventdConfigLoads(t *testing.T) {
 	if c.DB.User != "nms_eventd" || c.DB.Name != "nms" || c.DB.PasswordFile != "/run/secrets/db_eventd_password" ||
 		c.ReadKeyFile != "/run/secrets/domain_read_key" || c.TLSCertFile != "/run/secrets/syslog_crt" || c.TLSKeyFile != "/run/secrets/syslog_key" || c.SyslogUDP != "0.0.0.0:1514" || c.TrapUDP != "0.0.0.0:1162" {
 		t.Errorf("unexpected config: %+v", c)
+	}
+}
+
+/*
+The executor origin listens only on the gateway's static address in edge, the
+gateway's only routed network (where Docker publishes the ports): edge has a
+fixed subnet, the gateway its second host address there, and the :9443 site
+binds to exactly that address; the panel site does not bind.
+*/
+func TestExecutorOriginBoundToEdge(t *testing.T) {
+	in := sampleInput()
+	in.EdgeSubnet = "10.66.5.0/24"
+	out := render(t, in)
+	var c compose
+	if err := yaml.Unmarshal(out["compose.yaml"], &c); err != nil {
+		t.Fatal(err)
+	}
+	edge := c.Networks["edge"]
+	if edge.Internal || len(edge.IPAM.Config) != 1 || edge.IPAM.Config[0].Subnet != "10.66.5.0/24" {
+		t.Errorf("edge = %+v, want routed with subnet 10.66.5.0/24", edge)
+	}
+	if e, _ := c.Services["gateway"].Networks["edge"].(map[string]any); e["ipv4_address"] != "10.66.5.2" {
+		t.Errorf("gateway edge = %v, want the static address 10.66.5.2", c.Services["gateway"].Networks["edge"])
+	}
+	for name, s := range c.Services {
+		if _, ok := s.Networks["edge"]; ok != (name == "gateway") {
+			t.Errorf("%s: edge membership %v, want only the gateway", name, ok)
+		}
+	}
+	/* Only edge may be routed for the gateway, or Docker could publish its ports on another network. */
+	for n := range c.Services["gateway"].Networks {
+		if n != "edge" && !c.Networks[n].Internal {
+			t.Errorf("gateway network %s is routed", n)
+		}
+	}
+	if site := caddySite(t, out["Caddyfile"], ":9443"); !strings.Contains(site, "\n\tbind 10.66.5.2\n") {
+		t.Errorf("the executor origin is not bound to the gateway's edge address:\n%s", site)
+	}
+	if strings.Contains(caddySite(t, out["Caddyfile"], ":8443"), "bind ") {
+		t.Error("the panel site binds")
 	}
 }

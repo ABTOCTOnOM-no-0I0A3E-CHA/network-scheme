@@ -2685,6 +2685,113 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /api/executor/ticket:
+    post:
+      summary: Session ticket for the executor (origin :8443)
+      description: |
+        Signs a session ticket v1 for the caller ({v, aud "executor", user_id, username, iat,
+        exp = iat + 60 s, nonce}, Ed25519). The ticket is only the api's claim about who the user
+        is: the executor takes rights from its own registry and needs the user's change TOTP for
+        every action, and accepts each ticket once. At most 20 tickets a minute per user (429
+        rate_limited); every issue is audited (executor.ticket), refusals by the limit at most once
+        a minute per user. A disabled or deleted user gets 401 session_expired.
+      x-permission: self
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "200":
+          description: The ticket (opaque to the client; never stored)
+          headers:
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at]
+                properties:
+                  ticket: { type: string, maxLength: 1024 }
+                  expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/executor/freeze:
+    post:
+      summary: Ask the executor to freeze (on only)
+      description: |
+        Inserts the caller's id into execpub.freeze_request, the only request the panel can
+        make of the executor; the executor freezes within 5 s. A request already pending is
+        as good (still 202). There is no way to lift a freeze here: only nmsctl executor
+        freeze off on the host. The body is ignored. Global admin with a fresh step-up;
+        every call is audited (executor.freeze, with already_pending).
+      x-permission: executor.freeze
+      x-step-up: true
+      parameters: [{ $ref: "#/components/parameters/CSRF" }]
+      responses:
+        "202": { description: The request is pending; the executor freezes within 5 s }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/executor/status:
+    get:
+      summary: What the executor last published (enabled, frozen)
+      description: |
+        execpub.status as written by the executor: enabled is its policy, frozen its
+        freeze. The executor rewrites the row every 30 s; stale is true when it is older
+        than 90 s by the database clock (the executor stopped publishing). known is false
+        while it never published.
+      x-permission: system.read
+      responses:
+        "200":
+          description: Executor status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [known, enabled, frozen, at, stale]
+                properties:
+                  known: { type: boolean }
+                  enabled: { type: boolean }
+                  frozen: { type: boolean }
+                  at: { type: [string, "null"], format: date-time }
+                  stale: { type: boolean }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/devices/{id}/sessions:
+    get:
+      summary: Change sessions of the device, newest first
+      description: |
+        From execpub.session_summary (written by the executor). username is the user's
+        current name in the panel (null once deleted); post_sha256 is a 12-character prefix
+        of the hash of the configuration after the session (null while open or unknown).
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [session_id, user_id, username, opened_at, closed_at, status, post_sha256]
+                      properties:
+                        session_id: { type: string, format: uuid }
+                        user_id: { type: integer, format: int64 }
+                        username: { type: [string, "null"] }
+                        opened_at: { type: string, format: date-time }
+                        closed_at: { type: [string, "null"], format: date-time }
+                        status: { type: string, enum: [open, closed, timeout, interrupted, rolled_back] }
+                        post_sha256: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:

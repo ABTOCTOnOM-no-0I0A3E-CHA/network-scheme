@@ -1,0 +1,1188 @@
+/*
+Package registry is the executor's write registry in schema exec: the only
+writer of its rows and their verifier. Every row carries
+HMAC-SHA-256(mac subkey, Canonical(table, pk, content, version)); every
+change takes the next value of the global counter as the version of the rows
+it touches; the state file holds the counter's high-water mark and the hash
+of all (table, pk, version, mac), so a changed, replayed, deleted or rolled
+back row and a replaced state file are all detected (security.md 5.1a).
+
+Values are read over the binary protocol into Go values and MACed from
+those, so no server-side function, cast or search_path takes part in what
+is verified. Writes are declared (Tx.Put, Tx.Delete): the registry computes
+each MAC from the declared values and, before COMMIT, insists the database
+holds exactly the previous verified rows with the declared changes; it never
+seals anything it reads back. Decisions read the registry only through View,
+from the very snapshot that was verified.
+
+One Registry per process (the executor is the single writer): an in-process
+lock orders writes and verifications, the row lock on registry_counter
+orders transactions (never an advisory lock: the api can take those).
+Waiting for that lock respects the caller's context, and every database
+operation runs under a client-side deadline as well as the server-side
+timeouts: a backend that stops answering (a superuser can SIGSTOP it, and
+then no server-side timeout fires) closes the connection on expiry instead
+of holding the lock forever.
+*/
+package registry
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
+)
+
+/* ErrTampered means the registry or the state file does not match what the executor wrote. */
+var ErrTampered = errors.New("registry: tampered")
+
+func tampered(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", ErrTampered, fmt.Sprintf(format, a...))
+}
+
+/*
+Bounds of every registry transaction: a row or table lock held by someone
+else cannot stall the executor (server side), nor can a backend that stops
+answering (OpTimeout, client side: one verification or write transaction).
+*/
+const (
+	LockTimeout      = 3 * time.Second
+	StatementTimeout = 10 * time.Second
+	OpTimeout        = 2 * StatementTimeout
+)
+
+/* Sentinel is created in the state directory once the registry is bootstrapped and never removed. */
+const Sentinel = "initialized"
+
+/* PinSession sets the pool's sessions to resolve only pg_catalog (main passes it to store.Open). */
+func PinSession(cfg *pgxpool.Config) {
+	cfg.ConnConfig.RuntimeParams["search_path"] = "pg_catalog, pg_temp"
+}
+
+/*
+MaxMessage bounds every message the executor's connections receive. What
+the executor reads in this phase is small (registry rows and audit rows are
+bounded to 64 KiB by their CHECKs, core.user names to a few bytes); a value
+planted by a database superuser (a huge user name, a view in place of a
+table) would otherwise be read whole into memory. A larger message fails
+its query (and drops the connection). Reading session snapshots and
+recordings (task 4c, up to 4 MiB a row) needs a raised bound there.
+*/
+const MaxMessage = 1 << 20
+
+/*
+oversized turns a message over MaxMessage into tampering: nothing the
+executor reads from schema exec or the catalog is that large, so only a
+planted value (a row, a constraint definition) can be.
+*/
+func oversized(err error) error {
+	var e *pgproto3.ExceededMaxBodyLenErr
+	if errors.As(err, &e) {
+		return tampered("a message of %d bytes from the database (bound %d)", e.ActualBodyLen, e.MaxExpectedBodyLen)
+	}
+	return err
+}
+
+/* BoundMessages sets MaxMessage on the pool's connections (main passes it to store.Open). */
+func BoundMessages(cfg *pgxpool.Config) {
+	cfg.ConnConfig.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
+		f := pgproto3.NewFrontend(r, w)
+		f.SetMaxBodyLen(MaxMessage)
+		return f
+	}
+}
+
+/* Registry verifies and changes the registry. */
+type Registry struct {
+	pool *pgxpool.Pool
+	keys *seal.Keys
+	path string
+	/* sem is the registry's lock (a channel, so waiting for it can end with the caller's context). */
+	sem chan struct{}
+	/* fileMu orders the state file's loads and saves; it is never held across a database call. */
+	fileMu sync.Mutex
+	/* Test seams: hook runs at named stages; commitTx commits. */
+	hook     func(stage string, tx pgx.Tx)
+	commitTx func(ctx context.Context, tx pgx.Tx) error
+	/* settleFor bounds the wait for the fate of a transaction whose COMMIT failed ambiguously. */
+	settleFor time.Duration
+	/* opTimeout bounds one verification or write transaction on the client side (OpTimeout). */
+	opTimeout time.Duration
+}
+
+/* New returns the registry over pool, with the state file at path. */
+func New(pool *pgxpool.Pool, keys *seal.Keys, path string) *Registry {
+	return &Registry{pool: pool, keys: keys, path: path, sem: make(chan struct{}, 1),
+		settleFor: 2 * StatementTimeout, opTimeout: OpTimeout,
+		commitTx: func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) }}
+}
+
+/* lock takes the registry's lock, or fails once ctx ends: a stalled holder cannot hold the caller past its deadline. */
+func (r *Registry) lock(ctx context.Context) error {
+	select {
+	case r.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("registry: waiting for the lock: %w", ctx.Err())
+	}
+}
+
+func (r *Registry) unlock() { <-r.sem }
+
+/* row is one verified registry row. */
+type row struct {
+	t       *table
+	key     string /* table and encoded key: unique across the registry */
+	pk      []*string
+	content []*string
+	typed   map[string]any
+	version int64
+	mac     []byte
+}
+
+func (r *row) canonical() []byte { return Canonical(r.t.name, r.pk, r.content, r.version) }
+
+/* Snapshot is the registry as verified in one transaction. */
+type Snapshot struct {
+	seq    int64 /* 0 when registry_counter has no row */
+	rows   []*row
+	byKey  map[string]*row
+	frozen bool
+	reason string
+}
+
+/* Row is a read-only view of one verified row. */
+type Row struct{ r *row }
+
+/* Get returns the value of column col: int64, bool, string, []byte, time.Time, netip.Addr, json.RawMessage or nil (byte values are copies). */
+func (r Row) Get(col string) any {
+	switch v := r.r.typed[col].(type) {
+	case []byte:
+		return slices.Clone(v)
+	case json.RawMessage:
+		return slices.Clone(v)
+	default:
+		return v
+	}
+}
+
+/* Version is the counter value of the change that last wrote the row. */
+func (r Row) Version() int64 { return r.r.version }
+
+/* Table names the registry table of the row ("" for the zero Row, which no snapshot hands out). */
+func (r Row) Table() string {
+	if r.r == nil {
+		return ""
+	}
+	return r.r.t.name
+}
+
+/* Seq is the registry counter. */
+func (s *Snapshot) Seq() int64 { return s.seq }
+
+/* Frozen reports whether exec_state, a missing exec_state or the state file say frozen. */
+func (s *Snapshot) Frozen() (bool, string) { return s.frozen, s.reason }
+
+/* Rows lists the rows of table. */
+func (s *Snapshot) Rows(table string) []Row {
+	var out []Row
+	for _, r := range s.rows {
+		if r.t.name == table {
+			out = append(out, Row{r})
+		}
+	}
+	return out
+}
+
+/* Get returns the row of table with key pk (values as for Tx.Put). */
+func (s *Snapshot) Get(table string, pk ...any) (Row, bool) {
+	t := lookup(table)
+	if t == nil {
+		return Row{}, false
+	}
+	key, _, err := keyOf(t, pk)
+	if err != nil {
+		return Row{}, false
+	}
+	r, ok := s.byKey[key]
+	return Row{r}, ok
+}
+
+/* keyOf encodes a key given as Go values; it also returns them as query parameters. */
+func keyOf(t *table, pk []any) (string, []any, error) {
+	if len(pk) != len(t.pk) {
+		return "", nil, fmt.Errorf("registry: %s key has %d parts", t.name, len(t.pk))
+	}
+	enc := make([]*string, 0, len(pk))
+	params := make([]any, 0, len(pk))
+	for i, c := range t.pk {
+		v, err := norm(c, pk[i])
+		if err != nil {
+			return "", nil, fmt.Errorf("registry: %s: %w", t.name, err)
+		}
+		enc, params = append(enc, v.canon), append(params, v.param)
+	}
+	return keyEnc(t, enc), params, nil
+}
+
+func keyEnc(t *table, pk []*string) string {
+	name := t.name
+	return string(appendList(appendField(nil, &name), pk))
+}
+
+/* pinSession bounds the transaction and resolves names in pg_catalog only (utility statements: nothing to resolve). */
+func pinSession(ctx context.Context, tx pgx.Tx) error {
+	for _, s := range []string{
+		"SET LOCAL search_path = pg_catalog, pg_temp",
+		fmt.Sprintf("SET LOCAL lock_timeout = %d", LockTimeout.Milliseconds()),
+		fmt.Sprintf("SET LOCAL statement_timeout = %d", StatementTimeout.Milliseconds()),
+	} {
+		if _, err := tx.Exec(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+/*
+Bounds of a snapshot: rows per table (the deployment's scale, 5 000
+devices, with room to spare) and bytes in all. Each row is checked against
+them, and its MAC verified, as it streams in: rows planted by someone
+without the MAC key stop the read at the first one, and no number of them
+can make the executor hold more than the bounds (a superuser could
+otherwise exhaust its memory and have it restarted). Legitimate data beyond
+the bounds is refused as well (fail closed). Every table needs a bound (a
+missing one is 0: its first row would freeze); the writer checks them
+before anything is written (fits) and refuses a change that would cross
+them with ErrFull, so only rows the executor did not write can.
+*/
+var (
+	maxRows = map[string]int{counterTable: 1, stateTable: 1, "write_device": 10000, "write_credential": 10000,
+		"write_grant": 20000, "change_totp": 10000, "model_profile": 1024}
+	maxSnapshotBytes = 64 << 20
+)
+
+/* ErrFull refuses a change that would take a table over its row bound or the registry over its byte bound; nothing was written. */
+var ErrFull = errors.New("registry: full")
+
+/* rowSize is what a row counts against maxSnapshotBytes: its key and content in canonical form. */
+func rowSize(vals []*string) int {
+	n := 0
+	for _, v := range vals {
+		if v != nil {
+			n += len(*v)
+		}
+	}
+	return n
+}
+
+/*
+fits checks that pre with ops applied stays within the bounds scan enforces,
+counted the same way, before anything is written.
+*/
+func fits(pre *Snapshot, ops []op) error {
+	type entry struct {
+		table string
+		size  int
+	}
+	rows, count, size := map[string]entry{}, map[string]int{}, 0
+	for k, r := range pre.byKey {
+		s := rowSize(r.pk) + rowSize(r.content)
+		rows[k] = entry{r.t.name, s}
+		count[r.t.name]++
+		size += s
+	}
+	for _, o := range ops {
+		if old, ok := rows[o.key]; ok {
+			delete(rows, o.key)
+			count[old.table]--
+			size -= old.size
+		}
+		if o.del {
+			continue
+		}
+		s := 0
+		for _, v := range o.vals {
+			s += rowSize([]*string{v.canon})
+		}
+		rows[o.key] = entry{o.t.name, s}
+		count[o.t.name]++
+		size += s
+	}
+	for t, n := range count {
+		if n > maxRows[t] {
+			return fmt.Errorf("%w: %s would hold %d rows (bound %d)", ErrFull, t, n, maxRows[t])
+		}
+	}
+	if size > maxSnapshotBytes {
+		return fmt.Errorf("%w: the registry would hold %d bytes (bound %d)", ErrFull, size, maxSnapshotBytes)
+	}
+	return nil
+}
+
+/*
+scan reads the whole registry into Go values. Values that cannot be
+scanned or are out of their domain (NULL where none is allowed, infinite
+time, a network instead of an address, two rows with one key), a table
+over its row bound or a snapshot over its byte bound are tampering: the
+executor never writes them. With macKey every row's MAC is verified as it
+is read (nil: the registry reset, which keeps the rows that verify).
+*/
+func scan(ctx context.Context, q pgx.Tx, macKey *[32]byte) (*Snapshot, error) {
+	s := &Snapshot{byKey: map[string]*row{}}
+	size := 0
+	for i := range tables {
+		t := &tables[i]
+		rows, err := q.Query(ctx, t.selectSQL())
+		if err != nil {
+			return nil, fmt.Errorf("registry: read %s: %w", t.name, err)
+		}
+		cols := t.columns()
+		n := 0
+		for rows.Next() {
+			if n++; n > maxRows[t.name] {
+				rows.Close()
+				return nil, tampered("%s has more than %d rows", t.name, maxRows[t.name])
+			}
+			dst := make([]any, 0, len(cols)+2)
+			for _, c := range cols {
+				dst = append(dst, dest(c.kind))
+			}
+			var version *int64
+			var mac *[]byte
+			if err := rows.Scan(append(dst, &version, &mac)...); err != nil {
+				rows.Close()
+				return nil, tampered("%s: %v", t.name, err)
+			}
+			r := &row{t: t, typed: map[string]any{}}
+			for j, c := range cols {
+				v, err := norm(c, deref(dst[j]))
+				if err != nil {
+					rows.Close()
+					return nil, tampered("%s: %v", t.name, err)
+				}
+				r.typed[c.name] = v.typed
+				if j < len(t.pk) {
+					r.pk = append(r.pk, v.canon)
+				} else {
+					r.content = append(r.content, v.canon)
+				}
+			}
+			if version == nil || mac == nil || len(*mac) != sha256.Size {
+				rows.Close()
+				return nil, tampered("%s: NULL version or bad mac", t.name)
+			}
+			r.version, r.mac = *version, *mac
+			if macKey != nil && !hmac.Equal(r.mac, macOf(macKey, r.canonical())) {
+				rows.Close()
+				return nil, tampered("bad MAC in %s", t.name)
+			}
+			if size += rowSize(r.pk) + rowSize(r.content); size > maxSnapshotBytes {
+				rows.Close()
+				return nil, tampered("the registry holds more than %d bytes", maxSnapshotBytes)
+			}
+			r.key = keyEnc(t, r.pk)
+			if s.byKey[r.key] != nil {
+				rows.Close()
+				return nil, tampered("%s: two rows with one key", t.name)
+			}
+			s.byKey[r.key] = r
+			s.rows = append(s.rows, r)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("registry: read %s: %w", t.name, err)
+		}
+	}
+	if c := s.Rows(counterTable); len(c) == 1 {
+		s.seq = c[0].r.version
+	}
+	return s, nil
+}
+
+func dest(k kind) any {
+	switch k {
+	case kInt8:
+		return new(*int64)
+	case kInt4:
+		return new(*int32)
+	case kBool:
+		return new(*bool)
+	case kText:
+		return new(*string)
+	case kTime:
+		return new(*time.Time)
+	case kInet:
+		return new(*netip.Prefix)
+	default: /* kBytes, kJSON */
+		return new(*[]byte)
+	}
+}
+
+/* deref turns a **T scan destination into the T value, or nil for NULL. */
+func deref(p any) any {
+	v := reflect.ValueOf(p).Elem()
+	if v.IsNil() {
+		return nil
+	}
+	return v.Elem().Interface()
+}
+
+/* check verifies every row's version against the counter and returns the state hash (scan verified the MACs). */
+func (s *Snapshot) check() ([]byte, error) {
+	entries := make([][]byte, 0, len(s.rows))
+	for _, r := range s.rows {
+		if r.version > s.seq {
+			return nil, tampered("%s row version %d above counter %d", r.t.name, r.version, s.seq)
+		}
+		entries = append(entries, entry(r.t.name, r.pk, r.version, r.mac))
+	}
+	slices.SortFunc(entries, bytes.Compare)
+	h := sha256.New()
+	for _, e := range entries {
+		h.Write(e)
+	}
+	return h.Sum(nil), nil
+}
+
+/* match compares the verified database with the committed record of the (settled) state file. */
+func match(f state.File, seq int64, hash []byte) error {
+	if f.Committed.HWM == seq && bytes.Equal(f.Committed.StateHash, hash) {
+		return nil
+	}
+	return tampered("registry at %d does not match the state file (committed %d)", seq, f.Committed.HWM)
+}
+
+func (r *Registry) load() (state.File, error) {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	return r.loadLocked()
+}
+
+/* loadLocked is load with fileMu held. */
+func (r *Registry) loadLocked() (state.File, error) {
+	f, err := state.Load(r.path, r.keys.State())
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return f, tampered("state file missing")
+	case errors.Is(err, state.ErrInvalid):
+		return f, tampered("state file invalid or of another install")
+	}
+	return f, err
+}
+
+/*
+save writes the records of f (committed, pending). The sticky freeze is the
+file's own: save always keeps the Frozen and FreezeReason the file holds at
+that moment, never the copy f was loaded with, so neither MarkFrozen nor
+ClearFrozen (which do not wait for the registry's lock) can be undone by a
+save of an operation that loaded the file before them. A file that cannot be
+read is not written over: only the bootstrap's first save (an empty
+committed record) may find no file at all.
+*/
+func (r *Registry) save(f state.File) error {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	cur, err := state.Load(r.path, r.keys.State())
+	switch {
+	case err == nil:
+		f.Frozen, f.FreezeReason = cur.Frozen, cur.FreezeReason
+	case errors.Is(err, os.ErrNotExist) && f.Committed.HWM == 0:
+		f.Frozen, f.FreezeReason = false, ""
+	case errors.Is(err, os.ErrNotExist):
+		return tampered("state file missing")
+	case errors.Is(err, state.ErrInvalid):
+		return tampered("state file invalid or of another install")
+	default:
+		return err
+	}
+	return state.Save(r.path, r.keys.State(), f)
+}
+
+/* errUnsettled: the fate of the pending transaction cannot be read now; nothing is decided until it can. */
+var errUnsettled = errors.New("registry: the pending change is not settled yet")
+
+/*
+xactStatus is pg_xact_status of xid: "committed", "aborted", "in progress"
+or "" (too old to be known). A transaction in the database's future means
+the database was put back behind the state file: tampering.
+*/
+func (r *Registry) xactStatus(ctx context.Context, xid uint64) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, StatementTimeout)
+	defer cancel()
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pinSession(ctx, tx); err != nil {
+		return "", err
+	}
+	var st *string
+	err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_xact_status($1::pg_catalog.text::pg_catalog.xid8)`,
+		strconv.FormatUint(xid, 10)).Scan(&st)
+	var pe *pgconn.PgError
+	switch {
+	case errors.As(err, &pe) && pe.Code == "22023":
+		return "", tampered("pending transaction %d is in the database's future", xid)
+	case err != nil:
+		return "", err
+	case st == nil:
+		return "", nil
+	}
+	return *st, nil
+}
+
+/*
+settle resolves a pending record by the fate of its own transaction, never
+by comparing hashes: committed makes it the committed record, aborted (or
+too old to know) drops it, so the rows of a change that did not commit can
+never be accepted later, even replayed exactly. While the fate cannot be
+read, settle fails and nothing is verified (fail closed).
+*/
+func (r *Registry) settle(ctx context.Context, f state.File) (state.File, error) {
+	if f.Pending == nil {
+		return f, nil
+	}
+	st, err := r.xactStatus(ctx, f.PendingXID)
+	switch {
+	case err != nil:
+		return f, err
+	case st == "committed":
+		f.Committed = *f.Pending
+	case st == "aborted" || st == "":
+	default:
+		return f, errUnsettled
+	}
+	f.Pending, f.PendingXID = nil, 0
+	return f, r.save(f)
+}
+
+/*
+settleWait retries settle until it succeeds, is tampering or settleFor passes;
+the registry's lock stays held. Every attempt (each read of the fate) ends by
+the deadline too, so a stalled read cannot carry the wait past settleFor.
+*/
+func (r *Registry) settleWait(ctx context.Context, f state.File) (state.File, error) {
+	deadline := time.Now().Add(r.settleFor)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	for {
+		g, err := r.settle(ctx, f)
+		if err == nil || errors.Is(err, ErrTampered) || time.Now().After(deadline) {
+			return g, err
+		}
+		select {
+		case <-ctx.Done():
+			return g, errors.Join(err, ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+/* verified reads and verifies the whole registry within opTimeout; the registry's lock must be held. */
+func (r *Registry) verified(ctx context.Context) (*Snapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
+	f, err := r.load()
+	if err != nil {
+		return nil, err
+	}
+	if f, err = r.settle(ctx, f); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pinSession(ctx, tx); err != nil {
+		return nil, err
+	}
+	if err := checkCatalog(ctx, tx); err != nil {
+		return nil, err
+	}
+	s, err := scan(ctx, tx, r.keys.MAC())
+	if err != nil {
+		return nil, err
+	}
+	hash, err := s.check()
+	if err != nil {
+		return nil, err
+	}
+	if err := match(f, s.seq, hash); err != nil {
+		return nil, err
+	}
+	if err := checkAuditHead(ctx, tx, f.Committed.AuditHead); err != nil {
+		return nil, err
+	}
+	s.frozen, s.reason = frozen(s, f)
+	return s, nil
+}
+
+func frozen(s *Snapshot, f state.File) (bool, string) {
+	st, ok := s.Get(stateTable, true)
+	switch {
+	case f.Frozen:
+		return true, f.FreezeReason
+	case !ok:
+		return true, "exec_state missing"
+	case st.Get("freeze") == true:
+		reason, _ := st.Get("freeze_reason").(string)
+		return true, reason
+	}
+	return false, ""
+}
+
+/*
+View verifies the whole registry (every row's MAC and version, the counter,
+the catalog, the state hash against the state file) and hands fn the very
+snapshot it verified. It is the only way decisions read the registry: a
+second query after a verification could see other rows. fn runs without
+the registry's lock and must not call Write; a read-modify-write goes
+through Write, whose function receives its own verified snapshot. An
+ErrTampered error means freeze; any other error (including ctx ending while
+waiting for the registry's lock) means the registry is not verified now.
+*/
+func (r *Registry) View(ctx context.Context, fn func(*Snapshot) error) error {
+	s, err := r.locked(ctx)
+	if err != nil {
+		return err
+	}
+	return fn(s)
+}
+
+/* locked verifies under the registry's lock, released however verified ends (a panic included). */
+func (r *Registry) locked(ctx context.Context) (*Snapshot, error) {
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
+	s, err := r.verified(ctx)
+	return s, oversized(err)
+}
+
+/* Report is the verified state of the registry. */
+type Report struct {
+	Seq    int64
+	Frozen bool
+	Reason string
+}
+
+/* Verify is View without a decision: call it at start and periodically. */
+func (r *Registry) Verify(ctx context.Context) (Report, error) {
+	var rep Report
+	err := r.View(ctx, func(s *Snapshot) error {
+		rep.Seq = s.seq
+		rep.Frozen, rep.Reason = s.Frozen()
+		return nil
+	})
+	return rep, err
+}
+
+/* op is one declared change. */
+type op struct {
+	t      *table
+	key    string
+	del    bool
+	pk     []*string
+	vals   []value /* all columns, for a put */
+	params []any   /* key values, for a delete */
+}
+
+/* Tx collects the changes of one Write; nothing reaches the database before the function returns. */
+type Tx struct {
+	seq   int64
+	ops   []op
+	audit []Appender
+}
+
+/* Audit declares rows of the executor's audit chain to append in the same transaction as the change. */
+func (t *Tx) Audit(a Appender) { t.audit = append(t.audit, a) }
+
+/* Seq is the version every row of this change takes. */
+func (t *Tx) Seq() int64 { return t.seq }
+
+func newPut(table string, vals map[string]any) (op, error) {
+	t := lookup(table)
+	if t == nil {
+		return op{}, fmt.Errorf("registry: unknown table %q", table)
+	}
+	cols := t.columns()
+	if len(vals) != len(cols) {
+		return op{}, fmt.Errorf("registry: %s: want every column of %d, got %d", table, len(cols), len(vals))
+	}
+	o := op{t: t}
+	for i, c := range cols {
+		v, ok := vals[c.name]
+		if !ok {
+			return op{}, fmt.Errorf("registry: %s: column %s missing", table, c.name)
+		}
+		n, err := norm(c, v)
+		if err != nil {
+			return op{}, fmt.Errorf("registry: %s: %w", table, err)
+		}
+		o.vals = append(o.vals, n)
+		if i < len(t.pk) {
+			o.pk = append(o.pk, n.canon)
+		}
+	}
+	o.key = keyEnc(t, o.pk)
+	return o, nil
+}
+
+/*
+Put declares a full row of table (every key and content column, by name);
+the registry sets version and mac. Values: integers (int, int32, int64),
+bool, string, []byte, time.Time (kept to the microsecond), netip.Addr for
+inet, json.RawMessage or []byte for jsonb, nil for NULL.
+*/
+func (t *Tx) Put(table string, vals map[string]any) error {
+	if table == counterTable {
+		return errors.New("registry: the counter is the registry's own")
+	}
+	o, err := newPut(table, vals)
+	if err == nil {
+		t.ops = append(t.ops, o)
+	}
+	return err
+}
+
+/* Delete declares the removal of the row of table with key pk. exec_state is never deleted. */
+func (t *Tx) Delete(table string, pk ...any) error {
+	tb := lookup(table)
+	if tb == nil || table == counterTable || table == stateTable {
+		return fmt.Errorf("registry: cannot delete from %q", table)
+	}
+	key, params, err := keyOf(tb, pk)
+	if err != nil {
+		return err
+	}
+	t.ops = append(t.ops, op{t: tb, key: key, del: true, params: params})
+	return nil
+}
+
+/*
+Write changes the registry. Under the registry's locks it verifies the
+current registry against the state file (an unverified registry is never
+extended), hands fn that verified snapshot to declare its changes with
+tx.Put and tx.Delete, applies them at version seq+1 with MACs computed from
+the declared values, checks that the database now holds exactly the
+previous rows plus those changes (anything else — a trigger, a rule, a
+default, a planted row — is tampering), appends the audit rows declared with
+tx.Audit in the same transaction, then records the change (and the new head
+of the audit chain) as pending in the state file (with its transaction id),
+commits and records it as committed. The audit chain must end at the head
+anchored in the state file before anything is written. Every registry table is locked in EXCLUSIVE mode for the whole
+transaction. fn may run up to five times (serialization retries): it must
+only declare changes, with no side effect of its own (no device I/O, no
+other writes). Each attempt runs within OpTimeout; waiting for the
+registry's lock ends with ctx.
+
+A nil error means the change committed. An ErrTampered error means freeze.
+ErrFull (the change would cross the snapshot bounds) means nothing was
+written. Any other error does NOT mean the change was not applied: the COMMIT may
+have succeeded and only recording it in the state file failed, or the
+COMMIT failed ambiguously and its fate could not be read in time (the next
+verification settles it). Callers must treat such an error as "unknown":
+never as a refusal they may undo or retry blindly, and never as success.
+*/
+func (r *Registry) Write(ctx context.Context, fn func(ctx context.Context, s *Snapshot, tx *Tx) error) error {
+	if err := r.lock(ctx); err != nil {
+		return err
+	}
+	defer r.unlock()
+	var err error
+	for range 5 {
+		if err = r.write(ctx, fn); !isSerialization(err) {
+			return oversized(err)
+		}
+	}
+	return err
+}
+
+func isSerialization(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "40001"
+}
+
+func (r *Registry) write(ctx context.Context, fn func(ctx context.Context, s *Snapshot, tx *Tx) error) error {
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
+	f, err := r.load()
+	if err != nil {
+		return err
+	}
+	if f, err = r.settle(ctx, f); err != nil {
+		return err
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pinSession(ctx, tx); err != nil {
+		return err
+	}
+	if err := lockRegistry(ctx, tx); err != nil {
+		return err
+	}
+	var seq int64
+	if err := tx.QueryRow(ctx, `SELECT seq FROM exec.registry_counter FOR UPDATE`).Scan(&seq); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tampered("registry_counter missing")
+		}
+		return err
+	}
+	if err := checkCatalog(ctx, tx); err != nil {
+		return err
+	}
+	pre, err := scan(ctx, tx, r.keys.MAC())
+	if err != nil {
+		return err
+	}
+	hash, err := pre.check()
+	if err != nil {
+		return err
+	}
+	if err := match(f, pre.seq, hash); err != nil {
+		return err
+	}
+	if err := checkAuditHead(ctx, tx, f.Committed.AuditHead); err != nil {
+		return err
+	}
+	pre.frozen, pre.reason = frozen(pre, f)
+	w := &Tx{seq: seq + 1}
+	if err := fn(ctx, pre, w); err != nil {
+		return err
+	}
+	counter, err := newPut(counterTable, map[string]any{"singleton": true})
+	if err != nil {
+		return err
+	}
+	ops := append([]op{counter}, w.ops...)
+	/* Every row the write puts, the counter included, is counted. */
+	if err := fits(pre, ops); err != nil {
+		return err
+	}
+	r.step("verified", tx)
+	return r.apply(ctx, tx, f, pre, ops, w.seq, f.Committed.AuditHead, w.audit)
+}
+
+/*
+apply writes ops at version seq, insists the database holds exactly pre
+with ops applied, appends the declared audit rows to the chain from head
+(and insists the chain then ends exactly there), then commits in two phases
+through the state file.
+*/
+func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snapshot, ops []op, seq int64, head state.AuditHead, audit []Appender) error {
+	type want struct {
+		canonical, mac []byte
+	}
+	expect := map[string]want{}
+	for k, rw := range pre.byKey {
+		expect[k] = want{rw.canonical(), rw.mac}
+	}
+	for _, o := range ops {
+		if o.del {
+			if _, err := tx.Exec(ctx, o.t.deleteSQL(), o.params...); err != nil {
+				return err
+			}
+			delete(expect, o.key)
+			continue
+		}
+		content := make([]*string, 0, len(o.t.content))
+		params := make([]any, 0, len(o.vals)+2)
+		for i, v := range o.vals {
+			if i >= len(o.t.pk) {
+				content = append(content, v.canon)
+			}
+			params = append(params, v.param)
+		}
+		canonical := Canonical(o.t.name, o.pk, content, seq)
+		mac := macOf(r.keys.MAC(), canonical)
+		if _, err := tx.Exec(ctx, o.t.upsertSQL(), append(params, seq, mac)...); err != nil {
+			return err
+		}
+		expect[o.key] = want{canonical, mac}
+	}
+	r.step("written", tx)
+	if err := checkCatalog(ctx, tx); err != nil {
+		return err
+	}
+	post, err := scan(ctx, tx, r.keys.MAC())
+	if err != nil {
+		return err
+	}
+	if len(post.byKey) != len(expect) {
+		return tampered("the write left %d rows, %d declared", len(post.byKey), len(expect))
+	}
+	for k, rw := range post.byKey {
+		w, ok := expect[k]
+		if !ok || !bytes.Equal(rw.canonical(), w.canonical) || !bytes.Equal(rw.mac, w.mac) {
+			return tampered("the write left an undeclared %s row", rw.t.name)
+		}
+	}
+	if post.seq != seq {
+		return tampered("counter is %d inside the write of %d", post.seq, seq)
+	}
+	if _, ok := post.Get(stateTable, true); !ok {
+		return errors.New("registry: a write must leave exec_state")
+	}
+	hash, err := post.check()
+	if err != nil {
+		return err
+	}
+	if head, err = appendAudit(ctx, tx, head, audit); err != nil {
+		return err
+	}
+	return r.commit(ctx, tx, f, state.Record{HWM: seq, StateHash: hash, AuditHead: head})
+}
+
+/*
+commit records next as pending in the state file (with the transaction's
+id), commits, and records it as committed; a failed COMMIT is settled
+before the lock is released (failedCommit).
+*/
+func (r *Registry) commit(ctx context.Context, tx pgx.Tx, f state.File, next state.Record) error {
+	var xid string
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::pg_catalog.text`).Scan(&xid); err != nil {
+		return err
+	}
+	xid8, err := strconv.ParseUint(xid, 10, 64)
+	if err != nil || xid8 == 0 {
+		return fmt.Errorf("registry: transaction id %q", xid)
+	}
+	f.Pending, f.PendingXID = &next, xid8
+	if err := r.save(f); err != nil {
+		return err
+	}
+	r.step("pending", tx)
+	if err := r.commitTx(ctx, tx); err != nil {
+		return r.failedCommit(ctx, f, next, err)
+	}
+	r.step("committed", tx)
+	f.Committed, f.Pending, f.PendingXID = next, nil, 0
+	return r.save(f)
+}
+
+/*
+failedCommit settles the pending record after a failed COMMIT, before the
+lock is released. A COMMIT the server refused with an ERROR (or never
+received) aborted: the record is dropped. Anything else (the connection
+broke, or a FATAL that may come after the commit was written locally) is
+settled by the fate of the transaction, retried for a while under the lock;
+if it is still unknown, every verification keeps failing until it is known
+(fail closed), and a change that did commit is then advanced, one that did
+not is dropped: never accepted on a matching hash. The fate is read under
+its own deadline (settleFor), not the write's, which may be what ran out.
+*/
+func (r *Registry) failedCommit(ctx context.Context, f state.File, next state.Record, err error) error {
+	var pe *pgconn.PgError
+	if (errors.As(err, &pe) && pe.SeverityUnlocalized == "ERROR") || pgconn.SafeToRetry(err) || errors.Is(err, pgx.ErrTxCommitRollback) {
+		f.Pending, f.PendingXID = nil, 0
+		return errors.Join(err, r.save(f))
+	}
+	g, serr := r.settleWait(context.WithoutCancel(ctx), f)
+	if serr != nil {
+		return errors.Join(err, serr)
+	}
+	if g.Committed.Equal(next) {
+		return nil /* it did commit */
+	}
+	return err
+}
+
+func (r *Registry) step(stage string, tx pgx.Tx) {
+	if r.hook != nil {
+		r.hook(stage, tx)
+	}
+}
+
+/*
+Init runs once at start, before the first verification, and bootstraps a
+fresh install: registry_counter and exec_state (not frozen), through the
+same declared two-phase write, then the Sentinel. Fresh means a state
+directory never used (no state file, no Sentinel, nothing else but
+temporary files) and, checked under table locks inside the bootstrap
+transaction, an untouched exec schema. A missing state file in a used
+directory, or with a non-empty schema, is tampering; so is an invalid one.
+*/
+func (r *Registry) Init(ctx context.Context) error {
+	if err := r.lock(ctx); err != nil {
+		return err
+	}
+	defer r.unlock()
+	dir := filepath.Dir(r.path)
+	f, err := state.Load(r.path, r.keys.State())
+	missing := errors.Is(err, os.ErrNotExist)
+	switch {
+	case errors.Is(err, state.ErrInvalid):
+		return tampered("state file invalid or of another install")
+	case err != nil && !missing:
+		return err
+	case !missing && f.Pending != nil:
+		/* A crash inside a write or the bootstrap: settled by its transaction's fate, as after any failed COMMIT. */
+		if f, err = r.settleWait(ctx, f); err != nil {
+			return err
+		}
+	}
+	switch {
+	case !missing && f.Committed.HWM != 0:
+		return r.markInitialized(dir)
+	case missing:
+		if err := unused(dir); err != nil {
+			return err
+		}
+		f = state.File{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	defer cancel()
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := pinSession(ctx, tx); err != nil {
+		return err
+	}
+	r.step("begin", tx)
+	if err := lockRegistry(ctx, tx); err != nil {
+		return err
+	}
+	if err := checkCatalog(ctx, tx); err != nil {
+		return err
+	}
+	var fresh bool
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT FROM exec.registry_counter)
+		AND NOT EXISTS (SELECT FROM exec.write_device) AND NOT EXISTS (SELECT FROM exec.write_grant)
+		AND NOT EXISTS (SELECT FROM exec.change_totp) AND NOT EXISTS (SELECT FROM exec.exec_state)
+		AND NOT EXISTS (SELECT FROM exec.model_profile) AND NOT EXISTS (SELECT FROM exec.write_credential)
+		AND NOT EXISTS (SELECT FROM exec.session) AND NOT EXISTS (SELECT FROM exec.audit_event)
+		AND NOT EXISTS (SELECT FROM exec.audit_head WHERE last_id <> 0)`).Scan(&fresh); err != nil {
+		return err
+	}
+	if !fresh {
+		if missing {
+			return tampered("state file missing, registry not empty")
+		}
+		return nil /* the verification decides (it fails: the state file says empty) */
+	}
+	empty := sha256.Sum256(nil)
+	f.Committed = state.Record{StateHash: empty[:], AuditHead: state.AuditHead{Hash: make([]byte, sha256.Size)}}
+	counter, err := newPut(counterTable, map[string]any{"singleton": true})
+	if err != nil {
+		return err
+	}
+	st, err := newPut(stateTable, map[string]any{"singleton": true, "freeze": false, "freeze_reason": nil,
+		"global_fail_window": []byte("[]")})
+	if err != nil {
+		return err
+	}
+	if err := r.apply(ctx, tx, f, &Snapshot{byKey: map[string]*row{}}, []op{counter, st}, 1, f.Committed.AuditHead, nil); err != nil {
+		return err
+	}
+	return r.markInitialized(dir)
+}
+
+/*
+lockRegistry takes every registry table (and audit_head) in EXCLUSIVE mode
+before the transaction's first snapshot: from then until COMMIT nobody else
+writes a row or changes the tables (DDL, triggers, constraints wait), so
+what the catalog check and the scan see is what the write runs against.
+Readers are not blocked.
+*/
+func lockRegistry(ctx context.Context, tx pgx.Tx) error {
+	names := []string{"exec.audit_head"}
+	for _, t := range tables {
+		names = append(names, t.qname())
+	}
+	_, err := tx.Exec(ctx, "LOCK TABLE "+strings.Join(names, ", ")+" IN EXCLUSIVE MODE")
+	return err
+}
+
+/* unused accepts a state directory that holds nothing but temporary files. */
+func unused(dir string) error {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), ".state-") && !strings.HasPrefix(e.Name(), ".probe-") {
+			return tampered("state file missing in a used state directory (%s)", e.Name())
+		}
+	}
+	return nil
+}
+
+func (r *Registry) markInitialized(dir string) error {
+	p := filepath.Join(dir, Sentinel)
+	if _, err := os.Stat(p); err == nil {
+		return nil
+	}
+	fh, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- inside the configured state directory
+	if err != nil {
+		return err
+	}
+	return errors.Join(fh.Sync(), fh.Close())
+}
+
+/*
+MarkFrozen makes the freeze sticky in the state file (it outlives a database
+put back as it was). Without a valid state file there is nothing to mark:
+that condition alone freezes every start. It touches only the state file,
+under the file's own lock and never the registry's, so no database call in
+flight (however stalled) delays it; every later save keeps the mark.
+*/
+func (r *Registry) MarkFrozen(reason string) error {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	f, err := r.loadLocked()
+	if err != nil || f.Frozen {
+		return err
+	}
+	f.Frozen, f.FreezeReason = true, reason
+	return state.Save(r.path, r.keys.State(), f)
+}
+
+/* StickyFrozen reports the sticky freeze mark of the state file. */
+func (r *Registry) StickyFrozen() (bool, error) {
+	f, err := r.load()
+	return f.Frozen, err
+}
+
+/*
+ClearFrozen lifts the sticky freeze of the state file, under the file's own
+lock and with a save of its own (an ordinary save keeps whatever the file
+says). Only the host's freeze off calls it, after a verification passed.
+*/
+func (r *Registry) ClearFrozen() error {
+	r.fileMu.Lock()
+	defer r.fileMu.Unlock()
+	f, err := r.loadLocked()
+	if err != nil || !f.Frozen {
+		return err
+	}
+	f.Frozen, f.FreezeReason = false, ""
+	return state.Save(r.path, r.keys.State(), f)
+}

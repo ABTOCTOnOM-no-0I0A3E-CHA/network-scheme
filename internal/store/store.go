@@ -54,11 +54,14 @@ func poolConfig(c config.DB, pw secret.Secret) (*pgxpool.Config, error) {
 	return cfg, nil
 }
 
-// Open creates a connection pool and verifies connectivity.
-func Open(ctx context.Context, c config.DB, pw secret.Secret) (*pgxpool.Pool, error) {
+// Open creates a connection pool and verifies connectivity; opts adjust the pool configuration first.
+func Open(ctx context.Context, c config.DB, pw secret.Secret, opts ...func(*pgxpool.Config)) (*pgxpool.Pool, error) {
 	cfg, err := poolConfig(c, pw)
 	if err != nil {
 		return nil, err
+	}
+	for _, o := range opts {
+		o(cfg)
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
