@@ -216,6 +216,9 @@ func TestPollerCollectsFromSimulator(t *testing.T) {
 	if oid := h.str(`SELECT coalesce(sys_object_id, '') FROM core.device WHERE id = $1`, id); oid != "1.3.6.1.4.1.35265.1.65535" {
 		t.Fatalf("sys_object_id = %q", oid)
 	}
+	if got := h.str(`SELECT concat_ws('|', model, firmware, role_auto) FROM core.device WHERE id = $1`, id); got != "MES2324|6.6.2|l3switch" {
+		t.Fatalf("model|firmware|role_auto = %q", got)
+	}
 	if s := h.str(`SELECT status FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, id); s != "ok" {
 		t.Fatalf("profile status = %q", s)
 	}

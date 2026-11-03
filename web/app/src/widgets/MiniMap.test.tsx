@@ -77,16 +77,7 @@ describe("MiniMap", () => {
     expect(header.contains(btn)).toBe(true);
     expect(box.contains(btn)).toBe(false);
     expect(header.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(box.className).toContain("origin-top");
-  });
-
-  it("has the bubble classes normally and none under prefers-reduced-motion", () => {
-    mm(false);
-    const a = renderMini();
-    expect(a.getByTestId("mini-map-box").className).toContain("hover:scale-");
-    a.unmount();
-    mm(true);
-    renderMini();
-    expect(screen.getByTestId("mini-map-box").className).not.toMatch(/scale|transition|shadow/);
+    /* the bubble enlarges the whole widget (its dashboard frame), never the map box inside it: no inner scrollbars */
+    expect(box.className).not.toMatch(/scale|transition/);
   });
 });

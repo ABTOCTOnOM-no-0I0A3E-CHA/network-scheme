@@ -32,6 +32,10 @@ type topoNode struct {
 	Name     string   `json:"name"`
 	State    string   `json:"state"`
 	Driver   string   `json:"driver"`
+	Address  string   `json:"address"`
+	Model    string   `json:"model"`             /* from the device: render as text only */
+	Firmware string   `json:"firmware"`          /* from the device: render as text only */
+	Role     *string  `json:"role"`              /* set by hand, else derived; null when neither is known */
 	AreaID   *int64   `json:"area_id,omitempty"` /* deepest area of the view whose rectangle holds the node */
 	X        *float64 `json:"x,omitempty"`
 	Y        *float64 `json:"y,omitempty"`
@@ -79,7 +83,8 @@ WITH RECURSIVE sub (id, depth) AS (
   UNION ALL
     SELECT g.id, sub.depth + 1 FROM core.device_group g JOIN sub ON g.parent_id = sub.id WHERE sub.depth < 64
 )
-SELECT d.id, d.name, coalesce(s.state, 'unknown'), d.driver
+SELECT d.id, d.name, coalesce(s.state, 'unknown'), d.driver, host(d.address), coalesce(d.model, ''),
+    coalesce(d.firmware, ''), coalesce(d.role, d.role_auto)
 FROM core.device d
 LEFT JOIN inventory.device_state_v s ON s.device_id = d.id
 WHERE ($1::bool OR d.group_id = ANY($2)) AND (NOT $3::bool OR d.group_id IN (SELECT id FROM sub))
@@ -180,7 +185,7 @@ func (s *server) getTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodes, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (n topoNode, err error) {
-		err = row.Scan(&n.DeviceID, &n.Name, &n.State, &n.Driver)
+		err = row.Scan(&n.DeviceID, &n.Name, &n.State, &n.Driver, &n.Address, &n.Model, &n.Firmware, &n.Role)
 		return n, err
 	})
 	if err != nil {

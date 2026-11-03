@@ -2,6 +2,7 @@ import cytoscape from "cytoscape";
 import { describe, expect, it } from "vitest";
 import { area, link, node } from "./fixtures";
 import { buildModel, type Topology } from "./semanticZoom";
+import { haloIcon } from "./icons";
 import { syncElements } from "./sync";
 
 const topo: Topology = {
@@ -12,13 +13,12 @@ const topo: Topology = {
 const opts = { canDrag: true };
 
 describe("syncElements", () => {
-  it("adds elements, reports devices without a position and parents them in areas", () => {
+  it("adds elements and reports devices without a position", () => {
     const cy = cytoscape({ headless: true });
     const need = syncElements(cy, buildModel(topo, false, new Map()), opts);
     expect(need).toEqual(["d3"]);
-    expect(cy.nodes()).toHaveLength(4);
+    expect(cy.nodes()).toHaveLength(3);
     expect(cy.edges()).toHaveLength(2);
-    expect(cy.getElementById("d1").parent().first().id()).toBe("a1");
     expect(cy.getElementById("d1").position()).toEqual({ x: 10, y: 20 });
     expect(cy.getElementById("d1").grabbable()).toBe(true);
   });
@@ -31,7 +31,7 @@ describe("syncElements", () => {
     const down: Topology = { ...topo, nodes: topo.nodes.map((x) => (x.device_id === 2 ? { ...x, state: "down" as const } : x)) };
     syncElements(cy, buildModel(down, false, new Map([[2, "high" as const]])), opts);
     expect(cy.getElementById("d2")).toBe(n);
-    expect(n.data("ring")).toBe(3);
+    expect(String(n.data("images")).split(" ")[0]).toBe(haloIcon("high"));
     /* the model says (10, 20) again, so the canvas follows it */
     expect(cy.getElementById("d1").position()).toEqual({ x: 10, y: 20 });
     expect(n.position()).toEqual({ x: 30, y: 40 });
@@ -44,7 +44,7 @@ describe("syncElements", () => {
     expect(cy.nodes().map((x) => x.id()).sort()).toEqual(["d3", "g1"]);
     expect(cy.edges().map((x) => x.id())).toEqual(["ed3-g1"]);
     syncElements(cy, buildModel(topo, false, new Map()), opts);
-    expect(cy.nodes()).toHaveLength(4);
+    expect(cy.nodes()).toHaveLength(3);
   });
 
   it("keeps hostile names as plain data, never as markup", () => {

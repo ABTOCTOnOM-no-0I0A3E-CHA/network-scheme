@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStylesheet, iconKey, linkStyle, linkWidth, LINK_COLOR, worseState } from "./style";
+import { buildStylesheet, linkStyle, linkWidth, LINK_COLOR, portLabelOffset, worseState } from "./style";
 
 describe("linkWidth", () => {
   it("grows with the speed", () => {
@@ -39,14 +39,26 @@ describe("misc", () => {
     expect(worseState("partial", "unknown")).toBe("partial");
     expect(worseState("unknown", "up")).toBe("unknown");
   });
-  it("picks icons by driver", () => {
-    expect(iconKey("eltex-mes")).toBe("switch");
-    expect(iconKey("eltex-esr")).toBe("router");
-    expect(iconKey("whatever")).toBe("device");
-  });
   it("switches to cheap edges for large maps", () => {
     const sheet = (large: boolean) => JSON.stringify(buildStylesheet({ dark: false, large }));
     expect(sheet(true)).toContain("haystack");
     expect(sheet(false)).not.toContain("haystack");
+  });
+  it("draws device names on the canvas only for large maps (the label layer does it otherwise)", () => {
+    const device = (large: boolean) => buildStylesheet({ dark: false, large }).find((r) => r.selector === "node[kind = 'device']")!;
+    expect((device(true) as unknown as { style: Record<string, unknown> }).style.label).toBe("data(label)");
+    expect((device(false) as unknown as { style: Record<string, unknown> }).style.label).toBe("");
+  });
+  it("shows port names on hovered links and on the links of a hovered device", () => {
+    const rule = buildStylesheet({ dark: false, large: false }).find((r) => r.selector === "edge.hover, edge.ports") as unknown as { style: Record<string, unknown> };
+    expect(rule.style).toMatchObject({ "source-label": "data(portA)", "target-label": "data(portB)" });
+  });
+});
+
+describe("portLabelOffset", () => {
+  it("puts a port name past the label chip only when the link leaves downwards", () => {
+    expect(portLabelOffset({ x: 0, y: 0 }, { x: 10, y: 100 })).toBe(46);
+    expect(portLabelOffset({ x: 10, y: 100 }, { x: 0, y: 0 })).toBe(20);
+    expect(portLabelOffset({ x: 0, y: 0 }, { x: 200, y: 20 })).toBe(20);
   });
 });

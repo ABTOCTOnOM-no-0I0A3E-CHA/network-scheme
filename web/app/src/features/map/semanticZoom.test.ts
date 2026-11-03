@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { area, link, node } from "./fixtures";
 import { buildModel, COLLAPSE_BELOW, EXPAND_ABOVE, isCollapsed, severityByDevice, type Topology } from "./semanticZoom";
-import { SEVERITY_COLOR, STATE_COLOR } from "./style";
+import { BLANK, haloIcon, lampIcon, PIN_ICON, roleIcon } from "./icons";
+import { STATE_COLOR } from "./style";
 
 describe("isCollapsed", () => {
   it("collapses below the threshold and expands above it, with hysteresis between", () => {
@@ -34,33 +35,26 @@ const topo: Topology = {
 describe("buildModel expanded", () => {
   const m = buildModel(topo, false, new Map());
   const byId = new Map(m.nodes.map((n) => [n.id, n]));
-  it("nests devices in areas and areas in areas, parents first", () => {
-    expect(byId.get("d1")?.parent).toBe("a1");
-    expect(byId.get("d2")?.parent).toBe("a2");
-    expect(byId.get("a2")?.parent).toBe("a1");
-    expect(byId.get("d5")?.parent).toBeUndefined();
-    const ids = m.nodes.map((n) => n.id);
-    expect(ids.indexOf("a1")).toBeLessThan(ids.indexOf("a2"));
-  });
-  it("places an area without devices at its rectangle, and compounds without a position of their own", () => {
-    expect(byId.get("a9")?.pos).toEqual({ x: 40, y: 320 });
-    expect(byId.get("a1")?.pos).toBeUndefined();
+  it("has every device on the canvas and no area nodes (zones are drawn by their own layer)", () => {
+    expect(m.nodes.map((n) => n.id).sort()).toEqual(["d1", "d2", "d3", "d4", "d5"]);
+    expect(byId.get("d1")?.pos).toEqual({ x: 10, y: 10 });
   });
   it("keeps every link, styled", () => {
     expect(m.edges.map((e) => e.id).sort()).toEqual(["l1", "l2", "l3", "l4", "l5"]);
     expect(m.edges.find((e) => e.id === "l1")?.data.color).not.toBe(m.edges.find((e) => e.id === "l2")?.data.color);
   });
-  it("colors by state and rings devices with open problems", () => {
-    const m2 = buildModel(topo, false, new Map([[1, "high" as const]]));
-    const d1 = m2.nodes.find((n) => n.id === "d1")!;
-    expect(d1.data).toMatchObject({ color: STATE_COLOR.down, ring: 3, ringColor: SEVERITY_COLOR.high });
-    expect(m2.nodes.find((n) => n.id === "d2")!.data.ring).toBe(0);
+  it("draws the role pictogram with a status lamp, and a halo for open problems", () => {
+    const m2 = buildModel({ ...topo, nodes: topo.nodes.map((n) => (n.device_id === 1 ? { ...n, role: "router" as const } : n)) }, false, new Map([[1, "high" as const]]));
+    const layers = (id: string) => String(m2.nodes.find((n) => n.id === id)!.data.images).split(" ");
+    expect(layers("d1")).toEqual([haloIcon("high"), roleIcon("router"), lampIcon("down"), BLANK]);
+    expect(layers("d2")).toEqual([BLANK, roleIcon(null), lampIcon("up"), BLANK]);
   });
   it("shows an unsaved position instead of the server one and marks the device pinned", () => {
     const m2 = buildModel(topo, false, new Map(), { pos: new Map([[5, { x: 7, y: 8 }]]), pinned: new Set([5]) });
     const d5 = m2.nodes.find((n) => n.id === "d5")!;
     expect(d5.pos).toEqual({ x: 7, y: 8 });
     expect(d5.data.pinned).toBe(true);
+    expect(String(d5.data.images).split(" ")[3]).toBe(PIN_ICON);
   });
 });
 
@@ -89,7 +83,7 @@ describe("buildModel collapsed", () => {
     };
     expect(buildModel(big, true, new Map()).nodes).toHaveLength(1);
     expect(buildModel(big, true, new Map()).edges).toHaveLength(0);
-    expect(buildModel(big, false, new Map()).nodes).toHaveLength(3001);
+    expect(buildModel(big, false, new Map()).nodes).toHaveLength(3000);
   });
 });
 

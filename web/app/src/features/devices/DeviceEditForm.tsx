@@ -1,4 +1,4 @@
-import { useState, type ComponentProps, type FormEvent } from "react";
+import { useId, useState, type ComponentProps, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
-import { useDevices, useUpdateDevice, type DeviceDetail, type DevicePatch, type Group } from "./api";
+import { DEVICE_ROLES, useDevices, useUpdateDevice, type DeviceDetail, type DevicePatch, type DeviceRole, type Group } from "./api";
 
 const SELECT_CLASS = "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm dark:bg-input/30";
 /* client-side bounds; the API enforces its own as well */
@@ -19,9 +19,11 @@ const INTERVALS = [
 
 type Props = { device: DeviceDetail; groups?: Group[]; onDone: () => void };
 
-/** Edits name, address, SNMP port, group and polling intervals (an empty interval inherits from the group). */
+/** Edits name, address, SNMP port, group, role ("auto" follows the poller) and polling intervals (an empty interval inherits from the group). */
 export function DeviceEditForm({ device, groups, onDone }: Props) {
   const { t } = useTranslation();
+  /* several device windows can show this form at once: ids are per form */
+  const uid = useId();
   const update = useUpdateDevice(device.id);
   const devices = useDevices();
   const [error, setError] = useState<string | undefined>();
@@ -45,6 +47,8 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
     if (!Number.isInteger(groupId) || groupId <= 0) return setError(t("card.edit.required"));
     if (groupId !== device.group_id) patch.group_id = groupId;
     if (parent !== initialParent) patch.parent_id = parent === "" ? null : Number(parent);
+    const role = f("role");
+    if (role !== (device.role_manual ?? "")) patch.role = role === "" ? null : (role as DeviceRole);
     for (const { field, min } of INTERVALS) {
       const raw = f(field);
       const v = raw === "" ? null : Number(raw);
@@ -64,8 +68,8 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
 
   const field = (id: string, label: string, props: ComponentProps<typeof Input>) => (
     <div className="grid gap-1.5">
-      <Label htmlFor={`edit-${id}`}>{label}</Label>
-      <Input id={`edit-${id}`} name={id} autoComplete="off" {...props} />
+      <Label htmlFor={`${uid}edit-${id}`}>{label}</Label>
+      <Input id={`${uid}edit-${id}`} name={id} autoComplete="off" {...props} />
     </div>
   );
 
@@ -78,8 +82,8 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
         {field("port", t("devices.addDialog.port"), { type: "number", defaultValue: device.snmp_port })}
         {groups ? (
           <div className="grid gap-1.5">
-            <Label htmlFor="edit-group_id">{t("devices.addDialog.group")}</Label>
-            <select id="edit-group_id" name="group_id" className={SELECT_CLASS} defaultValue={device.group_id}>
+            <Label htmlFor={`${uid}edit-group_id`}>{t("devices.addDialog.group")}</Label>
+            <select id={`${uid}edit-group_id`} name="group_id" className={SELECT_CLASS} defaultValue={device.group_id}>
               {groups.map((g) => (
                 <option key={g.id} value={g.id}>
                   {g.name}
@@ -91,8 +95,8 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
           field("group_id", t("devices.addDialog.groupId"), { type: "number", defaultValue: device.group_id })
         )}
         <div className="grid gap-1.5">
-          <Label htmlFor="edit-parent_id">{t("card.edit.parent")}</Label>
-          <select id="edit-parent_id" name="parent_id" className={SELECT_CLASS} value={parent} onChange={(e) => setParent(e.target.value)}>
+          <Label htmlFor={`${uid}edit-parent_id`}>{t("card.edit.parent")}</Label>
+          <select id={`${uid}edit-parent_id`} name="parent_id" className={SELECT_CLASS} value={parent} onChange={(e) => setParent(e.target.value)}>
             <option value="">{t("card.edit.noParent")}</option>
             {device.parent_id != null && !devices.data?.some((d) => d.id === device.parent_id) && <option value={device.parent_id}>#{device.parent_id}</option>}
             {devices.data
@@ -102,6 +106,17 @@ export function DeviceEditForm({ device, groups, onDone }: Props) {
                   {safeText(d.name)}
                 </option>
               ))}
+          </select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor={`${uid}edit-role`}>{t("card.edit.role")}</Label>
+          <select id={`${uid}edit-role`} name="role" className={SELECT_CLASS} defaultValue={device.role_manual ?? ""}>
+            <option value="">{device.role_auto ? t("card.edit.roleAutoDerived", { role: t(`devices.role.${device.role_auto}`) }) : t("card.edit.roleAuto")}</option>
+            {DEVICE_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {t(`devices.role.${r}`)}
+              </option>
+            ))}
           </select>
         </div>
         {INTERVALS.map(({ field: name, label }) => field(name, t(label), { type: "number", placeholder: t("card.inherit"), defaultValue: device[name] ?? "" }))}

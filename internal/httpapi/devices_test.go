@@ -276,10 +276,42 @@ func TestDeviceCRUD(t *testing.T) {
 	if d := decode[detail](t, f.do(admin.authed(req{method: "GET", path: path}))); d.IntervalAvailS != nil || d.IntervalMetricsS == nil {
 		t.Fatalf("after clearing avail: %+v", d)
 	}
+	/* role: set by hand over the derived one, null back to automatic */
+	type roles struct {
+		Role       *string `json:"role"`
+		RoleManual *string `json:"role_manual"`
+		RoleAuto   *string `json:"role_auto"`
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "<nil>"
+		}
+		return *p
+	}
+	if _, err := f.env.Pool("nms_poller").Exec(context.Background(), `UPDATE core.device SET role_auto = 'switch' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	wantRoles := func(role, man, auto string) {
+		t.Helper()
+		r := decode[roles](t, f.do(admin.authed(req{method: "GET", path: path})))
+		if str(r.Role) != role || str(r.RoleManual) != man || str(r.RoleAuto) != auto {
+			t.Fatalf("role %s manual %s auto %s, want %s %s %s", str(r.Role), str(r.RoleManual), str(r.RoleAuto), role, man, auto)
+		}
+	}
+	wantRoles("switch", "<nil>", "switch")
+	for _, c := range []struct {
+		body      any
+		role, man string
+	}{{"router", "router", "router"}, {nil, "switch", "<nil>"}} {
+		if resp := f.do(admin.authed(req{method: "PATCH", path: path, body: map[string]any{"role": c.body}})); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("patch role %v: %d", c.body, resp.StatusCode)
+		}
+		wantRoles(c.role, c.man, "switch")
+	}
 	for _, body := range []map[string]any{
 		{}, {"interval_avail_s": 5}, {"interval_avail_s": 86401}, {"name": ""}, {"name": " x"},
 		{"address": "not-an-ip"}, {"address": "127.0.0.1"}, {"address": "224.0.0.1"}, {"address": "0.0.0.0"},
-		{"snmp_port": 0}, {"snmp_port": 65536},
+		{"snmp_port": 0}, {"snmp_port": 65536}, {"role": "Router"}, {"role": ""}, {"role": 1}, {"role": "auto"},
 	} {
 		wantError(t, f.do(admin.authed(req{method: "PATCH", path: path, body: body})), http.StatusBadRequest, "bad_request")
 	}

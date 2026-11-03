@@ -4,7 +4,7 @@ type N = Topology["nodes"][number];
 type L = Topology["links"][number];
 type A = Topology["areas"][number];
 
-export const node = (id: number, o: Partial<N> = {}): N => ({ device_id: id, name: `sw${id}`, state: "up", driver: "eltex-mes", pinned: false, ...o });
+export const node = (id: number, o: Partial<N> = {}): N => ({ device_id: id, name: `sw${id}`, state: "up", driver: "eltex-mes", address: `192.0.2.${id}`, model: "", firmware: "", role: null, pinned: false, ...o });
 export const link = (id: number, a: number, b: number, o: Partial<L> = {}): L => ({
   id,
   a,

@@ -61,15 +61,20 @@ function useDrain(q: ReturnType<typeof useProblems>, enabled: boolean): void {
   }, [enabled, hasNextPage, isFetchingNextPage, fetchNextPage, pages]);
 }
 
-/** Worst open-problem severity per device. Refreshes with the problem queries (WebSocket invalidation and the 30 s poll). */
-export function useOpenProblemSeverity(drain = true) {
+/** Worst open-problem severity and number of open problems per device. Refreshes with the problem queries (WebSocket invalidation and the 30 s poll). */
+export function useOpenProblems(drain = true) {
   const a = useProblems(OPEN[0]);
   const b = useProblems(OPEN[1]);
   useDrain(a, drain);
   useDrain(b, drain);
   const pa = a.data?.pages;
   const pb = b.data?.pages;
-  return useMemo(() => severityByDevice([...(pa ?? []), ...(pb ?? [])].flatMap((p) => p.items)), [pa, pb]);
+  return useMemo(() => {
+    const items = [...(pa ?? []), ...(pb ?? [])].flatMap((p) => p.items);
+    const counts = new Map<number, number>();
+    for (const p of items) if (p.device_id !== null) counts.set(p.device_id, (counts.get(p.device_id) ?? 0) + 1);
+    return { severity: severityByDevice(items), counts };
+  }, [pa, pb]);
 }
 
 /** Replaces the positions of the given devices in a cached topology (so a saved drag does not jump back before the refetch). */
@@ -86,6 +91,8 @@ export function useSavePositions(viewId: number | undefined) {
       if (viewId === undefined) return;
       await withStepUp(async () => void unwrap(await api.PUT("/api/map/views/{id}/positions", { params: { path: { id: viewId }, ...CSRF }, body: { items } })));
       qc.setQueryData<Topology>(topologyKeys.one(viewId), (t) => (t ? patchPositions(t, items) : t));
+      /* the server derives the area of a device from its position: refresh the areas and their counts */
+      void qc.invalidateQueries({ queryKey: topologyKeys.one(viewId) });
     },
     [qc, viewId],
   );
@@ -101,6 +108,19 @@ function useAdminMutation<V>(fn: (v: V) => Promise<unknown>) {
 
 export const useCreateView = () =>
   useAdminMutation(async (body: { name: string; kind: MapView["kind"]; background_id?: number | null }) => unwrap(await api.POST("/api/map/views", { params: CSRF, body })));
+
+/** Creates a view and resolves to its id (the default view that "all devices" positions are kept in). */
+export function useCreateViewId() {
+  const qc = useQueryClient();
+  return useCallback(
+    async (body: { name: string; kind: MapView["kind"] }): Promise<number> => {
+      const r = await withStepUp(async () => unwrap(await api.POST("/api/map/views", { params: CSRF, body })));
+      await qc.invalidateQueries({ queryKey: topologyKeys.views });
+      return r.id;
+    },
+    [qc],
+  );
+}
 
 export const usePatchView = () =>
   useAdminMutation(async (v: { id: number; body: { name?: string; kind?: MapView["kind"]; background_id?: number | null } }) =>

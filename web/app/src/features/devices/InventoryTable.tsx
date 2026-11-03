@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { errorKey } from "@/features/auth/errors";
+import { EmptyState } from "@/features/common/EmptyState";
 import { ApiError, StepUpCancelled, unwrap, withStepUp } from "@/features/common/stepup";
 import { api } from "@/lib/api";
 import { safeText } from "@/lib/text";
@@ -156,7 +157,15 @@ export function InventoryTable<T extends DeviceTable>({ deviceId, table, columns
           </tbody>
         </table>
         {q.isPending && <p className="p-3 text-sm text-muted-foreground">{t("card.loading")}</p>}
-        {visible && visible.length === 0 && <p className="p-3 text-sm text-muted-foreground">{t(q.data?.items.length ? "data.noMatch" : "card.noRows")}</p>}
+        {visible &&
+          visible.length === 0 &&
+          (q.data?.items.length ? (
+            <p className="p-3 text-sm text-muted-foreground">{t("data.noMatch")}</p>
+          ) : (
+            <div className="p-3">
+              <EmptyState title={t(`data.empty.${table}.title`)} hint={t(`data.empty.${table}.hint`)} />
+            </div>
+          ))}
       </div>
       <div className="flex items-center gap-2">
         <Button type="button" variant="outline" size="sm" disabled={offsets.length < 2} onClick={() => setOffsets((o) => o.slice(0, -1))}>

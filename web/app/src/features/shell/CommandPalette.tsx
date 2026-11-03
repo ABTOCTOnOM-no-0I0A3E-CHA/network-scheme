@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { canReadDevices } from "@/features/auth/permissions";
 import { useSession } from "@/features/auth/useSession";
-import type { TabId } from "@/features/devices/DeviceCard";
+import { useDeviceWindows } from "@/features/devices/DeviceWindows";
+import type { TabRef } from "@/features/devices/tabs";
 import { safeText } from "@/lib/text";
 import { NAV, navVisible } from "./nav";
 import { SEARCH_DEBOUNCE_MS, SEARCH_MAX, SEARCH_MIN, useDebounced, useGlobalSearch } from "./search";
@@ -27,7 +28,10 @@ function More({ show }: { show: boolean }) {
 function PaletteBody({ onDone }: { onDone: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const windows = useDeviceWindows();
   const { data: session } = useSession();
+  /* Shift held on the Enter or click that picked a result: a device then opens as a page instead of a window */
+  const shift = useRef(false);
   const [query, setQuery] = useState("");
   const debounced = useDebounced(query, SEARCH_DEBOUNCE_MS);
   const search = useGlobalSearch(debounced, canReadDevices(session));
@@ -39,9 +43,15 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
     onDone();
     void navigate({ to: path as "/" });
   };
-  const goDevice = (id: number, tab?: TabId, ifIndex?: number) => {
+  const goDevice = (id: number, tab?: TabRef, ifIndex?: number) => {
     onDone();
     void navigate({ to: "/devices/$id", params: { id: String(id) }, search: { tab, if: ifIndex } });
+  };
+  /* a device result opens its window where the app has them; with Shift, or without windows, the device page */
+  const openDevice = (id: number, name: string) => {
+    if (!windows || shift.current) return goDevice(id);
+    onDone();
+    windows.open(id, name);
   };
 
   const needle = query.trim().toLocaleLowerCase();
@@ -49,7 +59,15 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
 
   return (
     /* results are filtered by the server, not by cmdk; at most 50 per type are rendered */
-    <Command shouldFilter={false}>
+    <Command
+      shouldFilter={false}
+      onKeyDownCapture={(e) => {
+        if (e.key === "Enter") shift.current = e.shiftKey;
+      }}
+      onPointerDownCapture={(e) => {
+        shift.current = e.shiftKey;
+      }}
+    >
       <CommandInput autoFocus maxLength={SEARCH_MAX} placeholder={t("palette.placeholder")} value={query} onValueChange={setQuery} />
       <CommandList>
         <CommandEmpty>{t(search.isError && query.trim() ? "palette.error" : pending ? "palette.searching" : "palette.empty")}</CommandEmpty>
@@ -63,7 +81,7 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
         {!!r?.devices.items.length && (
           <CommandGroup heading={t("palette.devices")}>
             {r.devices.items.map((d) => (
-              <Item key={d.id} value={`device:${d.id}`} label={safeText(d.name)} detail={safeText(d.address)} onGo={() => goDevice(d.id)} />
+              <Item key={d.id} value={`device:${d.id}`} label={safeText(d.name)} detail={safeText(d.address)} onGo={() => openDevice(d.id, d.name)} />
             ))}
             <More show={r.devices.more} />
           </CommandGroup>
@@ -76,7 +94,7 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
                 value={`ip:${a.device_id}:${a.ip}:${a.if_index}`}
                 label={safeText(a.ip)}
                 detail={`${safeText(a.mac)} · ${safeText(a.device_name)}${a.port_name ? ` · ${safeText(a.port_name)}` : ""}`}
-                onGo={() => goDevice(a.device_id, "arp")}
+                onGo={() => goDevice(a.device_id, "data/arp")}
               />
             ))}
             <More show={r.ips.more} />
@@ -92,7 +110,7 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
                   value={`mac:${m.source}:${m.device_id}:${m.mac}:${m.vlan ?? m.ip}`}
                   label={safeText(m.mac)}
                   detail={`${t(`palette.source.${m.source}`)} · ${where} · ${safeText(m.device_name)}${m.port_name ? ` · ${safeText(m.port_name)}` : ""}`}
-                  onGo={() => goDevice(m.device_id, m.source === "fdb" ? "mac" : "arp")}
+                  onGo={() => goDevice(m.device_id, m.source === "fdb" ? "data/mac" : "data/arp")}
                 />
               );
             })}
@@ -114,6 +132,7 @@ function PaletteBody({ onDone }: { onDone: () => void }) {
           </CommandGroup>
         )}
       </CommandList>
+      {windows && !!r?.devices.items.length && <p className="border-t px-3 py-1.5 text-xs text-muted-foreground">{t("palette.windowHint")}</p>}
     </Command>
   );
 }

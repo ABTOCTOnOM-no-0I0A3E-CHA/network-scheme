@@ -1,45 +1,28 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { errText } from "@/features/common/errText";
+import { useDeviceWindows } from "@/features/devices/DeviceWindows";
 import { NetworkMap } from "@/features/map/NetworkMap";
-import { useOpenProblemSeverity, useTopology, useViews } from "@/features/map/useTopology";
-
-const QUERY = "(prefers-reduced-motion: reduce)";
-
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(() => window.matchMedia?.(QUERY).matches ?? false);
-  useEffect(() => {
-    const mq = window.matchMedia?.(QUERY);
-    if (!mq) return;
-    const on = () => setReduced(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return reduced;
-}
-
-/* bubble effect: the map box grows from its top edge (never towards the header strip with the button) and gains a shadow */
-const BUBBLE = "origin-top transition-[scale,box-shadow] duration-200 ease-out hover:z-10 hover:scale-[1.04] hover:shadow-lg focus-within:z-10 focus-within:scale-[1.04] focus-within:shadow-lg";
+import { useOpenProblems, useTopology, useViews } from "@/features/map/useTopology";
 
 /**
  * Compact network map, the mini-map widget of dashboards. Self-contained: loads the view (viewId or
  * the first one), the topology and the problem severities itself. The "Open" button sits in a strip above the map box, so it
  * never covers map content, and leads to /map with the same view. `fill` stretches the map box to the parent's height
- * (a dashboard cell) instead of the fixed 20rem.
+ * (a dashboard cell) instead of the fixed 20rem. The bubble effect enlarges the whole widget (the dashboard frame does it).
  */
 export function MiniMap({ viewId, className = "", fill = false }: { viewId?: number; className?: string; fill?: boolean }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const reduced = useReducedMotion();
+  const windows = useDeviceWindows();
   const views = useViews();
   const id = viewId ?? views.data?.[0]?.id;
   const view = views.data?.find((v) => v.id === id);
   const topo = useTopology(id, views.isSuccess);
-  const severity = useOpenProblemSeverity(false);
+  const problems = useOpenProblems(false);
   const err = views.error ?? topo.error;
 
   return (
@@ -51,7 +34,7 @@ export function MiniMap({ viewId, className = "", fill = false }: { viewId?: num
           {t("map.mini.open")}
         </Button>
       </div>
-      <div className={`${fill ? "min-h-0 flex-1" : "h-80"} rounded-md ${reduced ? "" : BUBBLE}`} data-testid="mini-map-box">
+      <div className={`${fill ? "min-h-0 flex-1" : "h-80"} rounded-md`} data-testid="mini-map-box">
         {err ? (
           <p role="alert" className="text-sm text-destructive">
             {errText(t, err)}
@@ -65,9 +48,10 @@ export function MiniMap({ viewId, className = "", fill = false }: { viewId?: num
             compact
             key={id ?? 0}
             topology={topo.data}
-            severity={severity}
+            severity={problems.severity}
+            problems={problems.counts}
             backgroundUrl={view?.background_id != null ? `/api/map/backgrounds/${view.background_id}` : undefined}
-            onOpenDevice={(d) => void navigate({ to: "/devices/$id", params: { id: String(d) } })}
+            onOpenDevice={(d, name) => (windows ? windows.open(d, name) : void navigate({ to: "/devices/$id", params: { id: String(d) } }))}
           />
         )}
       </div>

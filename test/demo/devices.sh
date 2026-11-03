@@ -12,6 +12,8 @@ SSH_USER=demo-read SSH_PASSWORD=demo-read-pw
 addr() { docker inspect -f "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}" "$1"; }
 EVENTD="$(addr "$(docker compose -f /etc/nms/compose.yaml ps -q eventd)")"
 [ -n "$EVENTD" ] || { echo "eventd has no address on $NET"; exit 1; }
+# stand copies of the fixtures: the Eltex ones get moving traffic counters and the tables of a live device (enrich.py)
+docker run --rm -v "$D:$D" "$IMAGE" python3 "$D/enrich.py" "$D/snmp" "$D/snmp-demo"
 
 # show_outputs DIR MODEL PROMPT: the outputs sshemud serves, one file per allowlisted command line without arguments
 show_outputs() {
@@ -20,7 +22,7 @@ show_outputs() {
   cp "$D/configs/$model-secrets.txt" "$dir/show running-config"
   : > "$dir/terminal datadump"
   if [ "$model" = mes ]; then
-    printf 'Active-image: flash://system/images/mes3300-4108.ros\n  Version: 4.0.21.2\n  Commit: 4b1c6a2e\n  Build: 1 (date 14-Mar-2024 time 11:02:17)\n' > "$dir/show version"
+    printf 'Active-image: flash://system/images/mes2300-662.ros\n  Version: 6.6.2\n  Commit: 4b1c6a2e\n  Build: 1 (date 14-Mar-2024 time 11:02:17)\n' > "$dir/show version"
     printf 'System Description:                       MES2324 28-port 1G/10G Managed Switch\nSystem Up Time (days,hour:min:sec):       12,04:31:07\nSystem Contact:                           noc\nSystem Name:                              %s\nSystem Location:                          demo rack 1\nSystem MAC Address:                       e8:28:c1:00:00:11\nSystem Object ID:                         1.3.6.1.4.1.89.6.1.4\n' "$name" > "$dir/show system"
     printf 'Vlan       Name                Tagged Ports     UnTagged Ports   Created by\n---- ----------------- ------------------ ---------------- ----------\n 1           1                                gi1/0/3-24        D\n 10        users             gi1/0/1-2        gi1/0/5-12        S\n 20        voice             gi1/0/1-2                          S\n 99        mgmt              gi1/0/1                            S\n' > "$dir/show vlan"
   else
@@ -39,7 +41,7 @@ ready() { local logs; logs="$(docker logs "$1" 2>&1)"; grep -q 'Listening at UDP
 while read -r name address fixture community ssh events <&3; do
   [ "$fixture" = - ] && continue
   c="nms-demo-$name"
-  args=(-d --name "$c" --network "$NET" --ip "$address" -v "$D/snmp/$fixture.snmprec:/data/$community.snmprec:ro" -v "$D/send_events.py:/send_events.py:ro")
+  args=(-d --name "$c" --network "$NET" --ip "$address" -v "$D/snmp-demo/$fixture.snmprec:/data/$community.snmprec:ro" -v "$D/send_events.py:/send_events.py:ro")
   sshd=""
   if [ "$ssh" != - ]; then
     show_outputs "$D/ssh-$name" "$ssh" "$name#"
@@ -50,13 +52,13 @@ while read -r name address fixture community ssh events <&3; do
     --process-user=nobody --process-group=nogroup --cache-dir=/tmp/idx --data-dir=/data --agent-udpv4-endpoint=0.0.0.0:161' > /dev/null
   for _ in $(seq 1 60); do ready "$c" "$ssh" && break; sleep 1; done
   ready "$c" "$ssh" || { docker logs "$c"; exit 1; }
-  marker="demo${name//[^a-z0-9]/}" # one word: event search matches whole words
+  # DEMO_EVENTS=1: Eltex-like syslog of mixed severity with the device name as the syslog host
   case "$events" in
-    syslog) docker exec -d "$c" python3 /send_events.py "$EVENTD" "$marker" ;;
+    syslog) docker exec -d -e DEMO_EVENTS=1 "$c" python3 /send_events.py "$EVENTD" "$name" ;;
     # the control file makes send_events.py send its trap for TRAP_IFINDEX (2, down in the fixture) instead of ifIndex 1,
     # so the polls the trap causes agree with it and the problem stays open
     trap) docker exec "$c" sh -c 'echo linkDown > /tmp/trap-control'
-          docker exec -d -e TRAP_CONTROL=/tmp/trap-control -e TRAP_IFINDEX=2 "$c" python3 /send_events.py "$EVENTD" "$marker" "$community" ;;
+          docker exec -d -e DEMO_EVENTS=1 -e TRAP_CONTROL=/tmp/trap-control -e TRAP_IFINDEX=2 "$c" python3 /send_events.py "$EVENTD" "$name" "$community" ;;
   esac
   echo "  $name at $address: $fixture, ssh $ssh, events $events"
 done 3< <(grep -vE '^\s*(#|$)' "$D/devices.txt")

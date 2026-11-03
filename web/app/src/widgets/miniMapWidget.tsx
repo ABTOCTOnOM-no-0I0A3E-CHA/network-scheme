@@ -16,5 +16,6 @@ export const miniMapWidget: WidgetDef<Config> = {
   size: { w: 6, h: 8, minW: 3, minH: 5 },
   fields: [titleField(), { key: "view_id", kind: "view", label: "widgets.field.view" }],
   frameless: true,
+  bubble: true,
   render: (_data, c) => <MiniMap viewId={c.view_id} fill className="h-full" />,
 };

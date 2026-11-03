@@ -464,6 +464,9 @@ paths:
                 snmp_port: { type: integer, minimum: 1, maximum: 65535 }
                 group_id: { type: integer, format: int64 }
                 parent_id: { type: [integer, "null"], format: int64, minimum: 1 }
+                role:
+                  description: The role set by hand; null returns the device to the automatic role
+                  oneOf: [{ $ref: "#/components/schemas/DeviceRole" }, { type: "null" }]
                 interval_avail_s: { $ref: "#/components/schemas/Interval" }
                 interval_metrics_s: { $ref: "#/components/schemas/Interval" }
                 interval_inventory_s: { $ref: "#/components/schemas/Interval" }
@@ -3009,7 +3012,7 @@ components:
       description: No control characters, no leading or trailing spaces
     Device:
       type: object
-      required: [id, name, address, group_id, driver, model, firmware, insecure_protocols, state, state_since]
+      required: [id, name, address, group_id, driver, model, firmware, role, insecure_protocols, state, state_since]
       properties:
         id: { type: integer, format: int64 }
         name: { type: string }
@@ -3018,6 +3021,9 @@ components:
         driver: { type: string }
         model: { type: string, description: Reported by the device; render as text only }
         firmware: { type: string, description: Reported by the device; render as text only }
+        role:
+          description: The role set by hand, else the one the poller derived; null while neither is known
+          oneOf: [{ $ref: "#/components/schemas/DeviceRole" }, { type: "null" }]
         insecure_protocols: { type: boolean, description: An SNMPv2c or telnet credential is set }
         state: { type: string, enum: [up, partial, down, unknown] }
         state_since: { type: [string, "null"], format: date-time }
@@ -3025,14 +3031,23 @@ components:
       allOf:
         - $ref: "#/components/schemas/Device"
         - type: object
-          required: [snmp_port, parent_id, interval_avail_s, interval_metrics_s, interval_inventory_s, last_error]
+          required: [snmp_port, parent_id, interval_avail_s, interval_metrics_s, interval_inventory_s, last_error, role_manual, role_auto]
           properties:
+            role_manual:
+              description: The role set by hand; null means automatic
+              oneOf: [{ $ref: "#/components/schemas/DeviceRole" }, { type: "null" }]
+            role_auto:
+              description: The role the poller derived from the driver and sysServices; null before the first identification
+              oneOf: [{ $ref: "#/components/schemas/DeviceRole" }, { type: "null" }]
             snmp_port: { type: integer }
             parent_id: { type: [integer, "null"], format: int64, description: The device whose outage suppresses this one's problems }
             last_error: { type: string, description: Fixed text of the poller why the device is not up; empty if none }
             interval_avail_s: { type: [integer, "null"], description: null inherits from the group }
             interval_metrics_s: { type: [integer, "null"] }
             interval_inventory_s: { type: [integer, "null"] }
+    DeviceRole:
+      type: string
+      enum: [switch, router, l3switch, firewall, server, ap, pc, printer, phone, cloud, other]
     EventSeverity:
       type: string
       enum: [info, warning, average, high, disaster]
@@ -3321,12 +3336,18 @@ components:
         h: { type: number }
     TopologyNode:
       type: object
-      required: [device_id, name, state, driver, pinned]
+      required: [device_id, name, state, driver, address, model, firmware, role, pinned]
       properties:
         device_id: { type: integer, format: int64 }
         name: { type: string }
         state: { type: string, enum: [up, partial, down, unknown] }
         driver: { type: string }
+        address: { type: string }
+        model: { type: string, description: Reported by the device; render as text only }
+        firmware: { type: string, description: Reported by the device; render as text only }
+        role:
+          description: The role set by hand, else the derived one; null while neither is known
+          oneOf: [{ $ref: "#/components/schemas/DeviceRole" }, { type: "null" }]
         area_id: { type: integer, format: int64, description: "Smallest area of the requested view whose rectangle contains the position; absent without view_id or position" }
         x: { type: number, description: Present with view_id when the node has a position }
         y: { type: number }

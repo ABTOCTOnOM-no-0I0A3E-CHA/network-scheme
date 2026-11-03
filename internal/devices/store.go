@@ -58,8 +58,18 @@ type Device struct {
 	PollerID          string
 	Intervals         Intervals
 	ParentID          *int64 /* the device whose outage suppresses this one's problems; set by hand */
+	Role              string /* set by hand; empty means automatic (RoleAuto) */
+	RoleAuto          string /* derived by the poller; empty until the first identification */
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+/* EffectiveRole is the role set by hand, else the derived one; empty when neither is known. */
+func (d Device) EffectiveRole() string {
+	if d.Role != "" {
+		return d.Role
+	}
+	return d.RoleAuto
 }
 
 /*
@@ -90,6 +100,7 @@ type Patch struct {
 	InsecureProtocols *bool
 	PollerID          *string
 	Intervals         *Intervals
+	Role              *string /* "" returns the device to the automatic role */
 }
 
 /*
@@ -151,13 +162,15 @@ func mapWrite(op string, err error) error {
 
 const deviceCols = `id, name, address, snmp_port, group_id, driver, coalesce(model, ''), coalesce(firmware, ''),
 	coalesce(sys_object_id, ''), insecure_protocols, poller_id,
-	interval_avail_s, interval_metrics_s, interval_inventory_s, created_at, updated_at, parent_id`
+	interval_avail_s, interval_metrics_s, interval_inventory_s, created_at, updated_at, parent_id,
+	coalesce(role, ''), coalesce(role_auto, '')`
 
 func scanDevice(r pgx.Row) (Device, error) {
 	var d Device
 	err := r.Scan(&d.ID, &d.Name, &d.Address, &d.SNMPPort, &d.GroupID, &d.Driver, &d.Model, &d.Firmware,
 		&d.SysObjectID, &d.InsecureProtocols, &d.PollerID,
-		&d.Intervals.AvailS, &d.Intervals.MetricsS, &d.Intervals.InventoryS, &d.CreatedAt, &d.UpdatedAt, &d.ParentID)
+		&d.Intervals.AvailS, &d.Intervals.MetricsS, &d.Intervals.InventoryS, &d.CreatedAt, &d.UpdatedAt, &d.ParentID,
+		&d.Role, &d.RoleAuto)
 	return d, err
 }
 
@@ -235,10 +248,11 @@ func (s *Store) Update(ctx context.Context, tx pgx.Tx, id int64, p Patch) error 
 			interval_avail_s = CASE WHEN $9::bool THEN $10::int ELSE interval_avail_s END,
 			interval_metrics_s = CASE WHEN $9::bool THEN $11::int ELSE interval_metrics_s END,
 			interval_inventory_s = CASE WHEN $9::bool THEN $12::int ELSE interval_inventory_s END,
+			role = CASE WHEN $13::text IS NULL THEN role ELSE nullif($13, '') END,
 			updated_at = now()
 		WHERE id = $1`,
 		id, p.Name, unmapPtr(p.Address), p.SNMPPort, p.GroupID, p.Driver, p.InsecureProtocols, p.PollerID,
-		p.Intervals != nil, iv.AvailS, iv.MetricsS, iv.InventoryS)
+		p.Intervals != nil, iv.AvailS, iv.MetricsS, iv.InventoryS, p.Role)
 	if err != nil {
 		return mapWrite("update device", err)
 	}

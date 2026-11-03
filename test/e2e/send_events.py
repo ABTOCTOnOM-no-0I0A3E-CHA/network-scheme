@@ -17,10 +17,15 @@ With the environment variable TRAP_CONTROL (a file path) the trap is chosen by t
 trap it names (linkDown or linkUp, for ifIndex TRAP_IFINDEX, default 1) or none while the file is missing or empty, so a
 test can open and close a link problem of this source on demand. Without it a linkDown for ifIndex 1 is sent every round.
 
+With DEMO_EVENTS=1 (the demo stand, test/demo) MARKER is the host name and every round sends one UDP syslog message
+picked from a catalogue of Eltex-like texts of mixed severity (link up/down, logins, configuration changes, fan and
+temperature warnings) instead of the marker messages; TCP and TLS are not used then, traps are sent as above.
+
 Ports default to the container ports of eventd (1514 syslog, 1162 traps, 6514 TLS); the environment
 variables SYSLOG_PORT, TRAP_PORT and TLS_PORT replace them, e.g. 514 for the published port.
 """
 import os
+import random
 import socket
 import ssl
 import sys
@@ -73,6 +78,39 @@ def link_trap(community, request_id, name="linkDown", if_index=1):
     return tlv(0x30, integer(1) + tlv(0x04, community.encode()) + pdu)
 
 
+# Demo catalogue: (syslog severity, weight, text). The texts follow the "%MODULE-L-EVENT: ..." style of Eltex MES/ESR
+# logs (L is the severity letter); {port}, {peer} and {self} are filled in per message. Not captured from hardware.
+DEMO_MESSAGES = [
+    (6, 10, "%LINK-I-Up:  gi1/0/{port}"),
+    (4, 8, "%LINK-W-Down:  gi1/0/{port}"),
+    (6, 6, "%STP-I-PORTSTATUS: gi1/0/{port}: STP status Forwarding"),
+    (6, 6, "%AAA-I-CONNECT: User CLI session for user admin over ssh , source {peer} destination  {self} ACCEPTED"),
+    (6, 3, "%AAA-I-DISCONNECT: User CLI session for user admin over ssh , source {peer} destination  {self} TERMINATED"),
+    (4, 4, "%AAA-W-REJECT: New ssh connection, source {peer} destination  {self} REJECTED"),
+    (5, 3, "%COPY-N-TRAP: The copy operation was completed successfully"),
+    (5, 3, "%CLI-N-CONFIG: Configuration changed by user admin from {peer}"),
+    (4, 2, "%ENV-W-FAN: Fan 1 speed is low"),
+    (4, 2, "%ENV-W-TEMP: Temperature sensor 1 is 61 C, above the warning threshold"),
+    (3, 1, "%ENV-E-TEMP: Temperature sensor 1 is 72 C, above the critical threshold"),
+    (3, 1, "%LINK-E-ERRDISABLE: gi1/0/{port} is shut down by loopback-detection"),
+    (2, 1, "%ENV-C-PSU: Power supply 2 failed"),
+]
+FACILITY_LOCAL7 = 23
+
+
+def demo_line(host, own):
+    sev, _, text = random.choices(DEMO_MESSAGES, weights=[w for _, w, _ in DEMO_MESSAGES])[0]
+    text = text.format(port=random.randint(1, 24), peer="172.30.1.%d" % random.randint(20, 60), self=own)
+    return "<%d>%s %s %s" % (FACILITY_LOCAL7 * 8 + sev, time.strftime("%b %e %H:%M:%S"), host, text)
+
+
+def own_address(target, port):
+    """The source address the kernel picks for target (no packet is sent by connect on UDP)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((target, port))
+        return s.getsockname()[0]
+
+
 def read_control(path):
     """The trap named in the control file (linkDown or linkUp) and an optional community after it ("linkUp other-community"):
     the device's profile, which eventd checks traps against, may have been switched to another community.
@@ -97,10 +135,15 @@ def main():
     control = os.environ.get("TRAP_CONTROL", "")
     if_index = int(os.environ.get("TRAP_IFINDEX", "1"))
     ctx = ssl.create_default_context(cafile=cafile) if cafile else None
+    demo = os.environ.get("DEMO_EVENTS") == "1"
+    own = own_address(target, syslog_port) if demo else ""
     n = 0
     while True:
         n += 1
-        text = "<14>%s e2ehost e2eapp: %s%s" % (time.strftime("%b %e %H:%M:%S"), marker, "udp")
+        if demo:
+            text = demo_line(marker, own)
+        else:
+            text = "<14>%s e2ehost e2eapp: %s%s" % (time.strftime("%b %e %H:%M:%S"), marker, "udp")
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.sendto(text.encode(), (target, syslog_port))
         if community and control:
@@ -110,6 +153,9 @@ def main():
         elif community:
             udp.sendto(link_trap(community, n), (target, trap_port))
         udp.close()
+        if demo:
+            time.sleep(random.uniform(2, 6))
+            continue
         try:
             with socket.create_connection((target, syslog_port), timeout=3) as tcp:
                 tcp.sendall(("<14>%s e2ehost e2eapp: %stcp\n" % (time.strftime("%b %e %H:%M:%S"), marker)).encode())

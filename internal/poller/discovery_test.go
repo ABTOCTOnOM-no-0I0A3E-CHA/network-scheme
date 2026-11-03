@@ -287,7 +287,7 @@ func TestScanFindsSimulatedDevices(t *testing.T) {
 		t.Fatalf("inbox = %+v", got)
 	}
 	for _, f := range got {
-		if f.SysOID != "1.3.6.1.4.1.35265.1.65535" || f.Descr != "24-port 10/100/1000 Ethernet Switch" || f.Name != "sim-mes1" || f.Status != "pending" {
+		if f.SysOID != "1.3.6.1.4.1.35265.1.65535" || f.Descr != "MES2324 28-port 1G/10G Managed Switch" || f.Name != "sim-mes1" || f.Status != "pending" {
 			t.Errorf("find %+v", f)
 		}
 	}

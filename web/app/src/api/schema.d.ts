@@ -921,6 +921,8 @@ export interface paths {
                         group_id?: number;
                         /** Format: int64 */
                         parent_id?: number | null;
+                        /** @description The role set by hand; null returns the device to the automatic role */
+                        role?: components["schemas"]["DeviceRole"] | null;
                         interval_avail_s?: components["schemas"]["Interval"];
                         interval_metrics_s?: components["schemas"]["Interval"];
                         interval_inventory_s?: components["schemas"]["Interval"];
@@ -5269,6 +5271,8 @@ export interface components {
             model: string;
             /** @description Reported by the device; render as text only */
             firmware: string;
+            /** @description The role set by hand, else the one the poller derived; null while neither is known */
+            role: components["schemas"]["DeviceRole"] | null;
             /** @description An SNMPv2c or telnet credential is set */
             insecure_protocols: boolean;
             /** @enum {string} */
@@ -5277,6 +5281,10 @@ export interface components {
             state_since: string | null;
         };
         DeviceDetail: components["schemas"]["Device"] & {
+            /** @description The role set by hand; null means automatic */
+            role_manual: components["schemas"]["DeviceRole"] | null;
+            /** @description The role the poller derived from the driver and sysServices; null before the first identification */
+            role_auto: components["schemas"]["DeviceRole"] | null;
             snmp_port: number;
             /**
              * Format: int64
@@ -5290,6 +5298,8 @@ export interface components {
             interval_metrics_s: number | null;
             interval_inventory_s: number | null;
         };
+        /** @enum {string} */
+        DeviceRole: "switch" | "router" | "l3switch" | "firewall" | "server" | "ap" | "pc" | "printer" | "phone" | "cloud" | "other";
         /** @enum {string} */
         EventSeverity: "info" | "warning" | "average" | "high" | "disaster";
         ProblemSummary: {
@@ -5623,6 +5633,13 @@ export interface components {
             /** @enum {string} */
             state: "up" | "partial" | "down" | "unknown";
             driver: string;
+            address: string;
+            /** @description Reported by the device; render as text only */
+            model: string;
+            /** @description Reported by the device; render as text only */
+            firmware: string;
+            /** @description The role set by hand, else the derived one; null while neither is known */
+            role: components["schemas"]["DeviceRole"] | null;
             /**
              * Format: int64
              * @description Smallest area of the requested view whose rectangle contains the position; absent without view_id or position

@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import "@/i18n";
 import i18n from "@/i18n";
 import "./builtin";
+import { groupRepeats, relativeTime } from "./logStream";
 import { mergeChanges } from "./recentChanges";
 import { getWidget, listWidgets } from "./registry";
 import { formatUptime } from "./topDevices";
@@ -68,6 +69,32 @@ describe("built-in widgets", () => {
 });
 
 describe("widget helpers", () => {
+  it("folds repeats of the log stream into the newest row with a count and the oldest time", () => {
+    const ev = (ts: string, text: string, device_id = 1) => ({ ts, kind: "syslog" as const, device_id, device_name: "d", severity: "warning" as const, app: "a", text, identified: true });
+    const rows = groupRepeats([ev("2026-10-01T10:03:00Z", "x"), ev("2026-10-01T10:02:00Z", "y"), ev("2026-10-01T10:01:00Z", "x"), ev("2026-10-01T10:00:00Z", "x", 2)]);
+    expect(rows.map((r) => [r.e.text, r.e.device_id, r.count, r.first])).toEqual([
+      ["x", 1, 2, "2026-10-01T10:01:00Z"],
+      ["y", 1, 1, "2026-10-01T10:02:00Z"],
+      ["x", 2, 1, "2026-10-01T10:00:00Z"],
+    ]);
+  });
+
+  it("shows log times relative to now", () => {
+    const now = Date.parse("2026-10-01T12:00:00Z");
+    expect(relativeTime("2026-10-01T11:59:40Z", now, "ru", "только что")).toBe("только что");
+    expect(relativeTime("2026-10-01T11:55:00Z", now, "ru", "-")).toMatch(/^5 мин/);
+    expect(relativeTime("2026-10-01T09:00:00Z", now, "ru", "-")).toMatch(/^3 ч/);
+  });
+
+  it("tints warning-and-up log rows and opens the device from its chip", async () => {
+    const def = getWidget("log_stream")!;
+    render(<>{def.render([{ ts: new Date().toISOString(), kind: "syslog", device_id: 4, device_name: "sw-1", severity: "high", app: "a", text: "t", identified: true }], {})}</>);
+    const row = screen.getByTestId("log-stream").querySelector("li")!;
+    expect(row.dataset.severity).toBe("high");
+    expect(row.className).toMatch(/bg-red/);
+    expect(screen.getByRole("button", { name: "sw-1" })).toBeInTheDocument();
+  });
+
   it("formats uptime with its two largest units", () => {
     const t = i18n.t.bind(i18n);
     expect(formatUptime(t, 3 * 86400 + 4 * 3600 + 59)).toBe("3 д 4 ч");

@@ -23,6 +23,7 @@ const (
 	oidSysObjectID = "1.3.6.1.2.1.1.2.0"
 	oidSysUpTime   = "1.3.6.1.2.1.1.3.0"
 	oidSysName     = "1.3.6.1.2.1.1.5.0"
+	oidSysServices = "1.3.6.1.2.1.1.7.0"
 
 	/* ENTITY-MIB entPhysicalEntry */
 	entPhysicalEntry = "1.3.6.1.2.1.47.1.1.1.1"
@@ -62,15 +63,21 @@ func (d Driver) limit() int {
 Identify reads the system group and the model, serial number and software
 revision of the first chassis in entPhysicalTable. Missing entity data leaves
 those fields empty; only a system-group failure or an ended ctx is an error.
+The role comes from the sysServices layer bits (RoleFromServices); without
+sysServices it is "other".
 */
 func (d Driver) Identify(ctx context.Context, r snmp.Reader) (drivers.Identity, error) {
-	var id drivers.Identity
-	vs, err := r.Get(ctx, oidSysDescr, oidSysObjectID, oidSysName)
+	id := drivers.Identity{Role: drivers.RoleOther}
+	vs, err := r.Get(ctx, oidSysDescr, oidSysObjectID, oidSysName, oidSysServices)
 	if err != nil {
 		return id, err
 	}
 	for _, v := range vs {
 		switch v.OID {
+		case oidSysServices:
+			if s, ok := intVal(v); ok {
+				id.Role = drivers.RoleFromServices(s)
+			}
 		case oidSysDescr:
 			id.SysDescr = str(v)
 		case oidSysObjectID:

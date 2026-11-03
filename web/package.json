@@ -3,5 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "license": "UNLICENSED",
-  "workspaces": ["app", "executor", "shared"]
+  "workspaces": ["app", "executor", "shared"],
+  "overrides": {
+    "minimatch": "11.0.1"
+  }
 }
