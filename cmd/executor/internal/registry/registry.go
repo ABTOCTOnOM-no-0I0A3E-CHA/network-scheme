@@ -190,6 +190,14 @@ func (r Row) Get(col string) any {
 /* Version is the counter value of the change that last wrote the row. */
 func (r Row) Version() int64 { return r.r.version }
 
+/* Table names the registry table of the row ("" for the zero Row, which no snapshot hands out). */
+func (r Row) Table() string {
+	if r.r == nil {
+		return ""
+	}
+	return r.r.t.name
+}
+
 /* Seq is the registry counter. */
 func (s *Snapshot) Seq() int64 { return s.seq }
 

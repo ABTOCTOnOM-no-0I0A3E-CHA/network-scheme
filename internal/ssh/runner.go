@@ -248,7 +248,7 @@ func Dial(ctx context.Context, addr netip.AddrPort, deviceID int64, c creds.Cred
 	if err != nil {
 		return nil, err
 	}
-	var mismatch atomic.Bool
+	var mismatch, inSession atomic.Bool
 	verify := hk.callback(ctx, deviceID, addr.Addr())
 	cfg := &gossh.ClientConfig{
 		User: c.Username,
@@ -257,6 +257,9 @@ func Dial(ctx context.Context, addr netip.AddrPort, deviceID int64, c creds.Cred
 			err := verify(host, remote, key)
 			if errors.Is(err, ErrHostKeyMismatch) {
 				mismatch.Store(true)
+			}
+			if errors.Is(err, ErrHostKeyInSession) {
+				inSession.Store(true)
 			}
 			return err
 		},
@@ -277,6 +280,9 @@ func Dial(ctx context.Context, addr netip.AddrPort, deviceID int64, c creds.Cred
 		_ = conn.Close()
 		if mismatch.Load() {
 			return nil, ErrHostKeyMismatch
+		}
+		if inSession.Load() {
+			return nil, ErrHostKeyInSession
 		}
 		return nil, fmt.Errorf("ssh: handshake: %w", err)
 	}

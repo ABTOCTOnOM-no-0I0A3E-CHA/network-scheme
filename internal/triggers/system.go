@@ -60,10 +60,12 @@ like config_drift; acknowledging does not resolve it. The freeze kinds
 (the executor_unfrozen marker is newer), and stay open, whatever their age,
 while the executor may be frozen: its status says frozen, or the status is
 stale (older than executorStaleAfter: a stale row never hides a problem).
-While it may be frozen, the newest freeze alert stays open even behind a
-newer marker (a marker whose publication was retried can land after the
-freeze that followed it). A stale status of an enabled executor is itself a
-problem (executor_unreachable, high).
+Only while a fresh status says frozen does the newest freeze alert also stay
+open behind a newer marker (a marker whose publication was retried can land
+after the freeze that followed it); a stale status keeps open only freeze
+alerts newer than the last marker, so a freeze lifted long ago does not
+reopen whenever the executor stops publishing. A stale status of an enabled
+executor is itself a problem (executor_unreachable, high).
 */
 const (
 	executorAlertFor   = 24 * time.Hour
@@ -169,7 +171,7 @@ func (e *Engine) executorAlerts(ctx context.Context, want map[pkey]sysWant, now 
 	default:
 		known = true
 	}
-	mayBeFrozen := known && (frozen || stale)
+	frozenNow, mayBeFrozen := known && !stale && frozen, known && (frozen || stale)
 	if known && stale && enabled {
 		want[pkey{sys: SystemExecutorUnreachable, obj: "executor"}] = sysWant{"high",
 			fmt.Sprintf("the executor has not published its status for over %s", executorStaleAfter)}
@@ -198,7 +200,7 @@ func (e *Engine) executorAlerts(ctx context.Context, want map[pkey]sysWant, now 
 		}
 		open := recent
 		if slices.Contains(executorFreezeKinds, kind) {
-			open = (recent && sinceUnfrozen) || (mayBeFrozen && (sinceUnfrozen || newestFreeze))
+			open = ((mayBeFrozen || recent) && sinceUnfrozen) || (frozenNow && newestFreeze)
 		}
 		if !open {
 			continue

@@ -110,6 +110,39 @@ func (e *executor) recorded(t *testing.T) bool {
 	return f
 }
 
+/* row returns a row of a verified snapshot, as the executor's session code gets it (registry.View). */
+func (e *executor) row(t *testing.T, table string, pk ...any) registry.Row {
+	t.Helper()
+	var r registry.Row
+	if err := e.g.View(context.Background(), func(s *registry.Snapshot) error {
+		var ok bool
+		if r, ok = s.Get(table, pk...); !ok {
+			return fmt.Errorf("no %s row %v", table, pk)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+/* writeDevice registers a write device through the registry (fp nil: no host key accepted yet) and returns its verified row. */
+func (e *executor) writeDevice(t *testing.T, id int64, address string, fp any) registry.Row {
+	t.Helper()
+	algo := any(nil)
+	if fp != nil {
+		algo = "ssh-ed25519"
+	}
+	if err := e.g.HostWrite(context.Background(), func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+		return tx.Put("write_device", map[string]any{"device_id": id, "address": netip.MustParseAddr(address), "port": 22,
+			"protocol": "ssh", "write_group": "core", "write_driver": "esr", "hostkey_algo": algo, "hostkey_fp": fp,
+			"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": false})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return e.row(t, "write_device", id)
+}
+
 func (e *executor) frozen() bool {
 	f, _ := e.g.Frozen()
 	return f
@@ -409,16 +442,21 @@ func TestPublisherWriters(t *testing.T) {
 		_, _ = e.env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = 900001;
 			DELETE FROM execpub.session_summary WHERE device_id = 900001`)
 	})
-	if err := p.Busy(ctx, 900001, netip.Addr{}, a); err == nil {
-		t.Error("busy without the executor's address accepted")
+	/* Only a write_device row of a verified snapshot: the zero row and other tables are refused. */
+	if err := p.Busy(ctx, registry.Row{}, a); err == nil {
+		t.Error("busy from a zero row accepted")
 	}
-	if err := p.Busy(ctx, 900001, netip.MustParseAddr("::ffff:10.9.9.9"), a); err != nil {
+	if err := p.Busy(ctx, e.row(t, "exec_state", true), a); err == nil {
+		t.Error("busy from an exec_state row accepted")
+	}
+	const fp = "SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
+	if err := p.Busy(ctx, e.writeDevice(t, 900001, "10.9.9.9", fp), a); err != nil {
 		t.Fatal(err)
 	}
-	if n := e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001 AND address = '10.9.9.9'`); n != 1 {
-		t.Fatal("busy address not stored unmapped")
+	if n := e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001 AND address = '10.9.9.9' AND hostkey_fp = $1`, fp); n != 1 {
+		t.Fatal("busy row without the registry's address and host key")
 	}
-	if err := p.Busy(ctx, 900001, netip.MustParseAddr("10.9.9.9"), b); !errors.Is(err, pub.ErrDeviceBusy) {
+	if err := p.Busy(ctx, e.writeDevice(t, 900001, "10.9.9.9", fp), b); !errors.Is(err, pub.ErrDeviceBusy) {
 		t.Fatalf("second session on a busy device: %v", err)
 	}
 	if err := p.Free(ctx, 900001, b); err != nil || e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001`) != 1 {
@@ -427,6 +465,14 @@ func TestPublisherWriters(t *testing.T) {
 	if err := p.Free(ctx, 900001, a); err != nil || e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001`) != 0 {
 		t.Fatalf("free: %v", err)
 	}
+	/* A device whose host key is not accepted yet: no fingerprint, the id and address still published. */
+	if err := p.Busy(ctx, e.writeDevice(t, 900001, "10.9.9.10", nil), a); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(t, `SELECT count(*) FROM execpub.device_busy WHERE device_id = 900001 AND address = '10.9.9.10' AND hostkey_fp IS NULL`); n != 1 {
+		t.Fatal("busy row of a device without a host key")
+	}
+	_ = p.Free(ctx, 900001, a)
 
 	if err := p.SessionOpened(ctx, a, 11, 900001, time.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)

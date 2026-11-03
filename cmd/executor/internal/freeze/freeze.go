@@ -406,15 +406,10 @@ freezes as KindTamper.
 */
 func (g *Guard) Request(ctx context.Context, reason string, consume registry.Appender) error {
 	reason = state.Reason(reason)
-	g.mu.Lock()
-	early, gen := !g.frozen, int64(0)
-	g.mu.Unlock()
+	/* Decided and latched in one locked section: the latch undone later is exactly this one. */
+	early, gen := g.latchOwed(reason, true)
 	marked := false
 	if early {
-		g.latchOwed(reason)
-		g.mu.Lock()
-		gen = g.gen
-		g.mu.Unlock()
 		if sticky, err := g.reg.StickyFrozen(); err == nil && !sticky {
 			marked = true
 		}
@@ -427,7 +422,7 @@ func (g *Guard) Request(ctx context.Context, reason string, consume registry.App
 		if err != nil {
 			return head, err
 		}
-		g.latchOwed(reason)
+		g.latchOwed(reason, false)
 		if err := g.reg.MarkFrozen(reason); err != nil {
 			g.log.Error("state file: cannot record the freeze", slog.Any("err", err))
 		}
@@ -475,21 +470,32 @@ func (g *Guard) Request(ctx context.Context, reason string, consume registry.App
 	return nil
 }
 
-/* latchOwed latches as a new freeze; freezing an unfrozen executor makes the KindHostFreeze alert owed. */
-func (g *Guard) latchOwed(reason string) {
+/*
+latchOwed latches as a new freeze (moving the generation) and reports
+whether it set the latch and the generation it left; freezing an unfrozen
+executor makes the KindHostFreeze alert owed. With onlyUnfrozen it does
+nothing on a frozen executor.
+*/
+func (g *Guard) latchOwed(reason string, onlyUnfrozen bool) (set bool, gen int64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.frozen {
+	if onlyUnfrozen && g.frozen {
+		return false, g.gen
+	}
+	if set = !g.frozen; set {
 		g.frozen, g.reason, g.owed = true, state.Reason(reason), true
 	}
 	g.gen++
+	return set, g.gen
 }
 
 /*
 unlatch undoes Request's early latch (and the sticky flag, if Request set
-it) when nothing froze since: the generation is still gen. Under the
-latch's lock, so a concurrent Trigger either moved the generation first or
-latches after this.
+it) only when that latch is still the newest: the generation is still gen,
+the one latchOwed left when it set it. Any freeze since (Trigger, latchAt,
+another request) moved the generation and is kept. Under the latch's lock,
+so a concurrent Trigger either moved the generation first or latches after
+this.
 */
 func (g *Guard) unlatch(gen int64, sticky bool) {
 	g.mu.Lock()

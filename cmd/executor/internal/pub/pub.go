@@ -100,18 +100,30 @@ func (p *Publisher) Alert(ctx context.Context, kind, severity string, deviceID i
 }
 
 /*
-Busy marks a device as held by session: the poller opens no SSH to the
-device id nor to address, which must be the address the executor connects
-to (the address of its registry row, write_device, never core.device:
-the api may give another device row that address). A device another session
-holds is refused.
+Busy marks the device of dev, a write_device row of a verified registry
+snapshot (registry.View; nothing else builds a registry.Row), as held by
+session: the poller opens no SSH to that device id or address, and refuses
+any switch presenting its pinned host key. Taking the row, not free values,
+keeps core.device out: the api may give another device row the address of a
+device in a session, or another address of it. A device without an accepted
+host key yet is published without a fingerprint (the id and address checks
+still apply). A device another session holds is refused.
 */
-func (p *Publisher) Busy(ctx context.Context, deviceID int64, address netip.Addr, session [16]byte) error {
-	if !address.IsValid() || address.Zone() != "" {
-		return fmt.Errorf("pub: bad address %v", address)
+func (p *Publisher) Busy(ctx context.Context, dev registry.Row, session [16]byte) error {
+	if dev.Table() != "write_device" {
+		return fmt.Errorf("pub: busy needs a write_device row, got %q", dev.Table())
 	}
-	n, err := p.exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address) VALUES ($1, $2, $3) ON CONFLICT (device_id) DO NOTHING`,
-		deviceID, session, address.Unmap())
+	id, _ := dev.Get("device_id").(int64)
+	address, _ := dev.Get("address").(netip.Addr)
+	if id <= 0 || !address.IsValid() {
+		return fmt.Errorf("pub: write_device row %d without an address", id)
+	}
+	var fp *string
+	if s, ok := dev.Get("hostkey_fp").(string); ok {
+		fp = &s
+	}
+	n, err := p.exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address, hostkey_fp) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (device_id) DO NOTHING`, id, session, address, fp)
 	if err == nil && n == 0 {
 		return ErrDeviceBusy
 	}

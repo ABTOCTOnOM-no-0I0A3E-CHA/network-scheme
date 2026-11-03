@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
@@ -761,4 +762,33 @@ func TestFreezeOffSeesAFreezeDuringItsCheck(t *testing.T) {
 		t.Fatalf("freeze off: %v", err)
 	}
 	e.mustFreeze(t)
+}
+
+/*
+Re-review minor 1: a request whose request turns out to be gone undoes only
+its own early latch. A freeze that latched while the request's transaction
+ran moved the generation and stays (latch and sticky flag), and a restart
+is frozen too.
+*/
+func TestRequestGoneKeepsAFreezeThatCameMeanwhile(t *testing.T) {
+	env := testdb.New(t)
+	attacktest.Reset(t, env)
+	e := start(t, env, filepath.Join(t.TempDir(), "state"))
+	ctx := context.Background()
+	err := e.guard.Request(ctx, "panel: test", func(_ context.Context, _ pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+		freeze.Latch(e.guard, "concurrent freeze")
+		return head, freeze.ErrNoRequest
+	})
+	if !errors.Is(err, freeze.ErrNoRequest) {
+		t.Fatalf("request gone: %v", err)
+	}
+	if frozen, _ := e.guard.Frozen(); !frozen {
+		t.Fatal("the request undid a freeze that latched meanwhile")
+	}
+	if st, err := state.Load(e.path, e.keys.State()); err != nil || !st.Frozen {
+		t.Fatalf("sticky flag lost: %+v %v", st, err)
+	}
+	if frozen, _ := e.restart(t).guard.Frozen(); !frozen {
+		t.Fatal("not frozen after a restart")
+	}
 }

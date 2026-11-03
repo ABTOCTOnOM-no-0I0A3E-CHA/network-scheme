@@ -37,14 +37,23 @@ and the SNMP part of inventory never ask, so a broken check costs the CLI
 tables, backups and show commands, never the monitoring. The check and the
 dial are not atomic: a session opened right after the check meets a poller
 session already running (the executor's exclusive strategy is the defence
-there, 4b.5).
+there, 4b.5). Address and id are the first, cheap gate; the second is the
+host key itself: internal/ssh refuses, before any credential, a presented key
+whose fingerprint a busy device has (execpub.device_busy.hostkey_fp), so
+another address of the same switch gets no login either.
 */
 func (p *Poller) dialSSH(ctx context.Context, d device, c creds.Credential, dl ssh.Dialect) (*ssh.Runner, error) {
 	addr := d.Addr.Addr().Unmap().WithZone("")
 	if err := p.checkNotInSession(ctx, d.ID, addr); err != nil {
 		return nil, err
 	}
-	return ssh.Dial(ctx, netip.AddrPortFrom(addr, p.sshPort), d.ID, c, p.hostKeys, dl)
+	r, err := ssh.Dial(ctx, netip.AddrPortFrom(addr, p.sshPort), d.ID, c, p.hostKeys, dl)
+	if errors.Is(err, ssh.ErrHostKeyInSession) {
+		p.log.Warn("the device presented the host key of a device in a change session: no credential sent",
+			slog.Int64("device_id", d.ID), slog.String("address", addr.String()))
+		return nil, fmt.Errorf("%w: %w", errInSession, err)
+	}
+	return r, err
 }
 
 /*

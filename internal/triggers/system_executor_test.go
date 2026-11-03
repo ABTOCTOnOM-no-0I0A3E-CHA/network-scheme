@@ -276,3 +276,29 @@ func TestStaleExecutorStatus(t *testing.T) {
 		t.Fatal("a disabled executor that stopped publishing raised executor_unreachable")
 	}
 }
+
+/*
+Re-review minor 2: a stale status keeps open only freeze alerts newer than
+the last marker; a tamper freeze lifted weeks ago does not reopen as a
+disaster whenever the executor stops publishing (it is executor_unreachable).
+*/
+func TestStaleStatusDoesNotReopenALiftedFreeze(t *testing.T) {
+	h := newHarness(t)
+	exe := h.env.Pool("nms_executor")
+	h.alert("executor_tamper", "disaster", 0, "bad MAC", 29*24*time.Hour)
+	h.alert("executor_unfrozen", "info", 0, "the host lifted the freeze (registry reset)", 28*24*time.Hour)
+	h.exec(exe, `INSERT INTO execpub.status (enabled, frozen, at) VALUES (true, false, now() - interval '5 minutes')`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); ok {
+		t.Fatal("a freeze lifted weeks ago reopened on a stale status")
+	}
+	if _, ok := h.sysOpen("executor_unreachable", "executor", 0); !ok {
+		t.Fatal("no executor_unreachable")
+	}
+	/* A fresh status that says frozen keeps the newest freeze open behind the marker (a late marker). */
+	h.exec(exe, `UPDATE execpub.status SET frozen = true, at = now()`)
+	h.settle()
+	if _, ok := h.sysOpen("executor_tamper", "executor", 0); !ok {
+		t.Fatal("the newest freeze of a frozen executor is hidden by an older-looking marker")
+	}
+}

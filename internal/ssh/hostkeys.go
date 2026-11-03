@@ -16,6 +16,13 @@ import (
 // ErrHostKeyMismatch means the device presented a host key other than its pinned one.
 var ErrHostKeyMismatch = errors.New("ssh: host key does not match the pinned key")
 
+/*
+ErrHostKeyInSession means the device presented the host key of a device the
+executor holds in a change session (execpub.device_busy.hostkey_fp), or that
+this could not be checked: no credential is sent.
+*/
+var ErrHostKeyInSession = errors.New("ssh: host key of a device in a change session")
+
 const dbTimeout = 10 * time.Second
 
 /*
@@ -33,10 +40,15 @@ func NewHostKeys(pool *pgxpool.Pool) *HostKeys {
 }
 
 /*
-Callback returns a host key callback for deviceID reached at addr. The first
-key seen is pinned; later keys must match it, otherwise the attempt is
-recorded in ssh_hosts.mismatch and ErrHostKeyMismatch is returned. The SSH
-handshake verifies the host key before any credential is sent.
+Callback returns a host key callback for deviceID reached at addr. A key
+whose fingerprint belongs to a device the executor holds in a change session
+is refused first (ErrHostKeyInSession, also when that cannot be read: fail
+closed), whatever device row the dial is for: the api may give a second
+device row any other address of the same switch. The busy table is read at
+every callback, never cached. Then the first key seen is pinned; later keys
+must match it, otherwise the attempt is recorded in ssh_hosts.mismatch and
+ErrHostKeyMismatch is returned. The SSH handshake verifies the host key
+before any credential is sent.
 */
 func (h *HostKeys) Callback(deviceID int64, addr netip.Addr) gossh.HostKeyCallback {
 	return h.callback(context.Background(), deviceID, addr)
@@ -46,8 +58,24 @@ func (h *HostKeys) callback(ctx context.Context, deviceID int64, addr netip.Addr
 	return func(_ string, _ net.Addr, key gossh.PublicKey) error {
 		ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 		defer cancel()
-		return h.verify(ctx, deviceID, addr, key.Type(), gossh.FingerprintSHA256(key))
+		fp := gossh.FingerprintSHA256(key)
+		if err := h.notInSession(ctx, fp); err != nil {
+			return err
+		}
+		return h.verify(ctx, deviceID, addr, key.Type(), fp)
 	}
+}
+
+/* notInSession is nil only when execpub.device_busy was read and no busy device has host key fingerprint fp. */
+func (h *HostKeys) notInSession(ctx context.Context, fp string) error {
+	var busy bool
+	if err := h.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.device_busy WHERE hostkey_fp = $1)`, fp).Scan(&busy); err != nil {
+		return fmt.Errorf("%w: check: %w", ErrHostKeyInSession, err)
+	}
+	if busy {
+		return ErrHostKeyInSession
+	}
+	return nil
 }
 
 func (h *HostKeys) verify(ctx context.Context, deviceID int64, addr netip.Addr, algo, fp string) error {

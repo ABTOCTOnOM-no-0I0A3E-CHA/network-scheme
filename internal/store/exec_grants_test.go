@@ -836,3 +836,29 @@ func TestDeviceBusyAddress(t *testing.T) {
 	}
 	requireDenied(t, "nms_eventd", `SELECT address FROM execpub.device_busy`)
 }
+
+/* 00028: device_busy carries the pinned host key fingerprint in exec.write_device's format; the executor writes it, the api and the poller read it. */
+func TestDeviceBusyHostKey(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	exe := env.Pool("nms_executor")
+	t.Cleanup(func() {
+		_, _ = env.Pool("postgres").Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id IN (910011, 910012)`)
+	})
+	fp := "SHA256:" + strings.Repeat("a", 43)
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, hostkey_fp) VALUES (910011, gen_random_uuid(), $1)`, fp); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"SHA256:short", "MD5:" + strings.Repeat("a", 43), fp + "x"} {
+		if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, hostkey_fp) VALUES (910012, gen_random_uuid(), $1)`, bad); err == nil {
+			t.Errorf("fingerprint %q accepted", bad)
+		}
+	}
+	for _, role := range []string{"nms_poller", "nms_api"} {
+		var n int
+		if err := env.Pool(role).QueryRow(ctx, `SELECT count(*) FROM execpub.device_busy WHERE hostkey_fp = $1`, fp).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s reads the busy fingerprint: %d, %v", role, n, err)
+		}
+		requireDenied(t, role, `UPDATE execpub.device_busy SET hostkey_fp = NULL`)
+	}
+}

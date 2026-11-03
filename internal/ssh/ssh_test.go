@@ -527,3 +527,75 @@ func TestLongOutputAndLongInterfaceName(t *testing.T) {
 		t.Fatalf("device saw %q", got)
 	}
 }
+
+/*
+A host key whose fingerprint a device in a change session has
+(execpub.device_busy.hostkey_fp) is refused before any credential, whatever
+device row the dial is for and without pinning it; when the busy table
+cannot be read the dial fails closed the same way.
+*/
+func TestBusyHostKeySendsNoCredential(t *testing.T) {
+	env := testdb.New(t)
+	hk := ssh.NewHostKeys(env.Pool("nms_poller"))
+	ctx := context.Background()
+	id := newDevice(t, env)
+	key := sshemu.NewHostKey(t)
+	addr, log := emu(t, key, sshemu.Config{Responses: map[string]string{"terminal datadump": ""}})
+	exe := env.Pool("nms_executor")
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, hostkey_fp) VALUES (990101, gen_random_uuid(), $1)`,
+		gossh.FingerprintSHA256(key.PublicKey())); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = exe.Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = 990101`)
+	})
+	if _, err := ssh.Dial(ctx, addr, id, cred, hk, dialect()); !errors.Is(err, ssh.ErrHostKeyInSession) {
+		t.Fatalf("busy host key: %v", err)
+	}
+	if got := log.AuthAttempts(); len(got) != 0 {
+		t.Fatalf("credentials sent: %q", got)
+	}
+	var pins int
+	if err := env.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM ssh_hosts.host_key WHERE device_id = $1`, id).Scan(&pins); err != nil || pins != 0 {
+		t.Fatalf("pinned the busy key: %d %v", pins, err)
+	}
+
+	/* Fail closed: the busy table locked past the callback's deadline. */
+	if _, err := exe.Exec(ctx, `DELETE FROM execpub.device_busy WHERE device_id = 990101`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := env.Pool("postgres").Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE execpub.device_busy IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ssh.Dial(ctx, addr, id, cred, hk, dialect())
+	_ = tx.Rollback(ctx)
+	if err == nil || len(log.AuthAttempts()) != 0 {
+		t.Fatalf("unreadable busy table: %v, auth attempts %q", err, log.AuthAttempts())
+	}
+	/* Readable and not busy: the same dial logs in. */
+	r, err := ssh.Dial(ctx, addr, id, cred, hk, dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if len(log.AuthAttempts()) == 0 {
+		t.Fatal("no login: the test cannot see one")
+	}
+}
+
+/* The busy check fails closed: a role that cannot read execpub.device_busy refuses every key (ErrHostKeyInSession). */
+func TestBusyHostKeyCheckFailsClosed(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	fp := "SHA256:" + strings.Repeat("b", 43)
+	if err := ssh.NewHostKeys(env.Pool("nms_eventd")).NotInSession(ctx, fp); !errors.Is(err, ssh.ErrHostKeyInSession) {
+		t.Fatalf("unreadable busy table: %v", err)
+	}
+	if err := ssh.NewHostKeys(env.Pool("nms_poller")).NotInSession(ctx, fp); err != nil {
+		t.Fatalf("readable, not busy: %v", err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"net"
 	"net/netip"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/drivers/eltexmes"
 	"github.com/beekamai/network-scheme/internal/ssh"
 	"github.com/beekamai/network-scheme/test/sim/sshemu"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 /* countingListener counts the TCP connections the SSH emulator accepts. */
@@ -49,6 +51,7 @@ type cliEnv struct {
 	drv   drivers.Driver
 	ln    *countingListener
 	log   *sshemu.Log
+	key   gossh.Signer /* the emulator's host key */
 }
 
 func newCLIEnv(t *testing.T) *cliEnv {
@@ -61,8 +64,9 @@ func newCLIEnv(t *testing.T) *cliEnv {
 	e := &cliEnv{harness: h, ln: &countingListener{Listener: ln}, log: &sshemu.Log{}, cache: newDevCache(),
 		drv: drivers.Default().ByName(eltexmes.Name)}
 	t.Cleanup(func() { _ = ln.Close() })
+	e.key = sshemu.NewHostKey(t)
 	go func() {
-		_ = sshemu.Serve(e.ln, sshemu.Config{HostKey: sshemu.NewHostKey(t), Prompt: "sw1#", Username: "u", Password: "twelve-chars-x"}, e.log)
+		_ = sshemu.Serve(e.ln, sshemu.Config{HostKey: e.key, Prompt: "sw1#", Username: "u", Password: "twelve-chars-x"}, e.log)
 	}()
 	id := h.device(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(20000+cliPort.Add(1))))
 	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
@@ -231,24 +235,82 @@ func TestAliasOfABusyDeviceGetsNoSSH(t *testing.T) {
 }
 
 /*
-cliDials lists, in one source file of the poller, every way to a device's
-CLI other than the one ssh.Dial reference inside dialSSH (cli.go): a call or
-a value (f := ssh.Dial) of internal/ssh's Dial, the x/crypto/ssh package
-itself, and net's dialers.
+I1 (re-review): the api's device row for another address of a switch in a
+change session (the emulator here answers on 127.0.0.1, the busy device is
+registered at 10.254.0.1) passes the id and address checks, but the switch
+presents the busy device's host key: the handshake is refused before any
+credential (0 authentication attempts at all three CLI paths), no pin is
+taken for the alias, and with the busy row gone the same path logs in.
 */
-func cliDials(fset *token.FileSet, f *ast.File, name string) (inDialSSH int, bad []string) {
+func TestOtherAddressOfABusyDeviceGetsNoLogin(t *testing.T) {
+	e := newCLIEnv(t)
+	ctx := context.Background()
+	exe := e.env.Pool("nms_executor")
+	fp := gossh.FingerprintSHA256(e.key.PublicKey())
+	if _, err := exe.Exec(ctx, `INSERT INTO execpub.device_busy (device_id, session_id, address, hostkey_fp)
+		VALUES (990001, gen_random_uuid(), '10.254.0.1', $1)`, fp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = exe.Exec(context.Background(), `DELETE FROM execpub.device_busy WHERE device_id = 990001`)
+	})
+	if err := e.p.checkNotInSession(ctx, e.d.ID, e.d.Addr.Addr()); err != nil {
+		t.Fatalf("the first gate already refuses (the test needs another address): %v", err)
+	}
+	var bf *backupFail
+	if _, err := e.p.sshFetch(ctx, e.d, e.cache, e.drv); !errors.As(err, &bf) || bf.text != errChangeSession {
+		t.Errorf("backup fetch: %v", err)
+	}
+	var sf *showFailed
+	if _, err := e.p.sshShow(ctx, e.d, e.cache, e.drv, ssh.ShowCommand{}); !errors.As(err, &sf) || sf.text != errShowInSession {
+		t.Errorf("show: %v", err)
+	}
+	if r := e.p.sshRunner(ctx, e.d, e.cache, e.drv); r != nil {
+		_ = r.Close()
+		t.Error("inventory logged in")
+	}
+	if a := e.log.AuthAttempts(); len(a) != 0 {
+		t.Fatalf("credentials sent to a device in a session: %v", a)
+	}
+	if n := e.count(`SELECT count(*) FROM ssh_hosts.host_key WHERE device_id = $1`, e.d.ID); n != 0 {
+		t.Fatal("the busy device's key was pinned for the alias")
+	}
+	if _, err := exe.Exec(ctx, `DELETE FROM execpub.device_busy WHERE device_id = 990001`); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = e.p.sshFetch(ctx, e.d, e.cache, e.drv)
+	if len(e.log.AuthAttempts()) == 0 {
+		t.Fatal("no login with the busy row gone: the test cannot see a login")
+	}
+}
+
+/*
+cliDials lists, in one source file (path relative to the repository), every
+way to a device's CLI other than the one ssh.Dial reference inside dialSSH
+(internal/poller/cli.go): a call or a value (f := ssh.Dial) of internal/ssh's
+Dial, a dot import of internal/ssh or net (their names would be unqualified),
+the x/crypto/ssh package itself and net's dialers; in the poller (poller set)
+also syscall, os/exec and golang.org/x/sys, raw ways to a socket or a
+program.
+*/
+func cliDials(fset *token.FileSet, f *ast.File, path string, poller bool) (inDialSSH int, bad []string) {
+	const internalSSH = "github.com/beekamai/network-scheme/internal/ssh"
 	alias := map[string]string{}
 	for _, im := range f.Imports {
-		path := strings.Trim(im.Path.Value, `"`)
-		local := path[strings.LastIndex(path, "/")+1:]
+		ip := strings.Trim(im.Path.Value, `"`)
+		local := ip[strings.LastIndex(ip, "/")+1:]
 		if im.Name != nil {
 			local = im.Name.Name
 		}
-		switch path {
-		case "github.com/beekamai/network-scheme/internal/ssh", "net":
-			alias[local] = path
-		case "golang.org/x/crypto/ssh":
-			bad = append(bad, fmt.Sprintf("%s imports golang.org/x/crypto/ssh", name))
+		switch {
+		case ip == "golang.org/x/crypto/ssh" || strings.HasPrefix(ip, "golang.org/x/crypto/ssh/"):
+			bad = append(bad, fmt.Sprintf("%s imports %s", path, ip))
+		case (ip == internalSSH || ip == "net") && local == ".":
+			bad = append(bad, fmt.Sprintf("%s dot-imports %s", path, ip))
+		case ip == internalSSH || ip == "net":
+			alias[local] = ip
+		case poller && (ip == "syscall" || ip == "os/exec" || strings.HasPrefix(ip, "golang.org/x/sys/")):
+			bad = append(bad, fmt.Sprintf("%s imports %s", path, ip))
 		}
 	}
 	for _, decl := range f.Decls {
@@ -264,11 +326,11 @@ func cliDials(fset *token.FileSet, f *ast.File, name string) (inDialSSH int, bad
 			}
 			at := fset.Position(sel.Pos()).String()
 			switch alias[x.Name] {
-			case "github.com/beekamai/network-scheme/internal/ssh":
+			case internalSSH:
 				if sel.Sel.Name != "Dial" {
 					return true
 				}
-				if name == "cli.go" && fn != nil && fn.Name.Name == "dialSSH" {
+				if path == "internal/poller/cli.go" && fn != nil && fn.Name.Name == "dialSSH" {
 					inDialSSH++
 				} else {
 					bad = append(bad, "ssh.Dial at "+at)
@@ -284,29 +346,69 @@ func cliDials(fset *token.FileSet, f *ast.File, name string) (inDialSSH int, bad
 	return inDialSSH, bad
 }
 
-/* ssh.Dial is referenced once in the poller, inside dialSSH, and nothing else reaches a device's CLI, so no path skips the check. */
+/*
+ssh.Dial is referenced once outside the executor, inside the poller's
+dialSSH, and nothing else reaches a device's CLI: every package (but the
+executor's and internal/ssh itself) that imports internal/ssh is checked,
+the drivers that re-export its types included, so no path skips the check.
+*/
 func TestOnlyDialSSHDialsSSH(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	root := filepath.Join("..", "..")
+	skip := map[string]bool{".git": true, ".claude": true, ".superpowers": true, "node_modules": true, "web": true}
+	files := map[string][]string{} /* package directory -> its non-test files */
+	importers := map[string]bool{"internal/poller": true}
+	fset := token.NewFileSet()
+	parsed := map[string]*ast.File{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if skip[d.Name()] || rel == "cmd/executor" || rel == "internal/ssh" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly|parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		files[dir] = append(files[dir], rel)
+		for _, im := range f.Imports {
+			if strings.Trim(im.Path.Value, `"`) == "github.com/beekamai/network-scheme/internal/ssh" {
+				importers[dir] = true
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fset := token.NewFileSet()
+	if len(importers) < 3 {
+		t.Fatalf("importers of internal/ssh: %v (truncated walk?)", importers)
+	}
 	n := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatal(err)
-		}
-		in, bad := cliDials(fset, f, name)
-		n += in
-		for _, b := range bad {
-			t.Errorf("%s: a way to a device's CLI outside dialSSH", b)
+	for dir := range importers {
+		for _, rel := range files[dir] {
+			f, err := parser.ParseFile(fset, filepath.Join(root, filepath.FromSlash(rel)), nil, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed[rel] = f
+			in, bad := cliDials(fset, f, rel, dir == "internal/poller")
+			n += in
+			for _, b := range bad {
+				t.Errorf("%s: a way to a device's CLI outside dialSSH", b)
+			}
 		}
 	}
-	if n != 1 {
+	if parsed["internal/poller/cli.go"] == nil || n != 1 {
 		t.Fatalf("ssh.Dial referenced %d times in dialSSH, want once", n)
 	}
 }
@@ -315,34 +417,39 @@ func TestOnlyDialSSHDialsSSH(t *testing.T) {
 func TestCLIDialsCatchesBypasses(t *testing.T) {
 	head := "package poller\nimport (\n\t\"net\"\n\t\"net/netip\"\n\tx \"github.com/beekamai/network-scheme/internal/ssh\"\n\t\"github.com/beekamai/network-scheme/internal/ssh\"\n)\n"
 	for _, src := range []string{
-		"func f() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
-		"func f() { g := ssh.Dial; g(nil, netip.AddrPort{}, 0, c, nil, d) }",
-		"var g = ssh.Dial",
-		"func f() { x.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
-		"func f() { net.Dial(\"tcp\", \"10.0.0.1:22\") }",
-		"func f() { d := net.Dialer{}; _ = d }",
-		"func f() { net.DialTimeout(\"tcp\", \"10.0.0.1:22\", 0) }",
-		"func dialSSH() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) } /* not in cli.go */",
+		head + "func f() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		head + "func f() { g := ssh.Dial; g(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		head + "var g = ssh.Dial",
+		head + "func f() { x.Dial(nil, netip.AddrPort{}, 0, c, nil, d) }",
+		head + "func f() { net.Dial(\"tcp\", \"10.0.0.1:22\") }",
+		head + "func f() { d := net.Dialer{}; _ = d }",
+		head + "func f() { net.DialTimeout(\"tcp\", \"10.0.0.1:22\", 0) }",
+		head + "func dialSSH() { ssh.Dial(nil, netip.AddrPort{}, 0, c, nil, d) } /* not in cli.go */",
+		"package poller\nimport . \"github.com/beekamai/network-scheme/internal/ssh\"\nfunc f() { Dial(nil, a, 0, c, nil, d) }\n",
+		"package poller\nimport . \"net\"\nfunc f() { Dial(\"tcp\", \"10.0.0.1:22\") }\n",
+		"package poller\nimport \"syscall\"\nfunc f() { syscall.Socket(2, 1, 0) }\n",
+		"package poller\nimport \"os/exec\"\nfunc f() { exec.Command(\"ssh\", \"10.0.0.1\") }\n",
+		"package poller\nimport \"golang.org/x/sys/unix\"\nfunc f() { unix.Socket(2, 1, 0) }\n",
+		"package poller\nimport gossh \"golang.org/x/crypto/ssh\"\nvar _ = gossh.NewClientConn\n",
 	} {
 		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, "worker.go", head+src, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, "worker.go", src, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("%s: %v", src, err)
 		}
-		if _, bad := cliDials(fset, f, "worker.go"); len(bad) == 0 {
+		if _, bad := cliDials(fset, f, "internal/poller/worker.go", true); len(bad) == 0 {
 			t.Errorf("not caught: %s", src)
 		}
 	}
+	/* A driver re-exporting internal/ssh is checked as well (a dial there is caught; syscall is the poller's rule only). */
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "cli.go", "package poller\nimport \"github.com/beekamai/network-scheme/internal/ssh\"\nfunc dialSSH() { ssh.Dial(nil, a, 0, c, nil, d) }\nfunc g() { _ = ssh.Dialect{} }\n", parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatal(err)
+	drv := mustParse(t, fset, "package eltexmes\nimport \"github.com/beekamai/network-scheme/internal/ssh\"\nvar Dial = ssh.Dial\n")
+	if _, bad := cliDials(fset, drv, "internal/drivers/eltexmes/x.go", false); len(bad) == 0 {
+		t.Error("a driver re-exporting ssh.Dial not caught")
 	}
-	if in, bad := cliDials(fset, f, "cli.go"); in != 1 || len(bad) != 0 {
+	f := mustParse(t, fset, "package poller\nimport \"github.com/beekamai/network-scheme/internal/ssh\"\nfunc dialSSH() { ssh.Dial(nil, a, 0, c, nil, d) }\nfunc g() { _ = ssh.Dialect{} }\n")
+	if in, bad := cliDials(fset, f, "internal/poller/cli.go", true); in != 1 || len(bad) != 0 {
 		t.Errorf("dialSSH itself: %d, %v", in, bad)
-	}
-	if _, bad := cliDials(fset, mustParse(t, fset, "package poller\nimport gossh \"golang.org/x/crypto/ssh\"\nvar _ = gossh.NewClientConn\n"), "show.go"); len(bad) == 0 {
-		t.Error("x/crypto/ssh not caught")
 	}
 }
 
