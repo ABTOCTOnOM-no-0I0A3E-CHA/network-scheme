@@ -100,6 +100,14 @@
 			}
 		}
 
+		# The two origins of this installation, for the executor UI (which origin may frame it, which origin is its own) and
+		# for the panel (where to find the executor). Static text from the gateway, so the api cannot change it.
+		handle /origins.json {
+			header Content-Type "application/json; charset=utf-8"
+			header Cache-Control "no-store"
+			respond `{"panel":"https://{{.Authority}}","executor":"https://{{.ExecutorAuthority}}"}` 200
+		}
+
 		handle /keys.json {
 			root * /srv/keys
 			file_server
@@ -204,6 +212,14 @@
 
 		handle /api/* {
 			error 404
+		}
+
+		# The two origins of this installation, for the executor UI (which origin may frame it, which origin is its own) and
+		# for the panel (where to find the executor). Static text from the gateway, so the api cannot change it.
+		handle /origins.json {
+			header Content-Type "application/json; charset=utf-8"
+			header Cache-Control "no-store"
+			respond `{"panel":"https://{{.Authority}}","executor":"https://{{.ExecutorAuthority}}"}` 200
 		}
 
 		handle /keys.json {

@@ -50,9 +50,12 @@ jobs:
         run: scripts/check-licenses.sh go .
       - name: Install web dependencies
         run: bun install --frozen-lockfile
-        working-directory: web/app
+        working-directory: web
       - name: JS licenses
-        run: scripts/check-licenses.sh js web/app
+        run: |
+          scripts/check-licenses.sh js web/app
+          scripts/check-licenses.sh js web/executor
+          scripts/check-licenses.sh js web/shared
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e
@@ -66,21 +69,24 @@ jobs:
           scripts/expect-license-failure.sh js test/fixtures/licenses/js-private-gpl sneaky-dep
           scripts/expect-license-failure.sh go test/fixtures/licenses/go-gpl example.com/gpldep
 
+  # One Bun workspace: the panel (app), the executor UI (executor) and the build-time package they share (shared).
   web:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web/app
+        working-directory: web
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run lint
-      - run: bun run test
-      - run: bun run build
+      - run: bun run typecheck && bun run lint && bun run test && bun run build
+        working-directory: web/app
+      - run: bun run typecheck && bun run lint && bun run test && bun run build
+        working-directory: web/executor
+      - run: bun run typecheck && bun run lint && bun run test
+        working-directory: web/shared
 
   sbom:
     runs-on: ubuntu-latest

@@ -229,6 +229,13 @@ func TestCaddyExecutorSite(t *testing.T) {
 	if !strings.Contains(caddySite(t, out["Caddyfile"], "(panel_headers)"), "frame-src https://nms.example.org:9000;") {
 		t.Error("the panel CSP must frame only the executor origin")
 	}
+	/* both origins publish the same static /origins.json: the executor UI learns its panel from it, the panel the executor */
+	origins := "respond `{\"panel\":\"https://nms.example.org\",\"executor\":\"https://nms.example.org:9000\"}` 200"
+	for name, s := range map[string]string{"panel": panel, "executor": site} {
+		if !strings.Contains(s, "handle /origins.json {\n") || !strings.Contains(s, origins) || !strings.Contains(s, "header Cache-Control \"no-store\"") {
+			t.Errorf("%s site lacks the static /origins.json", name)
+		}
+	}
 }
 
 func TestRenderRejectsBadInput(t *testing.T) {

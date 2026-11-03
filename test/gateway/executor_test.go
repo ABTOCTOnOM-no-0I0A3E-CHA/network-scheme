@@ -488,3 +488,26 @@ func TestExecutorRateLimitKeepsHeaders(t *testing.T) {
 	}
 	t.Fatal("no 429 after 200 requests from one address")
 }
+
+/*
+Both origins publish the same static /origins.json (from the gateway's own
+configuration, not from the api): the executor UI learns which origin may frame
+it, the panel where the executor is. It is never cached and carries each origin's headers.
+*/
+func TestOriginsPublishedOnBothOrigins(t *testing.T) {
+	s := gateway(t)
+	want := `{"panel":"https://` + publicHost + `","executor":"https://` + publicHost + `:8443"}`
+	resp, body := s.get(t, "/origins.json", nil)
+	if resp.StatusCode != http.StatusOK || body != want {
+		t.Fatalf("panel GET /origins.json = %d %q, want %q", resp.StatusCode, body, want)
+	}
+	only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
+	only(t, resp.Header, "Cache-Control", "no-store")
+	resp, body = s.xdo(t, http.MethodGet, "/origins.json", "", nil)
+	if resp.StatusCode != http.StatusOK || body != want {
+		t.Fatalf("executor GET /origins.json = %d %q, want %q", resp.StatusCode, body, want)
+	}
+	executorHeadersOnce(t, "origins.json", resp.Header)
+	only(t, resp.Header, "Content-Type", "application/json; charset=utf-8")
+	only(t, resp.Header, "Cache-Control", "no-store")
+}
