@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -790,5 +791,37 @@ func TestRequestGoneKeepsAFreezeThatCameMeanwhile(t *testing.T) {
 	}
 	if frozen, _ := e.restart(t).guard.Frozen(); !frozen {
 		t.Fatal("not frozen after a restart")
+	}
+}
+
+/*
+4a.7 minor (4): a panel request on an executor already frozen latches nothing
+before its transaction, so it moves no generation: a freeze off that drops
+the request (--drop-panel-request) while the request waits finds no new freeze
+and lifts the old one, and the request, gone in its transaction, freezes
+nothing. (With an early latch the generation would move and the freeze off
+would report a new freeze that never arrived.)
+*/
+func TestRequestOnAFrozenExecutorMovesNoGeneration(t *testing.T) {
+	e := seeded(t)
+	ctx := context.Background()
+	e.guard.Trigger(ctx, freeze.KindTamper, "host")
+	err := e.guard.FreezeOff(ctx, func(ctx context.Context) error {
+		err := e.guard.Request(ctx, "panel: dropped", func(_ context.Context, _ pgx.Tx, head state.AuditHead) (state.AuditHead, error) {
+			return head, freeze.ErrNoRequest
+		})
+		if !errors.Is(err, freeze.ErrNoRequest) {
+			return fmt.Errorf("request: %w", err)
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("freeze off: %v", err)
+	}
+	if frozen, reason := e.guard.Frozen(); frozen {
+		t.Fatalf("still frozen: %q", reason)
+	}
+	if err := e.guard.Check(ctx); err != nil {
+		t.Fatalf("check after freeze off: %v", err)
 	}
 }
