@@ -197,19 +197,23 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
     expect((await call("get", `/api/devices/${ids[m]}/backups/${v.id}/download`)).status()).toBe(200);
   }
 
-  /* Физика: the front panel of the MES from its inventory (gi1/0/1 RJ-45, te1/0/1 SFP). */
+  /* Физика: the front panel of the MES2324 from its inventory (24 x gi1/0/N RJ-45, 4 x te1/0/N SFP+). */
   const mes = ids.mes;
+  const mesPorts = [...Array.from({ length: 24 }, (_, i) => `gi1/0/${i + 1} rj45`), ...Array.from({ length: 4 }, (_, i) => `te1/0/${i + 1} sfp`)].sort();
   await expect
-    .poll(async () => (await json<{ items: { name: string; port_kind: string }[] }>(`/api/devices/${mes}/interfaces`)).items.map((i) => `${i.name} ${i.port_kind}`).sort(), {
-      timeout: 2 * 60_000,
-      intervals: [3_000],
-    })
-    .toEqual(["gi1/0/1 rj45", "te1/0/1 sfp"]);
+    .poll(
+      async () => (await json<{ items: { name: string; port_kind: string }[] }>(`/api/devices/${mes}/interfaces`)).items.map((i) => `${i.name} ${i.port_kind}`).sort(),
+      { timeout: 2 * 60_000, intervals: [3_000] },
+    )
+    .toEqual(mesPorts);
   await goto(`/devices/${mes}`);
   await expect(page.getByRole("heading", { name: "e2e-mes" })).toBeVisible();
   await page.getByRole("tab", { name: "Физика" }).click();
-  await expect(page.getByRole("group", { name: "RJ-45: 1" }).getByRole("button", { name: /^Порт gi1\/0\/1:/ })).toBeVisible();
-  await expect(page.getByRole("group", { name: "SFP: 1" }).getByRole("button", { name: /^Порт te1\/0\/1:/ })).toBeVisible();
+  const faceplate = page.getByRole("group", { name: /^Передняя панель / });
+  await expect(faceplate.locator('[data-port-kind="rj45"]')).toHaveCount(24);
+  await expect(faceplate.locator('[data-port-kind="sfp"]')).toHaveCount(4);
+  await expect(faceplate.getByRole("button", { name: /^Порт gi1\/0\/1:/ })).toBeVisible();
+  await expect(faceplate.getByRole("button", { name: /^Порт te1\/0\/1:/ })).toBeVisible();
   await seen.page(page, "physical");
 
   /* Конфиг: the masked copy split into sections. */
@@ -291,8 +295,10 @@ test("backups, the device window and the CLI end to end", async ({ page }) => {
   await expect(shown.locator("div").filter({ hasText: /^\+\s+description uplink-e2e$/ })).toHaveCount(1);
   await expect(shown.locator("div").filter({ hasText: /^-\s+description uplink$/ })).toHaveCount(1);
   await seen.page(page, "diff");
+  /* the journal holds the device's problems, events and sessions; backups (and drift) live on their own tab only */
   await page.getByRole("tab", { name: "Журнал" }).click();
-  await expect(page.getByText("Конфигурация изменена вне панели (вручную)")).toBeVisible();
+  await expect(page.getByRole("region", { name: "История сессий изменений" })).toBeVisible();
+  await expect(page.getByText("Конфигурация изменена вне панели")).toHaveCount(0);
   await seen.page(page, "journal");
 
   /* Not one known secret anywhere the test looked. */

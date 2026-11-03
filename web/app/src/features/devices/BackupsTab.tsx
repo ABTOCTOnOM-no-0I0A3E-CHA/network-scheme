@@ -231,29 +231,3 @@ function DiffView({ deviceId, pair, fmt }: { deviceId: number; pair: { a: number
     </section>
   );
 }
-
-const JOURNAL_VERSIONS = 10;
-
-/** Journal block of the newest configuration versions (backups and drift); the syslog/trap feed follows it. */
-export function BackupJournal({ deviceId }: { deviceId: number }) {
-  const { t, i18n } = useTranslation();
-  const versions = useBackups(deviceId);
-  const list = versions.data?.pages[0]?.items.slice(0, JOURNAL_VERSIONS) ?? [];
-  if (versions.error || list.length === 0) return null;
-  return (
-    <section className="grid gap-1" aria-label={t("backup.journal")}>
-      <h3 className="text-sm font-medium">{t("backup.journal")}</h3>
-      <ul className="grid gap-1 text-sm">
-        {list.map((v) => (
-          <li key={v.id} className="flex flex-wrap items-center gap-2">
-            <time dateTime={v.taken_at} className="text-xs tabular-nums">
-              {new Date(v.taken_at).toLocaleString(i18n.language)}
-            </time>
-            <span>{t(v.drift ? "backup.journalDrift" : "backup.journalVersion", { source: t(`backup.src.${v.source}`) })}</span>
-            {v.drift && <DriftBadge />}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}

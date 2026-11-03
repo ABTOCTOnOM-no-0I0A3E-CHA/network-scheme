@@ -105,7 +105,7 @@ func TestGenericIdentify(t *testing.T) {
 	}
 	want := drivers.Identity{
 		SysObjectID: "1.3.6.1.4.1.32473.1.100", SysDescr: "Synthetic Generic Switch 24-port, software 1.0.0",
-		SysName: "sim-sw1", Model: "SIM-SW-24", Firmware: "1.0.0", Serial: "SIM0001",
+		SysName: "sim-sw1", Model: "SIM-SW-24", Firmware: "1.0.0", Serial: "SIM0001", Role: drivers.RoleSwitch,
 	}
 	if id != want {
 		t.Fatalf("got %+v\nwant %+v", id, want)

@@ -167,12 +167,17 @@ the device is on "auto"; nothing is written (and nobody is notified) when
 nothing changed.
 */
 func (p *Poller) storeIdentity(ctx context.Context, id int64, ident drivers.Identity, driver string) error {
+	role := string(ident.Role)
+	if !drivers.ValidRole(role) {
+		role = "" /* a driver without a role (or a bad one) leaves role_auto NULL */
+	}
 	_, err := p.pool.Exec(ctx, `
 		UPDATE core.device SET model = nullif($2, ''), firmware = nullif($3, ''), sys_object_id = nullif($4, ''),
-			driver = CASE WHEN driver = 'auto' THEN $5 ELSE driver END
+			driver = CASE WHEN driver = 'auto' THEN $5 ELSE driver END, role_auto = nullif($6, '')
 		WHERE id = $1 AND (driver = 'auto' OR model IS DISTINCT FROM nullif($2, '')
-			OR firmware IS DISTINCT FROM nullif($3, '') OR sys_object_id IS DISTINCT FROM nullif($4, ''))`,
-		id, ident.Model, ident.Firmware, ident.SysObjectID, driver)
+			OR firmware IS DISTINCT FROM nullif($3, '') OR sys_object_id IS DISTINCT FROM nullif($4, '')
+			OR role_auto IS DISTINCT FROM nullif($6, ''))`,
+		id, ident.Model, ident.Firmware, ident.SysObjectID, driver, role)
 	if err != nil {
 		return fmt.Errorf("poller: store identity: %w", err)
 	}

@@ -277,16 +277,37 @@ describe("shell", () => {
     expect(screen.getByPlaceholderText(ru.palette.placeholder)).toBeInTheDocument();
   });
 
-  it("palette finds a device by name or by address and opens the list on it", async () => {
+  it("palette finds a device by name or by address: a window opens it, Shift opens the page", async () => {
     roles = [{ role: "viewer", group_id: null }];
     const user = userEvent.setup();
     const router = renderApp("/");
     await screen.findByRole("navigation", { name: ru.nav.label });
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "198.51");
+    expect(await screen.findByText(ru.palette.windowHint)).toBeInTheDocument();
     await user.click(await screen.findByRole("option", { name: /edge-rtr/ }));
+    expect(await screen.findByRole("dialog", { name: "edge-rtr" })).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/");
+
+    await user.click(screen.getByRole("button", { name: ru.windows.close }));
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "198.51");
+    await screen.findByRole("option", { name: /edge-rtr/ });
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
     await waitFor(() => expect(router.state.location.pathname).toBe("/devices/2"));
-    expect(await screen.findByRole("heading", { name: "edge-rtr" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "edge-rtr", level: 1 })).toBeInTheDocument();
+
+    /* Shift held on a click opens the page as well */
+    await router.navigate({ to: "/" });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "198.51");
+    const opt = await screen.findByRole("option", { name: /edge-rtr/ });
+    await user.keyboard("{Shift>}");
+    await user.click(opt);
+    await user.keyboard("{/Shift}");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/devices/2"));
+    expect(screen.queryByRole("dialog", { name: "edge-rtr" })).not.toBeInTheDocument();
 
     await user.keyboard("{Control>}k{/Control}");
     await user.type(screen.getByPlaceholderText(ru.palette.placeholder), "core");
@@ -344,9 +365,17 @@ describe("shell", () => {
       await user.keyboard("{Control>}k{/Control}");
       await user.type(screen.getByPlaceholderText(ru.palette.placeholder), q);
       await user.click(await screen.findByRole("option", { name }));
-      await waitFor(() => expect(router.state.location.search).toEqual({ tab }));
+      await waitFor(() => expect(router.state.location.search).toEqual({ tab: `data/${tab}` }));
       expect(await screen.findByRole("tab", { name: ru.card.tab[tab] })).toHaveAttribute("aria-selected", "true");
     }
+  });
+
+  it("an old ?tab= link opens the matching new tab", async () => {
+    roles = [{ role: "viewer", group_id: null }];
+    const router = renderApp("/devices/2?tab=arp");
+    expect(await screen.findByRole("tab", { name: ru.card.tab.arp })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: ru.card.tab.data })).toHaveAttribute("aria-selected", "true");
+    expect(router.state.location.search).toEqual({ tab: "data/arp" });
   });
 
   it("palette finds panel sections the user may open", async () => {

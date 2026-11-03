@@ -37,6 +37,8 @@ export type WidgetDef<C, D = undefined> = {
   fields?: WidgetField[];
   /** The widget draws its own header (the frame shows only the edit controls). */
   frameless?: boolean;
+  /** On hover or focus the whole widget grows over its neighbours (the mini-map bubble, FR-MAP-7). */
+  bubble?: boolean;
   dataQuery?: (config: C) => WidgetDataQuery<D>;
   render: (data: D, config: C) => ReactNode;
 };

@@ -19,6 +19,10 @@ type topoNodeT struct {
 	DeviceID int64    `json:"device_id"`
 	Name     string   `json:"name"`
 	State    string   `json:"state"`
+	Address  string   `json:"address"`
+	Model    string   `json:"model"`
+	Firmware string   `json:"firmware"`
+	Role     *string  `json:"role"`
 	AreaID   *int64   `json:"area_id"`
 	X        *float64 `json:"x"`
 	Y        *float64 `json:"y"`
@@ -260,6 +264,15 @@ func TestTopologyScopedByGroup(t *testing.T) {
 	onlyB := decode[topologyT](t, f.getTopology(global, url.Values{"group_id": {fmt.Sprint(gB)}}))
 	if len(onlyB.Nodes) != 1 || onlyB.Nodes[0].DeviceID != b1 || len(onlyB.Links) != 0 || len(onlyB.Areas) != 0 {
 		t.Errorf("group B = %+v", onlyB)
+	}
+	/* identity of the node: the hand-set role wins over the derived one */
+	if _, err := f.env.Pool("postgres").Exec(context.Background(), `UPDATE core.device SET model = 'MES2324', firmware = '6.6.2', role_auto = 'switch', role = 'l3switch'
+		WHERE id = $1`, b1); err != nil {
+		t.Fatal(err)
+	}
+	n := decode[topologyT](t, f.getTopology(global, url.Values{"group_id": {fmt.Sprint(gB)}})).Nodes[0]
+	if n.Model != "MES2324" || n.Firmware != "6.6.2" || n.Role == nil || *n.Role != "l3switch" || n.Address == "" || n.State == "" {
+		t.Errorf("node identity = %+v", n)
 	}
 	wantError(t, f.getTopology(viewerA, url.Values{"group_id": {fmt.Sprint(gB)}}), http.StatusNotFound, "not_found")
 	wantError(t, f.getTopology(global, url.Values{"group_id": {"999999999"}}), http.StatusNotFound, "not_found")

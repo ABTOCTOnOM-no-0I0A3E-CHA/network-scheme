@@ -1,21 +1,11 @@
 import type { StylesheetJson } from "cytoscape";
 import type { components } from "@/api/schema";
-import type { EventSeverity } from "@/features/problems/api";
 
 type S = components["schemas"];
 export type NodeState = S["TopologyNode"]["state"];
 export type TopologyLink = S["TopologyLink"];
 
 export const STATE_COLOR: Record<NodeState, string> = { up: "#16a34a", partial: "#d97706", down: "#dc2626", unknown: "#6b7280" };
-
-/** Ring color of a device with open problems, by its worst severity. */
-export const SEVERITY_COLOR: Record<EventSeverity, string> = {
-  info: "#0ea5e9",
-  warning: "#eab308",
-  average: "#f97316",
-  high: "#ef4444",
-  disaster: "#7f1d1d",
-};
 
 const ORDER: NodeState[] = ["up", "unknown", "partial", "down"];
 
@@ -34,6 +24,19 @@ export function linkWidth(speedBps: number | null): number {
   return 6;
 }
 
+type Pos = { x: number; y: number };
+type EdgeEnds = { source(): { position(): Pos }; target(): { position(): Pos } };
+
+/**
+ * How far along a link its port name sits from one end: past the device's label chip when the link leaves downwards
+ * (through the chip), close to the device otherwise, so the two names of a short link never meet.
+ */
+export function portLabelOffset(from: Pos, to: Pos): number {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  return dy > Math.abs(dx) * 0.5 ? 46 : 20;
+}
+
 export const LINK_COLOR = { ok: "#64748b", partial: "#d97706", down: "#dc2626", manual: "#7c3aed" } as const;
 /** Links below this confidence are drawn dashed: only one side (or a MAC table) vouches for them. */
 export const CONFIDENCE_SOLID = 0.8;
@@ -47,85 +50,107 @@ export function linkStyle(l: Pick<TopologyLink, "speed_bps" | "confidence" | "ma
   return { width: linkWidth(l.speed_bps), color, dashed: !l.manual && l.confidence < CONFIDENCE_SOLID };
 }
 
-const svg = (body: string) =>
-  `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`)}`;
+/* device node box (model units): the pictogram fills it; the name and address go below it */
+export const NODE_W = 60;
+export const NODE_H = 52;
+/* room the label below a device takes (model units), kept free by the layout */
+export const LABEL_W = 132;
+export const LABEL_H = 38;
 
-const ICONS = {
-  switch: svg('<rect x="2" y="8" width="20" height="8" rx="1"/><path d="M6 12h.01M10 12h.01M14 12h.01M18 12h.01"/>'),
-  router: svg('<rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 17h.01M11 17h.01M8 10l4-4 4 4M12 6v6"/>'),
-  device: svg('<rect x="3" y="4" width="18" height="12" rx="1"/><path d="M8 20h8M12 16v4"/>'),
-  area: svg('<path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>'),
-} as const;
-export type IconKey = keyof typeof ICONS;
-
-/** Icon kind by driver name (the topology carries no model): Eltex MES are switches, ESR are routers. */
-export function iconKey(driver: string): IconKey {
-  if (driver === "eltex-mes") return "switch";
-  if (driver === "eltex-esr") return "router";
-  return "device";
-}
-
-export const iconUri = (k: IconKey): string => ICONS[k];
-
-/** Cytoscape stylesheet. `large` swaps expensive curved edges for haystack ones; `dark` flips label colors for the dark theme. */
+/**
+ * Cytoscape stylesheet. A device is a transparent box holding four image layers, drawn in order: the problem halo (spilling
+ * over the box, unclipped), the role pictogram, the status lamp (top right) and the pin (top left); a layer that is off is a
+ * transparent placeholder. `large` swaps
+ * curved edges for haystack ones and draws the names on the canvas (the label layer is off then); `dark` flips text colors.
+ */
 export function buildStylesheet(opts: { dark: boolean; large: boolean }): StylesheetJson {
   const text = opts.dark ? "#e5e7eb" : "#1f2937";
+  const chip = opts.dark ? "#111827" : "#ffffff";
   return [
     {
       selector: "node",
       style: {
-        width: 34,
-        height: 34,
-        "background-color": "data(color)",
-        "background-image": "data(icon)",
-        "background-fit": "contain",
-        "background-width": "62%",
-        "background-height": "62%",
-        "border-width": "data(ring)",
-        "border-color": "data(ringColor)",
         label: "data(label)",
         color: text,
         "font-size": 11,
+        "font-family": "Inter Variable, Inter, system-ui, sans-serif",
         "text-valign": "bottom",
-        "text-margin-y": 4,
+        "text-margin-y": 5,
         "text-wrap": "ellipsis",
-        "text-max-width": "110px",
-        "min-zoomed-font-size": 8,
+        "text-max-width": `${LABEL_W - 12}px`,
+        "text-background-color": chip,
+        "text-background-opacity": 0.85,
+        "text-background-padding": "2px",
+        "text-background-shape": "round-rectangle",
+        "min-zoomed-font-size": 7,
       },
     },
-    { selector: "node[?pinned]", style: { "outline-width": 2, "outline-color": "#0ea5e9", "outline-offset": 1 } },
     {
-      selector: "node:parent",
+      selector: "node[kind = 'device']",
       style: {
         shape: "round-rectangle",
-        "background-opacity": 0.05,
-        "background-image": "none",
-        "border-width": 1.5,
-        "border-style": "dashed",
-        "border-color": "data(color)",
-        padding: "24px",
-        "text-valign": "top",
-        "text-margin-y": -4,
-        "font-weight": "bold",
-        "text-max-width": "300px",
+        width: NODE_W,
+        height: NODE_H,
+        "background-opacity": 0,
+        "border-width": 0,
+        label: opts.large ? "data(label)" : "",
+        "background-image": "data(images)",
+        "background-width": ["170%", "100%", "15px", "15px"],
+        "background-height": ["175%", "100%", "15px", "15px"],
+        "background-position-x": ["50%", "50%", "100%", "0%"],
+        "background-position-y": ["55%", "50%", "10%", "6%"],
+        /* the halo, lamp and pin are not clipped to the box (containment stays "inside": "over" images are drawn last, above the pictogram) */
+        "background-clip": ["none", "node", "none", "none"],
+        "background-image-smoothing": "yes",
+        "bounds-expansion": 24,
       },
     },
+    { selector: "node[kind = 'device'].hover", style: { "underlay-color": "#0ea5e9", "underlay-opacity": 0.12, "underlay-padding": 6, "underlay-shape": "round-rectangle", "underlay-corner-radius": 10 } },
     {
-      selector: "node[kind = 'area'], node[kind = 'group']",
-      style: { shape: "round-rectangle", width: "data(w)", height: "data(h)", "background-opacity": 0.08, "border-width": 2, "border-color": "data(color)", "text-valign": "center", "text-margin-y": 0, "background-width": "30%", "background-height": "30%" },
+      selector: "node[kind = 'group']",
+      style: {
+        shape: "round-rectangle",
+        width: "data(w)",
+        height: "data(h)",
+        "background-color": "data(color)",
+        "background-opacity": 0.12,
+        "border-width": 2,
+        "border-color": "data(color)",
+        "background-image": "data(icon)",
+        "background-fit": "contain",
+        "background-width": "60%",
+        "background-height": "60%",
+        "text-valign": "bottom",
+        "font-weight": "bold",
+      },
     },
+    { selector: "node[kind = 'group'].hover", style: { "overlay-opacity": 0.08, "overlay-color": text } },
     {
       selector: "edge",
       style: {
         width: "data(width)",
         "line-color": "data(color)",
         "line-style": "solid",
+        "line-cap": "round",
         "curve-style": opts.large ? "haystack" : "bezier",
-        opacity: 0.85,
+        "control-point-step-size": 26,
+        opacity: 0.9,
+        "font-size": 10,
+        color: text,
+        "text-background-color": chip,
+        "text-background-opacity": 0.92,
+        "text-background-padding": "2px",
+        "text-background-shape": "round-rectangle",
+        "text-border-color": opts.dark ? "#374151" : "#cbd5e1",
+        "text-border-width": 1,
+        "text-border-opacity": 1,
+        /* evaluated when the names show (hover), so they follow the current positions */
+        "source-text-offset": ((e: EdgeEnds) => portLabelOffset(e.source().position(), e.target().position())) as unknown as number,
+        "target-text-offset": ((e: EdgeEnds) => portLabelOffset(e.target().position(), e.source().position())) as unknown as number,
       },
     },
     { selector: "edge[?dashed]", style: { "line-style": "dashed" } },
-    { selector: "edge:selected, edge.hover", style: { opacity: 1, "overlay-opacity": 0.12, "overlay-color": text } },
-    { selector: "node.hover", style: { "overlay-opacity": 0.1, "overlay-color": text } },
+    { selector: "edge.hover, edge.ports", style: { opacity: 1, "source-label": "data(portA)", "target-label": "data(portB)" } },
+    { selector: "edge.hover", style: { "underlay-color": "#0ea5e9", "underlay-opacity": 0.25, "underlay-padding": 3 } },
   ] as StylesheetJson;
 }

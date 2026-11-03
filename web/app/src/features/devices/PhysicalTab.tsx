@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey } from "@/features/auth/errors";
@@ -6,7 +6,10 @@ import { formatBps } from "@/features/charts/series";
 import { ApiError } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
-import { useDeviceTable, useIfMetrics, type TableRows } from "./api";
+import type { DeviceState } from "@/features/common/StateBadge";
+import { EmptyState } from "@/features/common/EmptyState";
+import { useDeviceTable, useIfMetrics, useSysMetrics, type TableRows } from "./api";
+import { FrontPanel } from "./FrontPanel";
 
 type Iface = TableRows["interfaces"];
 type Kind = "rj45" | "sfp";
@@ -25,21 +28,34 @@ export function frontPanel(rows: Iface[]): Record<Kind, Iface[]> {
   return out;
 }
 
-/* the number printed on a port: the last number of its name, else its if_index */
-function portLabel(r: Iface): string {
-  return /(\d+)\s*$/.exec(r.name)?.[1] ?? String(r.if_index);
-}
+type Props = {
+  deviceId: number;
+  onShowChart: (ifIndex: number) => void;
+  /** Faceplate print: model, driver (for the brand text) and state (for the system LEDs). */
+  device?: { model: string; driver: string; state: DeviceState };
+};
 
-type Props = { deviceId: number; onShowChart: (ifIndex: number) => void };
+/* the brand printed on the faceplate, as text: only for drivers of a known vendor */
+const brandOf = (driver: string | undefined) => (driver?.startsWith("eltex") ? "ELTEX" : undefined);
 
 /** "Физика" tab: front panel built from the interface inventory; hover shows speed, VLAN and traffic, a click opens the port card. */
-export function PhysicalTab({ deviceId, onShowChart }: Props) {
+export function PhysicalTab({ deviceId, onShowChart, device }: Props) {
   const { t } = useTranslation();
   const ifaces = useDeviceTable(deviceId, "interfaces", { limit: 1000 });
   const macs = useDeviceTable(deviceId, "mac", { limit: 1000 });
   const lldp = useDeviceTable(deviceId, "lldp", { limit: 1000 });
   const [hover, setHover] = useState<number | undefined>();
+  /* where the hovered port is, relative to the panel box: the tooltip sits above it */
+  const [tipAt, setTipAt] = useState<{ x: number; y: number } | undefined>();
   const [open, setOpen] = useState<number | undefined>();
+  const box = useRef<HTMLDivElement>(null);
+  const onHover = (i: number | undefined) => {
+    setHover(i);
+    const port = i === undefined ? null : box.current?.querySelector(`[data-if-index="${i}"]`);
+    const outer = box.current?.getBoundingClientRect();
+    const r = port?.getBoundingClientRect();
+    setTipAt(r && outer ? { x: r.left + r.width / 2 - outer.left, y: r.top - outer.top } : undefined);
+  };
 
   const rows = ifaces.data?.items;
   const panel = useMemo(() => frontPanel(rows ?? []), [rows]);
@@ -64,55 +80,54 @@ export function PhysicalTab({ deviceId, onShowChart }: Props) {
   }
   const all = rows ?? [];
   const others = all.length - panel.rj45.length - panel.sfp.length;
+  const up = panel.rj45.filter((r) => r.oper_up).length + panel.sfp.filter((r) => r.oper_up).length;
   const byIndex = (i: number | undefined) => all.find((r) => r.if_index === i);
   const hovered = byIndex(hover);
   const opened = byIndex(open);
 
   return (
-    <div className="grid gap-4" data-slot="front-panel">
+    <div className="grid gap-3" data-slot="front-panel">
       {panel.rj45.length + panel.sfp.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t("phys.noPorts")}</p>
+        <EmptyState title={t("phys.noPorts")} hint={t("phys.noPortsHint")} />
       ) : (
-        <div className="flex flex-wrap items-start gap-6 overflow-x-auto rounded-md border bg-muted/40 p-4">
-          {KINDS.filter((k) => panel[k].length > 0).map((k) => (
-            <div key={k} className="grid gap-1">
-              <span className="text-xs text-muted-foreground">{t(`phys.kind.${k}`, { count: panel[k].length })}</span>
-              <div role="group" aria-label={t(`phys.kind.${k}`, { count: panel[k].length })} className="grid grid-flow-col grid-rows-2 gap-1">
-                {panel[k].map((r) => (
-                  <button
-                    key={r.if_index}
-                    type="button"
-                    data-port-kind={k}
-                    data-oper={r.oper_up ? "up" : "down"}
-                    aria-label={t("phys.port", { name: safeText(r.name), state: t(r.oper_up ? "card.up" : "card.down") })}
-                    aria-pressed={open === r.if_index}
-                    title={safeText(r.name)}
-                    className={cn(
-                      "flex items-end justify-center border-2 font-mono text-[10px] leading-none",
-                      k === "sfp" ? "h-7 w-10 rounded-sm" : "h-8 w-8 rounded-[3px]",
-                      r.oper_up ? "border-emerald-700 bg-emerald-500 text-white dark:border-emerald-400" : "border-border bg-background text-muted-foreground",
-                      open === r.if_index && "ring-2 ring-primary",
-                    )}
-                    onMouseEnter={() => setHover(r.if_index)}
-                    onMouseLeave={() => setHover(undefined)}
-                    onFocus={() => setHover(r.if_index)}
-                    onBlur={() => setHover(undefined)}
-                    onClick={() => setOpen(open === r.if_index ? undefined : r.if_index)}
-                  >
-                    {safeText(portLabel(r))}
-                  </button>
-                ))}
-              </div>
+        <>
+          <div ref={box} className="relative">
+            <div className="flex justify-center overflow-x-auto rounded-xl border bg-gradient-to-b from-muted/40 to-muted px-3 pt-6 pb-4 dark:from-muted/20 dark:to-muted/60">
+              <FrontPanel
+                rj45={panel.rj45}
+                sfp={panel.sfp}
+                model={device?.model ?? ""}
+                brand={brandOf(device?.driver)}
+                state={device?.state}
+                hover={hover}
+                selected={open}
+                onHover={onHover}
+                onSelect={(i) => setOpen(open === i ? undefined : i)}
+              />
             </div>
-          ))}
-        </div>
+            {/* the port tooltip: speed, VLAN and traffic of the hovered or focused port, above it; read out politely */}
+            <div
+              aria-live="polite"
+              data-testid="port-hint"
+              className={cn(
+                "pointer-events-none absolute z-10 w-max max-w-72 -translate-x-1/2 -translate-y-full rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg",
+                !hovered && "sr-only",
+              )}
+              style={tipAt && hovered ? { left: tipAt.x, top: tipAt.y - 6 } : undefined}
+            >
+              {hovered && <PortHint deviceId={deviceId} port={hovered} vlans={vlans.get(hovered.if_index)} />}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <Legend tone="bg-emerald-400" label={t("phys.legend.link")} />
+            <Legend tone="bg-amber-400" label={t("phys.legend.slow")} />
+            <Legend tone="bg-zinc-500" label={t("phys.legend.noLink")} />
+            <span>{t("phys.summary", { up, total: panel.rj45.length + panel.sfp.length, rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">{t("phys.hoverHint")}</p>
+        </>
       )}
-      <p className="text-xs text-muted-foreground">
-        {t("phys.summary", { rj45: panel.rj45.length, sfp: panel.sfp.length, other: others })}
-      </p>
-      <div aria-live="polite" className="min-h-10 text-sm" data-testid="port-hint">
-        {hovered ? <PortHint deviceId={deviceId} port={hovered} vlans={vlans.get(hovered.if_index)} /> : <span className="text-muted-foreground">{t("phys.hoverHint")}</span>}
-      </div>
+      <Hardware deviceId={deviceId} up={up} total={panel.rj45.length + panel.sfp.length} />
       {opened && (
         <PortCard
           port={opened}
@@ -127,10 +142,61 @@ export function PhysicalTab({ deviceId, onShowChart }: Props) {
   );
 }
 
+/* the newest sample within this window gives the chassis temperature */
+const SYS_WINDOW_MS = 15 * 60 * 1000;
+
+/** The chassis at a glance: serial, power supplies, fans (ENTITY-MIB), temperature and ports on link. */
+function Hardware({ deviceId, up, total }: { deviceId: number; up: number; total: number }) {
+  const { t } = useTranslation();
+  const ents = useDeviceTable(deviceId, "entities", { limit: 200 });
+  const [range] = useState(() => {
+    const to = new Date(Math.floor(Date.now() / 60_000) * 60_000);
+    return { from: new Date(to.getTime() - SYS_WINDOW_MS), to };
+  });
+  const sys = useSysMetrics(deviceId, range);
+  const items = ents.data?.items ?? [];
+  const chassis = items.find((e) => e.class === "chassis");
+  const count = (cls: string) => items.filter((e) => e.class === cls).length;
+  const temp = sys.data?.points.findLast((p) => p.temp_c !== null)?.temp_c;
+  const none = t("phys.unknown");
+  const tiles: [string, string][] = [
+    [t("phys.hw.serial"), safeText(chassis?.serial) || none],
+    [t("phys.hw.power"), count("powerSupply") ? t("phys.hw.units", { n: count("powerSupply") }) : none],
+    [t("phys.hw.fans"), count("fan") ? t("phys.hw.units", { n: count("fan") }) : none],
+    [t("phys.hw.temp"), temp == null ? none : t("phys.hw.celsius", { n: Math.round(temp) })],
+    [t("phys.hw.ports"), total ? t("phys.hw.portsUp", { up, total }) : none],
+  ];
+  return (
+    <section aria-label={t("phys.hw.title")} className="grid gap-2">
+      <h3 className="text-sm font-semibold">{t("phys.hw.title")}</h3>
+      <dl className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2">
+        {tiles.map(([k, v]) => (
+          <div key={k} className="min-w-0 rounded-lg border bg-muted/30 px-3 py-2">
+            <dt className="text-xs text-muted-foreground">{k}</dt>
+            <dd className="truncate text-sm font-medium" title={v}>
+              {v}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function Legend({ tone, label }: { tone: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span aria-hidden="true" className={cn("inline-block h-1.5 w-3 rounded-sm", tone)} />
+      {label}
+    </span>
+  );
+}
+
+/* a port speed (0 = not reported); with `rate`, a traffic rate, where 0 is a real value */
 function useSpeed() {
   const { t, i18n } = useTranslation();
   const units = ["bps", "kbps", "mbps", "gbps", "tbps"].map((k) => t(`chart.unit.${k}`));
-  return (bps: number) => (bps > 0 ? formatBps(bps, units, i18n.language) : t("phys.unknown"));
+  return (bps: number, rate = false) => (bps > 0 || (rate && bps === 0) ? formatBps(bps, units, i18n.language) : t("phys.unknown"));
 }
 
 function vlanText(vlans: number[] | undefined, none: string): string {
@@ -148,9 +214,14 @@ function PortHint({ deviceId, port, vlans }: { deviceId: number; port: Iface; vl
   });
   const m = useIfMetrics(deviceId, port.if_index, range, 60_000);
   const last = m.data?.points.at(-1);
+  const alias = safeText(port.alias);
   return (
-    <span className="flex flex-wrap gap-x-4 gap-y-1">
-      <span className="font-medium break-all">{safeText(port.name)}</span>
+    <span className="grid gap-0.5">
+      <span className="flex items-center gap-2 font-semibold break-all">
+        <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", port.oper_up ? "bg-emerald-500" : "bg-zinc-400")} />
+        {safeText(port.name)}
+        {alias && <span className="truncate font-normal text-muted-foreground">{alias}</span>}
+      </span>
       <span>
         {t("phys.speed")}: {speed(port.speed_bps)}
       </span>
@@ -158,7 +229,7 @@ function PortHint({ deviceId, port, vlans }: { deviceId: number; port: Iface; vl
         {t("phys.vlan")}: {vlanText(vlans, t("phys.unknown"))}
       </span>
       <span>
-        {t("phys.traffic")}: {last ? t("phys.inOut", { in: speed(last.in_bps), out: speed(last.out_bps) }) : m.isPending ? t("card.loading") : t("phys.unknown")}
+        {t("phys.traffic")}: {last ? t("phys.inOut", { in: speed(last.in_bps, true), out: speed(last.out_bps, true) }) : m.isPending ? t("card.loading") : t("phys.unknown")}
       </span>
     </span>
   );
@@ -177,6 +248,12 @@ type CardProps = {
 function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: CardProps) {
   const { t, i18n } = useTranslation();
   const speed = useSpeed();
+  /* the card opens below the panel: bring it into view (in a window it would open off-screen) */
+  const self = useRef<HTMLElement>(null);
+  /* a block body: newer browsers return a promise from scrollIntoView, which React would take for a cleanup */
+  useEffect(() => {
+    self.current?.scrollIntoView?.({ block: "nearest" });
+  }, [port.if_index]);
   const facts: [string, string][] = [
     [t("card.col.ifIndex"), String(port.if_index)],
     [t("card.col.alias"), safeText(port.alias) || "-"],
@@ -188,7 +265,7 @@ function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: Ca
     [t("card.col.seenAt"), new Date(port.seen_at).toLocaleString(i18n.language)],
   ];
   return (
-    <section aria-label={t("phys.card", { name: safeText(port.name) })} className="grid gap-3 rounded-md border p-4">
+    <section ref={self} aria-label={t("phys.card", { name: safeText(port.name) })} className="grid scroll-mb-4 gap-3 rounded-md border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="min-w-0 font-semibold break-all">{safeText(port.name)}</h3>
         <div className="flex gap-2">
@@ -213,7 +290,7 @@ function PortCard({ port, vlans, macCount, neighbors, onClose, onShowChart }: Ca
           <span className="text-xs text-muted-foreground">{t("phys.neighbors")}</span>
           {neighbors.map((n, i) => (
             <span key={i} className="break-all">
-              {safeText(n.sys_name) || safeText(n.chassis_id)} - {safeText(n.port_id)}
+              {safeText(n.sys_name) || safeText(n.chassis_id)} · {safeText(n.port_id)}
             </span>
           ))}
         </div>

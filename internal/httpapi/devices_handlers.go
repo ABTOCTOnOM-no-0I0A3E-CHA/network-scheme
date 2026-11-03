@@ -51,6 +51,7 @@ type deviceResponse struct {
 	Driver            string     `json:"driver"`
 	Model             string     `json:"model"`
 	Firmware          string     `json:"firmware"`
+	Role              *string    `json:"role"` /* set by hand, else derived; null when neither is known */
 	InsecureProtocols bool       `json:"insecure_protocols"`
 	State             string     `json:"state"`
 	StateSince        *time.Time `json:"state_since"`
@@ -58,12 +59,14 @@ type deviceResponse struct {
 
 type deviceDetailResponse struct {
 	deviceResponse
-	SNMPPort           int    `json:"snmp_port"`
-	ParentID           *int64 `json:"parent_id"`
-	IntervalAvailS     *int   `json:"interval_avail_s"`
-	IntervalMetricsS   *int   `json:"interval_metrics_s"`
-	IntervalInventoryS *int   `json:"interval_inventory_s"`
-	LastError          string `json:"last_error"`
+	SNMPPort           int     `json:"snmp_port"`
+	ParentID           *int64  `json:"parent_id"`
+	IntervalAvailS     *int    `json:"interval_avail_s"`
+	IntervalMetricsS   *int    `json:"interval_metrics_s"`
+	IntervalInventoryS *int    `json:"interval_inventory_s"`
+	LastError          string  `json:"last_error"`
+	RoleManual         *string `json:"role_manual"` /* null: the role is automatic */
+	RoleAuto           *string `json:"role_auto"`
 }
 
 /* toDeviceResponse adds the availability state; a device the state view does not list yet is "unknown". */
@@ -73,8 +76,17 @@ func toDeviceResponse(d devices.Device, st inventory.DeviceState) deviceResponse
 	}
 	return deviceResponse{
 		ID: d.ID, Name: d.Name, Address: d.Address.String(), GroupID: d.GroupID, Driver: d.Driver,
-		Model: d.Model, Firmware: d.Firmware, InsecureProtocols: d.InsecureProtocols, State: st.State, StateSince: st.Since,
+		Model: d.Model, Firmware: d.Firmware, Role: nonEmpty(d.EffectiveRole()), InsecureProtocols: d.InsecureProtocols,
+		State: st.State, StateSince: st.Since,
 	}
+}
+
+/* nonEmpty is nil for "" and a pointer to s otherwise. */
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 /* parseDeviceAddr accepts a unicast host address without zone; loopback, multicast, broadcast and unspecified are refused. */
@@ -213,7 +225,7 @@ func (s *server) getDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deviceDetailResponse{
 		deviceResponse: toDeviceResponse(d, states[d.ID]), SNMPPort: d.SNMPPort, ParentID: d.ParentID,
 		IntervalAvailS: d.Intervals.AvailS, IntervalMetricsS: d.Intervals.MetricsS, IntervalInventoryS: d.Intervals.InventoryS,
-		LastError: states[d.ID].LastError,
+		LastError: states[d.ID].LastError, RoleManual: nonEmpty(d.Role), RoleAuto: nonEmpty(d.RoleAuto),
 	})
 }
 
@@ -222,6 +234,7 @@ updateDevice changes the given fields; an absent field is unchanged and a
 null interval falls back to the group's. Moving the device needs
 devices.manage on the target group as well. parent_id (null clears) must name
 a device the caller can see; cycles and chains over 16 are refused with 409.
+role (null: automatic) must be one of devices.Roles.
 */
 func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -243,6 +256,7 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 		SNMPPort           *int            `json:"snmp_port"`
 		GroupID            *int64          `json:"group_id"`
 		ParentID           json.RawMessage `json:"parent_id"`
+		Role               json.RawMessage `json:"role"`
 		IntervalAvailS     json.RawMessage `json:"interval_avail_s"`
 		IntervalMetricsS   json.RawMessage `json:"interval_metrics_s"`
 		IntervalInventoryS json.RawMessage `json:"interval_inventory_s"`
@@ -280,6 +294,17 @@ func (s *server) updateDevice(w http.ResponseWriter, r *http.Request) {
 			valid = false
 		}
 		details["parent_id"] = parent
+	}
+	if in.Role != nil {
+		var role *string
+		if json.Unmarshal(in.Role, &role) != nil || (role != nil && !devices.ValidRole(*role)) {
+			valid = false
+		}
+		auto := ""
+		if role == nil {
+			role = &auto /* null returns the device to the automatic role */
+		}
+		p.Role, details["role"] = role, *role
 	}
 	var iv [3]intervalUpdate
 	for i, f := range []struct {

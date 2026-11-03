@@ -2,6 +2,7 @@ package eltexesr_test
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/netip"
 	"reflect"
@@ -77,7 +78,7 @@ func TestESRCollectResources(t *testing.T) {
 	if m.TempC == nil || *m.TempC != 42 {
 		t.Errorf("TempC = %v, want 42 (sensor with status != ok ignored)", m.TempC)
 	}
-	if len(s.Interfaces) != 2 || s.Interfaces[1].OutOctets != 8000 {
+	if len(s.Interfaces) != 32 || s.Interfaces[24].Name != "te1/0/1" || s.Interfaces[24].OutOctets != 8000 {
 		t.Errorf("interfaces from the embedded generic driver: %+v", s.Interfaces)
 	}
 }
@@ -105,8 +106,8 @@ func TestESRRoutes(t *testing.T) {
 	want := []drivers.Route{
 		{Dest: p("0.0.0.0/0"), NextHop: a("192.0.2.1"), IfIndex: 1, Proto: "netmgmt"},
 		{Dest: p("192.0.2.0/24"), NextHop: a("0.0.0.0"), IfIndex: 1, Proto: "local"},
-		{Dest: p("198.51.100.0/25"), NextHop: a("203.0.113.2"), IfIndex: 2, Proto: "bgp"},
-		{Dest: p("203.0.113.0/24"), NextHop: a("0.0.0.0"), IfIndex: 2, Proto: "local"},
+		{Dest: p("198.51.100.0/25"), NextHop: a("203.0.113.2"), IfIndex: 25, Proto: "bgp"},
+		{Dest: p("203.0.113.0/24"), NextHop: a("0.0.0.0"), IfIndex: 25, Proto: "local"},
 	}
 	if !reflect.DeepEqual(inv.Routes, want) {
 		t.Fatalf("routes\n got %+v\nwant %+v", inv.Routes, want)
@@ -158,7 +159,24 @@ func TestESRPortKinds(t *testing.T) {
 	for _, i := range inv.Interfaces {
 		got[i.Name] = i.PortKind
 	}
-	if want := map[string]drivers.PortKind{"gi1/0/1": drivers.PortRJ45, "te1/0/1": drivers.PortSFP}; !maps.Equal(got, want) {
+	want := map[string]drivers.PortKind{}
+	for n := 1; n <= 24; n++ {
+		want[fmt.Sprintf("gi1/0/%d", n)] = drivers.PortRJ45
+	}
+	for n := 1; n <= 8; n++ {
+		want[fmt.Sprintf("te1/0/%d", n)] = drivers.PortSFP
+	}
+	if !maps.Equal(got, want) {
 		t.Fatalf("port kinds %v, want %v", got, want)
+	}
+}
+
+func TestESRIdentify(t *testing.T) {
+	id, err := eltexesr.New().Identify(ctx(t), reader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Model != "ESR-1000" || id.Firmware != "1.23.3" || id.Serial != "NP00000012" || id.Role != drivers.RoleRouter {
+		t.Fatalf("identity %+v", id)
 	}
 }

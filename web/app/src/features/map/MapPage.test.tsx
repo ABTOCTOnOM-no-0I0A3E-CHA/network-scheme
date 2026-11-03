@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { Core } from "cytoscape";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -7,6 +8,7 @@ import { setupServer } from "msw/node";
 import "@/i18n";
 import { installCanvasStub } from "./canvasStub";
 import { area, node } from "./fixtures";
+import { DeviceWindowsProvider } from "@/features/devices/DeviceWindows";
 import { MapPage } from "./MapPage";
 
 const navigate = vi.fn();
@@ -59,6 +61,14 @@ const server = setupServer(
     await rec(request);
     return new HttpResponse(null, { status: 204 });
   }),
+  http.post("*/api/map/views/:id/areas", async ({ request }) => {
+    await rec(request);
+    return HttpResponse.json({ id: 4 }, { status: 201 });
+  }),
+  http.put("*/api/map/views/:id/positions", async ({ request }) => {
+    await rec(request);
+    return new HttpResponse(null, { status: 204 });
+  }),
 );
 beforeAll(() => {
   installCanvasStub();
@@ -71,6 +81,8 @@ afterEach(() => {
   bodies = [];
 });
 afterAll(() => server.close());
+
+const cyOf = () => (screen.getByTestId("map-canvas") as unknown as { _cyreg: { cy: Core } })._cyreg.cy;
 
 const renderPage = (canManage: boolean) =>
   render(
@@ -88,7 +100,8 @@ describe("MapPage", () => {
     expect(within(sel).getByRole("option", { name: "<b>HQ</b>" })).toBeInTheDocument();
     await waitFor(() => expect(container.querySelector("img[src='/api/map/backgrounds/5']")).not.toBeNull());
     expect(container.querySelector("b")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Редактор карты" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Виды и подложки" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Правка" })).toBeNull();
   });
 
   it("opens the view from ?view=", async () => {
@@ -111,7 +124,7 @@ describe("MapPage", () => {
 
   it("lets map.manage create a view, upload a background into it and delete it after confirmation", async () => {
     renderPage(true);
-    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Виды и подложки" }));
     await userEvent.type(screen.getByLabelText("Название вида"), "New floor");
     await userEvent.click(screen.getByRole("button", { name: "Создать вид" }));
     await waitFor(() => expect(bodies).toContainEqual({ method: "POST", url: "/api/map/views", body: { name: "New floor", kind: "logical" } }));
@@ -129,7 +142,7 @@ describe("MapPage", () => {
 
   it("deletes the background of the view for everyone after confirmation", async () => {
     renderPage(true);
-    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Виды и подложки" }));
     await userEvent.click(await screen.findByRole("button", { name: "Удалить подложку везде" }));
     expect(bodies.some((b) => b.method === "DELETE")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "Подтвердить" }));
@@ -138,7 +151,7 @@ describe("MapPage", () => {
 
   it("lists backgrounds and deletes only an unused one, after confirmation", async () => {
     renderPage(true);
-    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Виды и подложки" }));
     const list = await screen.findByRole("list", { name: "Подложки" });
     expect(await within(list).findByText("№5 · image/svg+xml · 800×600 · 4 КиБ")).toBeInTheDocument();
     expect(within(list).getByText("Используется в видах: 1")).toBeInTheDocument();
@@ -149,16 +162,72 @@ describe("MapPage", () => {
     await waitFor(() => expect(bodies).toContainEqual({ method: "DELETE", url: "/api/map/backgrounds/8", body: "" }));
   });
 
-  it("edits an area through the form", async () => {
+  it("gates editing behind the Правка mode: devices and zones are fixed until it is on", async () => {
     renderPage(true);
-    await userEvent.click(await screen.findByRole("button", { name: "Редактор карты" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Floor <i>1</i>" }));
-    const name = screen.getByLabelText("Название области");
-    await userEvent.clear(name);
-    await userEvent.type(name, "Lobby");
-    await userEvent.click(screen.getByRole("button", { name: "Сохранить" }));
-    await waitFor(() =>
-      expect(bodies).toContainEqual({ method: "PATCH", url: "/api/map/views/1/areas/1", body: { name: "Lobby", kind: "building", parent_id: null, x: 0, y: 0, w: 100, h: 100 } }),
+    const map = await screen.findByTestId("network-map");
+    await waitFor(() => expect(cyOf().nodes()).toHaveLength(1));
+    expect(cyOf().getElementById("d1").grabbable()).toBe(false);
+    expect(within(map).queryByTestId("area-editor")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Зона" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Правка" }));
+    expect(await within(map).findByTestId("area-editor")).toBeInTheDocument();
+    expect(cyOf().getElementById("d1").grabbable()).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Правка" }));
+    expect(within(map).queryByTestId("area-editor")).toBeNull();
+  });
+
+  it("saves a dragged device into the view, pinned", async () => {
+    renderPage(true);
+    await screen.findByTestId("network-map");
+    await userEvent.click(screen.getByRole("button", { name: "Правка" }));
+    await waitFor(() => expect(cyOf().getElementById("d1").grabbable()).toBe(true));
+    const n = cyOf().getElementById("d1");
+    n.position({ x: 210, y: 120 });
+    n.emit("dragfree");
+    await waitFor(() => expect(bodies).toContainEqual({ method: "PUT", url: "/api/map/views/1/positions", body: { items: [{ device_id: 1, x: 210, y: 120, pinned: true }] } }), { timeout: 3000 });
+  });
+
+  it("draws a zone on the map in edit mode and creates it with its name and kind", async () => {
+    renderPage(true);
+    await screen.findByTestId("network-map");
+    await userEvent.click(screen.getByRole("button", { name: "Правка" }));
+    await userEvent.click(screen.getByRole("button", { name: "Зона" }));
+    const s = await screen.findByTestId("draw-surface");
+    fireEvent.pointerDown(s, { clientX: 10, clientY: 10, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(s, { clientX: 40, clientY: 30, pointerId: 1 });
+    fireEvent.pointerUp(s, { pointerId: 1 });
+    await userEvent.type(screen.getByLabelText("Название"), "Rack <1>");
+    await userEvent.click(screen.getByRole("button", { name: "Создать" }));
+    await waitFor(() => expect(bodies.find((b) => b.method === "POST" && b.url === "/api/map/views/1/areas")).toBeDefined());
+    const body = bodies.find((b) => b.url === "/api/map/views/1/areas")!.body as Record<string, unknown>;
+    expect(body).toMatchObject({ name: "Rack <1>", kind: "room" });
+    for (const k of ["x", "y", "w", "h"]) expect(Number.isFinite(body[k])).toBe(true);
+    expect("parent_id" in body).toBe(true);
+  });
+
+  it("keeps the positions of all devices: editing them switches to a default view, created on first use", async () => {
+    server.use(http.get("*/api/map/views", () => HttpResponse.json([])));
+    renderPage(true);
+    const sel = await screen.findByRole("combobox", { name: "Вид карты" });
+    expect(sel).toHaveValue("0");
+    await userEvent.click(screen.getByRole("button", { name: "Правка" }));
+    await waitFor(() => expect(bodies).toContainEqual({ method: "POST", url: "/api/map/views", body: { name: "Основная схема", kind: "logical" } }));
+    await waitFor(() => expect(topoQueries.at(-1)?.get("view_id")).toBe("9"));
+  });
+
+  it("opens a device window when a device is clicked", async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <DeviceWindowsProvider renderBody={(id) => <p>card {id}</p>} onOpenPage={vi.fn()}>
+          <MapPage canManage={false} />
+        </DeviceWindowsProvider>
+      </QueryClientProvider>,
     );
+    await screen.findByTestId("network-map");
+    await waitFor(() => expect(cyOf().nodes()).toHaveLength(1));
+    cyOf().getElementById("d1").emit("tap");
+    const win = await screen.findByRole("dialog", { name: "sw1" });
+    expect(within(win).getByText("card 1")).toBeInTheDocument();
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

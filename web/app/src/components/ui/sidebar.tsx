@@ -219,7 +219,8 @@ function Sidebar({
       <div
         data-slot="sidebar-gap"
         className={cn(
-          "relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear",
+          // In-flow column under the fixed panel: it carries the panel background down the whole page, past the viewport.
+          "relative h-full w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear group-data-[variant=sidebar]:border-r group-data-[variant=sidebar]:bg-sidebar group-data-[collapsible=offcanvas]:border-r-0",
           "group-data-[collapsible=offcanvas]:w-0",
           "group-data-[side=right]:rotate-180",
           variant === "floating" || variant === "inset"

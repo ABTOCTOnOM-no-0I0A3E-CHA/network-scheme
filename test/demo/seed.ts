@@ -13,6 +13,11 @@ const RUN = join(import.meta.dir, ".run");
 const BASE = "https://localhost";
 const GROUP = "Демо-стенд";
 const DASHBOARD = "Демо";
+/*
+ * Roles set by hand where the poller cannot tell: the generic router fixture reports no sysServices, and nothing answers
+ * at offline-1. The other devices keep the automatic role (driver and sysServices).
+ */
+const ROLES: Record<string, string> = { "rtr-branch-1": "router", "offline-1": "server" };
 /* the read account of the simulated CLI: test values, the same in devices.sh */
 const SSH = { username: "demo-read", password: "demo-read-pw" };
 
@@ -95,7 +100,7 @@ for (const d of devices) {
   const id = (await must<{ id: number }>("POST", "/api/devices", { name: d.name, address: d.address, group_id: group })).id;
   ids[d.name] = id;
   /* metrics every 30 s, so charts and the interface load fill within minutes */
-  await must("PATCH", `/api/devices/${id}`, { interval_metrics_s: 30 });
+  await must("PATCH", `/api/devices/${id}`, { interval_metrics_s: 30, ...(ROLES[d.name] ? { role: ROLES[d.name] } : {}) });
   /* SSH first: the schedule backs a new device up within seconds, and it needs both */
   const profiles: [string, object][] = [];
   if (d.ssh !== "-") profiles.push(["ssh_read", SSH]);
@@ -112,14 +117,14 @@ const chartDevice = ids["sw-floor-2"] ?? Object.values(ids)[0];
 const dash = (await must<{ id: number }>("POST", "/api/dashboards", { name: DASHBOARD, shared: true, default_for_role: "admin" })).id;
 await must("PUT", `/api/dashboards/${dash}/widgets`, {
   widgets: [
-    { type: "device_status", x: 0, y: 0, w: 3, h: 6, config: {} },
-    { type: "problems", x: 3, y: 0, w: 5, h: 6, config: { limit: 10 } },
-    { type: "top_devices", x: 8, y: 0, w: 4, h: 6, config: { metric: "cpu", limit: 10 } },
-    { type: "metric_chart", x: 0, y: 6, w: 6, h: 6, config: { device_id: chartDevice, metric: "cpu", range: "1h" } },
-    { type: "top_interfaces", x: 6, y: 6, w: 6, h: 6, config: { limit: 10 } },
-    { type: "log_stream", x: 0, y: 12, w: 6, h: 8, config: { limit: 20 } },
-    { type: "mini_map", x: 6, y: 12, w: 6, h: 8, config: {} },
-    { type: "recent_changes", x: 0, y: 20, w: 12, h: 6, config: { limit: 10 } },
+    { type: "device_status", x: 0, y: 0, w: 3, h: 5, config: {} },
+    { type: "problems", x: 3, y: 0, w: 5, h: 5, config: { limit: 10 } },
+    { type: "top_devices", x: 8, y: 0, w: 4, h: 5, config: { metric: "cpu", limit: 10 } },
+    { type: "log_stream", x: 0, y: 5, w: 7, h: 9, config: { limit: 30 } },
+    { type: "mini_map", x: 7, y: 5, w: 5, h: 9, config: {} },
+    { type: "metric_chart", x: 0, y: 14, w: 6, h: 6, config: { device_id: chartDevice, metric: "cpu", range: "1h" } },
+    { type: "top_interfaces", x: 6, y: 14, w: 6, h: 6, config: { limit: 8 } },
+    { type: "recent_changes", x: 0, y: 20, w: 12, h: 5, config: { limit: 8 } },
   ],
 });
 console.log(`  dashboard «${DASHBOARD}» id ${dash} with 8 widgets`);

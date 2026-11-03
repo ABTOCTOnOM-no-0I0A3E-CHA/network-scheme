@@ -7,6 +7,9 @@ import { api } from "@/lib/api";
 type S = components["schemas"];
 export type Device = S["Device"];
 export type DeviceDetail = S["DeviceDetail"];
+export type DeviceRole = S["DeviceRole"];
+/** Every role in display order (the API enum). */
+export const DEVICE_ROLES: readonly DeviceRole[] = ["switch", "router", "l3switch", "firewall", "server", "ap", "pc", "printer", "phone", "cloud", "other"];
 export type Group = S["Group"];
 export type IfPoint = S["IfPoint"];
 export type SysPoint = S["SysPoint"];
@@ -152,7 +155,7 @@ export function useGroups(enabled = true) {
 }
 
 export type DeviceCreate = { name: string; address: string; group_id: number; snmp_port?: number };
-export type DevicePatch = Partial<Pick<DeviceDetail, "name" | "address" | "snmp_port" | "group_id" | "interval_avail_s" | "interval_metrics_s" | "interval_inventory_s" | "parent_id">>;
+export type DevicePatch = Partial<Pick<DeviceDetail, "name" | "address" | "snmp_port" | "group_id" | "interval_avail_s" | "interval_metrics_s" | "interval_inventory_s" | "parent_id">> & { role?: DeviceRole | null };
 
 /** Adds a device; resolves to its id. */
 export function useCreateDevice() {
