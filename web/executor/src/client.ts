@@ -34,11 +34,11 @@ export function getStatus(signal?: AbortSignal): Promise<Result<ExecutorStatus>>
 
 export type Poster = {
   /*
-   * POSTs the body built from a fresh ticket from the panel (one per request, never reused). Never retries; refuses
-   * a second request while one is in flight; refuses a TOTP `code` already sent from this page: a replayed or
-   * parallel-submitted code is a counted failure on the server.
+   * POSTs body with a fresh ticket from the panel added (one per request, never reused). Never retries; refuses
+   * a second request while one is in flight; refuses a TOTP `code` already sent from this page before it asks the
+   * panel for a ticket: a replayed or parallel-submitted code is a counted failure on the server.
    */
-  post<T>(path: string, build: (ticket: string) => { code?: string } & Record<string, unknown>, schema: z.ZodType<T>): Promise<Result<T>>;
+  post<T>(path: string, body: { code?: string; ticket?: never } & Record<string, unknown>, schema: z.ZodType<T>): Promise<Result<T>>;
 };
 
 const REMEMBERED_CODES = 16;
@@ -47,8 +47,9 @@ export function createPoster(bridge: Pick<ExecutorBridge, "requestTicket">): Pos
   let inFlight = false;
   const sent: string[] = [];
   return {
-    async post(path, build, schema) {
+    async post(path, body, schema) {
       if (inFlight) return { ok: false, failure: { kind: "local", code: "busy" } };
+      if (body.code !== undefined && sent.includes(body.code)) return { ok: false, failure: { kind: "local", code: "code_reused" } };
       inFlight = true;
       try {
         let ticket: string;
@@ -57,13 +58,11 @@ export function createPoster(bridge: Pick<ExecutorBridge, "requestTicket">): Pos
         } catch (e) {
           return { ok: false, failure: { kind: "local", code: e instanceof BridgeError ? e.code : "no_ticket" } };
         }
-        const body = build(ticket);
         if (body.code !== undefined) {
-          if (sent.includes(body.code)) return { ok: false, failure: { kind: "local", code: "code_reused" } };
           sent.push(body.code);
           if (sent.length > REMEMBERED_CODES) sent.shift();
         }
-        return await run(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, schema);
+        return await run(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ticket }) }, schema);
       } finally {
         inFlight = false;
       }

@@ -1,11 +1,13 @@
 package attacktest_test
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -35,8 +37,9 @@ var trace = []struct {
 		{"cmd/executor/internal/authz", "TestPolicyCheckedAgainInsideTheWrite"},
 		{"cmd/executor/internal/admin", "TestPolicyFailsClosed"},
 		{"cmd/nmsctl", "TestEnableEditsThePolicyAtomically"},
-		{".github/workflows/ci.yml", "sudo /usr/local/bin/nmsctl executor enable"},
-		{"test/e2e/executor.spec.ts", "C1"},
+		{".github/workflows/ci.yml", "- name: The executor is off after install (C1), then enable, enroll and grant"},
+		{".github/workflows/ci.yml", "\n          sudo /usr/local/bin/nmsctl executor enable\n"},
+		{"test/e2e/executor.spec.ts", `test("C1: after nmsctl executor enable requests go past the policy gate to the route table and authz", `},
 	}},
 	{"C2a", "no TOTP, a wrong code, another user's code", []ref{
 		{"cmd/executor/internal/authz", "TestC2aNoOrWrongTOTP"},
@@ -140,27 +143,33 @@ var trace = []struct {
 		{"cmd/executor/internal/admin", "TestSocketRefusesAnotherUID"},
 		{"internal/install", "TestComposeHardening"},
 		{"internal/install", "TestRunInExecutor"},
-		{"scripts/check-isolation.sh", `go list -deps "./cmd/$name"`},
+		{"scripts/check-isolation.sh", `done < <(go list -deps "./cmd/$name" | tr -d '\r')`},
 	}},
 }
 
 /*
 Every scenario of the index has its proofs, and every proof exists: a test
 function of that name in the package's _test.go files (any build tag: the
-Linux-only ones run in CI), or the text in the named file. Renaming or
-deleting a proof fails here until the index follows.
+Linux-only ones run in CI) that never skips itself (t.Skip, Skipf, SkipNow
+in its body; only skipAllowed may), or the text in the named file. Renaming
+or deleting a proof fails here until the index follows.
+
+With NMS_TRACE_JSON set to the output of go test -json over the traced
+packages (CI step "Traced attack tests ran"), every traced test must also
+have passed there: a skip (Docker missing, -short, a helper's skip) or an
+absent test fails.
 */
 func TestTraceability(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "..")
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("repository root: %v", err)
 	}
-	tests := map[string]map[string]bool{} /* package directory -> its test functions */
-	testsOf := func(dir string) map[string]bool {
+	tests := map[string]map[string]*ast.FuncDecl{} /* package directory -> its test functions */
+	testsOf := func(dir string) map[string]*ast.FuncDecl {
 		if fns, ok := tests[dir]; ok {
 			return fns
 		}
-		fns := map[string]bool{}
+		fns := map[string]*ast.FuncDecl{}
 		files, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(dir), "*_test.go"))
 		if err != nil || len(files) == 0 {
 			t.Errorf("%s: no test files (%v)", dir, err)
@@ -173,14 +182,14 @@ func TestTraceability(t *testing.T) {
 			}
 			for _, d := range af.Decls {
 				if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
-					fns[fn.Name.Name] = true
+					fns[fn.Name.Name] = fn
 				}
 			}
 		}
 		tests[dir] = fns
 		return fns
 	}
-	ids := map[string]bool{}
+	ids, traced := map[string]bool{}, map[string]bool{}
 	for _, s := range trace {
 		if ids[s.id] {
 			t.Errorf("%s twice in the index", s.id)
@@ -197,9 +206,15 @@ func TestTraceability(t *testing.T) {
 				}
 				continue
 			}
-			if !testsOf(r.dir)[r.name] {
+			fn := testsOf(r.dir)[r.name]
+			if fn == nil {
 				t.Errorf("%s: %s.%s does not exist", s.id, r.dir, r.name)
+				continue
 			}
+			if _, ok := skipAllowed[r.dir+"."+r.name]; skips(fn) && !ok {
+				t.Errorf("%s: %s.%s can skip itself, so it may prove nothing", s.id, r.dir, r.name)
+			}
+			traced[r.dir+"."+r.name] = true
 		}
 	}
 	/* The scenarios 4a must prove (the plan's table rows owned by 4a, the 4a.7 attack, the five review focus items). */
@@ -207,5 +222,98 @@ func TestTraceability(t *testing.T) {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}
+	}
+	if f := os.Getenv("NMS_TRACE_JSON"); f != "" {
+		problems, err := ran(root, f, traced)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range problems {
+			t.Error(p)
+		}
+	}
+}
+
+/* skipAllowed lists traced tests ("dir.Name") that may call t.Skip themselves, each with its reason. */
+var skipAllowed = map[string]string{}
+
+/* skips reports whether fn's body calls a Skip method (t.Skip, t.Skipf, t.SkipNow, or any receiver's). */
+func skips(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Skip" || sel.Sel.Name == "Skipf" || sel.Sel.Name == "SkipNow") {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+/* ran reads the go test -json output in file and lists every traced test ("dir.Name") that did not pass: skipped, failed or absent. */
+func ran(root, file string, traced map[string]bool) ([]string, error) {
+	mod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return nil, err
+	}
+	first, _, _ := strings.Cut(string(mod), "\n")
+	module := strings.TrimSpace(strings.TrimPrefix(first, "module "))
+	b, err := os.ReadFile(file) // #nosec G304 -- the CI step's own output file
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]string{} /* "dir.Name" -> pass, fail or skip */
+	for _, line := range strings.Split(string(b), "\n") {
+		var ev struct{ Action, Package, Test string }
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Test == "" || strings.Contains(ev.Test, "/") {
+			continue
+		}
+		if ev.Action == "pass" || ev.Action == "fail" || ev.Action == "skip" {
+			result[strings.TrimPrefix(strings.TrimPrefix(ev.Package, module), "/")+"."+ev.Test] = ev.Action
+		}
+	}
+	var problems []string
+	for k := range traced {
+		switch got := result[k]; got {
+		case "pass":
+		case "":
+			problems = append(problems, k+": absent from "+file)
+		default:
+			problems = append(problems, k+": "+got+" in "+file)
+		}
+	}
+	sort.Strings(problems)
+	return problems, nil
+}
+
+/* The skip and run checks catch what they are meant to catch. */
+func TestTraceabilityCatchesSkipsAndAbsentTests(t *testing.T) {
+	af, err := parser.ParseFile(token.NewFileSet(), "x_test.go", `package x
+func TestA(t *testing.T) { if testing.Short() { t.Skip("no") } }
+func TestB(t *testing.T) { t.Run("s", func(t *testing.T) { t.SkipNow() }) }
+func TestC(t *testing.T) { t.Log("skip") }`, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []bool
+	for _, d := range af.Decls {
+		got = append(got, skips(d.(*ast.FuncDecl)))
+	}
+	if len(got) != 3 || !got[0] || !got[1] || got[2] {
+		t.Errorf("skips = %v, want [true true false]", got)
+	}
+
+	file := filepath.Join(t.TempDir(), "t.json")
+	pkg := `"Package":"github.com/beekamai/network-scheme/cmd/x"`
+	if err := os.WriteFile(file, []byte(`{"Action":"pass",`+pkg+`,"Test":"TestA"}
+{"Action":"skip",`+pkg+`,"Test":"TestB"}
+{"Action":"pass",`+pkg+`,"Test":"TestC/sub"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	problems, err := ran(filepath.Join("..", "..", "..", ".."), file, map[string]bool{"cmd/x.TestA": true, "cmd/x.TestB": true, "cmd/x.TestC": true})
+	if err != nil || len(problems) != 2 || !strings.HasPrefix(problems[0], "cmd/x.TestB: skip") || !strings.HasPrefix(problems[1], "cmd/x.TestC: absent") {
+		t.Errorf("ran = %q, %v", problems, err)
 	}
 }

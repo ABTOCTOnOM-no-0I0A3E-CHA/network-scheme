@@ -22,6 +22,13 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Check
         run: scripts/check.sh
+      - name: Traced attack tests ran (none skipped or absent)
+        run: |
+          # The packages of TestTraceability's index once more, as JSON: every traced test must report pass
+          # (a skip or an absent test fails; a package missing here shows as absent tests).
+          go test -json -count=1 -p 2 ./cmd/executor/... ./cmd/nmsctl ./internal/httpapi ./internal/store \
+            ./internal/poller ./internal/ssh ./internal/install ./test/gateway > /tmp/nms-traced.json || true
+          NMS_TRACE_JSON=/tmp/nms-traced.json go test -count=1 -run '^TestTraceability$' -v ./cmd/executor/internal/attacktest
       - name: Race detector
         run: |
           go test -race ./internal/poller/... ./internal/metrics/... ./internal/ssh/... ./internal/snmp/... ./internal/jobs/...
@@ -363,9 +370,14 @@ jobs:
           code="$(x POST /x/sessions '{"ticket":"forged.ticket"}')"
           echo "enabled: POST /x/sessions -> $code (no route in 4a)"
           [ "$code" = 404 ]
-          # the output holds the QR code and the secret: print only the rest
+          # the output holds the QR code and the secret: print only allowlisted lines, and prove they hold no secret
           sudo /usr/local/bin/nmsctl executor enroll admin --yes --totp-secret-out "$E2E_DIR/change-totp-secret" > "$E2E_DIR/enroll.log"
-          grep -vE 'TOTP secret|[█▀▄]|^$' "$E2E_DIR/enroll.log"
+          shown="$(grep -E '^Panel user #' "$E2E_DIR/enroll.log" || true)"
+          secret="$(sudo cat "$E2E_DIR/change-totp-secret")"
+          [ -n "$secret" ]
+          if grep -qiF -- "$secret" <<<"$shown"; then echo "the printed enroll lines contain the change TOTP secret"; exit 1; fi
+          echo "$shown"
+          rm -f "$E2E_DIR/enroll.log"
           sudo /usr/local/bin/nmsctl executor grant admin write-admin --yes
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile

@@ -104,7 +104,8 @@ func gateway(t *testing.T) *stack {
 	}
 	once.Do(func() { shared, startErr = start() })
 	if startErr != nil {
-		if errors.Is(startErr, errNoDocker) {
+		/* in CI a missing Docker fails, as in testdb: a skipped attack test proves nothing */
+		if _, ci := os.LookupEnv("CI"); errors.Is(startErr, errNoDocker) && !ci {
 			t.Skipf("gateway: Docker is unavailable: %v", startErr)
 		}
 		t.Fatalf("gateway: %v", startErr)

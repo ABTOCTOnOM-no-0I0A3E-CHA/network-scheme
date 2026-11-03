@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useState } from "react";
 
 /*
  * Clickjacking defence. The panel may frame this UI (frame-ancestors), so a compromised panel could lay its own
@@ -32,14 +32,18 @@ export function observeUnobscured(el: Element, on: (unobscured: boolean) => void
   return () => io.disconnect();
 }
 
-/* true only while the element behind ref is fully visible and not covered; false until the first observation and when v2 is unsupported. */
-export function useUnobscured(ref: RefObject<Element | null>): { unobscured: boolean; supported: boolean } {
+/*
+ * true only while the element given to `ref` is fully visible and not covered; false until the first observation,
+ * without an element and when v2 is unsupported. `ref` is a callback ref: an element mounted later (after a
+ * loading state) or replaced is observed too, the previous one is no longer.
+ */
+export function useUnobscured(): { ref: (el: Element | null) => void; unobscured: boolean; supported: boolean } {
+  const [el, setEl] = useState<Element | null>(null);
   const [unobscured, setUnobscured] = useState(false);
   const supported = visibilityV2Supported();
   useEffect(() => {
-    const el = ref.current;
     if (!el) return;
     return observeUnobscured(el, setUnobscured);
-  }, [ref]);
-  return { unobscured: supported && unobscured, supported };
+  }, [el]);
+  return { ref: setEl, unobscured: supported && el !== null && unobscured, supported };
 }

@@ -87,19 +87,41 @@ describe("useUnobscured", () => {
   it("is false until the browser says the element is visible, then follows it", () => {
     install(FakeEntryV2);
     const el = document.createElement("div");
-    const ref = { current: el };
-    const { result } = renderHook(() => useUnobscured(ref));
-    expect(result.current).toEqual({ unobscured: false, supported: true });
+    const { result } = renderHook(() => useUnobscured());
+    act(() => result.current.ref(el));
+    expect(result.current).toMatchObject({ unobscured: false, supported: true });
+    expect(instances[0].observe).toHaveBeenCalledWith(el);
     act(() => instances[0].fire({ isIntersecting: true, intersectionRatio: 1, isVisible: true }));
     expect(result.current.unobscured).toBe(true);
     act(() => instances[0].fire({ isIntersecting: true, intersectionRatio: 1, isVisible: false }));
     expect(result.current.unobscured).toBe(false);
   });
 
+  it("observes an element mounted late, and stops observing it once it is gone or replaced", () => {
+    install(FakeEntryV2);
+    const { result } = renderHook(() => useUnobscured());
+    expect(instances).toHaveLength(0); /* nothing mounted yet: no observer, not unobscured */
+    expect(result.current.unobscured).toBe(false);
+    const late = document.createElement("div");
+    act(() => result.current.ref(late));
+    expect(instances).toHaveLength(1);
+    expect(instances[0].observe).toHaveBeenCalledWith(late);
+    act(() => instances[0].fire({ isIntersecting: true, intersectionRatio: 1, isVisible: true }));
+    expect(result.current.unobscured).toBe(true);
+    const next = document.createElement("div");
+    act(() => result.current.ref(next));
+    expect(instances[0].disconnect).toHaveBeenCalled();
+    expect(instances[1].observe).toHaveBeenCalledWith(next);
+    expect(result.current.unobscured).toBe(false); /* the new element is not yet known to be visible */
+    act(() => result.current.ref(null));
+    expect(instances[1].disconnect).toHaveBeenCalled();
+    expect(result.current.unobscured).toBe(false);
+  });
+
   it("stays false and reports unsupported when v2 is missing", () => {
     install(FakeEntryV1);
-    const ref = { current: document.createElement("div") };
-    const { result } = renderHook(() => useUnobscured(ref));
-    expect(result.current).toEqual({ unobscured: false, supported: false });
+    const { result } = renderHook(() => useUnobscured());
+    act(() => result.current.ref(document.createElement("div")));
+    expect(result.current).toMatchObject({ unobscured: false, supported: false });
   });
 });

@@ -45,8 +45,8 @@ describe("poster", () => {
     const b = bridge();
     fetchMock.mockImplementation(async () => json(200, { ok: true }));
     const p = createPoster(b);
-    await p.post("/x/confirm", (ticket) => ({ ticket, code: "111111" }), ok);
-    await p.post("/x/confirm", (ticket) => ({ ticket, code: "222222" }), ok);
+    await p.post("/x/confirm", { code: "111111" }, ok);
+    await p.post("/x/confirm", { code: "222222" }, ok);
     expect(b.requestTicket).toHaveBeenCalledTimes(2);
     const bodies = fetchMock.mock.calls.map((c) => JSON.parse((c[1] as RequestInit).body as string));
     expect(bodies.map((x) => x.ticket)).toEqual(["ticket-1", "ticket-2"]);
@@ -59,17 +59,18 @@ describe("poster", () => {
     const b = bridge();
     fetchMock.mockResolvedValue(json(503, { error: { code: "unavailable" } }));
     const p = createPoster(b);
-    const first = await p.post("/x/confirm", (ticket) => ({ ticket, code: "123456" }), ok);
+    const first = await p.post("/x/confirm", { code: "123456" }, ok);
     expect(first).toMatchObject({ ok: false, failure: { kind: "http", status: 503, code: "unavailable" } });
-    const again = await p.post("/x/confirm", (ticket) => ({ ticket, code: "123456" }), ok);
+    const again = await p.post("/x/confirm", { code: "123456" }, ok);
     expect(again).toEqual({ ok: false, failure: { kind: "local", code: "code_reused" } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(b.requestTicket).toHaveBeenCalledTimes(1); /* the reused code is refused before a ticket is asked for */
   });
 
   it("never retries by itself: one lost connection is one request", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     const p = createPoster(bridge());
-    await expect(p.post("/x/confirm", (ticket) => ({ ticket, code: "123456" }), ok)).resolves.toEqual({ ok: false, failure: { kind: "network" } });
+    await expect(p.post("/x/confirm", { code: "123456" }, ok)).resolves.toEqual({ ok: false, failure: { kind: "network" } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -77,9 +78,9 @@ describe("poster", () => {
     let release!: (r: Response) => void;
     fetchMock.mockReturnValue(new Promise<Response>((r) => (release = r)));
     const p = createPoster(bridge());
-    const first = p.post("/x/confirm", (ticket) => ({ ticket, code: "111111" }), ok);
+    const first = p.post("/x/confirm", { code: "111111" }, ok);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    await expect(p.post("/x/confirm", (ticket) => ({ ticket, code: "222222" }), ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "busy" } });
+    await expect(p.post("/x/confirm", { code: "222222" }, ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "busy" } });
     release(json(200, { ok: true }));
     await expect(first).resolves.toMatchObject({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -89,8 +90,8 @@ describe("poster", () => {
     const b = { requestTicket: vi.fn().mockRejectedValueOnce(new BridgeError("no_ticket")).mockResolvedValue("t") };
     fetchMock.mockResolvedValue(json(200, { ok: true }));
     const p = createPoster(b);
-    await expect(p.post("/x/confirm", (ticket) => ({ ticket, code: "123456" }), ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "no_ticket" } });
+    await expect(p.post("/x/confirm", { code: "123456" }, ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "no_ticket" } });
     expect(fetchMock).not.toHaveBeenCalled();
-    await expect(p.post("/x/confirm", (ticket) => ({ ticket, code: "123456" }), ok)).resolves.toMatchObject({ ok: true });
+    await expect(p.post("/x/confirm", { code: "123456" }, ok)).resolves.toMatchObject({ ok: true });
   });
 });

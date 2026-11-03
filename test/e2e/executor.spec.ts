@@ -108,9 +108,12 @@ test("messages from another origin or of the wrong shape are ignored without a r
     exec.postMessage("ticket", target);
   }, EXECUTOR);
   await page.waitForTimeout(1000);
-  /* nothing came back to the panel from the first frame, nothing was sent anywhere, the page still works */
-  const fromFirst = (await seen(page)).filter((m) => (m.data as { state?: string }).state === "ready");
-  expect(fromFirst).toHaveLength(2);
+  /*
+   * This proves only that the page keeps working and replies to none of it: the panel sees just the two "ready"
+   * messages, no request left the page. That the forged ticket is never used is the bridge's unit test (bridge.test.ts).
+   */
+  const readyMessages = (await seen(page)).filter((m) => (m.data as { state?: string }).state === "ready");
+  expect(readyMessages).toHaveLength(2);
   expect(await seen(page)).toHaveLength(2);
   expect(posts).toEqual([]);
   await expect(frame.getByRole("heading", { name: TITLE })).toBeVisible();
