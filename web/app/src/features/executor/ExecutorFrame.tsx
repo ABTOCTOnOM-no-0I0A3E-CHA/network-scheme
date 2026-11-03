@@ -26,18 +26,25 @@ export function ExecutorFrame({ title, className }: { title: string; className?:
 
   useEffect(() => {
     if (!o) return;
+    /* one ticket request at a time: the executor never has two outstanding */
+    let asking = false;
     const ch: Channel<TicketMessage> = createChannel({
       peerOrigin: o.executor,
       peer: () => frame.current?.contentWindow ?? null,
       incoming: statusMessage,
       outgoing: ticketMessage,
       onMessage(m) {
-        if (m.state !== "ticket_needed") return;
+        if (m.state !== "ticket_needed" || asking) return;
+        asking = true;
         const id = m.id;
-        void api.POST("/api/executor/ticket", { params: { header: { "X-CSRF-Token": "" } } }).then(({ data }) => {
-          /* no answer to a failed request: the executor times out and tells the user */
-          if (data) ch.send({ v: 1, type: "ticket", id, ticket: data.ticket });
-        });
+        void api
+          .POST("/api/executor/ticket", { params: { header: { "X-CSRF-Token": "" } } })
+          .then(({ data }) => {
+            /* no answer to a failed request: the executor times out and tells the user */
+            if (data) ch.send({ v: 1, type: "ticket", id, ticket: data.ticket });
+          })
+          .catch(() => {})
+          .finally(() => (asking = false));
       },
     });
     return () => ch.close();

@@ -2,7 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import "@/i18n";
 import { ExecutorFrame } from "./ExecutorFrame";
@@ -13,10 +13,12 @@ const ID = "0123456789abcdef0123456789abcdef";
 
 let origins: Record<string, string> = { panel: PANEL, executor: EXECUTOR };
 let tickets = 0;
+let slow = false;
 const server = setupServer(
   http.get("*/origins.json", () => HttpResponse.json(origins)),
-  http.post("*/api/executor/ticket", () => {
+  http.post("*/api/executor/ticket", async () => {
     tickets++;
+    await delay(slow ? 150 : 0);
     return HttpResponse.json({ ticket: "payload.signature", expires_at: "2026-10-26T10:00:00Z" });
   }),
 );
@@ -26,6 +28,7 @@ afterEach(() => {
   cleanup();
   origins = { panel: PANEL, executor: EXECUTOR };
   tickets = 0;
+  slow = false;
 });
 
 const renderFrame = () =>
@@ -65,6 +68,17 @@ describe("ExecutorFrame", () => {
     say({ ...needTicket, id: "fedcba9876543210fedcba9876543210" }, EXECUTOR, f.contentWindow);
     await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
     expect(tickets).toBe(2); /* one ticket per request, none kept */
+  });
+
+  it("asks the api for one ticket at a time", async () => {
+    slow = true;
+    renderFrame();
+    const f = (await screen.findByTitle("Executor")) as HTMLIFrameElement;
+    const post = vi.spyOn(f.contentWindow!, "postMessage");
+    say(needTicket, EXECUTOR, f.contentWindow);
+    say({ ...needTicket, id: "fedcba9876543210fedcba9876543210" }, EXECUTOR, f.contentWindow);
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    expect(tickets).toBe(1);
   });
 
   it.each([
