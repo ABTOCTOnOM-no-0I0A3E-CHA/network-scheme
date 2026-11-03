@@ -6,7 +6,7 @@ import { errorKey, thrownKey } from "@/features/auth/errors";
 import { StateBadge } from "@/features/common/StateBadge";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
 import { safeText } from "@/lib/text";
-import type { CredKind } from "@/lib/seal";
+import type { CredKind } from "@nms/shared/seal";
 import { cn } from "@/lib/utils";
 import { ProblemList } from "@/features/problems/ProblemList";
 import { useDevice, useDevices, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";

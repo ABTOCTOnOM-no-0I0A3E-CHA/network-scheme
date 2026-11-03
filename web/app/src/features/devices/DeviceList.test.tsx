@@ -9,8 +9,8 @@ import { x25519 } from "@noble/curves/ed25519.js";
 import "@/i18n";
 import ru from "@/i18n/ru.json";
 import { canListGroups, canManageDevices } from "@/features/auth/permissions";
-import { fingerprint } from "@/lib/keys";
-import { toBase64 } from "@/lib/seal";
+import { fingerprint } from "@nms/shared/keys";
+import { toBase64 } from "@nms/shared/seal";
 import { DeviceList } from "./DeviceList";
 
 const err = (status: number, code: string) => HttpResponse.json({ error: { code, message: "RAW SERVER MESSAGE" } }, { status });

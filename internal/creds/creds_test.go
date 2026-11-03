@@ -287,7 +287,7 @@ func TestLibsodiumVector(t *testing.T) {
 	}
 }
 
-/* testdata/browser_sealed_vector.json was sealed by the web app's sealCredential (web/app/scripts/gen-seal-vector.ts). */
+/* testdata/browser_sealed_vector.json was sealed by the web app's sealCredential (web/shared/scripts/gen-seal-vector.ts). */
 func TestBrowserSealedVector(t *testing.T) {
 	var priv, pub [32]byte
 	v := loadVector(t, "browser_sealed_vector.json", &priv, &pub)

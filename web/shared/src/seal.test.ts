@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { AUTH_PROTOS, buildPayload, generateKey, openSealed, sealCredential, validateSecret } from "./seal";
 
-const fixture = (name: string) => JSON.parse(readFileSync(path.resolve(__dirname, "../../../../internal/creds/testdata", name), "utf8"));
+const fixture = (name: string) => JSON.parse(readFileSync(path.resolve(__dirname, "../../../internal/creds/testdata", name), "utf8"));
 const unhex = (h: string) => Uint8Array.from(h.match(/../g) ?? [], (b) => parseInt(b, 16));
 const dec = new TextDecoder();
 const v3 = { user: "monitor", auth_proto: "SHA256", auth_key: "auth-key-0123456789", priv_proto: "AES", priv_key: "priv-key-0123456789" };

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 /* Pieces of the widget config schemas, mirroring internal/httpapi/dashboards_handlers.go. */
 
-/* zod runs jitless (CSP: no eval): set by src/lib/zod-jitless.ts, imported first by main.tsx and vitest.setup.ts. */
+/* zod runs jitless (CSP: no eval): set by web/shared/src/zod-jitless.ts, imported first by main.tsx and vitest.setup.ts. */
 
 /* eslint-disable-next-line no-control-regex */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;

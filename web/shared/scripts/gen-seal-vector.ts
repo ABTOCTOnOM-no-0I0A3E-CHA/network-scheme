@@ -6,7 +6,7 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { x25519 } from "@noble/curves/ed25519.js";
-import { buildPayload, sealCredential, type CredKind, type SecretOf } from "../src/lib/seal";
+import { buildPayload, sealCredential, type CredKind, type SecretOf } from "../src/seal";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 const { secretKey, publicKey } = x25519.keygen();
@@ -19,7 +19,7 @@ const cases: { [K in CredKind]: SecretOf[K] } = {
 };
 
 const out = {
-  comment: "TEST-ONLY keys. Sealed by web/app/src/lib/seal.ts sealCredential; regenerate with bun scripts/gen-seal-vector.ts.",
+  comment: "TEST-ONLY keys. Sealed by web/shared/src/seal.ts sealCredential; regenerate with bun scripts/gen-seal-vector.ts.",
   private_key: hex(secretKey),
   public_key: hex(publicKey),
   owner: "device:7",

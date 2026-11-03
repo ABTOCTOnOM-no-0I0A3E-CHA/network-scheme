@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && bun scripts/sri.ts dist",
+    "build": "vite build && bun ../shared/scripts/sri.ts dist",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",

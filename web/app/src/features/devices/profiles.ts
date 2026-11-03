@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "@/api/schema";
 import { unwrap, withStepUp } from "@/features/common/stepup";
 import { api } from "@/lib/api";
-import type { CredKind, Owner } from "@/lib/seal";
+import type { CredKind, Owner } from "@nms/shared/seal";
 import { deviceKeys } from "./api";
 
 export type Profile = components["schemas"]["Profile"];
