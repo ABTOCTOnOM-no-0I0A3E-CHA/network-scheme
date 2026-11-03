@@ -18,8 +18,9 @@ var ErrHostKeyMismatch = errors.New("ssh: host key does not match the pinned key
 
 /*
 ErrHostKeyInSession means the device presented the host key of a device the
-executor holds in a change session (execpub.device_busy.hostkey_fp), or that
-this could not be checked: no credential is sent.
+executor holds in a change session (execpub.device_busy.hostkey_fp, or a key
+the poller pinned for a busy device id), or that this could not be checked:
+no credential is sent.
 */
 var ErrHostKeyInSession = errors.New("ssh: host key of a device in a change session")
 
@@ -66,10 +67,20 @@ func (h *HostKeys) callback(ctx context.Context, deviceID int64, addr netip.Addr
 	}
 }
 
-/* notInSession is nil only when execpub.device_busy was read and no busy device has host key fingerprint fp. */
+/*
+notInSession is nil only when execpub.device_busy was read and fp is neither
+the host key fingerprint the executor published for a busy device nor one
+this poller pinned for a busy device id (ssh_hosts.host_key). The second
+closes the alias of a switch with several host keys of different types: the
+alias row negotiates the type of its own pin, so the switch may present a key
+the executor never saw but the poller pinned for the busy device. Devices
+sharing a host key (clones, factory keys) lose SSH while one is busy.
+*/
 func (h *HostKeys) notInSession(ctx context.Context, fp string) error {
 	var busy bool
-	if err := h.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.device_busy WHERE hostkey_fp = $1)`, fp).Scan(&busy); err != nil {
+	if err := h.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.device_busy WHERE hostkey_fp = $1)
+		OR EXISTS (SELECT 1 FROM ssh_hosts.host_key WHERE fingerprint_sha256 = $1
+			AND device_id IN (SELECT device_id FROM execpub.device_busy))`, fp).Scan(&busy); err != nil {
 		return fmt.Errorf("%w: check: %w", ErrHostKeyInSession, err)
 	}
 	if busy {
