@@ -5,9 +5,10 @@ export const ORIGIN = "https://localhost";
 
 /**
  * Records CSP violations (console messages and `securitypolicyviolation`
- * events) and requests to anything but ORIGIN on every page of a context.
+ * events) and requests to anything but the allowed origins (ORIGIN by default)
+ * on every page and frame of a context.
  */
-export async function watch(context: BrowserContext): Promise<{ problems: string[] }> {
+export async function watch(context: BrowserContext, allowed: string[] = [ORIGIN]): Promise<{ problems: string[] }> {
   const problems: string[] = [];
   await context.exposeBinding("__nmsCspViolation", (_src, v: string) => {
     problems.push(`securitypolicyviolation: ${v}`);
@@ -24,18 +25,21 @@ export async function watch(context: BrowserContext): Promise<{ problems: string
   });
   context.on("request", (r) => {
     const url = r.url();
-    if (url !== ORIGIN && !url.startsWith(`${ORIGIN}/`) && !url.startsWith("data:")) problems.push(`external request: ${url}`);
+    if (!allowed.some((o) => url === o || url.startsWith(`${o}/`)) && !url.startsWith("data:")) problems.push(`external request: ${url}`);
   });
   return { problems };
 }
 
-/** `test` whose default context is watched; a test fails on any recorded problem. */
-export const test = base.extend({
-  context: async ({ context }, use) => {
-    const w = await watch(context);
-    await use(context);
-    expect(w.problems, "CSP violations / external requests").toEqual([]);
-  },
-});
+/** `test` whose default context is watched; a test fails on any recorded problem. Origins other than ORIGIN are problems unless allowed. */
+export const testWith = (allowed: string[]) =>
+  base.extend({
+    context: async ({ context }, use) => {
+      const w = await watch(context, allowed);
+      await use(context);
+      expect(w.problems, "CSP violations / external requests").toEqual([]);
+    },
+  });
+
+export const test = testWith([ORIGIN]);
 
 export { expect };
