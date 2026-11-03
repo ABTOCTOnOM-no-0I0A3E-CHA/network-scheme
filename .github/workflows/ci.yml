@@ -334,6 +334,39 @@ jobs:
             echo "$model at $addr"
             echo "NMS_E2E_$(echo "$model" | tr a-z A-Z)=$addr" >> "$GITHUB_ENV"
           done
+      - name: The executor is off after install (C1), then enable, enroll and grant
+        run: |
+          # C1: the policy nmsctl install wrote keeps the executor off: every /x/* but /x/status answers 503
+          # executor_disabled (POST /x/sessions too, before any route or authz) and the bundle is still served.
+          # nmsctl executor enable then lets requests go down the chain (executor.spec.ts "C1"); the admin gets
+          # a change TOTP (a throwaway CI value) and write-admin for the executor tests.
+          sudo install -m 0644 /etc/nms/secrets/ca.crt /tmp/nms-e2e-ca.crt
+          X=https://localhost:8443
+          x() { # METHOD PATH [BODY]: prints the status code, the body goes to /tmp/nms-x.json
+            curl -sS --cacert /tmp/nms-e2e-ca.crt -o /tmp/nms-x.json -w '%{http_code}' -X "$1" -H "Origin: $X" \
+              -H 'Content-Type: application/json' ${3:+--data "$3"} "$X$2"
+          }
+          sudo /usr/local/bin/nmsctl executor policy show | tee /tmp/nms-policy.txt
+          grep -qx 'executor enabled: false' /tmp/nms-policy.txt
+          [ "$(x GET /x/status)" = 200 ]
+          grep -qx '{"enabled":false,"frozen":false}' /tmp/nms-x.json
+          [ "$(x GET /)" = 200 ]
+          for req in "POST /x/sessions" "POST /x/confirm/issue" "POST /x/confirm" "GET /x/sessions" "POST /x/nowhere"; do
+            code="$(x $req '{"ticket":"forged.ticket"}')"
+            echo "disabled: $req -> $code $(cat /tmp/nms-x.json)"
+            [ "$code" = 503 ]
+            grep -q '"executor_disabled"' /tmp/nms-x.json
+          done
+          sudo /usr/local/bin/nmsctl executor enable
+          [ "$(x GET /x/status)" = 200 ]
+          grep -qx '{"enabled":true,"frozen":false}' /tmp/nms-x.json
+          code="$(x POST /x/sessions '{"ticket":"forged.ticket"}')"
+          echo "enabled: POST /x/sessions -> $code (no route in 4a)"
+          [ "$code" = 404 ]
+          # the output holds the QR code and the secret: print only the rest
+          sudo /usr/local/bin/nmsctl executor enroll admin --yes --totp-secret-out "$E2E_DIR/change-totp-secret" > "$E2E_DIR/enroll.log"
+          grep -vE 'TOTP secret|[█▀▄]|^$' "$E2E_DIR/enroll.log"
+          sudo /usr/local/bin/nmsctl executor grant admin write-admin --yes
       - name: Install e2e dependencies
         run: bun install --frozen-lockfile
         working-directory: test/e2e

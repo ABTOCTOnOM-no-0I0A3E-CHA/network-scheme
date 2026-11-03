@@ -32,14 +32,18 @@ import (
 
 var ticketPriv = ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 
-/* live is the server over the live authorizer and confirm store, on the test database. */
+/* live is the server over the live authorizer and confirm store, on the test database, with its policy file. */
 type live struct {
 	*harness
-	env *testdb.Env
-	adm *admin.Admin
+	env     *testdb.Env
+	adm     *admin.Admin
+	polFile string
 }
 
-func startLive(t *testing.T) *live {
+func startLive(t *testing.T) *live { return startLiveWith(t, []byte("enabled: true\n")) }
+
+/* startLiveWith is startLive over the given policy file. */
+func startLiveWith(t *testing.T, policyFile []byte) *live {
 	t.Helper()
 	env := testdb.New(t)
 	attacktest.Reset(t, env)
@@ -62,7 +66,7 @@ func startLive(t *testing.T) *live {
 		t.Fatal(err)
 	}
 	polFile := filepath.Join(dir, "executor.yaml")
-	if err := os.WriteFile(polFile, []byte("enabled: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(polFile, policyFile, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pol := policy.New(polFile)
@@ -76,7 +80,7 @@ func startLive(t *testing.T) *live {
 		c.Auth, c.Confirm = az, confirm.New(az, nil)
 		c.State = func() (bool, bool) { f, _ := guard.Frozen(); return pol.Current().Enabled(), f }
 	})
-	return &live{harness: h, env: env, adm: &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az}}
+	return &live{harness: h, env: env, adm: &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az}, polFile: polFile}
 }
 
 /* user creates a panel user, enrolls its change TOTP and grants write-admin; it returns id, name and secret. */

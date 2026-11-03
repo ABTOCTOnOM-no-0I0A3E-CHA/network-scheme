@@ -1,19 +1,56 @@
 /*
-Package attacktest is the attacker of the executor's tests: direct edits of
-schema exec as the database superuser (the api has no right on exec, so only
-the database owner or a superuser can tamper with it, security.md 5.1a).
-Test-only: nothing outside _test.go files may import it.
+Package attacktest is the attacker of the executor's tests (security.md 18):
+a compromised api (Attacker: the role nms_api and the ticket signing key) and
+direct edits of schema exec as the database superuser (the api has no right
+on exec, so only the database owner or a superuser can tamper with it,
+security.md 5.1a). Its own tests index every attack scenario of Phase 4a
+(TestTraceability). Test-only: nothing outside _test.go files may import it.
 */
 package attacktest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/beekamai/network-scheme/internal/testdb"
+	"github.com/beekamai/network-scheme/internal/ticket"
 )
+
+/*
+Attacker is a compromised api: a connection as its database role nms_api and
+the key it signs session tickets with. It forges tickets for any user and
+name and runs whatever its role may (Exec); tampering beyond that role is the
+superuser's (Tamper, Copy, Stall).
+*/
+type Attacker struct {
+	env *testdb.Env
+	key ed25519.PrivateKey
+}
+
+/* NewAttacker is the api of env holding key, the ticket signing key the executor trusts. */
+func NewAttacker(env *testdb.Env, key ed25519.PrivateKey) *Attacker {
+	return &Attacker{env: env, key: key}
+}
+
+/* Exec runs sql as nms_api and returns the database's answer (a refusal is the point of most attacks). */
+func (a *Attacker) Exec(ctx context.Context, sql string, args ...any) error {
+	_, err := a.env.Pool("nms_api").Exec(ctx, sql, args...)
+	return err
+}
+
+/* Ticket signs a ticket issued now for any user id and name, as the api's ticket endpoint would. */
+func (a *Attacker) Ticket(t testing.TB, user int64, name string) string {
+	t.Helper()
+	tok, _, err := ticket.Issue(a.key, user, name, time.Now())
+	if err != nil {
+		t.Fatalf("forge a ticket for %d %q: %v", user, name, err)
+	}
+	return tok
+}
 
 /* Tamper runs sql as the superuser and fails the test on error. */
 func Tamper(t testing.TB, env *testdb.Env, sql string, args ...any) {

@@ -10,8 +10,8 @@ const EXECUTOR = process.env.NMS_E2E_EXECUTOR_ORIGIN ?? "https://localhost:8443"
 const test = testWith([ORIGIN, EXECUTOR]);
 
 const TITLE = "Изменение конфигураций";
-/* after nmsctl install the policy has the executor off; 4a.9 turns it on: either is a valid answer here */
-const ENABLED = /^(Включён|Выключен политикой хоста)$/;
+/* the CI step before Playwright proves the executor off after nmsctl install (C1), then turns it on */
+const ENABLED = /^Включён$/;
 
 type Seen = { origin: string; data: unknown };
 type Probe = Window & { __seen: Seen[] };
@@ -114,4 +114,28 @@ test("messages from another origin or of the wrong shape are ignored without a r
   expect(await seen(page)).toHaveLength(2);
   expect(posts).toEqual([]);
   await expect(frame.getByRole("heading", { name: TITLE })).toBeVisible();
+});
+
+/*
+ * C1, the enabled half: the CI step "The executor is off after install (C1)" saw every /x/* but the status answer 503
+ * executor_disabled, then ran nmsctl executor enable. Now the same requests go down the check chain: authz refuses
+ * a forged ticket and an unknown challenge for a real one (403 denied, audited by the executor), the empty action
+ * table of 4a answers unknown_action, and POST /x/sessions has no route yet (404).
+ */
+test("C1: after nmsctl executor enable requests go past the policy gate to the route table and authz", async ({ page }) => {
+  await page.goto("/");
+  const csrf = ((await (await page.request.get("/api/auth/me")).json()) as { csrf_token: string }).csrf_token;
+  const res = await page.request.post("/api/executor/ticket", { headers: { "X-CSRF-Token": csrf } });
+  expect(res.status()).toBe(200);
+  const { ticket } = (await res.json()) as { ticket: string };
+  const x = async (path: string, data: unknown) => {
+    const r = await page.request.post(`${EXECUTOR}${path}`, { headers: { Origin: EXECUTOR }, data });
+    return { status: r.status(), code: ((await r.json().catch(() => ({}))) as { error?: { code?: string } }).error?.code };
+  };
+  expect(await (await page.request.get(`${EXECUTOR}/x/status`)).json()).toEqual({ enabled: true, frozen: false });
+  const h = "00".repeat(32);
+  expect(await x("/x/confirm", { ticket: "forged.ticket", challenge_id: "c", h, code: "000000" })).toEqual({ status: 403, code: "denied" });
+  expect(await x("/x/confirm", { ticket, challenge_id: "c", h, code: "000000" })).toEqual({ status: 403, code: "denied" });
+  expect(await x("/x/confirm/issue", { ticket, action: "session.open", params: {} })).toEqual({ status: 404, code: "unknown_action" });
+  expect((await x("/x/sessions", { ticket })).status).toBe(404);
 });
