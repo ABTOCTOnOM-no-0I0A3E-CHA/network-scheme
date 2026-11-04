@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	gossh "golang.org/x/crypto/ssh"
 
@@ -716,15 +718,46 @@ func TestKEXStrategy(t *testing.T) {
 	r.mustDial(t)
 }
 
+/* forbidden is the fuzz oracle, independent of dropped: control characters but tab, every format character, and an explicit list. */
+func forbidden(r rune) bool {
+	if r == 0x09 {
+		return false
+	}
+	if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		return true
+	}
+	for _, x := range [][2]rune{{0x061c, 0x061c}, {0x200b, 0x200f}, {0x2028, 0x202e}, {0x2066, 0x2069}, {0xfeff, 0xfeff}, {0xfff9, 0xfffb}} {
+		if r >= x[0] && r <= x[1] {
+			return true
+		}
+	}
+	return false
+}
+
 func FuzzCleanLines(f *testing.F) {
-	f.Add([]byte("a\x1b]52;c;x\x07b\x1b[2Jc\x9bd" + string(rune(0x202e))))
+	f.Add([]byte("a" + esc + "]52;c;x" + bel + "b" + esc + "[2Jc" + string(rune(0x9b)) + "d" + string(rune(0x202e))))
+	f.Add([]byte("x" + string(rune(0x061c)) + string(rune(0x2028)) + string(rune(0x200b)) + string(rune(0xfeff)) + string(rune(0xfffa)) + "y"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		for _, l := range cleanLines(b) {
+			if !utf8.ValidString(l) {
+				t.Fatalf("invalid UTF-8 in %q", l)
+			}
 			for _, r := range l {
-				if dropped(r) || r == 0x1b || r == '\n' {
+				if forbidden(r) || r == 0x1b || r == 0x0a {
 					t.Fatalf("%U in %q", r, l)
 				}
 			}
 		}
 	})
 }
+
+var showVersion = ssh.ShowCommand{Name: "show version"}
+
+func (f *fakeSource) modelProfiles(context.Context, target) ([]identify.Profile, error) {
+	return f.profiles, nil
+}
+
+const (
+	esc = string(rune(0x1b))
+	bel = string(rune(0x07))
+)

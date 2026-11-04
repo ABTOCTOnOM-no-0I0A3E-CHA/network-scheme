@@ -106,9 +106,10 @@ type Shell struct {
 	decision identify.Decision
 	timeout  time.Duration
 
-	buf   []byte   /* raw output not yet consumed */
-	async []string /* async lines drained between commands */
-	st    State
+	buf        []byte   /* raw output not yet consumed */
+	async      []string /* async lines drained between commands */
+	asyncBytes int      /* their size, bounded by maxOutput */
+	st         State
 }
 
 func anchored(re string) *regexp.Regexp { return regexp.MustCompile(`^(?:` + re + `)$`) }
@@ -209,16 +210,43 @@ func (s *Shell) write(p string) error {
 	return nil
 }
 
+/* readOpts: a long output; a login read; the line sent, whose echo must come first when the strategy expects one. */
+type readOpts struct {
+	long, login bool
+	sent        string
+	echo        bool
+}
+
+/* maxTail: a last line longer than this is no prompt or question; it is not classified. */
+const maxTail = 4 << 10
+
+/* echoLine reports whether l is the device's echo of sent, maybe behind the prompt it redrew. */
+func (s *Shell) echoLine(l, sent string) bool {
+	return l == sent || sent != "" && strings.HasSuffix(l, sent) && s.set.Prompt.MatchString(strings.TrimSuffix(l, sent))
+}
+
+/* prevLine is the clean text of the last complete line before start ("" for none). */
+func prevLine(b []byte, start int) string {
+	if start == 0 {
+		return ""
+	}
+	return cleanLines(b[lastRaw(b[:start-1]) : start-1])[0]
+}
+
 /*
 read collects output until its last line is a prompt or a question (in
 login also a login or password-change prompt) and the device stayed quiet
-behind it. A pager prompt is answered with the line's key (pager=answer)
-and removed. It returns the clean lines before the last one, the last line
-and its kind. Every error closes the shell.
+behind it. Outside login, when the strategy expects an echo, a prompt counts
+only after the echo of the sent line: one before it is a redraw (after an
+async line), not the reply. A prompt directly behind an async line must stay
+quiet longer (the device may still print the reply). A pager prompt is
+answered with the line's key (pager=answer) and removed. It returns the
+clean lines before the last one, the last line and its kind. Every error
+closes the shell.
 */
-func (s *Shell) read(ctx context.Context, long, login bool) ([]string, string, kind, error) {
+func (s *Shell) read(ctx context.Context, o readOpts) ([]string, string, kind, error) {
 	timeout, idle := s.timeout, promptSettle
-	if long {
+	if o.long {
 		timeout, idle = max(s.timeout, longCommandTimeout), longPromptSettle
 	}
 	fail := func(err error) ([]string, string, kind, error) {
@@ -228,7 +256,8 @@ func (s *Shell) read(ctx context.Context, long, login bool) ([]string, string, k
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	var settle <-chan time.Time
-	pages := 0
+	pages, scanned := 0, 0
+	echoed := o.login || !o.echo
 	for {
 		select {
 		case b, ok := <-s.chunks:
@@ -238,7 +267,20 @@ func (s *Shell) read(ctx context.Context, long, login bool) ([]string, string, k
 			if s.buf = append(s.buf, b...); len(s.buf) > maxOutput {
 				return fail(ErrOutputTooLarge)
 			}
+			settle = nil
 			start := lastRaw(s.buf)
+			if !echoed && start > scanned {
+				for _, l := range cleanLines(s.buf[scanned : start-1]) {
+					if s.echoLine(l, o.sent) {
+						echoed = true
+						break
+					}
+				}
+				scanned = start
+			}
+			if len(s.buf)-start > maxTail {
+				continue
+			}
 			last := cleanLines(s.buf[start:])[0]
 			if s.set.PagerPrompt.MatchString(last) {
 				if s.set.Pager != "answer" || pages >= maxPages {
@@ -246,20 +288,24 @@ func (s *Shell) read(ctx context.Context, long, login bool) ([]string, string, k
 				}
 				pages++
 				s.buf = s.buf[:start]
+				scanned = min(scanned, start)
 				if err := s.write(s.set.PagerKey); err != nil {
 					return fail(err)
 				}
-				settle = nil
 				continue
 			}
-			settle = nil
-			if s.classify(last, login) != kNone {
-				settle = time.After(idle)
+			if !echoed || s.classify(last, o.login) == kNone {
+				continue
 			}
+			wait := idle
+			if s.set.Syslog.MatchString(prevLine(s.buf, start)) {
+				wait = max(idle, longPromptSettle)
+			}
+			settle = time.After(wait)
 		case <-settle:
 			start := lastRaw(s.buf)
 			last := cleanLines(s.buf[start:])[0]
-			k := s.classify(last, login)
+			k := s.classify(last, o.login)
 			lines := cleanLines(s.buf[:start])
 			s.buf = nil
 			return lines[:len(lines)-1], last, k, nil /* the text before the last line ends with "\n": drop the empty tail */
@@ -273,36 +319,56 @@ func (s *Shell) read(ctx context.Context, long, login bool) ([]string, string, k
 	}
 }
 
-/* drain consumes what arrived between commands (async log lines and a repeated prompt); only the log lines are kept. */
-func (s *Shell) drain() {
-	for {
+/*
+drain consumes what arrived between commands. Only async log lines (kept
+for the next output), blank lines and an exact repeat of the current prompt
+may be there: anything else is output the transport did not expect (a
+reply that came after a prompt was taken), so the shell closes
+(ErrUnexpectedPrompt). Residue and kept async lines are bounded by maxOutput.
+*/
+func (s *Shell) drain() error {
+	fail := func(err error) error {
+		_ = s.Close()
+		return err
+	}
+	for more := true; more; {
 		select {
 		case b, ok := <-s.chunks:
 			if !ok {
-				return
+				return fail(ErrClosed)
 			}
-			s.buf = append(s.buf, b...)
-			continue
+			if s.buf = append(s.buf, b...); len(s.buf) > maxOutput {
+				return fail(ErrOutputTooLarge)
+			}
 		default:
+			more = false
 		}
-		break
 	}
 	if len(s.buf) == 0 {
-		return
+		return nil
 	}
-	for _, l := range cleanLines(s.buf) {
-		if s.set.Syslog.MatchString(l) {
+	lines := cleanLines(s.buf)
+	s.buf = nil
+	for _, l := range lines {
+		switch {
+		case l == "", l == s.st.Prompt:
+		case s.set.Syslog.MatchString(l):
+			if s.asyncBytes += len(l); s.asyncBytes > maxOutput {
+				return fail(ErrOutputTooLarge)
+			}
 			s.async = append(s.async, l)
+		default:
+			return fail(fmt.Errorf("%w: %q between commands", ErrUnexpectedPrompt, l))
 		}
 	}
-	s.buf = nil
+	return nil
 }
 
 /* login waits for the prompt, doing the in-band login once if the strategy allows it. A password change stops it. */
 func (s *Shell) login(ctx context.Context, c Credential) error {
 	sentUser, sentPass := false, false
 	for {
-		lines, last, k, err := s.read(ctx, false, true)
+		lines, last, k, err := s.read(ctx, readOpts{login: true})
 		if err != nil {
 			return err
 		}
@@ -332,8 +398,8 @@ func (s *Shell) login(ctx context.Context, c Credential) error {
 			}
 			v := c.Username
 			if k == kPassword {
-				/* a password is one line: a CR or LF in it would send what follows as a command */
-				if v = c.Password.Reveal(); strings.ContainsAny(v, "\r\n\x00") {
+				/* a password is one line of text: a CR, LF or any other control byte could act as a key or a command */
+				if v = c.Password.Reveal(); strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 					return ErrLoginFailed
 				}
 			}
@@ -387,23 +453,34 @@ func (s *Shell) setup(ctx context.Context) error {
 	return nil
 }
 
-/* exclusive: this must be the only session on the ESR, and the shared candidate empty [R §8, §9.11]. */
+/*
+exclusive: this must be the only session on the ESR, and the shared
+candidate empty [R §8, §9.11]. Every non-blank line of show users but the
+header and separator lines is a session; exactly one is allowed, marked "*"
+(this one). It is a check at open only: another session may log in later,
+so 4c checks again before commit and confirm.
+*/
 func (s *Shell) exclusive(ctx context.Context) error {
 	users, err := s.exec(ctx, "show users", false)
 	if err != nil {
 		return fmt.Errorf("%w: show users: %w", ErrNotExclusive, err)
 	}
-	rows, mine := 0, 0
+	var rows []string
+	header := true
 	for _, l := range users.Lines {
-		if m := s.set.UsersRow.FindStringSubmatch(l); m != nil {
-			rows++
-			if m[1] == "*" {
-				mine++
-			}
+		switch {
+		case strings.TrimSpace(l) == "", separatorRe.MatchString(l):
+		case header:
+			header = false
+		default:
+			rows = append(rows, l)
 		}
 	}
-	if rows != 1 || mine != 1 {
-		return fmt.Errorf("%w: %d sessions in show users", ErrNotExclusive, rows)
+	if len(rows) != 1 {
+		return fmt.Errorf("%w: %d sessions in show users", ErrNotExclusive, len(rows))
+	}
+	if m := s.set.UsersRow.FindStringSubmatch(rows[0]); m == nil || m[1] != "*" {
+		return fmt.Errorf("%w: the only session in show users is not this one", ErrNotExclusive)
 	}
 	ch, err := s.exec(ctx, "show configuration changes", false)
 	if err != nil {
@@ -414,6 +491,8 @@ func (s *Shell) exclusive(ctx context.Context) error {
 	}
 	return nil
 }
+
+var separatorRe = regexp.MustCompile(`^[\s=+-]+$`)
 
 func printable(l string) bool {
 	if l == "" || len(l) > MaxLine {
@@ -438,12 +517,14 @@ func (s *Shell) exec(ctx context.Context, line string, long bool) (Output, error
 		return Output{}, ErrClosed
 	default:
 	}
-	s.drain()
+	if err := s.drain(); err != nil {
+		return Output{}, err
+	}
 	before := s.st
 	if err := s.write(line + "\n"); err != nil {
 		return Output{}, err
 	}
-	lines, last, k, err := s.read(ctx, long, false)
+	lines, last, k, err := s.read(ctx, readOpts{long: long, sent: line, echo: s.set.Echo == "expect"})
 	if err != nil {
 		return Output{}, err
 	}
@@ -460,14 +541,23 @@ func (s *Shell) exec(ctx context.Context, line string, long bool) (Output, error
 	return out, nil
 }
 
-/* process turns the clean lines of one command into its Output. */
+/*
+process turns the clean lines of one command into its Output. Lines before
+the echo can only be async lines (kept) and redrawn prompts or blanks
+(dropped). Error markers are checked on the lines as received, before
+wrapped lines are joined.
+*/
 func (s *Shell) process(sent string, lines []string, before State) Output {
 	out := Output{State: s.st, Async: s.async}
-	s.async = nil
-	/* the echo, maybe behind async lines and the prompt the device repeated after them */
+	s.async, s.asyncBytes = nil, 0
 	for i, l := range lines {
-		if l == sent || strings.HasSuffix(l, sent) && s.set.Prompt.MatchString(strings.TrimSuffix(l, sent)) {
-			lines = append(lines[:i:i], lines[i+1:]...)
+		if s.echoLine(l, sent) {
+			for _, p := range lines[:i] {
+				if s.set.Syslog.MatchString(p) {
+					out.Async = append(out.Async, p)
+				}
+			}
+			lines = lines[i+1:]
 			break
 		}
 		if l != "" && !s.set.Syslog.MatchString(l) && !s.set.Prompt.MatchString(l) {
@@ -475,9 +565,16 @@ func (s *Shell) process(sent string, lines []string, before State) Output {
 		}
 	}
 	for _, l := range lines {
+		/* a prompt the device redrew behind an async line, with the reply printed right after it */
+		if before.Prompt != "" && len(l) > len(before.Prompt) && strings.HasPrefix(l, before.Prompt) {
+			l = strings.TrimLeft(l[len(before.Prompt):], " ")
+		}
 		if s.set.Async == "filter" && s.set.Syslog.MatchString(l) {
 			out.Async = append(out.Async, l)
 			continue
+		}
+		if out.Error == "" && s.set.ErrorMarkers.MatchString(l) {
+			out.Error = l
 		}
 		if s.set.PTY == "wide-join" && len(out.Lines) > 0 && len([]rune(out.Lines[len(out.Lines)-1])) == s.set.Width {
 			out.Lines[len(out.Lines)-1] += l
@@ -490,12 +587,6 @@ func (s *Shell) process(sent string, lines []string, before State) Output {
 	}
 	for len(out.Lines) > 0 && out.Lines[len(out.Lines)-1] == "" {
 		out.Lines = out.Lines[:len(out.Lines)-1]
-	}
-	for _, l := range out.Lines {
-		if s.set.ErrorMarkers.MatchString(l) {
-			out.Error = l
-			break
-		}
 	}
 	if out.Error == "" && s.set.Errors == "strict" && (before.Mode == ModeConfig || before.Mode == ModeSub) && len(out.Lines) > 0 {
 		out.Error = out.Lines[0]
@@ -616,7 +707,13 @@ func (s *Shell) run(ctx context.Context, cmd ssh.ShowCommand) (Output, error) {
 		return Output{}, fmt.Errorf("%w: %q", ErrUnexpectedPrompt, s.st.Prompt)
 	}
 	out, err := s.exec(ctx, cmd.String(), cmd.LongOutput)
-	if err == nil && s.st.Mode != ModePrivileged {
+	select {
+	case <-s.done:
+		return out, err /* closed: err says why */
+	default:
+	}
+	if s.st.Mode != ModePrivileged {
+		/* a read command left the privileged prompt (a question, a mode change), also behind a device error */
 		_ = s.Close()
 		return Output{}, fmt.Errorf("%w: %q after %s", ErrUnexpectedPrompt, s.st.Prompt, cmd.Name)
 	}

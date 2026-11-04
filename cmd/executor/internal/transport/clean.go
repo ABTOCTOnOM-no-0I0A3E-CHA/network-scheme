@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -60,17 +61,22 @@ func stripEscapes(b []byte) []byte {
 	return out
 }
 
-/* dropped are runes no client ever gets: C0 but tab, DEL, C1, and the bidirectional controls. */
+/*
+dropped are runes no client ever gets: C0 but tab, DEL, C1, every format
+character (Unicode Cf: the bidirectional controls and isolates, zero-width
+characters, the byte order mark, the interlinear annotation controls,
+U+061C), and the line and paragraph separators.
+*/
 func dropped(r rune) bool {
 	switch {
-	case r == '\t':
+	case r == '	':
 		return false
 	case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
 		return true
-	case r == 0x200e, r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+	case r == 0x2028, r == 0x2029:
 		return true
 	}
-	return false
+	return unicode.Is(unicode.Cf, r)
 }
 
 /*

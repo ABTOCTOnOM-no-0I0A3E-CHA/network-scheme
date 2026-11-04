@@ -157,6 +157,7 @@ func targetOf(r registry.Row) (target, error) {
 /* source is where a connection's decisions come from: the verified registry (registrySource); tests use a fake. */
 type source interface {
 	target(ctx context.Context) (target, error)
+	modelProfiles(ctx context.Context, t target) ([]identify.Profile, error)
 	decide(ctx context.Context, t target, id identify.Identity) (identify.Decision, error)
 }
 
@@ -181,6 +182,23 @@ func (r registrySource) target(ctx context.Context) (target, error) {
 		return err
 	})
 	return t, err
+}
+
+/* modelProfiles reads the model profiles on a verified snapshot in which the device row is still the one to dial. */
+func (r registrySource) modelProfiles(ctx context.Context, t target) ([]identify.Profile, error) {
+	var ps []identify.Profile
+	err := r.v.View(ctx, func(s *registry.Snapshot) error {
+		now, err := r.row(s)
+		if err != nil {
+			return err
+		}
+		if now != t {
+			return ErrRegistryChanged
+		}
+		ps = identify.ProfilesOf(s)
+		return nil
+	})
+	return ps, err
 }
 
 /* decide takes the gate on a fresh verified snapshot, in which the device row must be the one dialled. */
@@ -213,8 +231,62 @@ func Dial(ctx context.Context, cfg Config) (*Shell, error) {
 	return dial(ctx, cfg, registrySource{v: cfg.Registry, id: cfg.DeviceID})
 }
 
+/* alertTimeout bounds publishing one alert; a cancelled caller does not cancel it. */
+const alertTimeout = 5 * time.Second
+
 func (c Config) alert(ctx context.Context, kind, text string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)
+	defer cancel()
 	_ = c.Alert(ctx, kind, "high", c.DeviceID, text)
+}
+
+/*
+preLogins are the ways to connect before the device is identified (auth,
+in-band login, KEX): the pre-login values of the line's usable profiles if
+they all agree, otherwise the defaults first and then each distinct set of
+the profiles. The model gate after login decides which profile applies.
+*/
+func preLogins(line strategy.Line, ps []identify.Profile) []strategy.Set {
+	def := strategy.Defaults(line)
+	var sets []strategy.Set
+	for _, p := range ps {
+		if p.WriteDriver != line || p.Err != nil {
+			continue
+		}
+		set, err := def.Override(p.Strategies)
+		if err != nil {
+			continue
+		}
+		if !slices.ContainsFunc(sets, func(x strategy.Set) bool { return x.PreLogin() == set.PreLogin() }) {
+			sets = append(sets, preLogin(def, set))
+		}
+	}
+	if len(sets) == 1 {
+		return sets
+	}
+	out := []strategy.Set{def}
+	for _, x := range sets {
+		if x.PreLogin() != def.PreLogin() {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+/* preLogin is def with the pre-login values of set. */
+func preLogin(def, set strategy.Set) strategy.Set {
+	def.Auth, def.InbandLogin, def.KEX = set.Auth, set.InbandLogin, set.KEX
+	return def
+}
+
+/*
+retryable reports whether the next pre-login set may be tried after err: only
+a refused authentication or key exchange, or a credential the method cannot
+use. A host key mismatch, a password change, a failed in-band login and every
+later stage stop.
+*/
+func retryable(err error) bool {
+	return errors.Is(err, ErrHandshake) || errors.Is(err, ErrCredential) || errors.Is(err, ErrInbandLogin)
 }
 
 func dial(ctx context.Context, cfg Config, src source) (*Shell, error) {
@@ -234,8 +306,20 @@ func dial(ctx context.Context, cfg Config, src source) (*Shell, error) {
 	if cfg.Access == Write && !t.writesEnabled {
 		return nil, ErrWritesDisabled
 	}
-	set := strategy.Defaults(t.line)
-	sh, id, err := connect(ctx, cfg, t, set)
+	ps, err := src.modelProfiles(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		sh  *Shell
+		id  identify.Identity
+		set strategy.Set
+	)
+	for _, set = range preLogins(t.line, ps) {
+		if sh, id, err = connect(ctx, cfg, t, set); err == nil || !retryable(err) {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -244,8 +328,12 @@ func dial(ctx context.Context, cfg Config, src source) (*Shell, error) {
 		_ = sh.Close()
 		return nil, err
 	}
-	if dec.Set.PreLogin() != set.PreLogin() {
-		/* the profile changes how to connect: connect again with it, and it must come out the same */
+	if !dec.Write {
+		/* no profile applies: reading keeps the way it connected (pre-login values say nothing about what is sent) */
+		dec.Set = preLogin(dec.Set, set)
+	}
+	if dec.Write && dec.Set.PreLogin() != set.PreLogin() {
+		/* the matching profile connects otherwise: connect again with it, and it must come out the same */
 		_ = sh.Close()
 		sh2, id2, err := connect(ctx, cfg, t, dec.Set)
 		if err != nil {
@@ -310,7 +398,7 @@ authenticates with its key (auth password or publickey); a password
 credential with password, or keyboard-interactive answered with the same
 password; publickey requires a key credential.
 */
-func authMethod(set strategy.Set, c Credential, expired *atomic.Bool) (gossh.AuthMethod, error) {
+func authMethod(set strategy.Set, c Credential, rsaSHA1 bool, expired *atomic.Bool) (gossh.AuthMethod, error) {
 	auth := set.Auth
 	if !c.PrivateKey.IsZero() && auth == "password" {
 		auth = "publickey"
@@ -334,29 +422,58 @@ func authMethod(set strategy.Set, c Credential, expired *atomic.Bool) (gossh.Aut
 		if err != nil {
 			return nil, fmt.Errorf("%w: unusable private key", ErrCredential)
 		}
+		if signer.PublicKey().Type() == gossh.KeyAlgoRSA {
+			/* RSA user keys sign with SHA-2; ssh-rsa (SHA-1) only with the registry's flag, as for the host key [R §9.10] */
+			as, ok := signer.(gossh.AlgorithmSigner)
+			if !ok {
+				return nil, fmt.Errorf("%w: RSA key without algorithm choice", ErrCredential)
+			}
+			if signer, err = gossh.NewSignerWithAlgorithms(as, hostKeyAlgorithms(gossh.KeyAlgoRSA, rsaSHA1)); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrCredential, err)
+			}
+		}
 		return gossh.PublicKeys(signer), nil
 	}
 	return nil, fmt.Errorf("%w: auth %q", ErrCredential, auth)
 }
 
 /*
-kiChallenge answers only password questions, with the password; a question
-about a new or expired password sets expired and fails [R §9.9].
+kiChallenge answers keyboard-interactive rounds [R §9.9]: a name,
+instruction or question about an expired or new password sets expired (it
+stays set: every later round fails) and fails; a round without questions
+gets no answer; exactly one round with password questions is answered, with
+the password; any other question, and any later password round, fails.
 */
 func kiChallenge(set strategy.Set, c Credential, expired *atomic.Bool) gossh.KeyboardInteractiveChallenge {
-	return func(_, instruction string, questions []string, _ []bool) ([]string, error) {
-		answers := make([]string, len(questions))
-		for i, q := range questions {
-			q = strings.TrimSpace(q)
-			if set.Expired.MatchString(q) || set.Expired.MatchString(strings.TrimSpace(instruction)) {
+	answered := false
+	return func(name, instruction string, questions []string, _ []bool) ([]string, error) {
+		if expired.Load() {
+			return nil, ErrPasswordExpired
+		}
+		if set.Expired.MatchString(strings.TrimSpace(name)) || set.Expired.MatchString(strings.TrimSpace(instruction)) {
+			expired.Store(true)
+			return nil, ErrPasswordExpired
+		}
+		for _, q := range questions {
+			if set.Expired.MatchString(strings.TrimSpace(q)) {
 				expired.Store(true)
 				return nil, ErrPasswordExpired
 			}
-			if !set.LoginPassword.MatchString(q) {
-				return nil, fmt.Errorf("transport: unexpected keyboard-interactive question %q", sanitizeLine([]byte(q)))
+		}
+		if len(questions) == 0 {
+			return nil, nil
+		}
+		if answered {
+			return nil, ErrLoginFailed
+		}
+		answers := make([]string, len(questions))
+		for i, q := range questions {
+			if !set.LoginPassword.MatchString(strings.TrimSpace(q)) {
+				return nil, fmt.Errorf("%w: unexpected keyboard-interactive question %q", ErrLoginFailed, sanitizeLine([]byte(q)))
 			}
 			answers[i] = c.Password.Reveal()
 		}
+		answered = true
 		return answers, nil
 	}
 }
@@ -379,7 +496,7 @@ func readDialect(l strategy.Line) ssh.Dialect {
 /* connect dials, authenticates, logs in and identifies the device with set (nothing but the read allowlist is sent). */
 func connect(ctx context.Context, cfg Config, t target, set strategy.Set) (*Shell, identify.Identity, error) {
 	var expired, mismatch atomic.Bool
-	auth, err := authMethod(set, cfg.Credential, &expired)
+	auth, err := authMethod(set, cfg.Credential, t.rsaSHA1, &expired)
 	if err != nil {
 		return nil, identify.Identity{}, err
 	}
@@ -416,11 +533,13 @@ func connect(ctx context.Context, cfg Config, t target, set strategy.Set) (*Shel
 		}
 		return nil, identify.Identity{}, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
-	_ = conn.SetDeadline(time.Time{})
+	/* the deadline holds until the shell is open: a device stalling the session, PTY or shell request cannot hang the dial */
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	sh, err := open(gossh.NewClient(sc, chans, reqs), t, set, cfg.CommandTimeout)
 	if err != nil {
 		return nil, identify.Identity{}, err
 	}
+	_ = conn.SetDeadline(time.Time{})
 	if err := sh.login(ctx, cfg.Credential); err != nil {
 		_ = sh.Close()
 		if errors.Is(err, ErrPasswordExpired) {

@@ -42,6 +42,7 @@ type Config struct {
 	Ciphers             []string /* empty: the x/crypto defaults */
 	HostKeyAlgorithms   []string /* signature algorithms offered for HostKey (e.g. only "ssh-rsa"); empty: all it supports */
 	KeyboardInteractive bool     /* also accept Password through keyboard-interactive (one "Password:" question) */
+	NoPasswordAuth      bool     /* refuse the password method: Password only through keyboard-interactive */
 	NoClientAuth        bool     /* accept any client without authentication (in-band login inside the channel) */
 	DisconnectAfter     int      /* drop the connection once this many input lines arrived: the last one reaches the shell, its output does not; 0: never */
 }
@@ -181,7 +182,7 @@ func serverConfig(cfg Config, log *Log) *gossh.ServerConfig {
 			}
 		},
 	}
-	if cfg.Password != "" {
+	if cfg.Password != "" && !cfg.NoPasswordAuth {
 		sc.PasswordCallback = func(m gossh.ConnMetadata, pw []byte) (*gossh.Permissions, error) {
 			log.add(&log.auths, "password:"+string(pw))
 			if (cfg.Username == "" || m.User() == cfg.Username) && string(pw) == cfg.Password {

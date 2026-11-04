@@ -114,4 +114,9 @@ func TestDecide(t *testing.T) {
 	if d.Write {
 		t.Error("MES2324 profile allows MES2324P")
 	}
+	/* a stored pattern with an alternation outside its anchors still matches only whole strings */
+	d, _ = Decide(strategy.MES6, []Profile{{ID: 1, WriteDriver: strategy.MES6, ModelRe: `^(?:MES)|(?:x)$`, FirmwareRe: `^(?:6\..*)$`}}, mes)
+	if d.Write {
+		t.Error("a pattern with an outer alternation allows another model")
+	}
 }

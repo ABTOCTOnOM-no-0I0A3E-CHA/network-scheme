@@ -148,7 +148,11 @@ func storedRe(p string) (*regexp.Regexp, error) {
 	if !strings.HasPrefix(p, "^(?:") || !strings.HasSuffix(p, ")$") {
 		return nil, fmt.Errorf("pattern %q is not stored anchored", p)
 	}
-	return regexp.Compile(p)
+	/*
+		The text form is not enough ("^(?:a)$|b" has it): wrap once more, so
+		the whole string must match whatever the stored pattern holds.
+	*/
+	return regexp.Compile(`^(?:` + p + `)$`)
 }
 
 func (p Profile) matches(id Identity) (bool, error) {

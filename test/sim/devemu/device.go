@@ -59,6 +59,7 @@ type Device struct {
 	reboots int
 	show    func(cmd string) (string, bool)
 	onInput func(Entry)
+	before  func(line string) (async string, delay time.Duration)
 }
 
 type reject struct {
@@ -101,6 +102,18 @@ func (d *Device) SetShowLookup(fn func(cmd string) (string, bool)) {
 func (d *Device) OnInput(fn func(Entry)) {
 	d.mu.Lock()
 	d.onInput = fn
+	d.mu.Unlock()
+}
+
+/*
+BeforeReply calls fn for every command line before the device answers it:
+a non-empty async is printed at once as a syslog line with the prompt
+redrawn behind it, then the reply waits delay (a slow device). The device
+lock is held meanwhile.
+*/
+func (d *Device) BeforeReply(fn func(line string) (async string, delay time.Duration)) {
+	d.mu.Lock()
+	d.before = fn
 	d.mu.Unlock()
 }
 

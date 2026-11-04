@@ -74,6 +74,11 @@ type Set struct {
 	PTY string `key:"pty" variants:"wide-join,wide" research:"§9.13, §5"`
 	/* ESR shared candidate: refuse unless this is the only session and the candidate is empty (exclusive), or trust. MES: unused. */
 	Concurrency string `key:"concurrency" variants:"exclusive,trust" research:"§9.11, §8"`
+	/* Echo: the CLI echoes each typed line (a prompt then counts only behind the echo), or not (none). */
+	Echo string `key:"echo" variants:"expect,none" research:"§5"`
+
+	/* line is the firmware line of the defaults; Override checks variants against it. */
+	line Line `research:"§0"`
 
 	/* Width is the PTY width requested. */
 	Width int `research:"§9.13, §5"`
@@ -111,7 +116,7 @@ var (
 	/* (y/N):  (Y/N)[N] ?  (y/n) [n]?  [confirm] [R §5]. */
 	questionRe = regexp.MustCompile(`(?i)(?:\(y/n\) ?(?:\[[yn]\])? ?[:?]|\[confirm\]) ?$`)
 	/* forced password change: CHANGE-EXPIRED-PASSWORD (ESR), passwords aging (MES) [R §4]; texts are guesses. */
-	expiredRe  = regexp.MustCompile(`(?i)password (?:has )?expired|change-expired-password|must change (?:your|the) password|^(?:enter )?new password ?:? ?$`)
+	expiredRe  = regexp.MustCompile(`(?i)expir|password change|change (?:your |the )?password|aging|^(?:enter )?new password ?:? ?$`)
 	loginUser  = regexp.MustCompile(`(?i)^(?:user ?name|login) ?: ?$`)
 	loginPass  = regexp.MustCompile(`(?i)^password ?: ?$`)
 	usersRowRe = regexp.MustCompile(`^\s*(\*)?\s*[0-9]+\s+\S+`)
@@ -122,7 +127,7 @@ const width = 511
 func base() Set {
 	return Set{
 		Auth: "password", InbandLogin: "off", KEX: "modern", Pager: "answer", Confirmations: "off",
-		Errors: "markers", Async: "filter", PTY: "wide-join", Concurrency: "trust",
+		Errors: "markers", Async: "filter", PTY: "wide-join", Concurrency: "trust", Echo: "expect",
 		Width: width, Prompt: promptRe, Question: questionRe, Expired: expiredRe,
 		LoginUser: loginUser, LoginPassword: loginPass, UsersRow: usersRowRe,
 		TerminalCommands: map[string][]string{
@@ -141,6 +146,7 @@ Line.Valid against the registry first.
 */
 func Defaults(l Line) Set {
 	s := base()
+	s.line = l
 	switch l {
 	case ESR:
 		s.KEX, s.Terminal, s.Concurrency, s.PagerKey = "no-curve25519", "datadump-machine", "exclusive", "R"
@@ -175,6 +181,25 @@ func Defaults(l Line) Set {
 /* ErrOverride refuses a profile's strategies: unknown key or variant. */
 var ErrOverride = errors.New("strategy: bad override")
 
+/*
+lineVariants narrows the variants of a key on a line: the terminal commands
+each line documents [R §5], and the shared-candidate check, ESR only [R §8].
+*/
+var lineVariants = map[Line]map[string][]string{
+	ESR:   {"terminal": {"datadump-machine", "datadump", "none"}},
+	MES6:  {"terminal": {"datadump", "none"}, "concurrency": {"trust"}},
+	MES10: {"terminal": {"set-cli-pagination-off", "none"}, "concurrency": {"trust"}},
+}
+
+/* Variants returns the switchable keys and the variants line l allows (default of the research first). */
+func Variants(l Line) map[string][]string {
+	out := Keys()
+	for k, vs := range lineVariants[l] {
+		out[k] = vs
+	}
+	return out
+}
+
 /* Keys returns the switchable keys and their variants (default of the research first). */
 func Keys() map[string][]string {
 	out := map[string][]string{}
@@ -190,11 +215,11 @@ func Keys() map[string][]string {
 
 /*
 Override returns s with the switchable fields named in o set to their
-values. Every key must be a switchable key and every value one of its
-variants, otherwise nothing is applied (ErrOverride).
+values. Every key must be a switchable key and every value one of the
+variants its line allows (Variants), otherwise nothing is applied (ErrOverride).
 */
 func (s Set) Override(o map[string]string) (Set, error) {
-	keys := Keys()
+	keys := Variants(s.line)
 	names := make([]string, 0, len(o))
 	for k := range o {
 		names = append(names, k)

@@ -159,3 +159,35 @@ func TestPrompt(t *testing.T) {
 		}
 	}
 }
+
+/* Override allows only the variants of the set's own line. */
+func TestOverridePerLine(t *testing.T) {
+	for line, o := range map[Line]map[string]string{
+		ESR:   {"terminal": "set-cli-pagination-off"},
+		MES6:  {"terminal": "datadump-machine"},
+		MES10: {"concurrency": "exclusive"},
+	} {
+		if _, err := Defaults(line).Override(o); !errors.Is(err, ErrOverride) {
+			t.Errorf("%s %v: %v", line, o, err)
+		}
+	}
+	if s, err := Defaults(MES10).Override(map[string]string{"terminal": "none", "echo": "none"}); err != nil || s.Echo != "none" {
+		t.Errorf("mes10 terminal=none echo=none: %v", err)
+	}
+}
+
+/* A forced password change is recognised in its documented and likely forms [R §4]. */
+func TestExpiredPatterns(t *testing.T) {
+	re := Defaults(MES6).Expired
+	for _, s := range []string{"Your password has expired.", "Password expires today", "Password change required",
+		"You must change your password", "Change password now", "passwords aging", "New password:", "CHANGE-EXPIRED-PASSWORD"} {
+		if !re.MatchString(s) {
+			t.Errorf("%q is not a password change", s)
+		}
+	}
+	for _, s := range []string{"Password:", "User Name:", "esr#", "% Authentication failed"} {
+		if re.MatchString(s) {
+			t.Errorf("%q is a password change", s)
+		}
+	}
+}

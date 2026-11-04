@@ -3,6 +3,7 @@ package devemu
 import (
 	"io"
 	"strings"
+	"time"
 )
 
 const (
@@ -235,6 +236,14 @@ func (s *Session) lineDone(text string) {
 		s.emit(out)
 	case stCLI:
 		s.record("line", text)
+		if s.d.before != nil {
+			if async, delay := s.d.before(text); async != "" || delay > 0 {
+				if async != "" {
+					s.write(s.d.now.Format(s.d.P.Syslog["stamp"].Text) + " " + async + "\n" + s.prompt())
+				}
+				time.Sleep(delay)
+			}
+		}
 		s.busy = true
 		s.emit(s.exec(text))
 	}
