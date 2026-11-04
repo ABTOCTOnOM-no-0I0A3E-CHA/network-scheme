@@ -96,14 +96,17 @@ type Request struct {
 	Strategies  map[string]string `json:"strategies,omitempty"`
 	/*
 		The device commands: the device, its routing fields and flags (accept-hostkey: only those
-		that change), and Fingerprint, the host key the host confirmed (without it: a preview).
+		that change; a nil flag keeps the registry's), Fingerprint, the host key the host confirmed
+		(without it: a preview), and DeviceVersion, the registry row version the preview showed
+		(accept-hostkey: a row changed since is refused).
 	*/
-	DeviceID    int64  `json:"device_id,omitempty"`
-	Address     string `json:"address,omitempty"`
-	Port        int64  `json:"port,omitempty"`
-	AllowSHA1   bool   `json:"allow_ssh_rsa_sha1,omitempty"`
-	Backup      bool   `json:"backup_via_executor,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
+	DeviceID      int64  `json:"device_id,omitempty"`
+	Address       string `json:"address,omitempty"`
+	Port          int64  `json:"port,omitempty"`
+	AllowSHA1     *bool  `json:"allow_ssh_rsa_sha1,omitempty"`
+	Backup        *bool  `json:"backup_via_executor,omitempty"`
+	Fingerprint   string `json:"fingerprint,omitempty"`
+	DeviceVersion int64  `json:"device_version,omitempty"`
 }
 
 var (
@@ -129,7 +132,7 @@ const MaxPattern = 250
 /* uses lists the optional fields each command takes; any other field set is refused. */
 var uses = map[string][]string{
 	CmdPolicyReload:  {"action"},
-	CmdDevice:        {"action", "device_id", "address", "port", "group", "driver", "allow_ssh_rsa_sha1", "backup_via_executor", "fingerprint"},
+	CmdDevice:        {"action", "device_id", "address", "port", "group", "driver", "allow_ssh_rsa_sha1", "backup_via_executor", "fingerprint", "device_version"},
 	CmdEnroll:        {"user", "user_id", "user_created_at", "replace"},
 	CmdGrant:         {"user", "user_id", "user_created_at", "kind", "group"},
 	CmdRevoke:        {"user", "kind", "group", "all"},
@@ -147,8 +150,8 @@ func (r Request) fields() map[string]bool {
 		"group": r.Group != "", "all": r.All, "replace": r.Replace, "global": r.Global, "i_understand": r.IUnderstand, "drop_panel_request": r.DropPanel,
 		"reason": r.Reason != "", "action": r.Action != "", "driver": r.Driver != "", "model": r.Model != "",
 		"firmware": r.Firmware != "", "note": r.Note != "", "strategies": len(r.Strategies) > 0,
-		"device_id": r.DeviceID != 0, "address": r.Address != "", "port": r.Port != 0, "allow_ssh_rsa_sha1": r.AllowSHA1,
-		"backup_via_executor": r.Backup, "fingerprint": r.Fingerprint != "",
+		"device_id": r.DeviceID != 0, "address": r.Address != "", "port": r.Port != 0, "allow_ssh_rsa_sha1": r.AllowSHA1 != nil,
+		"backup_via_executor": r.Backup != nil, "fingerprint": r.Fingerprint != "", "device_version": r.DeviceVersion != 0,
 	}
 }
 
@@ -235,8 +238,10 @@ func (r Request) validateDevice() error {
 	switch {
 	case !slices.Contains(DeviceActions, r.Action):
 		return fmt.Errorf("device action %q", r.Action)
-	case r.DeviceID < 0:
-		return errors.New("bad device id")
+	case r.DeviceID < 0 || r.DeviceVersion < 0:
+		return errors.New("bad device id or version")
+	case r.DeviceVersion != 0 && (r.Action != "accept-hostkey" || r.Fingerprint == ""):
+		return errors.New("device_version binds an accept-hostkey confirmation only")
 	case r.Address != "" && len(r.Address) > 64:
 		return errors.New("bad address")
 	case r.Port < 0 || r.Port > 65535:
@@ -321,6 +326,7 @@ type Device struct {
 	Algo         string `json:"hostkey_algo"`
 	Fingerprint  string `json:"hostkey_fp"`
 	PinnedFP     string `json:"pinned_fp,omitempty"`
+	Version      int64  `json:"version,omitempty"` /* accept-hostkey: the registry row version previewed */
 	PanelName    string `json:"panel_name,omitempty"`
 	PanelAddress string `json:"panel_address,omitempty"`
 }

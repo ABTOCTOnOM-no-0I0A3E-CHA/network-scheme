@@ -19,12 +19,13 @@ import (
 	"github.com/beekamai/network-scheme/internal/execadmin"
 )
 
-/* Actions of /x (confirm(H), write-admin). */
+/* Actions and reads of /x (write-admin; confirm(H) or ticket + change TOTP). */
 const (
 	ActionRegister = "device.register"
 	ActionAccept   = "device.accept_hostkey"
 	ActionWrites   = "device.writes"
 	ActionList     = "device.list"
+	ActionProbe    = "device.probe"
 )
 
 /*
@@ -40,7 +41,7 @@ type Action struct {
 type Read struct {
 	Action string
 	Need   authz.Need
-	Run    func(ctx context.Context, by authz.Decision) (any, error)
+	Run    func(ctx context.Context, by authz.Decision, params json.RawMessage) (any, error)
 }
 
 /* RefusalCode is the code /x answers a refusal with (web.Refusal). */
@@ -49,27 +50,62 @@ func (Refusal) RefusalCode() string { return "device_refused" }
 var writeAdmin = authz.Need{Kind: execadmin.KindWriteAdmin}
 
 /*
-Actions are the device actions of /x/confirm: each Describe reads the
-registry (and, for a key, the device) itself and builds every field the
-user confirms; Run changes exactly the confirmed description.
+Actions are the device actions of /x/confirm. No Describe touches the
+network: issuing a challenge needs only a ticket, so a forged one must not
+make the executor connect anywhere. The host key comes from the client (it
+read it through the probe, which needs the change TOTP) and is shown in H;
+Run reads it again from the confirmed address and refuses any other key.
 */
 func (s *Service) Actions() map[string]Action {
 	return map[string]Action{
-		ActionRegister: {Describe: s.describeRegister, Run: s.run(Register)},
-		ActionAccept:   {Describe: s.describeAccept, Run: s.run(Accept)},
+		ActionRegister: {Describe: s.describeKey(Register), Run: s.run(Register)},
+		ActionAccept:   {Describe: s.describeKey(Accept), Run: s.run(Accept)},
 		ActionWrites:   {Describe: s.describeWrites, Run: s.run(Writes)},
 	}
 }
 
 /* List is POST /x/devices: the registry's devices for a write-admin (ticket + change TOTP). */
 func (s *Service) List() Read {
-	return Read{Action: ActionList, Need: writeAdmin, Run: func(ctx context.Context, _ authz.Decision) (any, error) {
+	return Read{Action: ActionList, Need: writeAdmin, Run: func(ctx context.Context, _ authz.Decision, params json.RawMessage) (any, error) {
+		if len(params) > 0 && strict(params, &struct{}{}) != nil {
+			return nil, refuse("the device list takes no parameters")
+		}
 		var out []Device
 		err := s.Guard.View(ctx, func(snap *registry.Snapshot) error { out = All(snap); return nil })
 		if out == nil {
 			out = []Device{}
 		}
 		return out, err
+	}}
+}
+
+/*
+ProbeRead is POST /x/devices/probe: the only network action before a
+confirmation, and it needs the change TOTP of a write-admin (authz decides
+and audits it). It reads the host key of the target that register (kind
+"register") or accept-hostkey (kind "accept_hostkey") would confirm with
+these params, without authentication, and returns what the confirmation
+will show.
+*/
+func (s *Service) ProbeRead() Read {
+	return Read{Action: ActionProbe, Need: writeAdmin, Run: func(ctx context.Context, _ authz.Decision, params json.RawMessage) (any, error) {
+		var p probeParams
+		if err := strict(params, &p); err != nil {
+			return nil, refuse("bad probe parameters")
+		}
+		kind := map[string]string{"register": Register, "accept_hostkey": Accept}[p.Kind]
+		if kind == "" {
+			return nil, refuse("probe kind %q, want register or accept_hostkey", p.Kind)
+		}
+		r, err := s.resolve(ctx, kind, p.targetParams)
+		if err != nil {
+			return nil, err
+		}
+		k, err := s.Probe(ctx, r.t)
+		if err != nil {
+			return nil, err
+		}
+		return r.fields(k), nil
 	}}
 }
 
@@ -87,9 +123,9 @@ func strict(params json.RawMessage, v any) error {
 }
 
 /*
-admin checks, before anything is read from a device, that the user holds
-write-admin bound to the ticket's name; confirm (authz) decides it again
-with the change TOTP. A refusal is audited.
+admin checks, before anything else, that the user holds write-admin bound
+to the ticket's name; confirm (authz) decides it again with the change
+TOTP. A refusal is audited.
 */
 func (s *Service) admin(ctx context.Context, by authz.Decision, action string) error {
 	err := s.Guard.View(ctx, func(snap *registry.Snapshot) error {
@@ -118,14 +154,26 @@ func (s *Service) current(ctx context.Context, id int64) (Device, error) {
 	return d, err
 }
 
-type registerParams struct {
+/* targetParams are what the client may give of a target; nil keeps the default (register) or the registry's value (accept). */
+type targetParams struct {
 	DeviceID  int64   `json:"device_id"`
 	Address   *string `json:"address"`
 	Port      *int64  `json:"port"`
-	Group     string  `json:"write_group"`
-	Driver    string  `json:"write_driver"`
-	AllowSHA1 bool    `json:"allow_ssh_rsa_sha1"`
-	Backup    bool    `json:"backup_via_executor"`
+	Group     *string `json:"write_group"`
+	Driver    *string `json:"write_driver"`
+	AllowSHA1 *bool   `json:"allow_ssh_rsa_sha1"`
+	Backup    *bool   `json:"backup_via_executor"`
+}
+
+type probeParams struct {
+	Kind string `json:"kind"`
+	targetParams
+}
+
+type keyParams struct {
+	targetParams
+	Algo string `json:"hostkey_algo"`
+	FP   string `json:"hostkey_fp"`
 }
 
 func parseAddr(s string) (netip.Addr, error) {
@@ -136,96 +184,102 @@ func parseAddr(s string) (netip.Addr, error) {
 	return a, nil
 }
 
+/* Where a target's address came from (shown, and covered by H). */
+const (
+	SourceEntered  = "entered"  /* the user typed it */
+	SourcePanel    = "panel"    /* prefilled from core.device: the panel's claim, shown for confirmation */
+	SourceRegistry = "registry" /* accept-hostkey: the address the registry already has */
+)
+
+/* resolved is a target ready to show: the fields, where the address came from, and what else is shown. */
+type resolved struct {
+	kind    string
+	t       Target
+	source  string
+	cur     Device /* accept: the registry's row */
+	panel   Panel
+	onPanel bool
+}
+
 /*
-describeRegister: the address is the client's, or else the panel's
-core.device address as a prefill; either way it is shown, checked by the
-network guard, probed without authentication for its host key, and only
-the confirmed value is stored. The panel's name and address are shown for
-display only.
+resolve builds the target of a registration (the client's fields; the
+address entered or, failing that, the panel's core.device address as a
+prefill) or of a host key acceptance (the registry's fields, never the
+panel's, each replaceable by the client). The network guard checks it; no
+connection is made.
 */
-func (s *Service) describeRegister(ctx context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
-	if err := s.admin(ctx, by, ActionRegister); err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	var p registerParams
-	if err := strict(params, &p); err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	t := Target{ID: p.DeviceID, Port: 22, Group: p.Group, Driver: p.Driver, AllowSHA1: p.AllowSHA1, Backup: p.Backup}
-	if p.Port != nil {
-		t.Port = *p.Port
-	}
-	panel, onPanel, err := s.Panel(ctx, p.DeviceID)
-	if err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	switch {
-	case p.Address != nil:
-		if t.Address, err = parseAddr(*p.Address); err != nil {
-			return authz.Need{}, confirm.Description{}, err
+func (s *Service) resolve(ctx context.Context, kind string, p targetParams) (resolved, error) {
+	r := resolved{kind: kind, source: SourceEntered}
+	var err error
+	if kind == Register {
+		r.t = Target{ID: p.DeviceID, Port: 22}
+		if r.panel, r.onPanel, err = s.Panel(ctx, p.DeviceID); err != nil {
+			return r, err
 		}
-	case onPanel && panel.Address.IsValid():
-		t.Address = panel.Address
-	default:
-		return authz.Need{}, confirm.Description{}, refuse("device %d: no address given and none on the panel", p.DeviceID)
+		if p.Address == nil {
+			if !r.onPanel || !r.panel.Address.IsValid() {
+				return r, refuse("device %d: no address given and none on the panel", p.DeviceID)
+			}
+			r.t.Address, r.source = r.panel.Address, SourcePanel
+		}
+	} else {
+		if r.cur, err = s.current(ctx, p.DeviceID); err != nil {
+			return r, err
+		}
+		r.t, r.source = r.cur.target(), SourceRegistry
 	}
-	k, err := s.Probe(ctx, t)
-	if err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	f := targetFields(t, k)
-	if onPanel {
-		f["panel_name"], f["panel_address"] = panel.Name, panel.Address.String()
-	}
-	return writeAdmin, describe(ActionRegister, f), nil
-}
-
-type acceptParams struct {
-	DeviceID  int64   `json:"device_id"`
-	Address   *string `json:"address"`
-	Port      *int64  `json:"port"`
-	Group     *string `json:"write_group"`
-	Driver    *string `json:"write_driver"`
-	AllowSHA1 *bool   `json:"allow_ssh_rsa_sha1"`
-	Backup    *bool   `json:"backup_via_executor"`
-}
-
-/*
-describeAccept: the registry's routing fields (never the panel's), each
-replaceable by the client, are shown with the host key the executor reads
-from that address now and the key pinned so far; accepting it confirms
-them all (a device from a reset is confirmed so).
-*/
-func (s *Service) describeAccept(ctx context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
-	if err := s.admin(ctx, by, ActionAccept); err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	var p acceptParams
-	if err := strict(params, &p); err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	cur, err := s.current(ctx, p.DeviceID)
-	if err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	t := cur.target()
 	if p.Address != nil {
-		if t.Address, err = parseAddr(*p.Address); err != nil {
+		if r.t.Address, err = parseAddr(*p.Address); err != nil {
+			return r, err
+		}
+		r.source = SourceEntered
+	}
+	setIf(&r.t.Port, p.Port)
+	setIf(&r.t.Group, p.Group)
+	setIf(&r.t.Driver, p.Driver)
+	setIf(&r.t.AllowSHA1, p.AllowSHA1)
+	setIf(&r.t.Backup, p.Backup)
+	return r, s.checkTarget(r.t)
+}
+
+/* fields is what the confirmation shows (and H covers) for key k. */
+func (r resolved) fields(k Key) map[string]string {
+	f := targetFields(r.t, k)
+	f["address_source"] = r.source
+	if r.kind == Register && r.onPanel {
+		f["panel_name"], f["panel_address"] = r.panel.Name, r.panel.Address.String()
+	}
+	if r.kind == Accept {
+		f["pinned_fp"], f["status"], f["version"] = orNone(r.cur.FP), r.cur.Status, strconv.FormatInt(r.cur.Version, 10)
+	}
+	return f
+}
+
+/*
+describeKey describes a registration or a host key acceptance with the key
+the client read through the probe: the type must be one the registry may
+pin and the fingerprint well-formed; Run checks the device presents it.
+*/
+func (s *Service) describeKey(kind string) func(ctx context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
+	action := map[string]string{Register: ActionRegister, Accept: ActionAccept}[kind]
+	return func(ctx context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
+		if err := s.admin(ctx, by, action); err != nil {
 			return authz.Need{}, confirm.Description{}, err
 		}
+		var p keyParams
+		if err := strict(params, &p); err != nil {
+			return authz.Need{}, confirm.Description{}, err
+		}
+		k := Key{Algo: p.Algo, FP: p.FP}
+		if !slices.Contains(keyTypes, k.Algo) || !execadmin.FingerprintRe.MatchString(k.FP) {
+			return authz.Need{}, confirm.Description{}, refuse("a host key read by the probe is required (type and SHA256 fingerprint)")
+		}
+		r, err := s.resolve(ctx, kind, p.targetParams)
+		if err != nil {
+			return authz.Need{}, confirm.Description{}, err
+		}
+		return writeAdmin, describe(action, r.fields(k)), nil
 	}
-	setIf(&t.Port, p.Port)
-	setIf(&t.Group, p.Group)
-	setIf(&t.Driver, p.Driver)
-	setIf(&t.AllowSHA1, p.AllowSHA1)
-	setIf(&t.Backup, p.Backup)
-	k, err := s.Probe(ctx, t)
-	if err != nil {
-		return authz.Need{}, confirm.Description{}, err
-	}
-	f := targetFields(t, k)
-	f["pinned_fp"], f["status"], f["version"] = orNone(cur.FP), cur.Status, strconv.FormatInt(cur.Version, 10)
-	return writeAdmin, describe(ActionAccept, f), nil
 }
 
 func setIf[T any](dst *T, v *T) {
@@ -332,6 +386,22 @@ func (s *Service) run(kind string) func(ctx context.Context, ch confirm.Challeng
 		user := by.UserID
 		ev := audit.Event{UserID: &user, Action: ch.Action, Object: "device:" + strconv.FormatInt(c.Target.ID, 10),
 			Details: map[string]any{"ticket": by.Ticket, "username": by.Username, "challenge": ch.ID}}
+		if kind != Writes {
+			/* After the TOTP: the device must present the confirmed key at the confirmed address now (no TOFU). */
+			k, err := s.Probe(ctx, c.Target)
+			if err == nil && k != c.Key {
+				err = refuse("device %d presents host key %s %s, not the confirmed %s %s: nothing changed", c.Target.ID, k.Algo, k.FP, c.Key.Algo, c.Key.FP)
+			}
+			if err != nil {
+				ev.Details["change"], ev.Details["hostkey_fp"] = kind, c.Key.FP
+				result := audit.Error
+				if IsRefusal(err) {
+					result = audit.Denied
+				}
+				s.record(ctx, ev, result, err)
+				return nil, err
+			}
+		}
 		if err := s.Apply(ctx, s.Guard.Write, c, ev); err != nil {
 			return nil, err
 		}

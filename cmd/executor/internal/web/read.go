@@ -2,7 +2,7 @@ package web
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,18 +14,18 @@ import (
 )
 
 /*
-Read is an authorized read of the executor's own data (e.g. POST
-/x/devices): the ticket and the user's change TOTP code, decided and
-audited by authz with Need as Action, then Run as the decided user. The
+Read is an authorized read (e.g. POST /x/devices, /x/devices/probe): the
+ticket and the user's change TOTP code, decided and audited by authz with
+Need as Action, then Run as the decided user with the request's params. The
 grant comes from the executor's code, never from the client.
 */
 type Read struct {
 	Action string
 	Need   authz.Need
-	Run    func(ctx context.Context, by authz.Decision) (any, error)
+	Run    func(ctx context.Context, by authz.Decision, params json.RawMessage) (any, error)
 }
 
-var readPath = regexp.MustCompile(`^/x/[a-z0-9-]{1,32}$`)
+var readPath = regexp.MustCompile(`^/x/[a-z0-9-]{1,32}(/[a-z0-9-]{1,32})?$`)
 
 /* addReads adds a POST route per read, after the fixed routes (a read never replaces one). */
 func (s *Server) addReads() error {
@@ -46,11 +46,17 @@ func (s *Server) addReads() error {
 }
 
 type readRequest struct {
-	Ticket string `json:"ticket"`
-	Code   string `json:"code"`
+	Ticket string          `json:"ticket"`
+	Code   string          `json:"code"`
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
-/* read runs one authorized read: the bounded JSON body, the limits, authz (ticket, TOTP, grant, audit), then Run. */
+/*
+read runs one authorized read: the bounded JSON body, the limits, authz
+(ticket, TOTP, grant, audit), then Run. Run's own refusal answers as an
+action's (Refusal: 422 with its code), a freeze 503 frozen, anything else
+503 unavailable.
+*/
 func (s *Server) read(w http.ResponseWriter, r *http.Request, ip, path string, rd Read) {
 	var req readRequest
 	if !decode(w, r, &req) {
@@ -65,14 +71,12 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, ip, path string, r
 		refused(w, err)
 		return
 	}
-	res, err := rd.Run(r.Context(), by)
+	res, err := rd.Run(r.Context(), by, req.Params)
 	if err != nil {
-		s.c.Log.Error("web: read failed", slog.String("path", path), slog.Any("err", err))
-		if errors.Is(err, authz.ErrFrozen) {
-			refused(w, err)
-			return
+		s.c.Log.Info("web: read refused or failed", slog.String("path", path), slog.Any("err", err))
+		if !actionRefused(w, err) {
+			fail(w, http.StatusServiceUnavailable, "unavailable")
 		}
-		fail(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
 	reply(w, http.StatusOK, map[string]any{"result": res})

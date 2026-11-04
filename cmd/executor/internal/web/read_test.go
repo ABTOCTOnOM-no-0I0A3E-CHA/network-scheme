@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -24,17 +25,22 @@ such and Run is not called; Run's failure is 503 (frozen: frozen).
 func TestAuthorizedRead(t *testing.T) {
 	runs := 0
 	var fail error
-	rd := Read{Action: "device.list", Need: authz.Need{Kind: "write-admin"}, Run: func(_ context.Context, by authz.Decision) (any, error) {
+	var got json.RawMessage
+	rd := Read{Action: "device.list", Need: authz.Need{Kind: "write-admin"}, Run: func(_ context.Context, by authz.Decision, params json.RawMessage) (any, error) {
 		runs++
+		got = params
 		return []int64{by.UserID}, fail
 	}}
-	h := start(t, func(c *Config) { c.Reads = map[string]Read{"/x/devices": rd} })
-	if got := h.srv.Routes(); !slices.Equal(got, []string{"GET /x/status", "POST /x/confirm/issue", "POST /x/confirm", "POST /x/devices"}) {
+	h := start(t, func(c *Config) { c.Reads = map[string]Read{"/x/devices": rd, "/x/devices/probe": rd} })
+	if got := h.srv.Routes(); !slices.Equal(got, []string{"GET /x/status", "POST /x/confirm/issue", "POST /x/confirm", "POST /x/devices", "POST /x/devices/probe"}) {
 		t.Fatalf("routes %v", got)
 	}
 	a := h.do(t, http.MethodPost, "/x/devices", `{"ticket":"user-4","code":"123456"}`, hdr())
-	if a.status != http.StatusOK || strings.TrimSpace(a.body) != `{"result":[4]}` {
-		t.Fatalf("read: %d %s", a.status, a.body)
+	if a.status != http.StatusOK || strings.TrimSpace(a.body) != `{"result":[4]}` || got != nil {
+		t.Fatalf("read: %d %s, params %s", a.status, a.body, got)
+	}
+	if a := h.do(t, http.MethodPost, "/x/devices/probe", `{"ticket":"user-4","code":"1","params":{"device_id":7}}`, hdr()); a.status != http.StatusOK || string(got) != `{"device_id":7}` {
+		t.Fatalf("read with params: %d %s, params %s", a.status, a.body, got)
 	}
 	if c := h.auth.call(0); c.Action != "device.list" || c.Need.Kind != "write-admin" || c.Code != "123456" || c.Object != "/x/devices" {
 		t.Fatalf("authz got %+v", c)
@@ -43,7 +49,7 @@ func TestAuthorizedRead(t *testing.T) {
 		t.Errorf("unknown field: %d", a.status)
 	}
 	h.auth.set(authz.ErrDenied)
-	if a := h.do(t, http.MethodPost, "/x/devices", `{"ticket":"user-4","code":"1"}`, hdr()); a.status != http.StatusForbidden || runs != 1 {
+	if a := h.do(t, http.MethodPost, "/x/devices", `{"ticket":"user-4","code":"1"}`, hdr()); a.status != http.StatusForbidden || runs != 2 {
 		t.Errorf("denied: %d, runs %d", a.status, runs)
 	}
 	h.auth.set(nil)
@@ -55,7 +61,11 @@ func TestAuthorizedRead(t *testing.T) {
 	if a := h.do(t, http.MethodPost, "/x/devices", `{"ticket":"user-4","code":"1"}`, hdr()); a.status != http.StatusServiceUnavailable || a.code != "frozen" {
 		t.Errorf("frozen run: %d %s", a.status, a.body)
 	}
-	for _, p := range []string{"/x/confirm", "/x/status", "/x/a/b", "/y/devices"} {
+	fail = codeRefusal("device_refused")
+	if a := h.do(t, http.MethodPost, "/x/devices", `{"ticket":"user-4","code":"1"}`, hdr()); a.status != http.StatusUnprocessableEntity || a.code != "device_refused" {
+		t.Errorf("refused run: %d %s", a.status, a.body)
+	}
+	for _, p := range []string{"/x/confirm", "/x/confirm/x", "/x/status", "/x/a/b/c", "/y/devices", "/x/Devices"} {
 		if _, err := New(withReads(h, map[string]Read{p: rd})); err == nil {
 			t.Errorf("read at %s accepted", p)
 		}

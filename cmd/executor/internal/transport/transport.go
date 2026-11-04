@@ -383,6 +383,25 @@ func hostKeyAlgorithms(pinned string, sha1 bool) []string {
 	return out
 }
 
+/*
+noKeyOfType reports a handshake that failed because the device offers no
+host key of the pinned type at all (only that type is offered to it): it
+has another key, a mismatch. An RSA device that signs only with ssh-rsa
+(SHA-1) without the registry's flag still has the pinned key: not this.
+*/
+func noKeyOfType(err error, pinned string) bool {
+	var neg *gossh.AlgorithmNegotiationError
+	if !errors.As(err, &neg) || neg.What != "host key" {
+		return false
+	}
+	for _, a := range neg.RequestedAlgorithms {
+		if a == pinned || (pinned == gossh.KeyAlgoRSA && (a == gossh.KeyAlgoRSASHA256 || a == gossh.KeyAlgoRSASHA512)) {
+			return false
+		}
+	}
+	return true
+}
+
 /* kexAlgorithms is the x/crypto secure set, without anything on X25519 for no-curve25519 (ESR [R §4]). */
 func kexAlgorithms(variant string) []string {
 	all := gossh.SupportedAlgorithms().KeyExchanges
@@ -526,6 +545,9 @@ func connect(ctx context.Context, cfg Config, t target, set strategy.Set) (*Shel
 		switch {
 		case mismatch.Load():
 			cfg.alert(ctx, KindHostKeyMismatch, fmt.Sprintf("device %d at %s presented another host key than the pinned %s", t.deviceID, t.addr, t.hostFP))
+			return nil, identify.Identity{}, ErrHostKeyMismatch
+		case noKeyOfType(err, t.hostAlgo):
+			cfg.alert(ctx, KindHostKeyMismatch, fmt.Sprintf("device %d at %s has no host key of the pinned type %s any more", t.deviceID, t.addr, t.hostAlgo))
 			return nil, identify.Identity{}, ErrHostKeyMismatch
 		case expired.Load():
 			cfg.alert(ctx, KindPasswordExpired, fmt.Sprintf("device %d demands a password change; the executor stopped", t.deviceID))

@@ -70,6 +70,7 @@ func withPolicy(t *testing.T, body string) string {
 
 /* Every command becomes exactly one request on the stdin of docker compose exec in the executor container; argv carries nothing else. */
 func TestExecutorCommandsBecomeRequests(t *testing.T) {
+	yes, no := true, false
 	withPolicy(t, "enabled: false\n")
 	for _, c := range []struct {
 		args []string
@@ -97,9 +98,11 @@ func TestExecutorCommandsBecomeRequests(t *testing.T) {
 		{[]string{"device", "add", "--device", "7", "--address", "10.1.2.3", "--group", "core", "--driver", "mes6", "--port", "2222",
 			"--allow-ssh-rsa-sha1", "--backup-via-executor", "--fingerprint", testFP},
 			execadmin.Request{Cmd: "device", Action: "add", DeviceID: 7, Address: "10.1.2.3", Group: "core", Driver: "mes6", Port: 2222,
-				AllowSHA1: true, Backup: true, Fingerprint: testFP}},
+				AllowSHA1: &yes, Backup: &yes, Fingerprint: testFP}},
 		{[]string{"device", "accept-hostkey", "--device", "7", "--fingerprint", testFP},
 			execadmin.Request{Cmd: "device", Action: "accept-hostkey", DeviceID: 7, Fingerprint: testFP}},
+		{[]string{"device", "accept-hostkey", "--device", "7", "--allow-ssh-rsa-sha1=false", "--backup-via-executor=false", "--fingerprint", testFP},
+			execadmin.Request{Cmd: "device", Action: "accept-hostkey", DeviceID: 7, AllowSHA1: &no, Backup: &no, Fingerprint: testFP}},
 		{[]string{"policy", "show"}, execadmin.Request{Cmd: "policy-show"}},
 		{[]string{"policy", "check"}, execadmin.Request{Cmd: "policy-check"}},
 	} {
@@ -126,8 +129,9 @@ var testFP = "SHA256:" + strings.Repeat("A", 43)
 /*
 Without --fingerprint, device add is two steps: the executor's preview (the
 host key it read, the panel's view shown apart) is confirmed on the terminal
-and the confirmation carries exactly the fingerprint shown; a "no" sends
-nothing more, and there is no --yes (TOFU).
+and the confirmation carries exactly the fingerprint and fields shown (and,
+for accept-hostkey, the previewed row version); a "no" sends nothing more,
+and there is no --yes (TOFU).
 */
 func TestDeviceAddConfirmsTheShownKey(t *testing.T) {
 	withPolicy(t, "enabled: false\n")
@@ -147,9 +151,25 @@ func TestDeviceAddConfirmsTheShownKey(t *testing.T) {
 	if !strings.Contains(out, testFP) || !strings.Contains(out, "10.9.9.9") || strings.ContainsAny(out, "\x1b\x07") {
 		t.Fatalf("preview not shown safely:\n%q", out)
 	}
+	if c := sys.reqs[1]; c.Address != "10.1.2.3" || c.Port != 22 || c.Group != "core" || c.Driver != "esr" || c.AllowSHA1 == nil ||
+		*c.AllowSHA1 || c.Backup == nil || *c.Backup || c.DeviceVersion != 0 {
+		t.Fatalf("confirmation %+v", c)
+	}
 	sys = &daemon{respond: preview}
 	if code, _ := execRun(t, sys, "no\n", args...); code == 0 || len(sys.reqs) != 1 {
 		t.Fatalf("refused confirmation: exit %d, %d requests", code, len(sys.reqs))
+	}
+	accept := func(req execadmin.Request) execadmin.Response {
+		r := preview(req)
+		if r.Device != nil {
+			r.Device.Version, r.Device.PinnedFP, r.Device.Backup = 12, "SHA256:"+strings.Repeat("B", 43), true
+		}
+		return r
+	}
+	sys = &daemon{respond: accept}
+	if code, out := execRun(t, sys, "y\n", "device", "accept-hostkey", "--device", "7"); code != 0 || len(sys.reqs) != 2 ||
+		sys.reqs[1].DeviceVersion != 12 || sys.reqs[1].Backup == nil || !*sys.reqs[1].Backup || sys.reqs[1].Address != "10.1.2.3" {
+		t.Fatalf("accept-hostkey confirmation: exit %d %+v\n%s", code, sys.reqs, out)
 	}
 }
 

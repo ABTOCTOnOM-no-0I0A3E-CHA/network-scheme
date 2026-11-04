@@ -59,8 +59,11 @@ func ipv4Net(name string, p netip.Prefix) error {
 
 /*
 New builds a guard over the management subnets and the stack's networks,
-all required. dial, if not nil, replaces the real connection after the
-check (tests: an emulator on loopback behind a management address).
+all required. A management subnet must be /8 or narrower and must not
+overlap core, xnet or edge (install refuses the same; the devices subnet may
+be one, devices are lab or simulator hosts there, and Check still denies
+every address in it). dial, if not nil, replaces the real connection after
+the check (tests: an emulator on loopback behind a management address).
 */
 func New(mgmt []netip.Prefix, s Stack, dial func(ctx context.Context, network, address string) (net.Conn, error)) (*Guard, error) {
 	g := &Guard{dial: dial}
@@ -76,6 +79,14 @@ func New(mgmt []netip.Prefix, s Stack, dial func(ctx context.Context, network, a
 	for _, p := range mgmt {
 		if err := ipv4Net("management subnet "+p.String(), p); err != nil {
 			return nil, err
+		}
+		if p.Bits() < 8 {
+			return nil, fmt.Errorf("netguard: management subnet %s is wider than /8", p)
+		}
+		for _, n := range g.stack {
+			if n.name != "devices subnet" && n.p.Overlaps(p) {
+				return nil, fmt.Errorf("netguard: management subnet %s overlaps the %s %s", p, n.name, n.p)
+			}
 		}
 	}
 	g.mgmt = append([]netip.Prefix(nil), mgmt...)
@@ -117,7 +128,10 @@ func last(p netip.Prefix) netip.Addr {
 	return netip.AddrFrom4(a)
 }
 
-var thisNetwork = netip.MustParsePrefix("0.0.0.0/8")
+var (
+	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")
+	reserved    = netip.MustParsePrefix("240.0.0.0/4") /* class E, 255.255.255.255 included */
+)
 
 /* Check reports whether a may be connected to (nil) or why not (ErrDenied). */
 func (g *Guard) Check(a netip.Addr) error {
@@ -139,6 +153,8 @@ func (g *Guard) Check(a netip.Addr) error {
 		return deny("multicast")
 	case a == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
 		return deny("broadcast")
+	case reserved.Contains(a):
+		return deny("reserved (240.0.0.0/4)")
 	}
 	for _, n := range g.stack {
 		if n.p.Contains(a) {
@@ -180,12 +196,17 @@ func (g *Guard) Dial(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
 	if g.dial != nil {
 		return g.dial(ctx, "tcp4", ap.String())
 	}
-	d := net.Dialer{Timeout: DialTimeout, Control: func(_, address string, _ syscall.RawConn) error {
+	d := net.Dialer{Timeout: DialTimeout, Control: g.control(ap)}
+	return d.DialContext(ctx, "tcp4", ap.String())
+}
+
+/* control is the dialer's last check: the socket connects to exactly the checked ap, which passes Check again. */
+func (g *Guard) control(ap netip.AddrPort) func(network, address string, _ syscall.RawConn) error {
+	return func(_, address string, _ syscall.RawConn) error {
 		got, err := netip.ParseAddrPort(address)
 		if err != nil || got != ap {
 			return fmt.Errorf("%w: connecting to %s, checked %s", ErrDenied, address, ap)
 		}
 		return g.Check(got.Addr())
-	}}
-	return d.DialContext(ctx, "tcp4", ap.String())
+	}
 }

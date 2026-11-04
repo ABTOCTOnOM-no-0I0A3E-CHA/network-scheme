@@ -58,8 +58,13 @@ var trace = []struct {
 		{"cmd/executor/internal/devices", "TestEveryChangeIsAudited"},
 	}},
 	{"C5", "a host key other than the pinned one: refused before any credential, high alert", []ref{
-		{"cmd/executor/internal/devices", "TestC5HostKeyMismatchSendsNoCredential"},
+		{"cmd/executor/internal/transport", "TestHostKeyStrategy"},
+		{"cmd/executor/internal/transport", "TestNoKeyOfThePinnedTypeIsAMismatch"},
+		{"cmd/executor/internal/transport", "TestNetguardAndHostKeyAtDial"},
+		{"cmd/executor/internal/devices", "TestReplacedKeyOnlyThroughConfirmation"},
 		{"cmd/executor/internal/devices", "TestSHA1HostKeyNeedsTheFlag"},
+		{"cmd/executor/internal/devices", "TestForgedTicketMakesNoConnection"},
+		{"cmd/executor/internal/devices", "TestHostAcceptBindsThePreviewedRow"},
 		{"cmd/nmsctl", "TestDeviceAddConfirmsTheShownKey"},
 	}},
 	{"C2d", "the api freezes within 5 s and cannot lift the freeze", []ref{

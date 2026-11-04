@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -123,16 +124,40 @@ type Target struct {
 var groupRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 
 /* Refusal is a request refused by a rule: nothing was written, and its text may be shown. */
-type Refusal struct{ msg string }
+type Refusal struct {
+	msg   string
+	cause error
+}
 
 func (r Refusal) Error() string { return r.msg }
 
-func refuse(format string, a ...any) error { return Refusal{fmt.Sprintf(format, a...)} }
+/* Unwrap is the rule's own error (netguard.ErrDenied), if any. */
+func (r Refusal) Unwrap() error { return r.cause }
+
+func refuse(format string, a ...any) error { return Refusal{msg: fmt.Sprintf(format, a...)} }
+
+/* wrapRefusal makes err (a network guard denial, an unreachable device) a refusal shown as such. */
+func wrapRefusal(err error) error { return Refusal{msg: err.Error(), cause: err} }
 
 /* IsRefusal reports whether err is a refusal by a rule (the network guard's included). */
 func IsRefusal(err error) bool {
 	return errors.As(err, new(Refusal)) || errors.Is(err, netguard.ErrDenied)
 }
+
+/*
+outcomeUnknown is a change whose fate cannot be read back (the registry
+write failed after it may have committed, and the registry cannot be read
+now): /x answers 503 outcome_unknown (RefusalCode and HTTPStatus, the
+convention of package web), and the user checks the device list.
+*/
+type outcomeUnknown struct{}
+
+func (outcomeUnknown) Error() string       { return "devices: outcome unknown" }
+func (outcomeUnknown) RefusalCode() string { return "outcome_unknown" }
+func (outcomeUnknown) HTTPStatus() int     { return http.StatusServiceUnavailable }
+
+/* ErrUnknown is a change whose outcome cannot be known now; it is not a refusal. */
+var ErrUnknown error = outcomeUnknown{}
 
 /* Service changes and reads the write device registry. */
 type Service struct {
@@ -163,9 +188,12 @@ func (s *Service) checkTarget(t Target) error {
 		return refuse("bad write driver %q", t.Driver)
 	}
 	if err := netguard.CheckPort(t.Port); err != nil {
-		return err
+		return wrapRefusal(err)
 	}
-	return s.Net.Check(t.Address)
+	if err := s.Net.Check(t.Address); err != nil {
+		return wrapRefusal(err)
+	}
+	return nil
 }
 
 /* Panel is what the panel's core.device says about a device: display and prefill only, never a decision. */
@@ -261,10 +289,15 @@ func declare(s *registry.Snapshot, c Change) (map[string]any, error) {
 	return nil, fmt.Errorf("devices: unknown change %q", c.Kind)
 }
 
-/* applied reports whether s holds the row want (an outcome that was unknown). */
-func applied(s *registry.Snapshot, want map[string]any) bool {
+/*
+applied reports whether s holds the row want written by this change: a
+version above the row's version before it (pre, 0 for none). A change that
+declared what was already there (writes off on a device that is off) is not
+mistaken for one that committed.
+*/
+func applied(s *registry.Snapshot, want map[string]any, pre int64) bool {
 	r, ok := s.Get(table, want["device_id"])
-	if !ok {
+	if !ok || r.Version() <= pre {
 		return false
 	}
 	for k, v := range want {
@@ -274,9 +307,6 @@ func applied(s *registry.Snapshot, want map[string]any) bool {
 	}
 	return true
 }
-
-/* ErrUnknown is a change whose outcome cannot be known now (the registry write failed after it may have committed). */
-var ErrUnknown = errors.New("devices: outcome unknown")
 
 /*
 Apply makes change c through write, with ev (action, object, user) as its
@@ -304,14 +334,15 @@ func (s *Service) Apply(ctx context.Context, write Writer, c Change, ev audit.Ev
 	}
 	ev.Details = details
 	var want map[string]any
+	var pre int64
 	err := write(ctx, func(_ context.Context, snap *registry.Snapshot, tx *registry.Tx) error {
 		vals, err := declare(snap, c)
 		if err != nil {
 			return err
 		}
-		want = vals
+		want, pre = vals, 0
 		if cur, ok := Find(snap, c.Target.ID); ok {
-			details["before"] = cur
+			details["before"], pre = cur, cur.Version
 		}
 		ok := ev
 		ok.Result = audit.OK
@@ -329,7 +360,7 @@ func (s *Service) Apply(ctx context.Context, write Writer, c Change, ev audit.Ev
 		return err
 	}
 	there := false
-	if verr := s.Reg.View(ctx, func(snap *registry.Snapshot) error { there = applied(snap, want); return nil }); verr != nil {
+	if verr := s.Reg.View(ctx, func(snap *registry.Snapshot) error { there = applied(snap, want, pre); return nil }); verr != nil {
 		s.record(ctx, ev, audit.Error, fmt.Errorf("outcome unknown (%v): the registry cannot be read now: %v", err, verr))
 		return fmt.Errorf("%w: %v", ErrUnknown, err)
 	}
@@ -337,6 +368,9 @@ func (s *Service) Apply(ctx context.Context, write Writer, c Change, ev audit.Ev
 		s.record(ctx, ev, audit.Error, fmt.Errorf("not applied: %w", err))
 		return fmt.Errorf("devices: not applied: %w", err)
 	}
+	/* Committed after all (its own row is in the change's transaction); this row says the error was not a failure. */
+	ev.Details["confirmed_after"] = state.Reason(err.Error())
+	s.record(ctx, ev, audit.OK, nil)
 	return nil
 }
 

@@ -160,7 +160,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
-		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List())},
+		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()
 			return pol.Current().Enabled(), frozen

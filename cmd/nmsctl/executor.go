@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -42,7 +43,8 @@ const deviceLines = `  nmsctl executor device add --device ID --address A --grou
       [--allow-ssh-rsa-sha1] [--backup-via-executor] [--fingerprint SHA256:...]
   nmsctl executor device accept-hostkey --device ID [--address A] [--port P] [--group G] [--driver D]
       [--allow-ssh-rsa-sha1] [--backup-via-executor] [--fingerprint SHA256:...]
-      (without --fingerprint the executor shows the host key it read and asks; no TOFU)
+      (without --fingerprint the executor shows the host key it read and asks; no TOFU;
+       a flag given as --flag=false turns it off)
   nmsctl executor device writes on|off --device ID
   nmsctl executor device list
 `
@@ -166,8 +168,8 @@ func deviceCmd(ctx context.Context, d deps, action string, args []string) error 
 		fs.Int64Var(&req.Port, "port", 0, "SSH port (add: 22)")
 		fs.StringVar(&req.Group, "group", "", "write group")
 		fs.StringVar(&req.Driver, "driver", "", "write driver line: mes6, mes10 or esr")
-		fs.BoolVar(&req.AllowSHA1, "allow-ssh-rsa-sha1", false, "allow the ssh-rsa (SHA-1) host key signature (MES 6.x)")
-		fs.BoolVar(&req.Backup, "backup-via-executor", false, "the executor backs the device up")
+		fs.Var(optBool{&req.AllowSHA1}, "allow-ssh-rsa-sha1", "allow the ssh-rsa (SHA-1) host key signature (MES 6.x); =false turns it off")
+		fs.Var(optBool{&req.Backup}, "backup-via-executor", "the executor backs the device up; =false turns it off")
 		fs.StringVar(&req.Fingerprint, "fingerprint", "", "the host key fingerprint expected (from the device console)")
 	}
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 || (action != "list" && req.DeviceID <= 0) {
@@ -187,7 +189,7 @@ func deviceCmd(ctx context.Context, d deps, action string, args []string) error 
 	printf(d.out, "%s", terminalSafe(fmt.Sprintf("Device %d: %s:%d, group %s, driver %s, ssh-rsa SHA-1 %v, backup via executor %v\nHost key read by the executor: %s %s\n",
 		v.ID, v.Address, v.Port, v.Group, v.Driver, v.AllowSHA1, v.Backup, v.Algo, v.Fingerprint)))
 	if v.PinnedFP != "" {
-		printf(d.out, "Pinned so far: %s\n", terminalSafe(v.PinnedFP))
+		printf(d.out, "Pinned so far: %s (registry row version %d)\n", terminalSafe(v.PinnedFP), v.Version)
 	}
 	if v.PanelName != "" || v.PanelAddress != "" {
 		printf(d.out, "%s", terminalSafe(fmt.Sprintf("The panel calls it %q at %s (shown only; the address above is what is stored).\n", v.PanelName, v.PanelAddress)))
@@ -195,9 +197,35 @@ func deviceCmd(ctx context.Context, d deps, action string, args []string) error 
 	if err := confirm(d, "Compare the fingerprint with the device console (show crypto key / ssh-keygen -l). Accept this host key and these fields?"); err != nil {
 		return err
 	}
-	req.Fingerprint = v.Fingerprint
+	/* The confirmation names exactly what was shown: every field, the key, and (accept-hostkey) the row version. */
+	req.Address, req.Port, req.Group, req.Driver = v.Address, v.Port, v.Group, v.Driver
+	req.AllowSHA1, req.Backup, req.Fingerprint = &v.AllowSHA1, &v.Backup, v.Fingerprint
+	if action == "accept-hostkey" {
+		req.DeviceVersion = v.Version
+	}
 	return show(ctx, d, req)
 }
+
+/* optBool is a boolean flag that is nil until given: --x is true, --x=false false, absent keeps the registry's value. */
+type optBool struct{ p **bool }
+
+func (o optBool) String() string {
+	if o.p == nil || *o.p == nil {
+		return ""
+	}
+	return strconv.FormatBool(**o.p)
+}
+
+func (o optBool) Set(v string) error {
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return err
+	}
+	*o.p = &b
+	return nil
+}
+
+func (optBool) IsBoolFlag() bool { return true }
 
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
