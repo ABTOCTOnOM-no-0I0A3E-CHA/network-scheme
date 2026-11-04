@@ -255,11 +255,11 @@ describe("hostile device text", () => {
 });
 
 describe("Бэкапы", () => {
-  it("needs_write shows the phase 4 message and offers no manual backup", async () => {
+  it("needs_write points to the executor and offers no manual backup", async () => {
     stateFn = () => HttpResponse.json(stateBody({ needs_write: true, last_ok_at: null, latest_version: null }));
     wrap(<BackupsTab deviceId={7} canBackup />);
     expect(await screen.findByText(ru.backup.needsWrite)).toBeInTheDocument();
-    expect(ru.backup.needsWrite.toLowerCase()).toContain("бэкап до фазы 4 недоступен для этой модели");
+    expect(ru.backup.needsWrite.toLowerCase()).toContain("зарегистрируйте устройство в executor");
     expect(screen.queryByRole("button", { name: ru.backup.now })).toBeNull();
     cleanup();
     wrap(<ConfigTab deviceId={7} />);

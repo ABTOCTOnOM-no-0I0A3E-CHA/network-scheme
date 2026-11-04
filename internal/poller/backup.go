@@ -71,7 +71,7 @@ database through them (the same discipline as the availability reasons).
 */
 const (
 	errNoBackupKey   = "configuration backups are not configured on the poller"
-	errNeedsWrite    = "reading the configuration of this model needs a write account; not backed up before phase 4"
+	errNeedsWrite    = "reading the configuration of this model needs a write account; register the device in the executor to back it up from there"
 	errNoReader      = "the driver cannot read the configuration"
 	errNoSSHProfile  = "no usable SSH read credential"
 	errSSHFailed     = "SSH connection failed"
@@ -181,18 +181,30 @@ func (p *Poller) doBackup(ctx context.Context, d device, cache *devCache, source
 	return nil
 }
 
+/* executorFresh is how long a successful executor backup keeps the poller off the device (the executor backs up daily). */
+const executorFresh = 48 * time.Hour
+
 /*
 executorBacksUp reports whether the executor has taken over the backups of d,
 whose firmware line needs a write account to read the configuration (ruling
-R1). Until then the poller keeps backing it up with the read account as in
-Phase 3, so no device loses its backups in the move; a refusal by the device
-is recorded as needs_write.
-
-TODO(4b.8): true only when d is in exec.write_device with backup_via_executor
-and the executor has published a successful backup of it (through execpub,
-never from a table the api writes); the poller then stops fetching it.
+R1): the executor stamped execpub.backup_taken for d less than executorFresh
+ago. It stamps only successful backups of write_device rows with
+backup_via_executor, and only the executor can write that table (neither the
+api nor the poller), so nothing but the executor's own success stops the
+poller. Until then, again when the stamp goes stale (an executor that
+stopped), and on any read error, the poller keeps backing d up with the read
+account as in Phase 3, so no device loses its backups in the move; a refusal
+by the device is recorded as needs_write.
 */
-func (*Poller) executorBacksUp(context.Context, device) bool { return false }
+func (p *Poller) executorBacksUp(ctx context.Context, d device) bool {
+	var ok bool
+	err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.backup_taken WHERE device_id = $1 AND at > now() - $2 * interval '1 second')`,
+		d.ID, int64(executorFresh/time.Second)).Scan(&ok)
+	if err != nil && ctx.Err() == nil {
+		p.log.Warn("reading the executor's backups failed; backing up from the poller", slog.Int64("device_id", d.ID), slog.String("err", err.Error()))
+	}
+	return err == nil && ok
+}
 
 /* sshFetch reads the running configuration over the read-only SSH profile, with the driver's allowlisted command only. */
 func (p *Poller) sshFetch(ctx context.Context, d device, cache *devCache, drv drivers.Driver) (string, error) {

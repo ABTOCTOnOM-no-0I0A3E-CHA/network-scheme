@@ -28,6 +28,7 @@ import (
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
@@ -149,6 +150,13 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	defer clear(wpriv[:])
 	wc := &wcreds.Store{Gate: guard, Priv: wpriv, Pub: wpub, Record: az.Record, Log: log}
+	/* The backup scheduler (devices with backup_via_executor): ReadOnly, its own clock only, sealed to the backup domain. */
+	bpub, err := backups.PublicKey(cfg.BackupKeyFile)
+	if err != nil {
+		return err
+	}
+	sched := backups.New(backups.Config{Registry: guard, Net: ng, Open: wc.Open, Pool: pool, BackupPub: bpub,
+		Locks: &backups.Locks{}, Alert: publisher.Alert, Enabled: func() bool { return pol.Current().Enabled() }, Log: log})
 	actions := map[string]web.Action{}
 	for name, a := range devs.Actions() {
 		actions[name] = web.Action(a)
@@ -198,6 +206,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		defer close(reloads)
 		pol.Run(ctx, policyEvery, func(old, cur policy.State) { adm.PolicyChanged(ctx, "reload", old, cur) })
 	}()
+	backedUp := make(chan struct{})
+	go func() {
+		defer close(backedUp)
+		sched.Run(ctx)
+	}()
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
@@ -208,6 +221,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	err = errors.Join(<-served, <-webbed)
 	<-reloads
 	<-published
+	<-backedUp
 	return err
 }
 
