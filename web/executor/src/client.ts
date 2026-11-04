@@ -69,3 +69,8 @@ export function createPoster(bridge: Pick<ExecutorBridge, "requestTicket">): Pos
     },
   };
 }
+
+/* GET /keys.json of the executor origin (the gateway's own file, not /x): the domain public keys, parsed by the caller. */
+export function getKeys(signal?: AbortSignal): Promise<Result<unknown>> {
+  return run("/keys.json", { method: "GET", signal }, z.unknown());
+}

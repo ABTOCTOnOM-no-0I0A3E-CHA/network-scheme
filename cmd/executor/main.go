@@ -35,6 +35,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/wcreds"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
 	"github.com/beekamai/network-scheme/internal/execadmin"
@@ -131,12 +132,19 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az, Panel: publisher}
+	wpriv, wpub, err := wcreds.LoadKey(cfg.WriteKeyFile)
+	if err != nil {
+		return err
+	}
+	defer clear(wpriv[:])
+	wc := &wcreds.Store{Gate: guard, Priv: wpriv, Pub: wpub, Record: az.Record, Log: log}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
+		Actions: map[string]web.Action{wcreds.Action: {Describe: wc.Describe, Run: wc.Run}},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()
 			return pol.Current().Enabled(), frozen

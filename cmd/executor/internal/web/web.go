@@ -99,6 +99,29 @@ type Action struct {
 	Run      func(ctx context.Context, c confirm.Challenge, by authz.Decision) (any, error)
 }
 
+/*
+Refusal is an action's own refusal with a code the UI has a text for: a
+Describe or Run error that implements it answers 422 with that code.
+*/
+type Refusal interface {
+	error
+	RefusalCode() string
+}
+
+/* actionRefused answers an action's Refusal (422) or freeze (503) and reports whether it did. */
+func actionRefused(w http.ResponseWriter, err error) bool {
+	var rf Refusal
+	switch {
+	case errors.As(err, &rf):
+		fail(w, http.StatusUnprocessableEntity, rf.RefusalCode())
+	case errors.Is(err, authz.ErrFrozen):
+		refused(w, err)
+	default:
+		return false
+	}
+	return true
+}
+
 /* Config builds a Server. */
 type Config struct {
 	CertFile, KeyFile, ClientCAFile string
@@ -529,6 +552,9 @@ func (s *Server) issue(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	need, d, err := act.Describe(r.Context(), by, req.Params)
+	if err != nil && actionRefused(w, err) {
+		return
+	}
 	if err != nil {
 		s.c.Log.Info("web: action not described", slog.String("action", req.Action), slog.Any("err", err))
 		fail(w, http.StatusBadRequest, "bad_params")
@@ -594,6 +620,9 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	res, err := act.Run(r.Context(), c, by)
+	if err != nil && actionRefused(w, err) {
+		return
+	}
 	if err != nil {
 		s.c.Log.Error("web: confirmed action failed", slog.String("action", c.Action), slog.Any("err", err))
 		fail(w, http.StatusInternalServerError, "action_failed")

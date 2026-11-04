@@ -1,4 +1,4 @@
-// Package creds defines the sealed read-credential payload and its verification by the poller.
+// Package creds defines the sealed credential payload and its verification: read credentials by the poller (Open), write credentials by the executor (OpenWrite).
 package creds
 
 import (
@@ -26,6 +26,8 @@ const (
 	KindSNMP3   = "snmp3"
 	KindSSHRead = "ssh_read"
 	KindTelnet  = "telnet_read"
+	/* KindSSHWrite is sealed to the write domain and opened only by the executor (OpenWrite); Open refuses it. */
+	KindSSHWrite = "ssh_write"
 )
 
 const (
@@ -40,6 +42,9 @@ const (
 	minSNMPSecret  = 16 /* characters */
 	minPassword    = 12 /* characters */
 )
+
+/* minRSABits is the smallest RSA modulus of an ssh_write key. */
+const minRSABits = 2048
 
 var (
 	authProtos = map[string]bool{"SHA224": true, "SHA256": true, "SHA384": true, "SHA512": true}
@@ -63,9 +68,12 @@ type Credential struct {
 	PrivProto string /* AES|AES256 */
 	PrivKey   secret.Secret
 
-	Username   string        /* ssh_read, telnet_read */
-	Password   secret.Secret /* ssh_read (or key), telnet_read */
-	PrivateKey secret.Secret /* ssh_read only */
+	Username   string        /* ssh_read, telnet_read, ssh_write */
+	Password   secret.Secret /* ssh_read, ssh_write (or key), telnet_read */
+	PrivateKey secret.Secret /* ssh_read, ssh_write only */
+
+	Nonce   []byte /* the payload's 16-byte nonce */
+	KeyType string /* ssh_write with a key: its SSH public key algorithm (ssh-rsa, ssh-ed25519, ecdsa-sha2-*) */
 }
 
 // Wipe zeroes the bytes of every secret field (see secret.Secret.Wipe).

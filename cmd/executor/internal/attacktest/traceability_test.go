@@ -75,6 +75,15 @@ var trace = []struct {
 		{"cmd/executor/internal/authz", "TestC2gSwappedSecretsWithValidMAC"},
 		{"cmd/executor/internal/seal", "TestTOTPSealIsBoundToTheUser"},
 	}},
+	{"C2j", "a write credential sealed for another device or replayed; never readable by the api or the poller", []ref{
+		{"cmd/executor/internal/wcreds", "TestC2jCiphertextOfAnotherDeviceIsAMismatch"},
+		{"cmd/executor/internal/wcreds", "TestC2jReplayIsStale"},
+		{"cmd/executor/internal/wcreds", "TestStoredCredentialIsBoundInside"},
+		{"cmd/executor/internal/wcreds", "TestAPIAndPollerCannotReadWriteCredentials"},
+		{"cmd/executor/internal/attacktest", "TestAPICannotLearnTheWriteCredential"},
+		{"internal/creds", "TestOpenRefusesTheWriteKind"},
+		{"internal/poller", "TestWriteCredentialKindRejected"},
+	}},
 	{"C2k", "confirm(H): another description under the same challenge", []ref{
 		{"cmd/executor/internal/confirm", "TestC2kChangedDescription"},
 		{"cmd/executor/internal/confirm", "TestConfirmOnce"},
@@ -218,7 +227,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a must prove (the plan's table rows owned by 4a, the 4a.7 attack, the five review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2d", "C2e", "C2f", "C2g", "C2k", "C3", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}
