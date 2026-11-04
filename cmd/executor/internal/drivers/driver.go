@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,8 @@ system commands (save, commit, snapshots, rollback) are the driver's.
 type Session interface {
 	Mode() core.Mode
 	Pre() Config /* the snapshot read at Open: the only target Rollback accepts */
+	/* Classify classifies a typed line in the session's mode and context: the verdict Send takes. */
+	Classify(line string) core.Verdict
 	Snapshot(ctx context.Context) (Config, error)
 	Send(ctx context.Context, v core.Verdict) (transport.Output, error)
 	Save(ctx context.Context) error
@@ -89,6 +92,7 @@ var (
 	ErrNothingToConfirm = errors.New("drivers: no commit to confirm")
 	ErrTimeout          = errors.New("drivers: commit timeout out of 120..86400 s")
 	ErrForm             = errors.New("drivers: bad form")
+	ErrSnapshotLeft     = errors.New("drivers: the on-device snapshot file could not be deleted")
 )
 
 /* Config is a running configuration as read and its hash over the normalized text. */
@@ -189,11 +193,12 @@ Base is the line-independent part of a driver: the grammar and its argument
 types for Targets. The line packages embed it and add RenderForm and Open.
 */
 type Base struct {
-	L     strategy.Line
-	G     *core.Grammar
-	S     Strategies
-	Ifs   []string /* argument types of glued interface names */
-	VLANT string   /* argument type of one VLAN */
+	L        strategy.Line
+	G        *core.Grammar
+	S        Strategies
+	Ifs      []string /* argument types of glued interface names */
+	SaveCopy bool     /* MES: copy to startup-config is the Save flow */
+	VLANT    string   /* argument type of one VLAN */
 }
 
 /* Line is the firmware line. */
@@ -217,9 +222,84 @@ func (Base) MaskSecrets(t string) string { return Mask(t) }
 /* Normalize is the grammar's. */
 func (b Base) Normalize(line string, m core.Mode) (string, error) { return b.G.Normalize(line, m) }
 
-/* Classify is the grammar's. */
+/*
+Classify is the grammar's; on MES (SaveCopy) a copy whose destination is
+startup-config in any spelling is the Save flow (SaveCopy).
+*/
 func (b Base) Classify(line string, m core.Mode, c core.Context) core.Verdict {
-	return b.G.Classify(line, m, c)
+	v := b.G.Classify(line, m, c)
+	if b.SaveCopy && (v.Class == core.Safe || v.Class == core.Dangerous) {
+		switch saveCopy(v.Line) {
+		case exactSave:
+			return core.Verdict{Class: core.Control, Control: core.Save, Line: v.Line, Reason: core.ReasonGrammar}
+		case maybeSave:
+			return core.Verdict{Class: core.Denied, Line: v.Line, Reason: core.ReasonControl}
+		}
+	}
+	return v
+}
+
+const (
+	noSave = iota
+	exactSave
+	maybeSave
+)
+
+/*
+saveCopy reads a normalized line as the device may: copy (or a prefix of
+it, maybe after do) whose destination, lower case, without quotes, flash:,
+nvram:, system: and slashes, is startup-config (exactSave when the line is
+exactly "copy <src> <dst>") or a prefix of it, or extra words after one
+(maybeSave: never sent, use the Save button).
+*/
+func saveCopy(line string) int {
+	ts := strings.Fields(line)
+	if len(ts) > 1 && strings.HasPrefix("do", unq(ts[0])) {
+		ts = ts[1:]
+	}
+	if len(ts) < 3 || unq(ts[0]) == "" || !strings.HasPrefix("copy", unq(ts[0])) {
+		return noSave
+	}
+	for i, t := range ts[2:] {
+		switch d := saveDst(t); {
+		case d == "startup-config" && i == 0 && len(ts) == 3 && ts[0] == "copy":
+			return exactSave
+		case d != "" && strings.HasPrefix("startup-config", d), maySave(t):
+			return maybeSave
+		}
+	}
+	return noSave
+}
+
+/* maySave: t, slashes ignored, is a prefix of a startup-config spelling ("sy", "flash:st"): the device may expand it. */
+func maySave(t string) bool {
+	r := strings.ReplaceAll(unq(t), "/", "")
+	if r == "" {
+		return unq(t) != "" /* only slashes: the start of "//startup-config" */
+	}
+	for _, s := range []string{"startup-config", "flash:startup-config", "nvram:startup-config", "system:startup-config"} {
+		if r != "" && strings.HasPrefix(s, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func unq(s string) string { return strings.ToLower(strings.Trim(s, `"'`)) }
+
+/* saveDst strips a copy destination down to the file name the way a startup-config spelling would be. */
+func saveDst(t string) string {
+	t = unq(t)
+	for {
+		s := strings.TrimLeft(t, "/")
+		for _, p := range []string{"flash:", "nvram:", "system:"} {
+			s = strings.TrimPrefix(s, p)
+		}
+		if s == t {
+			return t
+		}
+		t = s
+	}
 }
 
 /* Complete is the grammar's. */

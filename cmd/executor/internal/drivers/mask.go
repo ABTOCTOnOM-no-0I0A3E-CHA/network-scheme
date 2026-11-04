@@ -14,8 +14,9 @@ every encrypted form is masked, never only the clear text). It runs the read
 drivers' mask.Secrets (values after secret keywords, encrypted and hashed
 forms, PEM and "crypto ... import" blocks) and then:
   - userinfo in a URL ("sftp://user:pass@host") becomes "***@";
-  - a line starting with "encrypted" (MES 6.x: "encrypted radius-server host
-    ... key ...") keeps only its first two words;
+  - a secret-bearing command (families: username, enable, radius-server,
+    snmp, encrypted, ...; also abbreviated) keeps only its first words;
+  - an abbreviation of ascii-text or hexadecimal masks the rest of the line;
   - the token after "encrypted" (or an abbreviation of it) is masked;
   - an abbreviated secret keyword as an operator types it ("passw", "secr",
     "commu", "key-str") masks the rest of the line.
@@ -30,7 +31,8 @@ func Mask(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-var urlInfoRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]*@`)
+/* urlInfoRe: the userinfo runs to the last '@' before a space or '/' (a password may hold '@'). */
+var urlInfoRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/]*@`)
 
 /* abbrevKeywords: an operator's abbreviation (4 letters or more, not ending a hyphen part) of one of them starts a secret. */
 var abbrevKeywords = []string{"password", "secret", "community", "key-string", "pre-shared-key", "authpassword",
@@ -74,17 +76,18 @@ func fields(l string) []field {
 func maskWords(l string) string {
 	fs := fields(l)
 	masked := make([]bool, len(fs))
-	word := func(i int) string { return strings.ToLower(strings.Trim(l[fs[i].start:fs[i].end], `"'`)) }
-	for i := range fs {
-		w := word(i)
+	ws := make([]string, len(fs))
+	for i, f := range fs {
+		ws[i] = strings.ToLower(strings.Trim(l[f.start:f.end], `"'`))
+	}
+	for k := familyKeep(ws); k < len(fs); k++ {
+		masked[k] = true
+	}
+	for i, w := range ws {
 		switch {
-		case i == 0 && isEncrypted(w):
-			for k := 2; k < len(fs); k++ {
-				masked[k] = true
-			}
 		case isEncrypted(w) && i+1 < len(fs):
 			masked[i+1] = true
-		case abbreviates(w, abbrevKeywords...):
+		case abbreviates(w, abbrevKeywords...), len(w) >= 3 && (strings.HasPrefix("ascii-text", w) || strings.HasPrefix("hexadecimal", w)):
 			for k := i + 1; k < len(fs); k++ {
 				masked[k] = true
 			}
@@ -102,4 +105,50 @@ func maskWords(l string) string {
 	}
 	b.WriteString(l[prev:])
 	return b.String()
+}
+
+/*
+family is a secret-bearing command: its first words (each also as an
+abbreviation of 2 letters or more, "key" also as the start of a word:
+key-string, key-chain) and how many words stay; everything after them is
+masked [R §7]. The first word may follow "no" or "do".
+*/
+type family struct {
+	words []string
+	keep  int
+}
+
+var families = []family{
+	{[]string{"username"}, 2}, {[]string{"enable"}, 1}, {[]string{"radius-server"}, 1}, {[]string{"tacacs-server"}, 1},
+	{[]string{"snmp-server"}, 1}, {[]string{"snmp"}, 1}, {[]string{"aaa"}, 1}, {[]string{"encrypted"}, 2},
+	{[]string{"crypto"}, 2}, {[]string{"key"}, 1}, {[]string{"line"}, 2},
+	{[]string{"ip", "ssh-client"}, 2}, {[]string{"ip", "ssh", "client"}, 3},
+	{[]string{"ip", "ftp", "client"}, 3}, {[]string{"ip", "sftp", "client"}, 3},
+}
+
+/* famWord: t is w or an abbreviation of it (2 letters or more); for "key" also any word starting with it. */
+func famWord(t, w string) bool {
+	return t == w || len(t) >= 2 && strings.HasPrefix(w, t) || w == "key" && strings.HasPrefix(t, "key")
+}
+
+/* familyKeep returns the index from which a secret-bearing command's line is masked (len(ws): none). */
+func familyKeep(ws []string) int {
+	off := 0
+	for off < len(ws)-1 && (ws[off] == "no" || ws[off] == "do") {
+		off++
+	}
+	best := len(ws)
+next:
+	for _, f := range families {
+		if off+len(f.words) > len(ws) {
+			continue
+		}
+		for i, w := range f.words {
+			if !famWord(ws[off+i], w) {
+				continue next
+			}
+		}
+		best = min(best, off+f.keep)
+	}
+	return best
 }

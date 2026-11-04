@@ -101,7 +101,7 @@ type Driver struct{ drivers.Base }
 
 /* New returns the driver. */
 func New() Driver {
-	return Driver{drivers.Base{L: strategy.MES10, G: drivers.MustGrammar(spec()), Ifs: []string{"iface"}, VLANT: "vlan",
+	return Driver{drivers.Base{L: strategy.MES10, G: drivers.MustGrammar(spec()), Ifs: []string{"iface"}, VLANT: "vlan", SaveCopy: true,
 		S: drivers.Strategies{SafetyNet: "none", ReloadMinutes: 10, Save: "write-startup", Rollback: "replace", Mask: "always"}}}
 }
 
@@ -155,7 +155,7 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	if err != nil {
 		return nil, err
 	}
-	c, err := drivers.NewCore(ctx, sh, d.G, o)
+	c, err := drivers.NewCore(ctx, sh, d, d.G, o)
 	if err != nil {
 		return nil, err
 	}
@@ -210,10 +210,13 @@ func (s *session) Rollback(ctx context.Context, to drivers.Config) error {
 	return s.Verify(ctx, to)
 }
 
-/* Close leaves the configuration and cancels the safety net. */
+/* Close leaves the configuration, cancels the safety net and deletes the snapshot file. */
 func (s *session) Close(ctx context.Context) error {
 	if err := s.ToRoot(ctx); err != nil {
 		return err
 	}
-	return s.disarm(ctx)
+	if err := s.disarm(ctx); err != nil {
+		return err
+	}
+	return s.DropSnapshot(ctx, s.SnapshotFile("flash:"))
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers/core"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers/drvtest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/strategy"
 )
@@ -121,4 +122,20 @@ func snap(t *testing.T, s drivers.Session) [32]byte {
 		t.Fatal(err)
 	}
 	return c.SHA256
+}
+
+/* m3: typed lines naming the snapshot are Denied; Close deletes it, and a snapshot that cannot be deleted is reported. */
+func TestSnapshotProtectedAndDeletedAtClose(t *testing.T) {
+	tm, s, _ := open(t, drivers.Strategies{})
+	for _, l := range []string{"copy system:running-config flash:data/nms-pre-s1", "delete flash:data/nms-pre-s1", "copy flash:data/nms-pre-s1 system:candidate-config"} {
+		if v := s.Classify(l); v.Class != core.Denied || v.Reason != drivers.ReasonSnapshot {
+			t.Errorf("%q = %v (%s)", l, v.Class, v.Reason)
+		}
+	}
+	if err := s.Close(context.Background()); err != nil || !slices.Equal(tm.Deleted, []string{"flash:data/nms-pre-s1"}) {
+		t.Fatalf("close: %v, deleted %q", err, tm.Deleted)
+	}
+	if err := s.Close(context.Background()); !errors.Is(err, drivers.ErrSnapshotLeft) {
+		t.Fatalf("second close: %v", err)
+	}
 }

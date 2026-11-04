@@ -67,7 +67,7 @@ func TestMaskSecretsGolden(t *testing.T) {
 			}
 		}
 		for _, keep := range []string{"hostname core-sw1", "interface gigabitethernet1/0/1", " description uplink",
-			"snmp-server community *** ro", "@192.0.2.9/cfg", "-----END RSA PRIVATE KEY-----", "privilege 15"} {
+			"snmp-server ***", "@192.0.2.9/cfg", "-----END RSA PRIVATE KEY-----", "username admin ***"} {
 			if !strings.Contains(out, keep) {
 				t.Errorf("%s: %q lost:\n%s", name, keep, out)
 			}
@@ -102,7 +102,7 @@ func TestRenderFormPassesClassify(t *testing.T) {
 			}
 			m := g.Root()
 			for _, l := range ls {
-				if v := g.Classify(l, m, ctx); v.Class != core.Safe || v.Line != l {
+				if v := f.d.Classify(l, m, ctx); v.Class != core.Safe || v.Line != l {
 					t.Errorf("%s: %+v: %q = %v (%s) %q", name, fm, l, v.Class, v.Reason, v.Line)
 				}
 				m = g.Next(l, m)
@@ -115,7 +115,7 @@ func TestRenderFormPassesClassify(t *testing.T) {
 		ls, _ := f.d.RenderForm(drivers.Form{Kind: drivers.FormState, Interface: f.mgmtIf})
 		m, worst := g.Root(), core.Safe
 		for _, l := range ls {
-			worst = max(worst, g.Classify(l, m, ctx).Class)
+			worst = max(worst, f.d.Classify(l, m, ctx).Class)
 			m = g.Next(l, m)
 		}
 		if worst != core.Dangerous {
@@ -139,5 +139,30 @@ func TestRenderFormPassesClassify(t *testing.T) {
 				t.Errorf("%s: %+v rendered %q", name, bad, ls)
 			}
 		}
+	}
+}
+
+/* I1: operator input with short or hyphenated keywords of a secret-bearing command; m1: '@' inside a URL password. */
+func TestMaskAbbreviatedSecretInput(t *testing.T) {
+	const s = "Secr3t-Q9"
+	for _, in := range []string{
+		"radius-server host 1.1.1.1 ke " + s, "tacacs-server host 1.1.1.1 ke " + s, "ra ho 1.1.1.1 k " + s,
+		"username admin pa " + s, "username admin pas " + s, "us admin pa " + s, "enable pa " + s, "en pa " + s,
+		"snmp-server co " + s + " ro", "sn co " + s, "snmp-server user bob grp v3 au sha " + s,
+		"snmp-server user bob grp v3 auth sha x priv aes " + s, "snmp com index 1 na " + s,
+		"authentication key ascii " + s, "authentication key asc " + s, "pre-shared-key hex " + s,
+		"authentication pre-shared-key hexa " + s, "key-string " + s, "key chain k1 " + s,
+		"ip ssh-client password " + s, "ip ssh client pa " + s, "ip ftp client pa " + s, "ip sftp client pass " + s,
+		"line ssh pa " + s, "no username bob pa " + s, "do enable pa " + s, "aaa x y " + s, "crypto key " + s,
+		"copy scp://u:a@b" + s + "@192.0.2.1/x running-config", "copy sftp://u:" + s + "@x@192.0.2.1/x flash:y",
+	} {
+		for name, f := range lines {
+			if out := f.d.MaskSecrets(in); strings.Contains(out, s) || strings.Contains(out, "Secr3t") {
+				t.Errorf("%s: %q -> %q", name, in, out)
+			}
+		}
+	}
+	if out := drivers.Mask("copy sftp://u:p@w@192.0.2.1/x y"); out != "copy sftp://***@192.0.2.1/x y" {
+		t.Errorf("url: %q", out)
 	}
 }

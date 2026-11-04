@@ -324,6 +324,7 @@ func ExpandVLANs(tok string) ([]int, bool) {
 var (
 	hostnameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,57}$`)
 	vnameRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`)
+	filterRe   = regexp.MustCompile(`^[A-Za-z0-9_.:/,*^$-]{1,64}$`)
 )
 
 /* Typed argument types shared by the lines. */
@@ -336,8 +337,8 @@ var (
 	VName = core.ArgType{Match: vnameRe.MatchString}
 	/* Desc: the rest of a description or location line (pure tokens only: no Text). */
 	Desc = core.ArgType{Match: func(string) bool { return true }}
-	/* Filter: the pattern of a show filter, rest of the line (pure tokens only). */
-	Filter = core.ArgType{Match: func(string) bool { return true }}
+	/* Filter: the one-token pattern of a show filter; anything else after the filter keyword is dangerous. */
+	Filter = core.ArgType{Match: filterRe.MatchString}
 	/* VLAN is one VLAN ID. */
 	VLAN = core.Uint(1, 4094, "vlan")
 )

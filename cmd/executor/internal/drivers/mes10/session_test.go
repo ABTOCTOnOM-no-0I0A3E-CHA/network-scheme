@@ -99,3 +99,19 @@ func snap(t *testing.T, s drivers.Session) [32]byte {
 	}
 	return c.SHA256
 }
+
+/* m3: typed lines naming the snapshot are Denied; Close deletes it, and a snapshot that cannot be deleted is reported. */
+func TestSnapshotProtectedAndDeletedAtClose(t *testing.T) {
+	tm, s, _ := open(t, drivers.Strategies{})
+	for _, l := range []string{"copy running-config flash:nms-pre-s1", "delete flash:nms-pre-s1", "copy tftp://192.0.2.1/x flash:NMS-PRE-s1"} {
+		if v := s.Classify(l); v.Class != core.Denied || v.Reason != drivers.ReasonSnapshot {
+			t.Errorf("%q = %v (%s)", l, v.Class, v.Reason)
+		}
+	}
+	if err := s.Close(context.Background()); err != nil || !slices.Equal(tm.Deleted, []string{"flash:nms-pre-s1"}) {
+		t.Fatalf("close: %v, deleted %q", err, tm.Deleted)
+	}
+	if err := s.Close(context.Background()); !errors.Is(err, drivers.ErrSnapshotLeft) {
+		t.Fatalf("second close: %v", err)
+	}
+}

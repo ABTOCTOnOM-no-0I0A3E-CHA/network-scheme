@@ -86,7 +86,7 @@ var dangerous = map[string][]pat{
 		{nil, "delete startup-config"}, {nil, "delete @flash:test"}, {nil, "delete candidate-config"},
 		{nil, "boot config @tftp://192.0.2.1/a.cfg"}, {nil, "boot system @tftp://192.0.2.1/i.bin"}, {nil, "boot system inactive-image"},
 		{nil, "boot license @x"}, {nil, "boot password @x"},
-		{nil, "copy @tftp://192.0.2.1/a.cfg startup-config"}, {nil, "copy @tftp://192.0.2.1/a.cfg running-config"},
+		{nil, "copy @tftp://192.0.2.1/a.cfg running-config"},
 		{nil, "copy @tftp://192.0.2.1/a.cfg candidate-config"}, {nil, "copy running-config @tftp://192.0.2.1/x"},
 		{nil, "rename @flash:a @flash:b"}, {nil, "crypto key generate rsa"},
 		{nil, "test cable-diagnostics tdr interface @gi1/0/1"}, {nil, "clear mac address-table"},
@@ -112,7 +112,7 @@ var dangerous = map[string][]pat{
 	"mes10": {
 		{nil, "reload"}, {nil, "reload in @1 @0"}, {nil, "reload at @12:00:00"}, {nil, "erase startup-config"}, {nil, "erase nvram:"},
 		{nil, "delete startup-config"}, {nil, "replace running-config @flash:x.conf"}, {nil, "clear running-config"},
-		{nil, "copy @tftp://192.0.2.1/a.conf running-config"}, {nil, "copy @tftp://192.0.2.1/a.conf startup-config"},
+		{nil, "copy @tftp://192.0.2.1/a.conf running-config"},
 		{nil, "copy @tftp://192.0.2.1/i image"}, {nil, "copy @tftp://192.0.2.1/b boot"}, {nil, "boot system inactive"},
 		{nil, "test cable-diagnostics tdr interface @gi0/1"}, {nil, "set cli pagination on"}, {nil, "crypto key generate rsa"},
 		{cfg10, "ssh disable"}, {cfg10, "no ssh enable"}, {cfg10, "ip ssh cipher @x"}, {cfg10, "ip ssh mac @x"},
@@ -212,11 +212,11 @@ func TestC4DangerousCommands(t *testing.T) {
 	for name, f := range lines {
 		g, ctx := f.d.Grammar(), f.ctx(t)
 		for _, p := range dangerous[name] {
-			if v := g.Classify(p.plain(), walk(g, p.mode...), ctx); v.Class != core.Dangerous {
+			if v := f.d.Classify(p.plain(), walk(g, p.mode...), ctx); v.Class != core.Dangerous {
 				t.Errorf("%s: %q in %v = %v (%s), want dangerous", name, p.plain(), p.mode, v.Class, v.Reason)
 			}
 			for _, x := range variants(p, f.cfg) {
-				v := g.Classify(x.line, walk(g, x.mode...), ctx)
+				v := f.d.Classify(x.line, walk(g, x.mode...), ctx)
 				switch {
 				case v.Class == core.Safe || v.Class == core.Control:
 					t.Errorf("%s: %q in %v = %v (%s)", name, x.line, x.mode, v.Class, v.Reason)
@@ -253,17 +253,17 @@ func TestManagementContextEverySpelling(t *testing.T) {
 				reason = core.ReasonUnsure
 			}
 			for _, l := range []string{"shutdown", "no shutdown", "description x"} {
-				if v := g.Classify(l, m, ctx); v.Class != core.Dangerous || v.Reason != reason {
+				if v := f.d.Classify(l, m, ctx); v.Class != core.Dangerous || v.Reason != reason {
 					t.Errorf("%s: %q after %q = %v (%s)", name, l, enter, v.Class, v.Reason)
 				}
 			}
-			if v := g.Classify(enter, walk(g, f.cfg), ctx); v.Class != core.Safe {
+			if v := f.d.Classify(enter, walk(g, f.cfg), ctx); v.Class != core.Safe {
 				t.Errorf("%s: entering %q = %v (%s): entering the mode only is safe", name, enter, v.Class, v.Reason)
 			}
 		}
 		other := walk(g, f.cfg, "interface "+f.other)
 		for _, l := range []string{"shutdown", "no shutdown", "description uplink to core", "switchport access vlan 20"} {
-			if v := g.Classify(l, other, ctx); v.Class != core.Safe {
+			if v := f.d.Classify(l, other, ctx); v.Class != core.Safe {
 				t.Errorf("%s: %q on %s = %v (%s), want safe", name, l, f.other, v.Class, v.Reason)
 			}
 		}
@@ -315,10 +315,12 @@ var controls = map[string]map[string]core.ControlKind{
 		"copy running-config startup-config": core.Save, "copy running-config flash:startup-config": core.Save,
 		"copy running-config flash://startup-config": core.Save, "copy running-config nvram:startup-config": core.Save,
 		"copy running-config system:startup-config": core.Save, "copy system:running-config startup-config": core.Save,
-		"COPY Running-Config Flash://Startup-Config": core.Save, "reload cancel": core.ReloadCancel},
+		"COPY Running-Config Flash://Startup-Config": core.Save, "copy running-config flash:/startup-config": core.Save, "copy running-config FLASH:///Startup-Config": core.Save, "copy running-config //nvram://startup-config": core.Save, "copy flash:/running-config system:/startup-config": core.Save, "copy tftp://192.0.2.1/a.cfg startup-config": core.Save, "copy sftp://192.0.2.1/a.cfg Flash:Startup-Config": core.Save,
+		"reload cancel": core.ReloadCancel},
 	"mes10": {"write startup-config": core.Save, "write": core.Save, "write memory": core.Save, "wr startup": core.Save,
 		"copy running-config startup-config": core.Save, "copy running-config nvram:startup-config": core.Save,
 		"copy running-config flash:startup-config": core.Save, "copy flash://running-config flash://startup-config": core.Save,
+		"copy running-config flash:/startup-config": core.Save, "copy running-config FLASH:///Startup-Config": core.Save, "copy running-config //nvram://startup-config": core.Save, "copy flash:/running-config system:/startup-config": core.Save, "copy tftp://192.0.2.1/a.cfg startup-config": core.Save, "copy sftp://192.0.2.1/a.cfg Flash:Startup-Config": core.Save,
 		"reload cancel": core.ReloadCancel},
 	"esr": {"commit": core.Commit, "commit confirm-timeout 600": core.Commit, "commit comment x": core.Commit, "commit check": core.Commit,
 		"confirm": core.Confirm, "restore": core.Restore, "save": core.Save, "reload cancel": core.ReloadCancel},
@@ -330,7 +332,7 @@ func TestEverySaveAliasIsControl(t *testing.T) {
 		g, ctx := f.d.Grammar(), f.ctx(t)
 		for l, kind := range controls[name] {
 			for _, x := range []variant{{nil, l, false}, {[]string{f.cfg}, "do " + l, false}, {[]string{f.cfg, "interface " + f.other}, "do " + strings.ToUpper(l), false}} {
-				if v := g.Classify(x.line, walk(g, x.mode...), ctx); v.Class != core.Control || v.Control != kind {
+				if v := f.d.Classify(x.line, walk(g, x.mode...), ctx); v.Class != core.Control || v.Control != kind {
 					t.Errorf("%s: %q in %v = %v/%d (%s), want control %d", name, x.line, x.mode, v.Class, v.Control, v.Reason, kind)
 				}
 			}
@@ -338,13 +340,14 @@ func TestEverySaveAliasIsControl(t *testing.T) {
 	}
 	/* abbreviations the grammar cannot expand, quotes and extra words are refused as control, never sent */
 	for name, ls := range map[string][]string{
-		"mes6":  {"copy run start", "copy r s", `"write"`, "write x", "copy running-config startup-config now", "do do write", "co ru sta"},
-		"mes10": {"wr st", "copy run start", "write startup-config now", "copy running-config 'startup-config'"},
+		"mes6": {"copy run start", "copy r s", `"write"`, "write x", "copy running-config startup-config now", "do do write", "co ru sta",
+			"co run flash:/startup-config", "copy x flash:/sta", "copy x startup-config now", "do co x nvram:/startup-config", "c x //Startup-Config", `copy running-config "startup-config"`},
+		"mes10": {"wr st", "copy run start", "write startup-config now", "cop x flash:///startup-config", "copy x st", "copy flash:/ru sy", "copy x fla", "copy x NVRAM:/", "copy running-config /", "copy x nvram:startup-config y", `copy x 'flash:startup-config'`},
 		"esr":   {"co", "conf", "com", "res", `"commit"`, "confirm now", "restore x"},
 	} {
 		g, ctx := lines[name].d.Grammar(), lines[name].ctx(t)
 		for _, l := range ls {
-			if v := g.Classify(l, g.Root(), ctx); v.Class != core.Denied && v.Class != core.Control {
+			if v := lines[name].d.Classify(l, g.Root(), ctx); v.Class != core.Denied && v.Class != core.Control {
 				t.Errorf("%s: %q = %v (%s): a control command could be sent", name, l, v.Class, v.Reason)
 			}
 		}
@@ -365,7 +368,7 @@ func TestCommonConfigurationIsSafe(t *testing.T) {
 	for name, ps := range safe {
 		g, ctx := lines[name].d.Grammar(), lines[name].ctx(t)
 		for _, p := range ps {
-			if v := g.Classify(p.line, walk(g, p.mode...), ctx); v.Class != core.Safe {
+			if v := lines[name].d.Classify(p.line, walk(g, p.mode...), ctx); v.Class != core.Safe {
 				t.Errorf("%s: %q in %v = %v (%s), want safe", name, p.line, p.mode, v.Class, v.Reason)
 			}
 		}
@@ -377,6 +380,23 @@ func TestDriversRegisteredUnverified(t *testing.T) {
 		d, ok := drivers.For(l)
 		if !ok || d.Line() != l || d.Verified() || d.Strategies().Check(l) != nil {
 			t.Errorf("driver %s: registered %v, verified %v, strategies %v", l, ok, ok && d.Verified(), d.Strategies().Check(l))
+		}
+	}
+}
+
+/* I3: a show filter is one plain token; redirection, shell and history syntax after it is dangerous, never safe. */
+func TestShowFilterIsOneToken(t *testing.T) {
+	for name, kw := range map[string]string{"mes6": "include", "mes10": "grep", "esr": "include"} {
+		d, ctx := lines[name].d, lines[name].ctx(t)
+		if v := d.Classify("show running-config | "+kw+" vlan.*10$", d.Grammar().Root(), ctx); v.Class != core.Safe {
+			t.Errorf("%s: plain filter = %v (%s)", name, v.Class, v.Reason)
+		}
+		for _, f := range []string{"> flash:x", ">flash:x", "<", "a < b", "`reload`", "$(reload)", "a&b", "&", "{}", "a{1}",
+			"!reload", "x y", "x >> flash:y", strings.Repeat("a", 65)} {
+			l := "show running-config | " + kw + " " + f
+			if v := d.Classify(l, d.Grammar().Root(), ctx); v.Class == core.Safe || v.Class == core.Control {
+				t.Errorf("%s: %q = %v (%s)", name, l, v.Class, v.Reason)
+			}
 		}
 	}
 }

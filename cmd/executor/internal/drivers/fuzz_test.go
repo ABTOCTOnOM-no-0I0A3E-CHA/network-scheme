@@ -98,7 +98,7 @@ func FuzzClassify(f *testing.F) {
 		line, ins := mutate(p, &b, false, true)
 		g := fx.d.Grammar()
 		mode := p.mode
-		v := g.Classify(line, walk(g, mode...), fx.ctx(t))
+		v := fx.d.Classify(line, walk(g, mode...), fx.ctx(t))
 		if v.Class == core.Safe || v.Class == core.Control || ins && v.Class != core.Denied {
 			t.Fatalf("%s: Classify(%q in %v) = %v (%s)", fx.d.Line(), line, mode, v.Class, v.Reason)
 		}
@@ -134,7 +134,7 @@ func FuzzControl(f *testing.F) {
 			if m.Name() == "config" {
 				l = "do " + line
 			}
-			if v := g.Classify(l, m, fx.ctx(t)); v.Class != core.Control && v.Class != core.Denied {
+			if v := fx.d.Classify(l, m, fx.ctx(t)); v.Class != core.Control && v.Class != core.Denied {
 				t.Fatalf("%s: Classify(%q in %s) = %+v: a session-control command would be sent", c.line, l, m.Name(), v)
 			}
 		}

@@ -25,13 +25,17 @@ type Term struct {
 	D   *devemu.Device
 	c   *devemu.Conn
 	set strategy.Set
+	/* Deleted are the files "delete <file>" removed: the emulator has no delete on MES 10.x and ESR, Term stands in for it. */
+	Deleted []string
+	gone    map[string]bool
+	line    strategy.Line
 }
 
 /* New opens a session on a fresh emulated device of line, after the line's terminal setup. */
 func New(t testing.TB, line strategy.Line) *Term {
 	t.Helper()
 	d := devemu.NewLine(t, string(line), devemu.Options{})
-	tm := &Term{D: d, c: d.Dial("admin"), set: strategy.Defaults(line)}
+	tm := &Term{D: d, c: d.Dial("admin"), set: strategy.Defaults(line), line: line}
 	for _, c := range append(tm.set.TerminalCommands[tm.set.Terminal], tm.set.ConfirmOff...) {
 		tm.c.Do(c)
 	}
@@ -92,6 +96,16 @@ func (tm *Term) exec(line string) (transport.Output, error) {
 func (tm *Term) Send(_ context.Context, line string) (transport.Output, error) {
 	if st := tm.State().Mode; st == transport.ModeConfirm {
 		return transport.Output{}, transport.ErrQuestionPending
+	}
+	if f, ok := strings.CutPrefix(line, "delete "); ok && tm.line != strategy.MES6 {
+		if _, have := tm.D.File(f); !have || tm.gone[f] {
+			return transport.Output{State: tm.State()}, fmt.Errorf("%w: no such file", transport.ErrDevice)
+		}
+		if tm.gone == nil {
+			tm.gone = map[string]bool{}
+		}
+		tm.gone[f], tm.Deleted = true, append(tm.Deleted, f)
+		return transport.Output{State: tm.State()}, nil
 	}
 	return tm.exec(line)
 }

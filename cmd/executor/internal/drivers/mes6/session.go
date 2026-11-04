@@ -41,12 +41,13 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	if err != nil {
 		return nil, err
 	}
-	c, err := drivers.NewCore(ctx, sh, d.G, o)
+	c, err := drivers.NewCore(ctx, sh, d, d.G, o)
 	if err != nil {
 		return nil, err
 	}
 	s := &session{Core: c, d: d}
 	c.Sent = s.record
+	c.Failed = func(string) { s.broken = true }
 	if o.Strategies.SafetyNet == "reload-in" {
 		if _, err := s.System(ctx, "reload in "+strconv.Itoa(o.Strategies.ReloadMinutes)); err != nil {
 			return nil, err

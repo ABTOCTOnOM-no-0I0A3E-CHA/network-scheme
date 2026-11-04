@@ -156,7 +156,7 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	if err != nil {
 		return nil, err
 	}
-	c, err := drivers.NewCore(ctx, sh, d.G, o)
+	c, err := drivers.NewCore(ctx, sh, d, d.G, o)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,10 @@ func (s *session) Rollback(ctx context.Context, to drivers.Config) error {
 	return nil
 }
 
-/* Close restores an unconfirmed commit (or leaves it to the timer) and drops the uncommitted candidate. */
+/* Close restores an unconfirmed commit (or leaves it to the timer), drops the uncommitted candidate and deletes the snapshot file. */
 func (s *session) Close(ctx context.Context) error {
-	return s.drop(ctx, s.Opt.Strategies.Close == "restore")
+	if err := s.drop(ctx, s.Opt.Strategies.Close == "restore"); err != nil {
+		return err
+	}
+	return s.DropSnapshot(ctx, s.SnapshotFile("flash:data/"))
 }

@@ -105,7 +105,7 @@ func Show(filters ...string) []core.Cmd {
 		cmds = append(cmds, Safe(p))
 	}
 	for _, f := range filters {
-		cmds = append(cmds, Safe("show running-config | "+f+" <filter...>"))
+		cmds = append(cmds, Safe("show running-config | "+f+" <filter>"))
 	}
 	return cmds
 }

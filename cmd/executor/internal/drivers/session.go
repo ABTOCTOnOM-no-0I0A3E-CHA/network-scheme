@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers/core"
@@ -34,16 +35,27 @@ pre-session snapshot and the hash check after a rollback.
 type Core struct {
 	Sh   Shell
 	G    *core.Grammar
+	D    Classifier
 	Opt  Options
 	Pre  Config
 	mode core.Mode
 	/* Sent is called after the device accepted a typed line, with the mode it was typed in. */
 	Sent func(line string, before core.Mode)
+	/* Failed is called when sending a typed line failed: the device may or may not have applied it. */
+	Failed func(line string)
 }
 
+/* Classifier is the driver's classification (WriteDriver.Classify). */
+type Classifier interface {
+	Classify(line string, m core.Mode, c core.Context) core.Verdict
+}
+
+/* ReasonSnapshot is why a line is denied when it names an executor snapshot file (nms-pre-*), which only the driver touches. */
+const ReasonSnapshot core.Reason = "snapshot"
+
 /* NewCore reads the pre-session snapshot from the privileged prompt. */
-func NewCore(ctx context.Context, sh Shell, g *core.Grammar, o Options) (*Core, error) {
-	c := &Core{Sh: sh, G: g, Opt: o, mode: g.Root()}
+func NewCore(ctx context.Context, sh Shell, d Classifier, g *core.Grammar, o Options) (*Core, error) {
+	c := &Core{Sh: sh, G: g, D: d, Opt: o, mode: g.Root()}
 	c.reconcile()
 	if err := c.ToRoot(ctx); err != nil {
 		return nil, err
@@ -111,23 +123,39 @@ func (c *Core) Snapshot(ctx context.Context) (Config, error) {
 }
 
 /*
+Classify classifies a typed line in the session's mode and context with the
+driver; a line naming an executor snapshot (nms-pre-*: copy over it, delete
+it) is Denied.
+*/
+func (c *Core) Classify(line string) core.Verdict {
+	v := c.D.Classify(line, c.mode, c.Opt.Context)
+	if (v.Class == core.Safe || v.Class == core.Dangerous) && strings.Contains(strings.ToLower(v.Line), "nms-pre-") {
+		return core.Verdict{Class: core.Denied, Line: v.Line, Reason: ReasonSnapshot}
+	}
+	return v
+}
+
+/*
 Send sends a typed line: only the verdict Classify gives for it in the
 session's mode and context (so a verdict of another mode, an edited line or
 a Control or Denied one is refused). A line the device accepted advances the
 mode (core.Next); the prompt reconciles it.
 */
 func (c *Core) Send(ctx context.Context, v core.Verdict) (transport.Output, error) {
-	again := c.G.Classify(v.Line, c.mode, c.Opt.Context)
+	again := c.Classify(v.Line)
 	if v.Line == "" || v.Class != core.Safe && v.Class != core.Dangerous || again.Class != v.Class || again.Line != v.Line {
 		return transport.Output{}, ErrNotSendable
 	}
 	before := c.mode
 	out, err := c.Sh.Send(ctx, v.Line)
-	if err == nil {
+	switch {
+	case err == nil:
 		c.mode = c.G.Next(v.Line, c.mode)
 		if c.Sent != nil {
 			c.Sent(v.Line, before)
 		}
+	case c.Failed != nil:
+		c.Failed(v.Line)
 	}
 	c.reconcile()
 	return out, err
@@ -164,3 +192,18 @@ func (c *Core) CheckTarget(to Config) error {
 
 /* SnapshotFile is the on-device copy of the pre-session configuration. */
 func (c *Core) SnapshotFile(prefix string) string { return prefix + "nms-pre-" + c.Opt.SessionID }
+
+/*
+DropSnapshot deletes the on-device snapshot file at Close ("delete <file>":
+documented for ESR [R §6], a guess for MES 10.x). A failure leaves the file:
+ErrSnapshotLeft, for the caller's alert.
+*/
+func (c *Core) DropSnapshot(ctx context.Context, file string) error {
+	if err := c.ToRoot(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshotLeft, err)
+	}
+	if _, err := c.System(ctx, "delete "+file); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshotLeft, err)
+	}
+	return nil
+}

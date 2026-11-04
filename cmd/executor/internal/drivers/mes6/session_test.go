@@ -158,3 +158,23 @@ func snap(t *testing.T, s drivers.Session) [32]byte {
 	}
 	return c.SHA256
 }
+
+/* m2: a typed line the device failed on leaves its effect unknown: Rollback refuses before sending anything. m3: the snapshot name is Denied. */
+func TestFailedSendBreaksTheJournal(t *testing.T) {
+	tm, s, _ := open(t, drivers.Strategies{})
+	typeLines(t, s, "conf", "hostname edge-7")
+	tm.D.Reject("^snmp-server location x$", "% Unrecognized command")
+	if _, err := s.Send(context.Background(), s.Classify("snmp-server location x")); err == nil {
+		t.Fatal("rejected line accepted")
+	}
+	n := len(tm.Lines())
+	if err := s.Rollback(context.Background(), s.Pre()); !errors.Is(err, drivers.ErrNoInverse) || len(tm.Lines()) != n {
+		t.Fatalf("rollback after a failed line: %v, sent %q", err, tm.Lines()[n:])
+	}
+	typeLines(t, s, "end")
+	for _, l := range []string{"copy running-config flash:nms-pre-s1", "delete flash:NMS-PRE-s1", "copy flash:nms-pre-x running-config"} {
+		if v := s.Classify(l); v.Class != core.Denied || v.Reason != drivers.ReasonSnapshot {
+			t.Errorf("%q = %v (%s)", l, v.Class, v.Reason)
+		}
+	}
+}

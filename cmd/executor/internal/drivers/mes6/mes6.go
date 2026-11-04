@@ -118,7 +118,7 @@ type Driver struct{ drivers.Base }
 
 /* New returns the driver. */
 func New() Driver {
-	return Driver{drivers.Base{L: strategy.MES6, G: drivers.MustGrammar(spec()), Ifs: []string{"iface"}, VLANT: "vlan",
+	return Driver{drivers.Base{L: strategy.MES6, G: drivers.MustGrammar(spec()), Ifs: []string{"iface"}, VLANT: "vlan", SaveCopy: true,
 		S: drivers.Strategies{Apply: "immediate", SafetyNet: "none", ReloadMinutes: 10, Save: "write", Rollback: "inverse", Mask: "always"}}}
 }
 
