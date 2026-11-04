@@ -185,6 +185,19 @@ var trace = []struct {
 		{"cmd/executor/internal/transport", "TestEscapesNeverReachTheClient"},
 		{"cmd/executor/internal/strategy", "TestEveryStrategyHasResearchRef"},
 	}},
+	{"C4", "dangerous commands of every firmware line in every spelling (abbreviation, do, case, spaces, tabs, control characters), the management context in every spelling, save aliases never sent", []ref{
+		{"cmd/executor/internal/drivers", "TestC4DangerousCommands"},
+		{"cmd/executor/internal/drivers", "TestManagementContextEverySpelling"},
+		{"cmd/executor/internal/drivers", "TestEverySaveAliasIsControl"},
+	}},
+	{"C7", "roll back the whole session = pre-session, hash checked, high alert otherwise (emulator; real models: stand)", []ref{
+		{"cmd/executor/internal/drivers/mes6", "TestRollbackInverseJournal"},
+		{"cmd/executor/internal/drivers/mes6", "TestRollbackHashMismatchAlerts"},
+		{"cmd/executor/internal/drivers/mes10", "TestSnapshotReplaceRollbackAndSave"},
+		{"cmd/executor/internal/drivers/mes10", "TestReplaceMismatchAlerts"},
+		{"cmd/executor/internal/drivers/esr", "TestRollbackBeforeAndAfterConfirm"},
+		{"cmd/executor/internal/drivers/esr", "TestRollbackMismatchIsNotConfirmed"},
+	}},
 }
 
 /*
