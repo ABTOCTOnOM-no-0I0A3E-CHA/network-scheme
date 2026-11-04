@@ -62,6 +62,10 @@ func (refuser) Identify(context.Context, authz.Request) (authz.Decision, error) 
 	return authz.Decision{}, authz.ErrDenied
 }
 
+func (refuser) Authorize(context.Context, authz.Request) (authz.Decision, error) {
+	return authz.Decision{}, authz.ErrDenied
+}
+
 func (refuser) Issue(int64, authz.Need, confirm.Description) (confirm.Challenge, error) {
 	return confirm.Challenge{}, authz.ErrDenied
 }

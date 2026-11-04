@@ -35,7 +35,7 @@ func TestRenderedConfigLoads(t *testing.T) {
 	}
 	if c.DB.User != "nms_executor" || c.DB.Host != "postgres" || c.DB.Port != 5432 || c.DB.PasswordFile != "/run/secrets/db_executor_password" ||
 		c.DB.MaxConns != defaultMaxConns || c.ListenXnet.String() != "172.30.2.2:8444" ||
-		c.CoreSubnet.String() != "172.30.0.0/24" || c.XnetSubnet.String() != "172.30.2.0/24" ||
+		c.CoreSubnet.String() != "172.30.0.0/24" || c.XnetSubnet.String() != "172.30.2.0/24" || c.EdgeSubnet.String() != "172.30.3.0/24" ||
 		c.PanelOrigin != "https://nms.example.org" || c.ExecutorOrigin != "https://nms.example.org:8443" ||
 		c.SealingKeyFile != "/run/secrets/executor_sealing_key" || c.WriteKeyFile != "/run/secrets/domain_write_key" ||
 		c.BackupKeyFile != "/run/secrets/domain_backup_key" || c.TicketPubKeyFile != "/run/secrets/ticket_pub" ||
@@ -91,6 +91,8 @@ func TestLoadRejects(t *testing.T) {
 		"xnet host bits":        set("xnet_subnet", `"172.30.2.1/24"`),
 		"xnet ipv6":             set("xnet_subnet", `"fd00::/64"`),
 		"subnets overlap":       set("core_subnet", `"172.30.0.0/16"`),
+		"no edge subnet":        set("edge_subnet", `""`),
+		"edge overlaps xnet":    set("edge_subnet", `"172.30.2.0/25"`),
 		"spki pin short":        base + "gateway_spki_sha256: \"abcd\"\n",
 		"spki pin uppercase":    base + "gateway_spki_sha256: \"" + strings.Repeat("AB", 32) + "\"\n",
 	} {

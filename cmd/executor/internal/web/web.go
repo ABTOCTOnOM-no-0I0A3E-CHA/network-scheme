@@ -80,6 +80,7 @@ var (
 type Authorizer interface {
 	TicketUser(tok string) (int64, bool)
 	Identify(ctx context.Context, req authz.Request) (authz.Decision, error)
+	Authorize(ctx context.Context, req authz.Request) (authz.Decision, error)
 }
 
 /* Confirmer is what the server needs of confirm.Store. */
@@ -134,6 +135,7 @@ type Config struct {
 	/* State reports what /x/status shows: whether the policy enables the executor, and the freeze. */
 	State   func() (enabled, frozen bool)
 	Actions map[string]Action
+	Reads   map[string]Read /* authorized reads (ticket + change TOTP) by path, POST routes of their own (read.go) */
 	Log     *slog.Logger
 	Now     func() time.Time /* nil: time.Now */
 }
@@ -183,6 +185,9 @@ func New(cfg Config) (*Server, error) {
 		{http.MethodGet, "/x/status", s.status},
 		{http.MethodPost, "/x/confirm/issue", s.issue},
 		{http.MethodPost, "/x/confirm", s.confirm},
+	}
+	if err := s.addReads(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }

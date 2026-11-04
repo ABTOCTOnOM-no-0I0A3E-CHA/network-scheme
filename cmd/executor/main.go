@@ -30,7 +30,9 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/netguard"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
@@ -90,13 +92,21 @@ verifying the registry every 30 s and rereading the policy until
 SIGTERM/SIGINT; meanwhile it publishes its status in execpub and freezes on
 the panel's requests (pub). The authorizer of session tickets and change TOTP (authz)
 and the confirm(H) store are built here; authz follows the host's unlocks.
-It touches no device yet. It returns (and wipes the keys) only after every
-administration command, every /x request, the policy loop and pub ended.
+Devices are reached only through package devices: the write device registry,
+the network guard (egress.yaml and the stack networks, all required: none
+missing, or it does not start) and pinned host keys. It returns (and wipes
+the keys) only after every administration command, every /x request, the
+policy loop and pub ended.
 */
 func serve(ctx context.Context, cfg config.Config) error {
 	started := time.Now() /* tickets issued before (minus authz's skew) are refused: none survives a restart */
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := checkFiles(cfg); err != nil {
+		return err
+	}
+	/* Where devices may be: the management subnets, never the core, xnet, devices or edge network (all required). */
+	ng, err := netguard.Load(cfg.EgressFile, cfg.CoreSubnet, cfg.XnetSubnet, cfg.EdgeSubnet)
+	if err != nil {
 		return err
 	}
 	pool, err := openPool(ctx, cfg)
@@ -131,20 +141,26 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az, Panel: publisher}
+	devs := devices.New(guard, reg, ng, log)
+	adm := &admin.Admin{Guard: guard, Reg: reg, Keys: keys, Policy: pol, Log: log, Lockouts: az, Panel: publisher, Devices: devs}
 	wpriv, wpub, err := wcreds.LoadKey(cfg.WriteKeyFile)
 	if err != nil {
 		return err
 	}
 	defer clear(wpriv[:])
 	wc := &wcreds.Store{Gate: guard, Priv: wpriv, Pub: wpub, Record: az.Record, Log: log}
+	actions := map[string]web.Action{}
+	for name, a := range devs.Actions() {
+		actions[name] = web.Action(a)
+	}
+	actions[wcreds.Action] = web.Action{Describe: wc.Describe, Run: wc.Run}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
-		Actions: map[string]web.Action{wcreds.Action: {Describe: wc.Describe, Run: wc.Run}},
+		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List())},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()
 			return pol.Current().Enabled(), frozen

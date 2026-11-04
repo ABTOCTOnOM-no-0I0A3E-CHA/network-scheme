@@ -17,6 +17,7 @@ listen_xnet: "{{.ExecutorIP}}:{{.ExecutorListenPort}}"
 # The stack's own networks: no device address may fall into them (the devices subnet is in egress.yaml).
 core_subnet: "{{.CoreSubnet}}"
 xnet_subnet: "{{.XnetSubnet}}"
+edge_subnet: "{{.EdgeSubnet}}"
 panel_origin: "https://{{.Authority}}"
 executor_origin: "https://{{.ExecutorAuthority}}"
 state_dir: "/var/lib/executor"

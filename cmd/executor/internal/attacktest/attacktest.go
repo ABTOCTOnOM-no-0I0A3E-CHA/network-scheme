@@ -3,7 +3,7 @@ Package attacktest is the attacker of the executor's tests (security.md 18):
 a compromised api (Attacker: the role nms_api and the ticket signing key) and
 direct edits of schema exec as the database superuser (the api has no right
 on exec, so only the database owner or a superuser can tamper with it,
-security.md 5.1a). Its own tests index every attack scenario of Phase 4a
+security.md 5.1a). Its own tests index every attack scenario of Phase 4
 (TestTraceability). Test-only: nothing outside _test.go files may import it.
 */
 package attacktest

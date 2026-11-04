@@ -227,6 +227,11 @@ func (g *Guard) HostWrite(ctx context.Context, fn func(ctx context.Context, s *r
 /* Alert publishes an alert that freezes nothing (e.g. an invalid policy), as freezes do. */
 func (g *Guard) Alert(ctx context.Context, kind, sev, text string) { g.alert(ctx, kind, sev, text) }
 
+/* AlertDevice publishes an alert about one device (execpub.alert.device_id), as Alert does. */
+func (g *Guard) AlertDevice(ctx context.Context, kind, sev string, device int64, text string) {
+	g.alertAbout(ctx, kind, sev, &device, text)
+}
+
 /*
 Reset resets a tampered registry (registry.Reset, host only) and then lifts
 the freeze as FreezeOff does: unless a new freeze arrived meanwhile.
@@ -528,12 +533,16 @@ database errors and, later, device data. A failed publication is logged and retr
 background a bounded number of times; the log line is the record if all fail.
 */
 func (g *Guard) alert(ctx context.Context, kind, severity, text string) {
+	g.alertAbout(ctx, kind, severity, nil, text)
+}
+
+func (g *Guard) alertAbout(ctx context.Context, kind, severity string, device *int64, text string) {
 	text = CleanText(text)
-	g.log.Warn("executor alert", slog.String("kind", kind), slog.String("severity", severity), slog.String("text", text))
+	g.log.Warn("executor alert", slog.String("kind", kind), slog.String("severity", severity), slog.Any("device", device), slog.String("text", text))
 	publish := func() error {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), alertTimeout)
 		defer cancel()
-		_, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, text) VALUES ($1, $2, $3)`, kind, severity, text)
+		_, err := g.pool.Exec(ctx, `INSERT INTO execpub.alert (kind, severity, device_id, text) VALUES ($1, $2, $3, $4)`, kind, severity, device, text)
 		return err
 	}
 	if err := publish(); err != nil {

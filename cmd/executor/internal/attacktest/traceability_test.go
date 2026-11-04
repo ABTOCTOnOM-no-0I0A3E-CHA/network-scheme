@@ -20,8 +20,8 @@ file (dir: that file, e.g. the e2e spec or the CI workflow).
 type ref struct{ dir, name string }
 
 /*
-trace is the one index of the Phase 4a attack scenarios (plan
-2026-10-25-phase-4-executor, "Критерии Фазы 4" and "Review Focus 4a"; the
+trace is the one index of the Phase 4 attack scenarios (plan
+2026-10-25-phase-4-executor, "Критерии Фазы 4" and the Review Focus lists; the
 security traceability of 4d.3 starts from it): each scenario and where it is
 proved. The attacker throughout is the api (Attacker: nms_api and the
 ticket signing key), and for exec the superuser (Tamper, Copy, Stall).
@@ -47,6 +47,20 @@ var trace = []struct {
 	{"C2b", "a ticket without the grant", []ref{
 		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
 		{"cmd/executor/internal/confirm", "TestChallengeBindsUserAndGrant"},
+	}},
+	{"C2c", "the api changes a device's address or group: registration and connections use the registry's address only", []ref{
+		{"cmd/executor/internal/devices", "TestC2cAPIChangesAddressAndGroup"},
+		{"cmd/executor/internal/devices", "TestStaleConfirmationRefused"},
+		{"cmd/executor/internal/devices", "TestResetDeviceUnusableUntilConfirmed"},
+		{"cmd/executor/internal/devices", "TestSSRFAddressesRefused"},
+		{"cmd/executor/internal/netguard", "TestSSRFAddressesRefused"},
+		{"cmd/executor/internal/devices", "TestWithoutWriteAdminRefused"},
+		{"cmd/executor/internal/devices", "TestEveryChangeIsAudited"},
+	}},
+	{"C5", "a host key other than the pinned one: refused before any credential, high alert", []ref{
+		{"cmd/executor/internal/devices", "TestC5HostKeyMismatchSendsNoCredential"},
+		{"cmd/executor/internal/devices", "TestSHA1HostKeyNeedsTheFlag"},
+		{"cmd/nmsctl", "TestDeviceAddConfirmsTheShownKey"},
 	}},
 	{"C2d", "the api freezes within 5 s and cannot lift the freeze", []ref{
 		{"cmd/executor/internal/pub", "TestPanelRequestFreezesWithinFiveSeconds"},

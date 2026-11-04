@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
@@ -49,6 +50,8 @@ type Admin struct {
 	Lockouts Lockouts
 	/* Panel, if set, reports the panel's pending freeze request to freeze off and registry reset (pub.Publisher). */
 	Panel PanelRequests
+	/* Devices runs the device commands (nil: refused). */
+	Devices *devices.Service
 	/* writeHook, if set, replaces the result of every host registry write (test seam: an error after a COMMIT). */
 	writeHook func(error) error
 }
@@ -273,7 +276,7 @@ func (a *Admin) Handle(ctx context.Context, req execadmin.Request) execadmin.Res
 	case execadmin.CmdAuditVerify:
 		return a.auditVerify(ctx, req)
 	default: /* execadmin.CmdDevice */
-		return a.refuse(ctx, req, "device", deny("device %s is not implemented until task 4b.3", req.Action), nil)
+		return a.device(ctx, req)
 	}
 }
 

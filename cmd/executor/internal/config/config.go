@@ -47,9 +47,13 @@ type Config struct {
 	GatewaySPKI string `yaml:"gateway_spki_sha256"`
 	/* ListenXnet is the executor's own address in xnet: a specific IPv4 address, never a wildcard. */
 	ListenXnet netip.AddrPort `yaml:"listen_xnet"`
-	/* CoreSubnet and XnetSubnet are the stack's own networks; ListenXnet lies in XnetSubnet. */
+	/*
+		CoreSubnet, XnetSubnet and EdgeSubnet are the stack's own networks (the devices subnet is in
+		egress.yaml): no device address may fall into them. ListenXnet lies in XnetSubnet.
+	*/
 	CoreSubnet netip.Prefix `yaml:"core_subnet"`
 	XnetSubnet netip.Prefix `yaml:"xnet_subnet"`
+	EdgeSubnet netip.Prefix `yaml:"edge_subnet"`
 	/* PanelOrigin may frame the executor UI; ExecutorOrigin is the only Origin the executor accepts. */
 	PanelOrigin    string `yaml:"panel_origin"`
 	ExecutorOrigin string `yaml:"executor_origin"`
@@ -102,13 +106,13 @@ func (c *Config) validate() error {
 	for _, s := range []struct {
 		name string
 		p    netip.Prefix
-	}{{"core_subnet", c.CoreSubnet}, {"xnet_subnet", c.XnetSubnet}} {
+	}{{"core_subnet", c.CoreSubnet}, {"xnet_subnet", c.XnetSubnet}, {"edge_subnet", c.EdgeSubnet}} {
 		if !s.p.IsValid() || !s.p.Addr().Is4() || s.p != s.p.Masked() {
 			return fmt.Errorf("%s is required as an IPv4 network address with prefix", s.name)
 		}
 	}
-	if c.CoreSubnet.Overlaps(c.XnetSubnet) {
-		return errors.New("core_subnet and xnet_subnet overlap")
+	if c.CoreSubnet.Overlaps(c.XnetSubnet) || c.EdgeSubnet.Overlaps(c.CoreSubnet) || c.EdgeSubnet.Overlaps(c.XnetSubnet) {
+		return errors.New("core_subnet, xnet_subnet and edge_subnet overlap")
 	}
 	a := c.ListenXnet.Addr()
 	switch {
