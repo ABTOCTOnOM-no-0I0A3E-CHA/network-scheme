@@ -179,19 +179,38 @@ func TestNewVersionOnlyWhenTheConfigChanges(t *testing.T) {
 	if n := r.versions(t); n != 1 {
 		t.Fatalf("same configuration: %d versions", n)
 	}
-	/* a poller version of another configuration does not make the executor store the same one again */
+	var a []byte
+	if err := r.env.Pool("postgres").QueryRow(context.Background(), `SELECT sha256 FROM backups.config_version WHERE device_id = $1`, r.id).Scan(&a); err != nil {
+		t.Fatal(err)
+	}
+	/*
+		Executor stored A, the poller stored B, the device is back at A: the
+		newest version must be A again, so the executor stores it.
+	*/
 	if _, err := r.env.Pool("nms_poller").Exec(context.Background(), `INSERT INTO backups.config_version (device_id, source, sha256, size, masked, full_ct, full_dek_ct)
 		VALUES ($1, 'schedule', $2, 1, 'x', '\x00', '\x00')`, r.id, bytes.Repeat([]byte{1}, 32)); err != nil {
 		t.Fatal(err)
 	}
 	r.backup(t)
-	if n := r.count(t, `SELECT count(*) FROM backups.config_version WHERE device_id = $1 AND source = 'executor'`, r.id); n != 1 {
-		t.Fatalf("after a poller version: %d executor versions", n)
+	newest := func() (sha []byte, source string) {
+		t.Helper()
+		if err := r.env.Pool("postgres").QueryRow(context.Background(), `SELECT sha256, source FROM backups.config_version WHERE device_id = $1 ORDER BY id DESC LIMIT 1`,
+			r.id).Scan(&sha, &source); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if sha, src := newest(); !bytes.Equal(sha, a) || src != Source || r.versions(t) != 3 {
+		t.Fatalf("after a poller version: newest %x from %s, %d versions", sha, src, r.versions(t))
+	}
+	r.backup(t)
+	if n := r.versions(t); n != 3 {
+		t.Fatalf("unchanged again: %d versions", n)
 	}
 	r.running(base + "hostname changed\n")
 	r.backup(t)
-	if n := r.count(t, `SELECT count(*) FROM backups.config_version WHERE device_id = $1 AND source = 'executor' AND drift`, r.id); n != 1 {
-		t.Fatalf("changed configuration: %d new drift versions", n)
+	if sha, _ := newest(); bytes.Equal(sha, a) || r.versions(t) != 4 {
+		t.Fatalf("changed configuration: %d versions", r.versions(t))
 	}
 	if n := r.count(t, `SELECT count(*) FROM backups.backup_state s JOIN backups.config_version v ON v.device_id = s.device_id AND v.sha256 = s.last_sha256
 		WHERE s.device_id = $1 AND v.source = 'executor' AND v.drift AND s.last_error IS NULL AND NOT s.needs_write`, r.id); n != 1 {
@@ -276,7 +295,21 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	if err := r.s.BeforeSession(ctx, le); err != errLease {
 		t.Fatalf("released lease: %v", err)
 	}
-	if err := r.s.BeforeSession(ctx, &Lease{l: &Locks{held: map[int64]bool{r.id: true}}, id: r.id}); err != errLease {
+	/* a released lease stays dead while another holder (the scheduler) has the device, and cannot free it */
+	other, ok := r.s.cfg.Locks.TryLock(r.id)
+	if !ok {
+		t.Fatal("relock")
+	}
+	if err := r.s.BeforeSession(ctx, le); err != errLease {
+		t.Fatalf("released lease while the device is held again: %v", err)
+	}
+	le.Release()
+	if _, ok := r.s.cfg.Locks.TryLock(r.id); ok {
+		t.Fatal("a released lease freed the next holder's lock")
+	}
+	other.Release()
+	fl, _ := (&Locks{}).TryLock(r.id)
+	if err := r.s.BeforeSession(ctx, fl); err != errLease {
 		t.Fatalf("foreign lease: %v", err)
 	}
 	r.running(r.d.Running() + "hostname after\n")
@@ -322,9 +355,46 @@ func TestExternalInsertsStartNoBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, re := range []string{`\briver`, `jobs\.`, `freeze_request`, `device_busy`, `session_summary`, `(?i)listen`,
-		`(?i)select[^;` + "`" + `]*execpub`, `(?i)select[^;` + "`" + `]*backup_state`, `(?i)from\s+backups\.backup_state`} {
+		/* of execpub only its own backup_taken (only the executor writes it) */
+		`(?i)execpub\.(alert|status)`, `(?i)select[^;` + "`" + `]*backup_state`, `(?i)from\s+backups\.backup_state`} {
 		if loc := regexp.MustCompile(re).FindIndex(src); loc != nil {
 			t.Errorf("backups.go reads %q: %q", re, src[loc[0]:loc[1]])
 		}
+	}
+}
+
+/* A disabled policy hands every device back to the poller at once and contacts none. */
+func TestDisabledPolicyDropsTheStamps(t *testing.T) {
+	r := newRig(t, "mes6")
+	r.backup(t)
+	r.s.cfg.Enabled = func() bool { return false }
+	sent := len(r.d.Journal())
+	r.due()
+	r.s.runDue(context.Background())
+	if n := r.count(t, `SELECT count(*) FROM execpub.backup_taken`); n != 0 || len(r.d.Journal()) != sent {
+		t.Fatalf("disabled: %d stamps kept, device contacted %v", n, len(r.d.Journal()) != sent)
+	}
+}
+
+/* A failure is written to backup_state only for a device the executor already backed up; the poller's state stays otherwise. */
+func TestFailureTouchesOnlyTheExecutorsState(t *testing.T) {
+	r := newRig(t, "mes6")
+	ctx := context.Background()
+	if _, err := r.env.Pool("nms_poller").Exec(ctx, `INSERT INTO backups.backup_state (device_id, last_ok_at) VALUES ($1, now())`, r.id); err != nil {
+		t.Fatal(err)
+	}
+	failed := func() int {
+		return r.count(t, `SELECT count(*) FROM backups.backup_state WHERE device_id = $1 AND last_error = $2`, r.id, ErrFailed)
+	}
+	key := r.s.cfg.BackupPub
+	r.s.cfg.BackupPub = nil /* every backup fails */
+	if err := r.s.backup(ctx, r.id); err == nil || failed() != 0 {
+		t.Fatalf("a failure overwrote the poller's backup_state: %v", err)
+	}
+	r.s.cfg.BackupPub = key
+	r.backup(t)
+	r.s.cfg.BackupPub = nil
+	if err := r.s.backup(ctx, r.id); err == nil || failed() != 1 {
+		t.Fatalf("failure of an executor-backed device not recorded: %v", err)
 	}
 }

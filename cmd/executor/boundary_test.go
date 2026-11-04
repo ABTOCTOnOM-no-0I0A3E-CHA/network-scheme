@@ -110,4 +110,12 @@ func TestRegistryBoundaryCatchesBypasses(t *testing.T) {
 	if v := violations("internal/pub", "var p *pgxpool.Pool; q := `DELETE FROM execpub.freeze_request`"); len(v) != 0 {
 		t.Errorf("pub: false positive %v", v)
 	}
+	for _, src := range []string{"q := `SELECT * FROM exec.session_device`", `q := "SELECT 1 FROM \"exec\".\"write_device\""`, "q := `select * from EXEC . audit_head`"} {
+		if len(violations("internal/backups", src)) == 0 {
+			t.Errorf("backups: not caught: %s", src)
+		}
+	}
+	if v := violations("internal/backups", "var p *pgxpool.Pool; q := `INSERT INTO execpub.backup_taken (device_id) VALUES ($1)`"); len(v) != 0 {
+		t.Errorf("backups: false positive %v", v)
+	}
 }

@@ -13,8 +13,11 @@ read driver's masker and the full copy is sealed to the backup domain
 differs from the newest version the executor itself stored: rows of the
 sources 'executor', 'pre_session' and 'post_session', which only the
 executor's role can insert (trigger config_version_check_source) into an
-append-only table. Nothing in backup_state, in the poller's versions, in
-jobs or in execpub decides anything here.
+append-only table, or when another source's version is newer than it (the
+newest version must be the device's configuration; this only ever adds a
+version). Nothing in backup_state, in jobs or in execpub (but the
+executor's own backup_taken, for where a failure is recorded) decides
+anything here; a disabled policy deletes every backup_taken stamp.
 
 Nothing outside triggers a backup: Run is driven by its own clock only (once
 a day per device with jitter), and BeforeSession is called in-process by a
@@ -94,7 +97,7 @@ var (
 /* Locks are the executor's per-device connection locks: whoever holds a device's Lease is its only SSH connection. */
 type Locks struct {
 	mu   sync.Mutex
-	held map[int64]bool
+	held map[int64]*Lease
 }
 
 /* Lease is a held device lock. */
@@ -108,27 +111,31 @@ type Lease struct {
 func (l *Locks) TryLock(id int64) (*Lease, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.held[id] {
+	if l.held[id] != nil {
 		return nil, false
 	}
 	if l.held == nil {
-		l.held = map[int64]bool{}
+		l.held = map[int64]*Lease{}
 	}
-	l.held[id] = true
-	return &Lease{l: l, id: id}, true
+	le := &Lease{l: l, id: id}
+	l.held[id] = le
+	return le, true
 }
 
+/* holds reports whether le itself (not another lease of the same device) holds its device. */
 func (l *Locks) holds(le *Lease) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return le != nil && le.l == l && l.held[le.id]
+	return le != nil && le.l == l && l.held[le.id] == le
 }
 
-/* Release frees the lock; repeated calls do nothing. */
+/* Release frees the lock if le still holds it; repeated calls, and calls after another holder took the device, do nothing. */
 func (le *Lease) Release() {
 	le.once.Do(func() {
 		le.l.mu.Lock()
-		delete(le.l.held, le.id)
+		if le.l.held[le.id] == le {
+			delete(le.l.held, le.id)
+		}
 		le.l.mu.Unlock()
 	})
 }
@@ -197,6 +204,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 /* runDue plans newly seen devices, forgets the others and backs up, one at a time, those due and not held. */
 func (s *Scheduler) runDue(ctx context.Context) {
 	if !s.cfg.Enabled() {
+		s.forget(ctx, []int64{}) /* disabled: the poller takes every device back at once */
 		return
 	}
 	ids, err := s.eligible(ctx)
@@ -322,7 +330,14 @@ func (s *Scheduler) backup(ctx context.Context, id int64) error {
 		/* err may carry device text: debug level only, never in the database */
 		s.cfg.Log.Info("executor backup failed", slog.Int64("device_id", id))
 		s.cfg.Log.Debug("executor backup failed", slog.Int64("device_id", id), slog.String("err", err.Error()))
-		if _, e := s.cfg.Pool.Exec(context.WithoutCancel(ctx), `INSERT INTO backups.backup_state (device_id, last_error) VALUES ($1, $2)
+		/*
+			Only for a device the executor has already backed up (its stamp or
+			one of its versions): otherwise the poller still owns backup_state
+			and its last result stays.
+		*/
+		if _, e := s.cfg.Pool.Exec(context.WithoutCancel(ctx), `INSERT INTO backups.backup_state (device_id, last_error)
+			SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM execpub.backup_taken WHERE device_id = $1)
+				OR EXISTS (SELECT 1 FROM backups.config_version WHERE device_id = $1 AND source IN ('executor', 'pre_session', 'post_session'))
 			ON CONFLICT (device_id) DO UPDATE SET last_error = $2`, id, ErrFailed); e != nil {
 			s.cfg.Log.Warn("executor backups: recording the failure failed", slog.Int64("device_id", id), slog.String("err", e.Error()))
 		}
@@ -375,7 +390,14 @@ func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
 		return err
 	}
 	if last != nil && *last == sum {
-		return s.store(ctx, id, sum, nil)
+		newest, err := s.newest(ctx, id)
+		if err != nil {
+			return err
+		}
+		if newest != nil && *newest == sum {
+			return s.store(ctx, id, sum, nil)
+		}
+		/* another source (the poller) stored a different configuration since: the newest version must be this one again */
 	}
 	masked := strings.ToValidUTF8(drv.MaskSecrets(raw), "?")
 	if len(masked) > drivers.MaxConfigSize {
@@ -390,9 +412,14 @@ func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
 
 /* lastOwn is the hash of the newest version the executor stored for id (sources only its role can insert); nil when none. */
 func (s *Scheduler) lastOwn(ctx context.Context, id int64) (*[32]byte, error) {
+	return s.hashOf(ctx, `SELECT sha256 FROM backups.config_version
+		WHERE device_id = $1 AND source IN ('executor', 'pre_session', 'post_session') ORDER BY id DESC LIMIT 1`, id)
+}
+
+/* hashOf runs a query of one sha256 for id; nil when there is no row. */
+func (s *Scheduler) hashOf(ctx context.Context, sql string, id int64) (*[32]byte, error) {
 	var b []byte
-	err := s.cfg.Pool.QueryRow(ctx, `SELECT sha256 FROM backups.config_version
-		WHERE device_id = $1 AND source IN ('executor', 'pre_session', 'post_session') ORDER BY id DESC LIMIT 1`, id).Scan(&b)
+	err := s.cfg.Pool.QueryRow(ctx, sql, id).Scan(&b)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -404,6 +431,15 @@ func (s *Scheduler) lastOwn(ctx context.Context, id int64) (*[32]byte, error) {
 	}
 	h := [32]byte(b)
 	return &h, nil
+}
+
+/*
+newest is the hash of the newest version of id of any source; nil when none.
+It only ever adds a version (a forged poller row makes the executor store
+the device's configuration again), never skips one.
+*/
+func (s *Scheduler) newest(ctx context.Context, id int64) (*[32]byte, error) {
+	return s.hashOf(ctx, `SELECT sha256 FROM backups.config_version WHERE device_id = $1 ORDER BY id DESC LIMIT 1`, id)
 }
 
 /* version is a new configuration version to store. */
