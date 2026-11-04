@@ -51,7 +51,8 @@ func TestExecutorAlertProblems(t *testing.T) {
 	dev := h.newDevice()
 	want := map[string]string{"executor_tamper": "disaster", "executor_bruteforce": "disaster", "executor_freeze": "warning",
 		"executor_policy_invalid": "high", "executor_guards_unwritable": "high", "executor_unverifiable": "high",
-		"hostkey_mismatch_write": "high", "mass_unmask": "high", "session_interrupted": "high", "session_outside_window": "warning"}
+		"hostkey_mismatch_write": "high", "mass_unmask": "high", "session_interrupted": "high", "session_outside_window": "warning",
+		"executor_password_expired": "high", "executor_line_mismatch": "high", "executor_rollback_mismatch": "high"}
 	for kind := range want {
 		h.alert(kind, "info", 0, "first "+kind, time.Minute)
 		h.alert(kind, "info", 0, "second "+kind, 0)

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { StatusWidget } from "./StatusWidget";
 import type { Poster } from "./client";
-import { CredentialForm } from "./credentials/CredentialForm";
+import { DevicesPage } from "./devices/DevicesPage";
 
 export function App({ poster }: { poster?: Poster }) {
   const { t } = useTranslation();
@@ -9,7 +9,7 @@ export function App({ poster }: { poster?: Poster }) {
     <main className="mx-auto max-w-xl space-y-4 p-4">
       <h1 className="text-lg font-semibold">{t("executor.title")}</h1>
       <StatusWidget />
-      {poster && <CredentialForm poster={poster} />}
+      {poster && <DevicesPage poster={poster} />}
     </main>
   );
 }
