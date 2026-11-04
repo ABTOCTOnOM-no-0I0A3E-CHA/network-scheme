@@ -196,8 +196,8 @@ func printable(s string) bool {
 	return true
 }
 
-/* allows reports whether c matches an allowlist entry by exact name and argument kinds, with valid values. */
-func (d Dialect) allows(c ShowCommand) bool {
+// Allows reports whether c matches an allowlist entry by exact name and argument kinds, with valid values.
+func (d Dialect) Allows(c ShowCommand) bool {
 	for _, a := range c.Args {
 		if !a.valid() {
 			return false
@@ -377,7 +377,7 @@ and returns the output up to the next prompt (CRLF normalised, without the
 echoed command and the prompt). Device output is untrusted text.
 */
 func (r *Runner) Run(ctx context.Context, cmd ShowCommand) (string, error) {
-	if !r.d.allows(cmd) {
+	if !r.d.Allows(cmd) {
 		return "", ErrNotAllowed
 	}
 	r.mu.Lock()

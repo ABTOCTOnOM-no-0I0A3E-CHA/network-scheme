@@ -154,6 +154,15 @@ var trace = []struct {
 		{"internal/install", "TestRunInExecutor"},
 		{"scripts/check-isolation.sh", `done < <(go list -deps "./cmd/$name" | tr -d '\r')`},
 	}},
+	{"4b.5", "the transport: registry row and netguard at dial, host key before credentials, model gate, expired password, ReadOnly allowlist, no escapes to clients", []ref{
+		{"cmd/executor/internal/transport", "TestDialUsesTheVerifiedRegistry"},
+		{"cmd/executor/internal/transport", "TestNetguardAndHostKeyAtDial"},
+		{"cmd/executor/internal/transport", "TestModelGate"},
+		{"cmd/executor/internal/transport", "TestExpiredPasswordStops"},
+		{"cmd/executor/internal/transport", "TestReadOnlySendsOnlyTheAllowlist"},
+		{"cmd/executor/internal/transport", "TestEscapesNeverReachTheClient"},
+		{"cmd/executor/internal/strategy", "TestEveryStrategyHasResearchRef"},
+	}},
 }
 
 /*
