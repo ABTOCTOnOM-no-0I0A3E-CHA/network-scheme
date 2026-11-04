@@ -225,7 +225,7 @@ var ruleVocab = []string{
 	"commit", "i", "frobnicate", "vlan", "name", "ip address",
 }
 
-/* FuzzRules: with any policy NewRules accepts, a line is at least as strict as the grammar's class, Control stays Control, and a denied prefix stays denied unless a longer rule carves the line out. */
+/* FuzzRules: with any policy NewRules accepts, a line is at least as strict as the grammar's class, Control stays Control, and a denied prefix stays denied unless a longer safe rule carves the line out. */
 func FuzzRules(f *testing.F) {
 	g := testGrammar(f)
 	ctx := mgmtCtx(f, g)
@@ -271,10 +271,11 @@ func FuzzRules(f *testing.F) {
 				if len(ru.words) > len(ws) || !ru.covers(ws) {
 					continue
 				}
-				if ru.class == Denied {
+				switch ru.class {
+				case Denied:
 					denied = max(denied, len(ru.words))
-				} else {
-					carved = max(carved, len(ru.words)) /* a longer rule carves the line out (the longest prefix wins) */
+				case Safe:
+					carved = max(carved, len(ru.words)) /* only an explicit longer safe rule carves the line out */
 				}
 			}
 			if denied > 0 && carved <= denied && v.Class != Denied {

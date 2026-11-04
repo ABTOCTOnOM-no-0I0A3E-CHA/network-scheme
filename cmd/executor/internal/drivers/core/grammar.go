@@ -46,8 +46,10 @@ type ModeSpec struct {
 ArgType is an argument type. Match says whether a token fits.
 
 Text marks free text the device takes literally (a description, say): its
-tokens may hold ';', '|', '\', quotes and non-ASCII letters. It is off by
-default; set it only where the line's syntax is confirmed for the firmware.
+tokens may hold '|', '\' (not at a token's end), quotes and non-ASCII
+letters, never ';'. It is off by default, only for a final <type...>
+argument and never with Kind; set it only where the line's syntax is
+confirmed for the firmware.
 
 Kind, when set, makes the argument name management targets of that kind
 ("interface", "vlan", ...). Names gives their canonical names (nil: the token
@@ -146,7 +148,7 @@ func NewGrammar(s Spec) (*Grammar, error) {
 	}
 	g := &Grammar{root: s.Modes[0].Name, args: map[string]ArgType{"word": Word}, modes: map[string]*mode{}}
 	for name, t := range s.Args {
-		if !typeRe.MatchString(name) || name == "word" || t.Match == nil || (t.Names != nil && t.Kind == "") {
+		if !typeRe.MatchString(name) || name == "word" || t.Match == nil || (t.Names != nil && t.Kind == "") || (t.Text && t.Kind != "") {
 			return nil, fmt.Errorf("core: bad argument type %q", name)
 		}
 		g.args[name] = t
@@ -214,6 +216,8 @@ func (g *Grammar) add(n *node, c Cmd) error {
 			return fmt.Errorf("bad argument %q", w)
 		case name == "word" && c.Class == Safe:
 			return fmt.Errorf("a safe command takes a typed argument, not <word>")
+		case t.Text && !rest:
+			return fmt.Errorf("a text argument is a final <type...>")
 		}
 		var e *edge
 		for _, x := range n.args {
@@ -246,6 +250,7 @@ const (
 	ambiguous
 	incomplete
 	badMode
+	abbreviated /* a policy rule's keyword not typed in full */
 )
 
 type hit struct {
@@ -273,7 +278,7 @@ func step(n *node, tok string) (*node, string, *edge, status) {
 	ok := pure(tok)
 	var args []*edge
 	for _, e := range n.args {
-		if (ok || e.t.Text) && e.t.Match(tok) {
+		if (ok || e.t.Text && textOK(tok)) && e.t.Match(tok) {
 			args = append(args, e)
 		}
 	}
@@ -303,6 +308,19 @@ func step(n *node, tok string) (*node, string, *edge, status) {
 		return args[0].next, "", args[0], parsed
 	}
 	return nil, "", nil, ambiguous
+}
+
+/* textOK: what even a Text argument refuses: ';' and a trailing backslash. */
+func textOK(tok string) bool { return !strings.Contains(tok, ";") && !strings.HasSuffix(tok, `\`) }
+
+/* restBad reports whether the rest of a line may not be taken by an argument of type t. */
+func restBad(t ArgType, toks []string) bool {
+	for _, tok := range toks {
+		if !pure(tok) && (!t.Text || !textOK(tok)) {
+			return true
+		}
+	}
+	return false
 }
 
 func anyImpure(toks []string) bool {
@@ -336,7 +354,7 @@ func (g *Grammar) parse(toks []string, modeName string) result {
 		case e != nil && e.rest:
 			r.toks = append(r.toks, toks[i:]...)
 			r.hits = append(r.hits, hit{e.t, strings.Join(toks[i:], " ")})
-			r.impure = !e.t.Text && anyImpure(toks[i:])
+			r.impure = restBad(e.t, toks[i:])
 			i = len(toks)
 		case e != nil:
 			r.toks = append(r.toks, toks[i])

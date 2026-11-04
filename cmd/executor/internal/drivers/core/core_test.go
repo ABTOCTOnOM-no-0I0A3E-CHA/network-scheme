@@ -245,7 +245,8 @@ func TestClassify(t *testing.T) {
 		{"show mgmt", exec, "show interfaces gi1/0/24", Safe, ReasonGrammar},
 		{"unsure", walk(g, "conf", "int gi1/0/1", "frobnicate"), "shutdown", Dangerous, ReasonUnsure},
 		{"unsure exit", walk(g, "conf", "int gi1/0/1", "frobnicate", "exit"), "hostname x", Dangerous, ReasonUnsure},
-		{"unsure end", walk(g, "conf", "int gi1/0/1", "frobnicate", "end", "conf"), "hostname x", Safe, ReasonGrammar},
+		{"unsure through end", walk(g, "conf", "int gi1/0/1", "frobnicate", "end", "conf"), "hostname x", Dangerous, ReasonUnsure},
+		{"unsure cleared by root prompt", g.Next("conf", g.Reconcile(walk(g, "conf", "int gi1/0/1", "frobnicate", "end"), "exec")), "hostname x", Safe, ReasonGrammar},
 		{"exec unknown accepted", walk(g, "frobnicate", "conf"), "hostname x", Dangerous, ReasonUnsure},
 		{"esr rollback", cfg, "rollback", Safe, ReasonGrammar},
 	}
@@ -333,6 +334,7 @@ func TestPolicyRules(t *testing.T) {
 		{cfg, "hostname core1", Safe},
 		{cfg, "hostname core1x", Dangerous},
 		{cfg, "no username bob", Dangerous}, /* safe never relaxes the grammar */
+		{exec, "copy x y", Dangerous},       /* an explicit longer safe rule carves the denied prefix out */
 		{exec, "write", Control},            /* M6: Control stands above Denied, the Save flow is mandatory */
 		{exec, "copy x y", Dangerous},       /* the carve-out goes back to the grammar's class */
 		{exec, "copy x z", Denied},
@@ -462,6 +464,8 @@ func TestNewGrammarRejects(t *testing.T) {
 		base(Cmd{Pattern: "hostname <word>", Class: Safe}),
 		base(Cmd{Pattern: "description <word...>", Class: Safe}),
 		base(Cmd{Pattern: "a ; b", Class: Safe}),
+		{Args: map[string]ArgType{"t": {Match: anyTok, Text: true}}, Modes: []ModeSpec{{Name: "exec", Cmds: []Cmd{{Pattern: "a <t> b", Class: Safe}}}}},
+		{Args: map[string]ArgType{"t": {Match: anyTok, Text: true, Kind: "interface"}}, Modes: []ModeSpec{{Name: "exec"}}},
 	} {
 		if _, err := NewGrammar(s); err == nil {
 			t.Errorf("spec %d accepted", i)

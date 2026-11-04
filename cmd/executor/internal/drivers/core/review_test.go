@@ -35,6 +35,10 @@ func TestImpureTokensRefused(t *testing.T) {
 		{g.Root(), "show running-config |include x"},
 		{g.Root(), "show running-config | include a|b"},
 		{Mode{}, "x;y"},
+		{cfg, "banner a ; reload"}, /* not even a Text argument takes ';' */
+		{cfg, "banner a;reload"},
+		{cfg, "banner a\\"}, /* nor a trailing backslash */
+		{cfg, "banner a\\ b"},
 	} {
 		v := g.Classify(c.line, c.m, ctx)
 		if v.Class != Denied || v.Reason != ReasonRefused || !errors.Is(v.Err, ErrImpure) || v.Line != "" {
@@ -50,7 +54,7 @@ func TestImpureTokensRefused(t *testing.T) {
 		line, want string
 	}{
 		{g.Root(), "sh run | inc Gi1", "show running-config | include Gi1"},
-		{cfg, "banner " + r(0x41f, 0x440, 0x438) + "; a|b\\c it's", "banner " + r(0x41f, 0x440, 0x438) + "; a|b\\c it's"},
+		{cfg, "banner " + r(0x41f, 0x440, 0x438) + " a|b\\c it's", "banner " + r(0x41f, 0x440, 0x438) + " a|b\\c it's"},
 		{ifo, `description "a b"`, `description "a b"`},
 	} {
 		if v := g.Classify(c.line, c.m, ctx); v.Class != Safe || v.Line != c.want {
@@ -105,11 +109,17 @@ func TestRulesNormalizedByGrammar(t *testing.T) {
 		line  string
 		class Class
 	}{
-		{rules(deny("rel")), exec, "reload", Denied},
-		{rules(deny("rel")), exec, "reload in 5", Denied},
-		{rules(deny("conf t")), exec, "configure terminal", Denied},
-		{rules(deny("conf t")), exec, "conf t", Denied},
-		{rules(deny("conf t")), exec, "configure", Safe},
+		{rules(deny("reload")), exec, "rel", Denied},
+		{rules(deny("reload")), exec, "reload in 5", Denied},
+		{rules(deny("RELOAD")), exec, "reload", Denied},
+		{rules(deny("configure terminal")), exec, "configure terminal", Denied},
+		{rules(deny("configure terminal")), exec, "conf t", Denied},
+		{rules(deny("configure terminal")), exec, "configure", Safe},
+		/* I-A: only an explicit safe rule carves a denied prefix out; a dangerous one never downgrades it. */
+		{rules(deny("copy"), execpolicy.ClassOverride{Driver: "any", Command: "copy x y", Class: "dangerous"}), exec, "copy x y", Denied},
+		{rules(deny("reload"), execpolicy.ClassOverride{Driver: "any", Command: "reload in", Class: "dangerous"}), exec, "reload in 5", Denied},
+		{rules(deny("reload in"), execpolicy.ClassOverride{Driver: "any", Command: "reload", Class: "safe"}), exec, "reload in 5", Denied},
+		{rules(deny("reload in"), execpolicy.ClassOverride{Driver: "any", Command: "reload in", Class: "safe"}), exec, "reload in 5", Denied},
 		{rules(deny("copy"), execpolicy.ClassOverride{Driver: "any", Command: "copy x y", Class: "safe"}), exec, "copy X Y", Denied},
 		{rules(deny("copy"), execpolicy.ClassOverride{Driver: "any", Command: "copy x y", Class: "safe"}), exec, `copy "x" y`, Denied},
 		{rules(deny("copy"), execpolicy.ClassOverride{Driver: "any", Command: "copy x y", Class: "safe"}), exec, "copy x y", Dangerous},
@@ -125,7 +135,8 @@ func TestRulesNormalizedByGrammar(t *testing.T) {
 			t.Errorf("Classify(%q) = %+v, want %v", c.line, v, c.class)
 		}
 	}
-	for _, cmd := range []string{"frobnicate", "i", "c", "show frob", "copy run"} {
+	/* m2: abbreviated keywords and commands that read differently by mode are refused. */
+	for _, cmd := range []string{"frobnicate", "i", "c", "show frob", "copy run", "rel", "conf t", "reload i", "sh", "no sh", "do rel"} {
 		if _, err := NewRules(g, "mes10", []execpolicy.ClassOverride{deny(cmd)}); err == nil {
 			t.Errorf("NewRules accepted %q", cmd)
 		}
@@ -201,9 +212,12 @@ func TestModeDrift(t *testing.T) {
 	if m = walk(g, "frobnicate"); !m.Unsure() || g.Classify("configure", m, ctx).Class != Dangerous {
 		t.Error("unknown root line is not unsure")
 	}
-	/* End clears it. */
-	if m = walk(g, "conf", "int gi1/0/1", "frob", "end"); m.Unsure() || m.Name() != "exec" {
-		t.Error("end did not clear unsure")
+	/* End does not clear it (m4): only the root prompt does. */
+	if m = walk(g, "conf", "int gi1/0/1", "frob", "end"); !m.Unsure() || m.Name() != "exec" {
+		t.Error("end cleared unsure")
+	}
+	if m = g.Reconcile(m, "exec"); m.Unsure() {
+		t.Error("root prompt after end did not clear unsure")
 	}
 	/* do of a mode change: dangerous, and the session no longer knows its mode. */
 	ifo := walk(g, "conf", "int gi1/0/1")

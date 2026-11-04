@@ -14,7 +14,9 @@ management targets each entered mode addresses. The zero Mode is no mode
 (every line dangerous). Unsure means the session lost track of the context
 (the device accepted a line the grammar could not parse, a `do` that may
 change the mode, or the prompt disagreed): every line but navigation and
-`do` is dangerous until End or a root prompt (Reconcile) clears it.
+`do` is dangerous until a root prompt clears it (Reconcile; End alone does
+not, the device may not have gone where the grammar thinks). The session
+(4c) calls Reconcile with the prompt's mode after every line.
 */
 type Mode struct {
 	frames []frame
@@ -44,7 +46,8 @@ func (g *Grammar) Root() Mode { return Mode{frames: []frame{{name: g.root}}} }
 Next is the mode after the device accepted line in m (the session calls it
 only then, and Reconcile with the prompt right after). A line the grammar
 cannot parse, or a `do` of a command that enters or leaves a mode, makes the
-mode Unsure, in the root too; only End clears it. Control lines leave m alone
+mode Unsure, in the root too; only Reconcile to the root prompt clears it.
+Control lines leave m alone
 (their flows set the mode they leave the device in).
 */
 func (g *Grammar) Next(line string, m Mode) Mode {
@@ -63,7 +66,7 @@ func (g *Grammar) Next(line string, m Mode) Mode {
 		}
 		return m
 	case r.cmd.Nav == End:
-		return g.Root()
+		return Mode{frames: g.Root().frames, unsure: m.unsure}
 	case r.cmd.Nav == Exit:
 		if len(m.frames) <= 1 {
 			return m
@@ -90,8 +93,8 @@ func (g *Grammar) enterBase(m Mode, name string) ([]frame, bool) {
 
 /*
 Reconcile checks m against the mode the device's prompt shows (as a grammar
-mode name). The root prompt resets the session to Root (the only way besides
-End to clear Unsure); a mismatch makes the session Unsure in the prompt's mode.
+mode name). The root prompt resets the session to Root, the only way to
+clear Unsure; a mismatch makes the session Unsure in the prompt's mode.
 */
 func (g *Grammar) Reconcile(m Mode, name string) Mode {
 	switch name {
@@ -246,12 +249,13 @@ func (g *Grammar) Complete(prefix string, m Mode) []string {
 
 /*
 Rules are the policy's class overrides for one driver line, their commands
-normalized by the line's grammar (NewRules). The override with the longest
-matching command prefix wins (the stricter on a tie); the line's class is
-then the stricter of it and the grammar's, so `safe` only carves an exception
-out of a broader policy override and never relaxes the grammar (security.md
-5.3: unknown, ambiguous and the built-in dangerous commands stay dangerous),
-and nothing changes Control. A dangerous or denied override matches keywords
+checked against the line's grammar (NewRules). A denied or dangerous rule
+applies unless a strictly longer safe rule covers the line too: only an
+explicit safe rule carves an exception out of them, and a dangerous rule
+never downgrades a denied one. Of the rules that apply the strictest wins,
+and the line's class is then the stricter of it and the grammar's, so `safe`
+never relaxes the grammar (security.md 5.3: unknown, ambiguous and the
+built-in dangerous commands stay dangerous), and nothing changes Control. A dangerous or denied override matches keywords
 by prefix ("rel" for "reload", for lines the grammar could not expand) and
 arguments case-insensitively, quoted or not, with or without a leading `do`;
 a safe one only matches whole keywords and arguments exactly (case included).
@@ -270,10 +274,11 @@ type rword struct {
 
 /*
 NewRules takes the overrides of line (and of "any") from a validated policy
-and spells their commands out with g: each word a full keyword or an
-argument, in every mode where the command parses. A word that is ambiguous in
-some mode, or a command that parses in no mode, is an error: the session must
-then refuse to open (fail closed).
+and checks their commands against g: a normalized command prefix (policy.go),
+each word a keyword typed in full or an argument, the same in every mode
+where it parses. An abbreviated or ambiguous keyword, a command that parses
+in no mode or differently in two modes is an error: the session must then
+refuse to open (fail closed).
 */
 func NewRules(g *Grammar, line string, overrides []execpolicy.ClassOverride) (Rules, error) {
 	var r Rules
@@ -303,7 +308,7 @@ func NewRules(g *Grammar, line string, overrides []execpolicy.ClassOverride) (Ru
 	return r, nil
 }
 
-/* ruleForms spells a command prefix out in every mode where it parses. */
+/* ruleForms reads a command prefix in every mode where it parses; it must read the same in all. */
 func (g *Grammar) ruleForms(raw []string) ([][]rword, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty command")
@@ -314,12 +319,17 @@ func (g *Grammar) ruleForms(raw []string) ([][]rword, error) {
 		switch {
 		case st == ambiguous:
 			return nil, fmt.Errorf("ambiguous word")
+		case st == abbreviated:
+			return nil, fmt.Errorf("abbreviated keyword: write it in full")
 		case st == parsed && !slices.ContainsFunc(forms, func(f []rword) bool { return slices.Equal(f, ws) }):
 			forms = append(forms, ws)
 		}
 	}
-	if len(forms) == 0 {
+	switch {
+	case len(forms) == 0:
 		return nil, fmt.Errorf("not a command of the grammar")
+	case len(forms) > 1:
+		return nil, fmt.Errorf("reads differently in different modes")
 	}
 	return forms, nil
 }
@@ -334,6 +344,8 @@ func (g *Grammar) ruleForm(n *node, raw []string) ([]rword, status) {
 		switch {
 		case st != parsed:
 			return nil, st
+		case e == nil && word != asciiLower(raw[i]):
+			return nil, abbreviated
 		case e == nil:
 			out = append(out, rword{word, true})
 		case e.rest:
@@ -365,17 +377,20 @@ func (r Rules) match(toks []string) (Class, bool) {
 }
 
 func (r Rules) match1(toks []string) (Class, bool) {
-	var best Class
-	n := 0
+	var longest [Denied + 1]int /* per class, the longest covering rule */
 	for _, ru := range r.rules {
-		if len(ru.words) > len(toks) || len(ru.words) < n || !ru.covers(toks) {
-			continue
-		}
-		if len(ru.words) > n || ru.class > best {
-			best, n = ru.class, len(ru.words)
+		if len(ru.words) <= len(toks) && ru.covers(toks) {
+			longest[ru.class] = max(longest[ru.class], len(ru.words))
 		}
 	}
-	return best, n > 0
+	nS := longest[Safe]
+	switch {
+	case longest[Denied] > 0 && longest[Denied] >= nS:
+		return Denied, true
+	case longest[Dangerous] > 0 && longest[Dangerous] >= nS:
+		return Dangerous, true
+	}
+	return Safe, nS > 0
 }
 
 func (ru rule) covers(toks []string) bool {
