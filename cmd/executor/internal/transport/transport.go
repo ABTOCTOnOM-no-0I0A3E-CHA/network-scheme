@@ -482,7 +482,7 @@ func kiChallenge(set strategy.Set, c Credential, expired *atomic.Bool) gossh.Key
 		if len(questions) == 0 {
 			return nil, nil
 		}
-		if answered {
+		if answered || len(questions) != 1 {
 			return nil, ErrLoginFailed
 		}
 		answers := make([]string, len(questions))

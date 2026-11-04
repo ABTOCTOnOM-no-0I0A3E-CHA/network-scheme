@@ -7,7 +7,8 @@
 -- Only the executor writes it; the poller stops only while the stamp is
 -- fresh, so a stopped executor hands the device back to the poller.
 -- The api and the poller cannot write it (nor any other execpub table but
--- freeze_request); the executor never reads it back.
+-- freeze_request); the executor reads it only to tell whether it already
+-- backs a device up (its own failure is then recorded in backup_state).
 CREATE TABLE execpub.backup_taken (
     device_id bigint      PRIMARY KEY CHECK (device_id > 0),
     at        timestamptz NOT NULL DEFAULT now()

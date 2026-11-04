@@ -270,8 +270,8 @@ func TestTraceability(t *testing.T) {
 			traced[r.dir+"."+r.name] = true
 		}
 	}
-	/* The scenarios 4a must prove (the plan's table rows owned by 4a, the 4a.7 attack, the five review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	/* The scenarios 4a and 4b must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}
