@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
@@ -42,11 +43,12 @@ const password = "Wr1te-Pass-0123456"
 var admin = authz.Decision{UserID: 7, Username: "wadmin"}
 
 type fixture struct {
-	env *testdb.Env
-	reg *registry.Registry
-	st  *wcreds.Store
-	pub *[32]byte
-	at  time.Time
+	env     *testdb.Env
+	reg     *registry.Registry
+	st      *wcreds.Store
+	pub     *[32]byte
+	at      time.Time
+	audited []string /* stage and reason of every refusal Record got */
 }
 
 /* newFixture is an executor registry with devices 1 (esr) and 2 (mes6), write-admin for admin and a write-domain key pair. */
@@ -76,7 +78,9 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f := &fixture{env: env, reg: reg, pub: pub, at: time.Now().UTC().Truncate(time.Second)}
-	f.st = &wcreds.Store{Gate: guard, Priv: priv, Pub: pub, Log: log}
+	f.st = &wcreds.Store{Gate: guard, Priv: priv, Pub: pub, Log: log, Record: func(_ context.Context, ev audit.Event) {
+		f.audited = append(f.audited, fmt.Sprint(ev.Details["stage"], " ", ev.Details["reason"]))
+	}}
 	f.put(t, func(tx *registry.Tx) error {
 		for id, drv := range map[int64]string{1: "esr", 2: "mes6"} {
 			if err := tx.Put("write_device", map[string]any{"device_id": id, "address": netip.AddrFrom4([4]byte{10, 9, 0, byte(id)}), "port": 22,
@@ -160,17 +164,18 @@ func (f *fixture) stored(t *testing.T, device int64) []byte {
 
 /*
 C2j (security.md 18): a ciphertext sealed for device 1 submitted for device 2
-is a mismatch, at Describe and again inside Run's write (a description the
-client built itself never reaches the registry either).
+is a mismatch inside Run's write, after the confirmation (Describe does not
+open it); a description the client built itself never reaches the registry
+either.
 */
 func TestC2jCiphertextOfAnotherDeviceIsAMismatch(t *testing.T) {
 	f := newFixture(t)
 	ct := f.ct(t, 1, f.at)
-	if _, _, err := f.st.Describe(context.Background(), admin, params(2, ct)); !errors.Is(err, wcreds.ErrMismatch) {
-		t.Fatalf("Describe: %v", err)
+	if err := f.submit(t, 2, ct); !errors.Is(err, wcreds.ErrMismatch) {
+		t.Fatalf("submit: %v", err)
 	}
-	forged := confirm.Description{Action: wcreds.Action, Fields: []confirm.Field{
-		{Key: "ciphertext", Value: base64.StdEncoding.EncodeToString(ct)}, {Key: "device_id", Value: "2"}}}
+	forged := confirm.Description{Action: wcreds.Action, Fields: []confirm.Field{{Key: "address", Value: "10.9.0.2"},
+		{Key: "ciphertext", Value: base64.StdEncoding.EncodeToString(ct)}, {Key: "device_id", Value: "2"}, {Key: "write_key", Value: f.st.WriteKey()}}}
 	if _, err := f.st.Run(context.Background(), confirm.Challenge{Action: wcreds.Action, Description: forged}, admin); !errors.Is(err, wcreds.ErrMismatch) {
 		t.Fatalf("Run: %v", err)
 	}
@@ -332,5 +337,132 @@ func TestAPIAndPollerCannotReadWriteCredentials(t *testing.T) {
 		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
 			t.Errorf("%s read exec.write_credential: %v", role, err)
 		}
+	}
+}
+
+/*
+Review M4: before the change TOTP Describe tells nothing of the ciphertext:
+undecryptable bytes, another device's payload and a weak password all get
+the same description (device id, address, write key fingerprint); refusals
+of the grant or the device are audited at that stage.
+*/
+func TestDescribeTellsNothingOfTheCiphertext(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	var keys [][]string
+	for _, ct := range [][]byte{[]byte("not a sealed box"), f.ct(t, 2, f.at), f.sealed(t, "device:1", creds.KindSSHWrite, f.at, nil, login("short-pass1"))} {
+		_, d, err := f.st.Describe(ctx, admin, params(1, ct))
+		if err != nil {
+			t.Fatalf("Describe: %v", err)
+		}
+		var ks []string
+		for _, fl := range d.Fields {
+			ks = append(ks, fl.Key)
+			if fl.Key == "address" && fl.Value != "10.9.0.1" || fl.Key == "write_key" && fl.Value != f.st.WriteKey() {
+				t.Errorf("%s = %q", fl.Key, fl.Value)
+			}
+		}
+		keys = append(keys, ks)
+	}
+	for _, ks := range keys {
+		if fmt.Sprint(ks) != "[address ciphertext device_id write_key]" {
+			t.Fatalf("described fields %v", ks)
+		}
+	}
+	if _, _, err := f.st.Describe(ctx, admin, params(9, f.ct(t, 9, f.at))); !errors.Is(err, wcreds.ErrNotRegistered) {
+		t.Fatalf("unregistered: %v", err)
+	}
+	if fmt.Sprint(f.audited) != "[describe not_registered]" {
+		t.Fatalf("audited %v", f.audited)
+	}
+}
+
+/* Review M1/M6: a device whose address changed after Describe, or a write key other than the confirmed one, is changed. */
+func TestRunRefusesWhatChangedSinceTheConfirmation(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, d, err := f.st.Describe(ctx, admin, params(1, f.ct(t, 1, f.at)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := confirm.Description{Action: d.Action}
+	for _, fl := range d.Fields {
+		if fl.Key == "write_key" {
+			fl.Value = "0000:0000:0000:0000:0000:0000:0000:0000"
+		}
+		other.Fields = append(other.Fields, fl)
+	}
+	if _, err := f.st.Run(ctx, confirm.Challenge{Action: d.Action, Description: other}, admin); !errors.Is(err, wcreds.ErrChanged) {
+		t.Fatalf("other write key: %v", err)
+	}
+	f.put(t, func(tx *registry.Tx) error {
+		return tx.Put("write_device", map[string]any{"device_id": 1, "address": netip.MustParseAddr("10.9.9.9"), "port": 22,
+			"protocol": "ssh", "write_group": "core", "write_driver": "esr", "hostkey_algo": nil, "hostkey_fp": nil,
+			"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": false})
+	})
+	if _, err := f.st.Run(ctx, confirm.Challenge{Action: d.Action, Description: d}, admin); !errors.Is(err, wcreds.ErrChanged) {
+		t.Fatalf("moved device: %v", err)
+	}
+	if f.stored(t, 1) != nil {
+		t.Fatal("stored although changed")
+	}
+	if fmt.Sprint(f.audited) != "[run changed run changed]" {
+		t.Fatalf("audited %v", f.audited)
+	}
+}
+
+/* Review M2: a key stored for an ESR whose line is now MES 6.x does not open (RSA only). */
+func TestOpenChecksTheLineAgain(t *testing.T) {
+	f := newFixture(t)
+	ct := f.sealed(t, "device:1", creds.KindSSHWrite, f.at, nil, map[string]string{"username": "netadmin", "private_key": edKey(t)})
+	if err := f.submit(t, 1, ct); err != nil {
+		t.Fatal(err)
+	}
+	f.put(t, func(tx *registry.Tx) error {
+		return tx.Put("write_device", map[string]any{"device_id": 1, "address": netip.MustParseAddr("10.9.0.1"), "port": 22,
+			"protocol": "ssh", "write_group": "core", "write_driver": "mes6", "hostkey_algo": nil, "hostkey_fp": nil,
+			"allow_ssh_rsa_sha1": false, "writes_enabled": false, "backup_via_executor": false})
+	})
+	if _, err := f.st.Open(view(t, f), 1); !errors.Is(err, wcreds.ErrKeyType) {
+		t.Fatalf("ed25519 on mes6: %v", err)
+	}
+}
+
+/* failingGate fails every Write without a verdict and, if view is set, every View too. */
+type failingGate struct {
+	wcreds.Gate
+	view bool
+}
+
+func (g failingGate) Write(context.Context, func(context.Context, *registry.Snapshot, *registry.Tx) error) error {
+	return errors.New("commit outcome not known")
+}
+
+func (g failingGate) View(ctx context.Context, fn func(*registry.Snapshot) error) error {
+	if g.view {
+		return errors.New("registry unreadable")
+	}
+	return g.Gate.View(ctx, fn)
+}
+
+/* Review M3: a write without a verdict is read back; if that fails too the answer is outcome_unknown (503), never success or refusal. */
+func TestRunOutcomeUnknown(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, d, err := f.st.Describe(ctx, admin, params(1, f.ct(t, 1, f.at)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := f.st.Gate
+	f.st.Gate = failingGate{Gate: live}
+	cancel() /* the client went away: the read back still runs */
+	if _, err := f.st.Run(ctx, confirm.Challenge{Action: d.Action, Description: d}, admin); err == nil || errors.Is(err, wcreds.ErrOutcomeUnknown) {
+		t.Fatalf("not stored, registry readable: %v", err)
+	}
+	f.st.Gate = failingGate{Gate: live, view: true}
+	_, err = f.st.Run(context.Background(), confirm.Challenge{Action: d.Action, Description: d}, admin)
+	var st interface{ HTTPStatus() int }
+	if !errors.Is(err, wcreds.ErrOutcomeUnknown) || !errors.As(err, &st) || st.HTTPStatus() != 503 {
+		t.Fatalf("unreadable: %v", err)
 	}
 }

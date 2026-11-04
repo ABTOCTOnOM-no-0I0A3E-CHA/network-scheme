@@ -30,8 +30,7 @@ const ch = {
     { key: "address", value: "10.9.0.1" },
     { key: "ciphertext", value: "SECRET-CT" },
     { key: "device_id", value: "5" },
-    { key: "username", value: "netadmin" },
-    { key: "method", value: "password" },
+    { key: "write_key", value: fingerprint(publicKey) },
   ],
 };
 
@@ -92,7 +91,7 @@ describe("CredentialForm", () => {
     expect(document.body.textContent).not.toContain("SECRET-CT");
     expect(document.body.textContent).not.toContain(PASSWORD);
 
-    fetchMock.mockImplementationOnce(() => Promise.resolve(json(200, { action: "credential.set", result: { device_id: 5, created_at: "2026-11-04T10:00:00Z" } })));
+    fetchMock.mockImplementationOnce(() => Promise.resolve(json(200, { action: "credential.set", result: { device_id: 5, created_at: "2026-11-04T10:00:00Z", method: "password" } })));
     await user.type(screen.getByLabelText("Код TOTP изменений"), "123456");
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     expect(await screen.findByTestId("done")).toHaveTextContent("Учётка устройства 5 сохранена");
@@ -120,16 +119,57 @@ describe("CredentialForm", () => {
     expect(await screen.findByTestId("failure")).toHaveTextContent("Учётка не новее сохранённой.");
   });
 
+  it("refuses a challenge whose write key is not the one keys.json gave (the anchor)", async () => {
+    const user = userEvent.setup();
+    render(<CredentialForm poster={poster()} />);
+    await fill(user);
+    const other = { ...ch, fields: ch.fields.map((f) => (f.key === "write_key" ? { ...f, value: "0000:0000:0000:0000:0000:0000:0000:0000" } : f)) };
+    fetchMock.mockImplementationOnce(() => Promise.resolve(json(200, other)));
+    await user.click(screen.getByRole("button", { name: "Зашифровать и проверить" }));
+    expect(await screen.findByTestId("failure")).toHaveTextContent("другой ключ write-домена");
+    expect(screen.queryByTestId("confirm")).toBeNull();
+  });
+
+  it("drops the challenge on a 5xx after confirm and says the outcome is unknown", async () => {
+    const user = userEvent.setup();
+    render(<CredentialForm poster={poster()} />);
+    await issue(user);
+    fetchMock.mockImplementationOnce(() => Promise.resolve(json(503, { error: { code: "outcome_unknown" } })));
+    await user.type(screen.getByLabelText("Код TOTP изменений"), "123456");
+    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByTestId("failure")).toHaveTextContent("Неизвестно, сохранена ли учётка");
+    expect(screen.queryByTestId("confirm")).toBeNull();
+  });
+
+  it("gives the password manager nothing to save: no form, no username/password pair, autocomplete off", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<CredentialForm poster={poster()} />);
+    await screen.findByTestId("write-key");
+    const check = () => {
+      expect(container.querySelector("form")).toBeNull();
+      for (const el of container.querySelectorAll("input:not([type=radio]), textarea")) {
+        expect(el.getAttribute("autocomplete"), el.id).toBe("off");
+        const names = [el.getAttribute("name"), el.id, el.getAttribute("autocomplete")].join(" ");
+        expect(names, el.id).not.toMatch(/user|login|email|account-name|current-password|new-password/i);
+      }
+    };
+    check();
+    await user.click(screen.getByLabelText("Закрытый ключ (PEM)"));
+    check();
+    await user.click(screen.getByLabelText("Пароль", { selector: "input[type=radio]" }));
+    check();
+  });
+
   it("after a failed confirmation clears the code and never resends it", async () => {
     const user = userEvent.setup();
     render(<CredentialForm poster={poster()} />);
     await issue(user);
-    fetchMock.mockImplementationOnce(() => Promise.resolve(json(503, { error: { code: "unavailable" } })));
+    fetchMock.mockImplementationOnce(() => Promise.resolve(json(429, { error: { code: "rate_limited" } })));
     const code = screen.getByLabelText("Код TOTP изменений") as HTMLInputElement;
     await user.type(code, "123456");
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     await waitFor(() => expect(code.value).toBe(""));
-    expect(screen.getByTestId("failure")).toHaveTextContent("Дождитесь следующего кода TOTP");
+    expect(screen.getByTestId("failure")).toHaveTextContent("Слишком много запросов");
     await user.type(code, "123456");
     await user.click(screen.getByRole("button", { name: "Сохранить" }));
     expect(await screen.findByTestId("failure")).toHaveTextContent("Этот код уже использован");

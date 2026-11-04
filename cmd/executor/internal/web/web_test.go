@@ -954,8 +954,15 @@ type codeRefusal string
 func (c codeRefusal) Error() string       { return "refused: " + string(c) }
 func (c codeRefusal) RefusalCode() string { return string(c) }
 
-/* An action's own refusal (Refusal) answers 422 with its code at issue and at confirm; a freeze answers 503 frozen. */
+type unknownOutcome struct{}
+
+func (unknownOutcome) Error() string       { return "outcome unknown" }
+func (unknownOutcome) RefusalCode() string { return "outcome_unknown" }
+func (unknownOutcome) HTTPStatus() int     { return http.StatusServiceUnavailable }
+
+/* An action's own refusal (Refusal) answers 422 with its code at issue and at confirm, or its own status; a freeze answers 503 frozen. */
 func TestActionRefusalsAnswer422(t *testing.T) {
+	runs := 0
 	refusing := Action{
 		Describe: func(_ context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
 			switch string(params) {
@@ -967,6 +974,9 @@ func TestActionRefusalsAnswer422(t *testing.T) {
 			return testAction.Describe(context.Background(), by, json.RawMessage(`{"device":"sw1"}`))
 		},
 		Run: func(context.Context, confirm.Challenge, authz.Decision) (any, error) {
+			if runs++; runs > 1 {
+				return nil, unknownOutcome{}
+			}
 			return nil, codeRefusal("mismatch")
 		},
 	}
@@ -986,5 +996,8 @@ func TestActionRefusalsAnswer422(t *testing.T) {
 	}
 	if a := h.do(t, http.MethodPost, "/x/confirm", `{"ticket":"user-1","challenge_id":"`+ch.ID+`","h":"`+ch.H+`","code":"123456"}`, hdr()); a.status != 422 || a.code != "mismatch" {
 		t.Errorf("confirm: %d %s", a.status, a.body)
+	}
+	if a := h.do(t, http.MethodPost, "/x/confirm", `{"ticket":"user-1","challenge_id":"`+ch.ID+`","h":"`+ch.H+`","code":"123456"}`, hdr()); a.status != 503 || a.code != "outcome_unknown" {
+		t.Errorf("confirm with an unknown outcome: %d %s", a.status, a.body)
 	}
 }

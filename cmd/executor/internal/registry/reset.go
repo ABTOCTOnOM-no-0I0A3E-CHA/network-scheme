@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -28,14 +29,22 @@ type ResetDevice struct {
 	Driver   string     `json:"write_driver"`
 }
 
+/* ResetCredential is a write credential removed by a reset: enter it again through /x. */
+type ResetCredential struct {
+	DeviceID  int64     `json:"device_id"`
+	CreatedAt time.Time `json:"created_at"` /* as the row said: not confirmed */
+}
+
 /* ResetReport says what a registry reset changed. */
 type ResetReport struct {
 	Seq     int64         /* the counter value every row now carries */
 	Grants  int           /* grants revoked */
 	TOTPs   int           /* change TOTP enrollments removed */
 	Devices []ResetDevice /* devices kept with writes disabled, no host key and both flags off */
-	/* Dropped lists the device and credential rows removed because their MAC did not verify ("write_device 7"): register them again. */
+	/* Dropped lists the device rows removed because their MAC did not verify ("write_device 7"): register them again. */
 	Dropped []string
+	/* Credentials lists every write credential removed (all of them, whatever their MAC): enter each again. */
+	Credentials []ResetCredential
 	/* Profiles is the number of confirmed model profiles removed. */
 	Profiles int
 	/* Known: the state file was readable. OldAnchor is the audit head it vouched for (the pending one if that change committed). */
@@ -67,15 +76,16 @@ its own and re-seals it under a new base:
   - every change TOTP enrollment is removed (an older secret of the same
     user, a reset failure counter or last step could have been put back):
     users enroll again;
-  - a device or write credential row whose MAC does not verify (planted or
-    changed) is removed and reported: register it again;
+  - a device row whose MAC does not verify (planted or changed) is removed
+    and reported: register it again;
+  - every write credential is removed and reported (fail closed: an old
+    valid row may have been put back, or its device row dropped while it
+    still verifies): the write-admin enters each again;
   - every other device keeps its id, address, port, protocol, line and
     group (all listed in the report: an old valid row may have been put
     back), with writes_enabled, allow_ssh_rsa_sha1 and backup_via_executor
     false and no pinned host key (a planted pin would otherwise be sealed);
   - every confirmed model profile is removed (model-verify again);
-  - every other write credential stays (bound to its device inside the
-    ciphertext);
   - exec_state is unfrozen with an empty failure window.
 
 The schema itself must be intact (the catalog check): a trigger, rule or
@@ -219,6 +229,12 @@ func resetOps(pre *Snapshot, macKey *[32]byte, rep *ResetReport) ([]op, error) {
 			continue
 		case "model_profile":
 			rep.Profiles++
+			del(rw)
+			continue
+		case "write_credential":
+			id, _ := rw.typed["device_id"].(int64)
+			at, _ := rw.typed["created_at"].(time.Time)
+			rep.Credentials = append(rep.Credentials, ResetCredential{DeviceID: id, CreatedAt: at})
 			del(rw)
 			continue
 		}

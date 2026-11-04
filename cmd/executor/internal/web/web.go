@@ -102,7 +102,8 @@ type Action struct {
 
 /*
 Refusal is an action's own refusal with a code the UI has a text for: a
-Describe or Run error that implements it answers 422 with that code.
+Describe or Run error that implements it answers 422 with that code, or the
+status of its HTTPStatus method when it has one (e.g. 503 outcome_unknown).
 */
 type Refusal interface {
 	error
@@ -114,7 +115,12 @@ func actionRefused(w http.ResponseWriter, err error) bool {
 	var rf Refusal
 	switch {
 	case errors.As(err, &rf):
-		fail(w, http.StatusUnprocessableEntity, rf.RefusalCode())
+		status := http.StatusUnprocessableEntity
+		var st interface{ HTTPStatus() int }
+		if errors.As(err, &st) {
+			status = st.HTTPStatus()
+		}
+		fail(w, status, rf.RefusalCode())
 	case errors.Is(err, authz.ErrFrozen):
 		refused(w, err)
 	default:

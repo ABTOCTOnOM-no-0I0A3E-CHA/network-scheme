@@ -815,7 +815,7 @@ func (a *Admin) registryReset(ctx context.Context, req execadmin.Request) execad
 		Audit: func(rep registry.ResetReport) registry.Appender {
 			/* Hashes, not only ids: this row is itself chained, so what the reset vouched for cannot be rewritten later. */
 			details = map[string]any{"seq": rep.Seq, "grants_revoked": rep.Grants, "totp_removed": rep.TOTPs,
-				"devices": rep.Devices, "dropped": rep.Dropped, "profiles_removed": rep.Profiles,
+				"devices": rep.Devices, "dropped": rep.Dropped, "profiles_removed": rep.Profiles, "write_credentials_removed": rep.Credentials,
 				"state_file_readable": rep.Known, "audit_intact": plan.Intact, "audit_unanchored": plan.Unanchored,
 				"audit_old_anchor": rep.OldAnchor.LastID, "audit_old_anchor_hash": hex.EncodeToString(rep.OldAnchor.Hash),
 				"audit_vouched": vouchedDetails(plan.Vouched), "audit_may_be_forged": plan.Suspect,
@@ -875,6 +875,12 @@ func resetText(rep registry.ResetReport, plan audit.Plan) string {
 		rep.Tail.LastID, rep.Chain.Base.LastID, len(rep.Chain.Sealed))
 	if len(rep.Dropped) > 0 {
 		fmt.Fprintf(&b, "Removed (MAC did not verify), register again: %s\n", strings.Join(rep.Dropped, ", "))
+	}
+	if len(rep.Credentials) > 0 {
+		fmt.Fprintf(&b, "%d write credential(s) removed, enter each again through /x:\n", len(rep.Credentials))
+		for _, c := range rep.Credentials {
+			fmt.Fprintf(&b, "  write credential of device %d (created %s, not confirmed)\n", c.DeviceID, c.CreatedAt.UTC().Format(time.RFC3339))
+		}
 	}
 	fmt.Fprintf(&b, "%d device(s) kept with writes disabled and no host key. None of these fields is confirmed: check each before the device is used again:\n", len(rep.Devices))
 	for _, d := range rep.Devices {

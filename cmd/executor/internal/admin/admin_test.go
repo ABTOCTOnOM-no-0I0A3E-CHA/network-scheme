@@ -989,7 +989,8 @@ func TestGrantOutcomeFollowsTheRegistry(t *testing.T) {
 Review I2: a device row changed by the superuser (moved to another group)
 and a planted credential fail their MAC: the reset removes them and asks to
 register them again instead of sealing them; a sound device is kept and all
-its routing fields are listed.
+its routing fields are listed. Every write credential, sound or not, is
+removed and listed (4b.4 ruling: enter each again).
 */
 func TestResetDropsRowsWithoutAValidMAC(t *testing.T) {
 	f := newFixture(t)
@@ -1017,13 +1018,13 @@ func TestResetDropsRowsWithoutAValidMAC(t *testing.T) {
 		`SELECT count(*) FROM exec.write_device WHERE device_id = 1`:     0,
 		`SELECT count(*) FROM exec.write_device WHERE device_id = 2`:     1,
 		`SELECT count(*) FROM exec.write_credential WHERE device_id = 3`: 0,
-		`SELECT count(*) FROM exec.write_credential WHERE device_id = 2`: 1,
+		`SELECT count(*) FROM exec.write_credential WHERE device_id = 2`: 0, /* every credential goes: enter it again */
 	} {
 		if n := f.count(t, sql); n != want {
 			t.Errorf("%s = %d, want %d", sql, n, want)
 		}
 	}
-	for _, want := range []string{"write_device 1", "write_credential 3", "device 2  address 10.0.0.2  port 22  protocol ssh  group core  driver mes6"} {
+	for _, want := range []string{"write_device 1", "write credential of device 2 (created", "write credential of device 3 (created", "device 2  address 10.0.0.2  port 22  protocol ssh  group core  driver mes6"} {
 		if !strings.Contains(resp.Text, want) {
 			t.Errorf("report lacks %q:\n%s", want, resp.Text)
 		}
@@ -1127,4 +1128,56 @@ func TestHostRecoveryReportsAndDropsPanelRequest(t *testing.T) {
 		t.Fatalf("audit %+v", r)
 	}
 	f.chainIntact(t)
+}
+
+/*
+Task 4b.4 review I1: a reset removes every write credential, even one whose
+MAC verifies, and lists it. An older valid row put back by the superuser
+(the rollback freezes, then the host resets) and an orphan whose device row
+was removed while it still verifies are both gone afterwards.
+*/
+func TestResetDropsEveryWriteCredential(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred := func(id int64, at time.Time) map[string]any {
+		return map[string]any{"device_id": id, "kind": "ssh_write", "ciphertext": []byte{byte(id)}, "created_at": at, "nonce": make([]byte, 16)}
+	}
+	t0 := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if err := f.guard.HostWrite(ctx, func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+		return errors.Join(tx.Put("write_device", map[string]any{"device_id": 1, "address": mustAddr("10.0.0.1"), "port": 22, "protocol": "ssh",
+			"write_group": "core", "write_driver": "esr", "hostkey_algo": nil, "hostkey_fp": nil, "allow_ssh_rsa_sha1": false,
+			"writes_enabled": false, "backup_via_executor": false}), tx.Put("write_credential", cred(1, t0)), tx.Put("write_credential", cred(2, t0)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restore := attacktest.Copy(t, f.env, "write_credential")
+	/* device 1 gets a newer credential; device 2 is never registered: its credential verifies with no device row */
+	if err := f.guard.HostWrite(ctx, func(_ context.Context, _ *registry.Snapshot, tx *registry.Tx) error {
+		return tx.Put("write_credential", cred(1, t0.Add(time.Hour)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restore() /* the old, validly MACed credential of device 1 is back */
+	if err := f.guard.Check(ctx); err == nil {
+		t.Fatal("the rolled back credential was not detected")
+	}
+	resp := f.do(execadmin.Request{Cmd: "registry-reset", IUnderstand: true})
+	if !resp.OK {
+		t.Fatalf("reset: %s", resp.Error)
+	}
+	if n := f.count(t, `SELECT count(*) FROM exec.write_credential`); n != 0 {
+		t.Fatalf("%d write credential(s) survived the reset", n)
+	}
+	for _, want := range []string{"2 write credential(s) removed", "write credential of device 1 (created 2026-11-01T10:00:00Z",
+		"write credential of device 2 (created 2026-11-01T10:00:00Z"} {
+		if !strings.Contains(resp.Text, want) {
+			t.Errorf("report lacks %q:\n%s", want, resp.Text)
+		}
+	}
+	if f.count(t, `SELECT count(*) FROM exec.write_device WHERE device_id = 1`) != 1 {
+		t.Fatal("the device itself should be kept")
+	}
+	if err := f.guard.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
