@@ -12,8 +12,9 @@ import (
 Mode is where a session's CLI is: the stack of modes from the root, with the
 management targets each entered mode addresses. The zero Mode is no mode
 (every line dangerous). Unsure means the session lost track of the context
-(the device accepted a line the grammar could not parse, or the prompt
-disagreed): every line but navigation and `do` is dangerous until the root.
+(the device accepted a line the grammar could not parse, a `do` that may
+change the mode, or the prompt disagreed): every line but navigation and
+`do` is dangerous until End or a root prompt (Reconcile) clears it.
 */
 type Mode struct {
 	frames []frame
@@ -41,8 +42,10 @@ func (g *Grammar) Root() Mode { return Mode{frames: []frame{{name: g.root}}} }
 
 /*
 Next is the mode after the device accepted line in m (the session calls it
-only then). A line the grammar cannot parse makes the mode Unsure; Control
-lines leave m alone (their flows set the mode they leave the device in).
+only then, and Reconcile with the prompt right after). A line the grammar
+cannot parse, or a `do` of a command that enters or leaves a mode, makes the
+mode Unsure, in the root too; only End clears it. Control lines leave m alone
+(their flows set the mode they leave the device in).
 */
 func (g *Grammar) Next(line string, m Mode) Mode {
 	r, _, err := g.analyze(line, m)
@@ -50,11 +53,14 @@ func (g *Grammar) Next(line string, m Mode) Mode {
 	case err == nil && len(r.toks) == 0:
 		return m
 	case err != nil || r.st != parsed:
-		if len(m.frames) > 1 {
+		m.unsure = true
+		return m
+	case r.cmd.Control != NoControl:
+		return m
+	case r.do:
+		if r.cmd.Enter != "" || r.cmd.Nav != NoNav {
 			m.unsure = true
 		}
-		return m
-	case r.do || r.cmd.Control != NoControl:
 		return m
 	case r.cmd.Nav == End:
 		return g.Root()
@@ -62,7 +68,7 @@ func (g *Grammar) Next(line string, m Mode) Mode {
 		if len(m.frames) <= 1 {
 			return m
 		}
-		return Mode{frames: m.frames[: len(m.frames)-1 : len(m.frames)-1], unsure: m.unsure && len(m.frames) > 2}
+		return Mode{frames: m.frames[: len(m.frames)-1 : len(m.frames)-1], unsure: m.unsure}
 	case r.cmd.Enter != "":
 		kept, found := g.enterBase(m, r.cmd.Enter)
 		ts, ok := targets(r.hits)
@@ -84,15 +90,15 @@ func (g *Grammar) enterBase(m Mode, name string) ([]frame, bool) {
 
 /*
 Reconcile checks m against the mode the device's prompt shows (as a grammar
-mode name): a mismatch makes the session Unsure in that mode, the root
-excepted.
+mode name). The root prompt resets the session to Root (the only way besides
+End to clear Unsure); a mismatch makes the session Unsure in the prompt's mode.
 */
 func (g *Grammar) Reconcile(m Mode, name string) Mode {
 	switch name {
-	case m.Name():
-		return m
 	case g.root:
 		return g.Root()
+	case m.Name():
+		return m
 	}
 	return Mode{frames: []frame{{name: g.root}, {name: name}}, unsure: true}
 }
@@ -112,13 +118,13 @@ func (c Context) mgmt(ts []Target) bool {
 	return false
 }
 
-/* Normalize spells out keywords and collapses spaces; it refuses a line with a forbidden character. It is idempotent. */
+/* Normalize spells out keywords and collapses spaces; it refuses a line Classify refuses. It is idempotent. */
 func (g *Grammar) Normalize(line string, m Mode) (string, error) {
 	_, out, err := g.analyze(line, m)
 	return out, err
 }
 
-/* Classify classifies one line typed in m. Send only Verdict.Line, and only when the class allows it. */
+/* Classify classifies one line typed in m. Send only Verdict.Line, and only when the class is Safe or Dangerous. */
 func (g *Grammar) Classify(line string, m Mode, c Context) Verdict {
 	r, out, err := g.analyze(line, m)
 	if err != nil {
@@ -140,22 +146,20 @@ func (g *Grammar) Classify(line string, m Mode, c Context) Verdict {
 		return Verdict{Class: Safe, Reason: ReasonEmpty}
 	case r.st != parsed:
 	case r.cmd.Control != NoControl:
-		return Verdict{Class: Control, Control: r.cmd.Control, Line: v.Line, Reason: ReasonGrammar}
+		return Verdict{Class: Control, Control: r.cmd.Control, Line: out, Reason: ReasonGrammar}
+	case r.do && (r.cmd.Enter != "" || r.cmd.Nav != NoNav):
+		v.Reason = ReasonDoMode
 	default:
 		v.Class, v.Reason = r.class, ReasonGrammar
 		if !r.do && r.cmd.Nav == NoNav && v.Class == Safe {
 			v.Class, v.Reason = g.context(r, m, c)
 		}
 	}
-	/* Also without a leading `do` or what may be one: the device may resolve "d" as do where the grammar finds it ambiguous. */
-	words := r.toks
-	if len(words) > 1 && strings.HasPrefix("do", asciiLower(words[0])) {
-		words = words[1:]
+	if v.Class == Dangerous && g.shadows(r.toks) {
+		return Verdict{Class: Denied, Line: out, Reason: ReasonControl}
 	}
-	for _, ws := range [][]string{r.toks, words} {
-		if cl, ok := c.Rules.match(ws); ok && cl > v.Class {
-			v.Class, v.Reason = cl, ReasonPolicy
-		}
+	if cl, ok := c.Rules.match(r.toks); ok && cl > v.Class {
+		v.Class, v.Reason = cl, ReasonPolicy
 	}
 	return v
 }
@@ -202,7 +206,7 @@ func (g *Grammar) Complete(prefix string, m Mode) []string {
 		return nil
 	}
 	partial := ""
-	if last := strings.ReplaceAll(prefix, "\t", " "); len(toks) > 0 && !strings.HasSuffix(last, " ") {
+	if len(toks) > 0 && !isSpace(prefix[len(prefix)-1]) {
 		partial, toks = toks[len(toks)-1], toks[:len(toks)-1]
 	}
 	n := md.top
@@ -241,24 +245,37 @@ func (g *Grammar) Complete(prefix string, m Mode) []string {
 }
 
 /*
-Rules are the policy's class overrides for one driver line. The override
-with the longest matching command prefix wins (the stricter on a tie); the
-line's class is then the stricter of it and the grammar's, so `safe` only
-carves an exception out of a broader policy override and never relaxes the
-grammar (security.md 5.3: unknown, ambiguous and the built-in dangerous
-commands stay dangerous). A dangerous or denied override also matches the
-line's words by prefix ("rel" for "reload"), quoted or not, with or without a
-leading `do`; a safe one only by whole words.
+Rules are the policy's class overrides for one driver line, their commands
+normalized by the line's grammar (NewRules). The override with the longest
+matching command prefix wins (the stricter on a tie); the line's class is
+then the stricter of it and the grammar's, so `safe` only carves an exception
+out of a broader policy override and never relaxes the grammar (security.md
+5.3: unknown, ambiguous and the built-in dangerous commands stay dangerous),
+and nothing changes Control. A dangerous or denied override matches keywords
+by prefix ("rel" for "reload", for lines the grammar could not expand) and
+arguments case-insensitively, quoted or not, with or without a leading `do`;
+a safe one only matches whole keywords and arguments exactly (case included).
 */
 type Rules struct{ rules []rule }
 
 type rule struct {
-	words []string
+	words []rword
 	class Class
 }
 
-/* NewRules takes the overrides of line (and of "any") from a validated policy. */
-func NewRules(line string, overrides []execpolicy.ClassOverride) (Rules, error) {
+type rword struct {
+	w  string
+	kw bool
+}
+
+/*
+NewRules takes the overrides of line (and of "any") from a validated policy
+and spells their commands out with g: each word a full keyword or an
+argument, in every mode where the command parses. A word that is ambiguous in
+some mode, or a command that parses in no mode, is an error: the session must
+then refuse to open (fail closed).
+*/
+func NewRules(g *Grammar, line string, overrides []execpolicy.ClassOverride) (Rules, error) {
 	var r Rules
 	for _, o := range overrides {
 		if o.Driver != line && o.Driver != "any" {
@@ -275,16 +292,79 @@ func NewRules(line string, overrides []execpolicy.ClassOverride) (Rules, error) 
 		default:
 			return Rules{}, fmt.Errorf("core: override %q: class %q", o.Command, o.Class)
 		}
-		words := strings.Fields(asciiLower(o.Command))
-		if len(words) == 0 {
-			return Rules{}, fmt.Errorf("core: empty override command")
+		forms, err := g.ruleForms(strings.Fields(o.Command))
+		if err != nil {
+			return Rules{}, fmt.Errorf("core: override %q: %w", o.Command, err)
 		}
-		r.rules = append(r.rules, rule{words, cl})
+		for _, ws := range forms {
+			r.rules = append(r.rules, rule{ws, cl})
+		}
 	}
 	return r, nil
 }
 
+/* ruleForms spells a command prefix out in every mode where it parses. */
+func (g *Grammar) ruleForms(raw []string) ([][]rword, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
+	var forms [][]rword
+	for _, md := range g.modes {
+		ws, st := g.ruleForm(md.top, raw)
+		switch {
+		case st == ambiguous:
+			return nil, fmt.Errorf("ambiguous word")
+		case st == parsed && !slices.ContainsFunc(forms, func(f []rword) bool { return slices.Equal(f, ws) }):
+			forms = append(forms, ws)
+		}
+	}
+	if len(forms) == 0 {
+		return nil, fmt.Errorf("not a command of the grammar")
+	}
+	return forms, nil
+}
+
+func (g *Grammar) ruleForm(n *node, raw []string) ([]rword, status) {
+	var out []rword
+	for i := 0; i < len(raw); i++ {
+		if n == doNode {
+			n = g.modes[g.root].top
+		}
+		nx, word, e, st := step(n, raw[i])
+		switch {
+		case st != parsed:
+			return nil, st
+		case e == nil:
+			out = append(out, rword{word, true})
+		case e.rest:
+			for _, w := range raw[i:] {
+				out = append(out, rword{w, false})
+			}
+			return out, parsed
+		default:
+			out = append(out, rword{raw[i], false})
+		}
+		n = nx
+	}
+	return out, parsed
+}
+
+/* match is the class of the best rule covering toks, also without a leading `do` or what may be one. */
 func (r Rules) match(toks []string) (Class, bool) {
+	cands := [][]string{toks}
+	if len(toks) > 1 && doLike(toks[0]) {
+		cands = append(cands, toks[1:])
+	}
+	var best Class
+	for _, ws := range cands {
+		if cl, ok := r.match1(ws); ok && cl > best {
+			best = cl
+		}
+	}
+	return best, best != 0
+}
+
+func (r Rules) match1(toks []string) (Class, bool) {
 	var best Class
 	n := 0
 	for _, ru := range r.rules {
@@ -300,11 +380,14 @@ func (r Rules) match(toks []string) (Class, bool) {
 
 func (ru rule) covers(toks []string) bool {
 	for i, w := range ru.words {
-		t := asciiLower(toks[i])
-		if ru.class != Safe {
-			t = strings.Trim(t, `"'`) /* a quoted keyword the device may still take as the keyword */
+		if ru.class == Safe {
+			if toks[i] != w.w {
+				return false
+			}
+			continue
 		}
-		if t != w && (ru.class == Safe || t == "" || !strings.HasPrefix(w, t)) {
+		t, lw := unquote(asciiLower(toks[i])), asciiLower(w.w)
+		if w.kw && (t == "" || !strings.HasPrefix(lw, t)) || !w.kw && t != unquote(lw) {
 			return false
 		}
 	}

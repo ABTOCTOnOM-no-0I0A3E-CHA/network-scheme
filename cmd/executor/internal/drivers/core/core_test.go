@@ -18,14 +18,14 @@ var ifaceRe = regexp.MustCompile(`^(gi|te)([0-9]+/[0-9]+/)([0-9]+)(?:-([0-9]+))?
 var iface = ArgType{
 	Match: func(tok string) bool { return ifaceRe.MatchString(asciiLower(tok)) },
 	Kind:  "interface",
-	Names: func(tok string) ([]string, bool) {
+	Names: func(tok string, limit int) ([]string, bool) {
 		m := ifaceRe.FindStringSubmatch(asciiLower(tok))
 		lo, err := strconv.Atoi(m[3])
 		hi := lo
 		if err == nil && m[4] != "" {
 			hi, err = strconv.Atoi(m[4])
 		}
-		if err != nil || hi < lo || hi-lo > 64 {
+		if err != nil || hi < lo || hi-lo >= limit {
 			return nil, false
 		}
 		var out []string
@@ -41,14 +41,25 @@ func sub(name, parent string, cmds ...Cmd) ModeSpec {
 	return ModeSpec{Name: name, Parent: parent, Do: true, Cmds: append(cmds, nav...)}
 }
 
+var (
+	nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	ipRe   = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,3}){3}$`)
+	anyTok = func(string) bool { return true }
+)
+
 /* testSpec is a small MES/ESR-like grammar: exec, config (with ESR candidate commands), interface, VLAN and line modes. */
 var testSpec = Spec{
-	Args: map[string]ArgType{"iface": iface, "vlan": Uint(1, 4094, "vlan"), "int": Uint(0, 65535, "")},
+	Args: map[string]ArgType{
+		"iface": iface, "vlan": Uint(1, 4094, "vlan"), "int": Uint(0, 65535, ""),
+		"name": {Match: nameRe.MatchString}, "ip": {Match: ipRe.MatchString},
+		"desc": {Match: anyTok}, "text": {Match: anyTok, Text: true},
+	},
 	Modes: []ModeSpec{
 		{Name: "exec", Cmds: []Cmd{
 			{Pattern: "configure", Class: Safe, Enter: "config"},
 			{Pattern: "configure terminal", Class: Safe, Enter: "config"},
 			{Pattern: "show running-config", Class: Safe},
+			{Pattern: "show running-config | include <desc...>", Class: Safe},
 			{Pattern: "show version", Class: Safe},
 			{Pattern: "show interfaces <iface>", Class: Safe},
 			{Pattern: "clear counters", Class: Safe},
@@ -61,7 +72,8 @@ var testSpec = Spec{
 			{Pattern: "copy <word> <word>", Class: Dangerous},
 		}},
 		sub("config", "exec",
-			Cmd{Pattern: "hostname <word>", Class: Safe},
+			Cmd{Pattern: "hostname <name>", Class: Safe},
+			Cmd{Pattern: "banner <text...>", Class: Safe},
 			Cmd{Pattern: "interface <iface>", Class: Safe, Enter: "config-if"},
 			Cmd{Pattern: "vlan <vlan>", Class: Safe, Enter: "config-vlan"},
 			Cmd{Pattern: "no vlan <vlan>", Class: Safe},
@@ -78,16 +90,16 @@ var testSpec = Spec{
 			Cmd{Pattern: "rollback", Class: Safe},
 		),
 		sub("config-if", "config",
-			Cmd{Pattern: "description <word...>", Class: Safe},
+			Cmd{Pattern: "description <desc...>", Class: Safe},
 			Cmd{Pattern: "duplex full", Class: Safe},
 			Cmd{Pattern: "shutdown", Class: Safe},
 			Cmd{Pattern: "no shutdown", Class: Safe},
-			Cmd{Pattern: "ip address <word> <word>", Class: Safe},
+			Cmd{Pattern: "ip address <ip> <ip>", Class: Safe},
 			Cmd{Pattern: "no ip address", Class: Safe},
 			Cmd{Pattern: "switchport access vlan <vlan>", Class: Safe},
 			Cmd{Pattern: "interface <iface>", Class: Safe, Enter: "config-if"},
 		),
-		sub("config-vlan", "config", Cmd{Pattern: "name <word>", Class: Safe}),
+		sub("config-vlan", "config", Cmd{Pattern: "name <name>", Class: Safe}),
 		sub("config-line", "config",
 			Cmd{Pattern: "exec-timeout <int>", Class: Dangerous},
 			Cmd{Pattern: "history size <int>", Class: Safe},
@@ -198,17 +210,17 @@ func TestClassify(t *testing.T) {
 		{"copy to startup", exec, "copy tftp://x/a startup-config", Dangerous, ReasonGrammar},
 		{"unknown exec", exec, "frobnicate", Dangerous, ReasonUnknown},
 		{"unknown trailing", exec, "show version now", Dangerous, ReasonUnknown},
-		{"ambiguous exec", exec, "c", Dangerous, ReasonAmbiguous},
+		{"ambiguous exec shadowing commit", exec, "c", Denied, ReasonControl},
 		{"incomplete", exec, "show", Dangerous, ReasonIncomplete},
 		{"no mode", Mode{}, "show version", Dangerous, ReasonMode},
 		{"unknown config", cfg, "frobnicate", Dangerous, ReasonUnknown},
 		{"unknown config 2", cfg, "ip route 0.0.0.0/0 1.2.3.4", Dangerous, ReasonUnknown},
-		{"ambiguous config", cfg, "r", Dangerous, ReasonAmbiguous},
+		{"ambiguous config", cfg, "i", Dangerous, ReasonAmbiguous},
 		{"abbreviated no", cfg, "no ip ssh s", Dangerous, ReasonGrammar},
 		{"keyword or arg", cfg, "username a password b", Dangerous, ReasonGrammar},
 		{"quoted keyword", cfg, `"hostname" x`, Dangerous, ReasonUnknown},
 		{"do in exec", exec, "do show version", Dangerous, ReasonUnknown},
-		{"do do", cfg, "do do reload", Dangerous, ReasonUnknown},
+		{"do do", cfg, "do do reload", Denied, ReasonRefused},
 		{"do alone", cfg, "do", Dangerous, ReasonIncomplete},
 		{"do reload", cfg, "DO RELOAD", Dangerous, ReasonGrammar},
 		{"do show", ifMgmt, "do show version", Safe, ReasonGrammar},
@@ -234,7 +246,7 @@ func TestClassify(t *testing.T) {
 		{"unsure", walk(g, "conf", "int gi1/0/1", "frobnicate"), "shutdown", Dangerous, ReasonUnsure},
 		{"unsure exit", walk(g, "conf", "int gi1/0/1", "frobnicate", "exit"), "hostname x", Dangerous, ReasonUnsure},
 		{"unsure end", walk(g, "conf", "int gi1/0/1", "frobnicate", "end", "conf"), "hostname x", Safe, ReasonGrammar},
-		{"exec unknown accepted", walk(g, "frobnicate", "conf"), "hostname x", Safe, ReasonGrammar},
+		{"exec unknown accepted", walk(g, "frobnicate", "conf"), "hostname x", Dangerous, ReasonUnsure},
 		{"esr rollback", cfg, "rollback", Safe, ReasonGrammar},
 	}
 	for _, c := range cases {
@@ -276,8 +288,8 @@ func TestControlCommands(t *testing.T) {
 			t.Errorf("Next(%q) moved to %s", c.line, n.Name())
 		}
 	}
-	/* Not control: a copy from elsewhere into startup, a reload, a commit with a stray word. */
-	for _, line := range []string{"copy tftp://h/f startup-config", "copy run startup-config", "reload", "reload cancel now"} {
+	/* Not control: a copy from elsewhere into startup, a reload. */
+	for _, line := range []string{"copy tftp://h/f startup-config", "reload"} {
 		if v := g.Classify(line, exec, Context{}); v.Class != Dangerous {
 			t.Errorf("Classify(%q) = %+v, want dangerous", line, v)
 		}
@@ -287,14 +299,13 @@ func TestControlCommands(t *testing.T) {
 func TestPolicyRules(t *testing.T) {
 	g := testGrammar(t)
 	exec, cfg := g.Root(), walk(g, "conf")
-	r, err := NewRules("mes6", []execpolicy.ClassOverride{
+	r, err := NewRules(g, "mes6", []execpolicy.ClassOverride{
 		{Driver: "any", Command: "reload", Class: "denied"},
 		{Driver: "mes6", Command: "clear counters", Class: "dangerous"},
 		{Driver: "esr", Command: "show version", Class: "denied"},
 		{Driver: "any", Command: "hostname", Class: "dangerous"},
 		{Driver: "mes6", Command: "hostname core1", Class: "safe"},
 		{Driver: "any", Command: "no username", Class: "safe"},
-		{Driver: "any", Command: "frobnicate", Class: "safe"},
 		{Driver: "any", Command: "write", Class: "denied"},
 		{Driver: "any", Command: "copy", Class: "denied"},
 		{Driver: "any", Command: "copy x y", Class: "safe"},
@@ -322,8 +333,7 @@ func TestPolicyRules(t *testing.T) {
 		{cfg, "hostname core1", Safe},
 		{cfg, "hostname core1x", Dangerous},
 		{cfg, "no username bob", Dangerous}, /* safe never relaxes the grammar */
-		{cfg, "frobnicate", Dangerous},      /* nor an unknown line */
-		{exec, "write", Control},            /* control lines are UI flows */
+		{exec, "write", Control},            /* M6: Control stands above Denied, the Save flow is mandatory */
 		{exec, "copy x y", Dangerous},       /* the carve-out goes back to the grammar's class */
 		{exec, "copy x z", Denied},
 	} {
@@ -331,7 +341,7 @@ func TestPolicyRules(t *testing.T) {
 			t.Errorf("Classify(%q) = %+v, want %v", c.line, v, c.class)
 		}
 	}
-	if _, err := NewRules("mes6", []execpolicy.ClassOverride{{Driver: "any", Command: "x", Class: "control"}}); err == nil {
+	if _, err := NewRules(g, "mes6", []execpolicy.ClassOverride{{Driver: "any", Command: "reload", Class: "control"}}); err == nil {
 		t.Error("NewRules accepted a bad class")
 	}
 }
@@ -349,7 +359,6 @@ func TestNext(t *testing.T) {
 		{[]string{"conf", "int gi1/0/1", "end"}, "exec"},
 		{[]string{"conf", "int gi1/0/1", "do show version"}, "config-if"},
 		{[]string{"conf", "vlan 5", "exit", "line ssh"}, "config-line"},
-		{[]string{"exit"}, "exec"},
 	} {
 		if m := walk(g, c.lines...); m.Name() != c.want || m.Unsure() {
 			t.Errorf("%q -> %s (unsure %v), want %s", c.lines, m.Name(), m.Unsure(), c.want)
@@ -393,9 +402,9 @@ func TestComplete(t *testing.T) {
 		{cfg, "do sh", []string{"show"}},
 		{cfg, "d", []string{"do"}},
 		{ifm, "d", []string{"description", "do", "duplex"}},
-		{ifm, "description ", []string{"<word...>"}},
+		{ifm, "description ", []string{"<desc...>"}},
 		{ifm, "description secret-from-device ", nil},
-		{ifm, "ip address 10.0.0.1", []string{"<word>"}},
+		{ifm, "ip address 10.0.0.1", []string{"<ip>"}},
 		{exec, "frob ", nil},
 		{exec, "x\x1b", nil},
 		{Mode{}, "", nil},
@@ -450,6 +459,9 @@ func TestNewGrammarRejects(t *testing.T) {
 		{Modes: []ModeSpec{{Name: "exec"}, {Name: "config", Parent: "exec", Do: true, Cmds: []Cmd{{Pattern: "do x", Class: Safe}}}}},
 		{Args: map[string]ArgType{"Bad": Word}, Modes: []ModeSpec{{Name: "exec"}}},
 		{Args: map[string]ArgType{"x": {}}, Modes: []ModeSpec{{Name: "exec"}}},
+		base(Cmd{Pattern: "hostname <word>", Class: Safe}),
+		base(Cmd{Pattern: "description <word...>", Class: Safe}),
+		base(Cmd{Pattern: "a ; b", Class: Safe}),
 	} {
 		if _, err := NewGrammar(s); err == nil {
 			t.Errorf("spec %d accepted", i)

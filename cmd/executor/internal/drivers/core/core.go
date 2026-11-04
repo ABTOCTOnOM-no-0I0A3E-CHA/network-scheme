@@ -3,29 +3,44 @@ Package core is the line-independent half of the executor's write drivers
 (security.md 5.3, architecture.md 5): a command tree per CLI mode, Normalize,
 Classify and Complete. The drivers mes6, mes10 and esr supply a Spec (their
 grammar and argument types); everything a session sends to a device is the
-normalized line of a Verdict that is not Denied.
+normalized line of a Verdict that is Safe or Dangerous.
 
 Rules every grammar gets for free:
   - A line with a control or format character (C0, C1, DEL, NUL, bidi and
-    other format characters, line separators, non-ASCII spaces, invalid UTF-8)
-    or a '?' (the device's help key, it would edit the line on the device) is
-    refused whole. A tab is a space.
+    other format characters, line separators, non-ASCII spaces, invalid UTF-8),
+    a '?' (the device's help key, it would edit the line on the device), a tab
+    inside quotes or an unterminated quote is refused whole. A tab outside
+    quotes is a space.
+  - A token is pure when it is printable ASCII without ';', '|' or '\' and
+    without quotes, or one quoted string ("..." or '...') of such characters
+    and spaces. A line with an impure token is refused, unless the token is a
+    keyword of the grammar (the pipe "|") or an argument of a type with Text
+    set (off by default). So "hostname a;reload", "hostname it's" or a
+    Cyrillic hostname never reach a device.
+  - `do` followed by another `do` (abbreviated or quoted) is refused.
   - Keywords match case-insensitively (ASCII only) by exact word or unique
     prefix and are sent spelled out; arguments are kept as typed. A prefix of
     two keywords, or of a keyword while an argument also fits, is ambiguous.
   - An unknown, ambiguous or incomplete line is dangerous in every mode (the
     device's own abbreviation rules may differ from the grammar), and so is
     any line in a mode the grammar does not know.
-  - `do` in a mode whose ModeSpec has Do runs the rest in the root mode.
+  - `do` in a mode whose ModeSpec has Do runs the rest in the root mode; a
+    `do` of a command that enters or leaves a mode is dangerous and makes the
+    session unsure of its mode.
   - Any line but navigation and `do` inside the management interface or VLAN
     (Context.Mgmt, from the registry address at session start) is dangerous,
     and so is a configuration line naming a management target, unless it
     only enters that target's mode.
   - Session-control commands (commit, confirm, restore, write and copy
     running-config startup-config, reload cancel) are Control: the session
-    turns them into UI flows and never sends them.
+    turns them into UI flows and never sends them. A dangerous or unparsed
+    line that could be one of them as the device reads it (prefixes, quotes,
+    extra words: "wr mem", "copy run start", "commit 600") is Denied with
+    ReasonControl ("use the Save/Commit button").
   - Denied comes only from the policy (Rules). A policy override never makes
     a line less strict than the grammar: the class is the stricter of the two.
+    Control stands above Denied: the Save and Commit flows are mandatory
+    (security.md 5.3), so a policy cannot turn them into anything else.
 */
 package core
 
@@ -49,13 +64,15 @@ var (
 	ErrControlChar = errors.New("core: control or format character in the line")
 	ErrHelpChar    = errors.New("core: '?' in the line")
 	ErrTooLong     = errors.New("core: line too long")
-	ErrQuote       = errors.New("core: unterminated quote")
+	ErrQuote       = errors.New("core: unterminated quote or a tab inside quotes")
+	ErrImpure      = errors.New("core: ';', '|', '\\', a quote or a non-ASCII character outside a text argument")
+	ErrNestedDo    = errors.New("core: do after do")
 )
 
 /* Class is what the session does with a line. The zero value is not a class. */
 type Class uint8
 
-/* Classes; Safe < Dangerous < Denied in strictness, Control stands apart. */
+/* Classes; Safe < Dangerous < Denied < Control in strictness (Control: no policy changes it). */
 const (
 	_         Class = iota
 	Safe            /* sent */
@@ -98,13 +115,15 @@ type Reason string
 const (
 	ReasonGrammar    Reason = "grammar"    /* the grammar's class */
 	ReasonEmpty      Reason = "empty"      /* nothing to send */
-	ReasonRefused    Reason = "refused"    /* forbidden character, too long, unterminated quote */
+	ReasonRefused    Reason = "refused"    /* forbidden character, impure token, nested do, too long, bad quote */
 	ReasonUnknown    Reason = "unknown"    /* a word the grammar does not know */
 	ReasonAmbiguous  Reason = "ambiguous"  /* a prefix of several words */
 	ReasonIncomplete Reason = "incomplete" /* the line stops before a command */
 	ReasonMode       Reason = "mode"       /* a mode the grammar does not know */
+	ReasonDoMode     Reason = "do-mode"    /* do of a command that enters or leaves a mode */
 	ReasonUnsure     Reason = "unsure"     /* the session lost track of the context (Mode.Unsure) */
 	ReasonMgmt       Reason = "mgmt"       /* the management interface or VLAN */
+	ReasonControl    Reason = "control"    /* may be a session-control command: use the Save/Commit button */
 	ReasonPolicy     Reason = "policy"     /* a policy override */
 )
 
@@ -127,7 +146,7 @@ func checkLine(s string) error {
 	}
 	for _, r := range s {
 		switch {
-		case r == '\t':
+		case r == 0x09:
 		case r == '?':
 			return ErrHelpChar
 		case r < 0x20 || r == 0x7f:
@@ -140,16 +159,18 @@ func checkLine(s string) error {
 	return nil
 }
 
+func isSpace(c byte) bool { return c == ' ' || c == 0x09 }
+
 /*
-tokenize splits a checked line at spaces. A token that starts with a quote
-runs to the matching quote (a backslash escapes inside "…") and on to the next
-space; quotes elsewhere are plain characters. Tabs are spaces.
+tokenize splits a checked line at spaces and tabs. A token that starts with a
+quote runs to the matching quote (a backslash escapes inside double quotes)
+and on to the next space; a tab inside it or a missing closing quote refuses
+the line.
 */
 func tokenize(s string) ([]string, error) {
-	s = strings.ReplaceAll(s, "\t", " ")
 	var toks []string
 	for i := 0; ; {
-		for i < len(s) && s[i] == ' ' {
+		for i < len(s) && isSpace(s[i]) {
 			i++
 		}
 		if i == len(s) {
@@ -158,6 +179,9 @@ func tokenize(s string) ([]string, error) {
 		j := i
 		if q := s[i]; q == '"' || q == '\'' {
 			for j++; j < len(s) && s[j] != q; j++ {
+				if s[j] == 0x09 {
+					return nil, ErrQuote
+				}
 				if q == '"' && s[j] == '\\' {
 					j++
 				}
@@ -167,7 +191,7 @@ func tokenize(s string) ([]string, error) {
 			}
 			j++
 		}
-		for j < len(s) && s[j] != ' ' {
+		for j < len(s) && !isSpace(s[j]) {
 			j++
 		}
 		if toks = append(toks, s[i:j]); len(toks) > MaxTokens {
@@ -176,6 +200,34 @@ func tokenize(s string) ([]string, error) {
 		i = j
 	}
 }
+
+/* pure reports whether a token may reach a device outside a Text argument (see the package doc). */
+func pure(tok string) bool {
+	inner, quoted := tok, false
+	if q := tok[0]; q == '"' || q == '\'' {
+		if len(tok) < 2 || tok[len(tok)-1] != q {
+			return false
+		}
+		inner, quoted = tok[1:len(tok)-1], true
+	}
+	for i := 0; i < len(inner); i++ {
+		switch c := inner[i]; {
+		case c == ' ' && quoted:
+		case c <= ' ' || c >= 0x7f, c == ';', c == '|', c == '\\', c == '"', c == '\'':
+			return false
+		}
+	}
+	return true
+}
+
+/* doLike reports whether a token may be `do` as a device reads it: a prefix, any case, quoted or not. */
+func doLike(tok string) bool {
+	t := unquote(asciiLower(tok))
+	return t != "" && strings.HasPrefix("do", t)
+}
+
+/* unquote strips surrounding quotes, the way a device may read a quoted keyword. */
+func unquote(s string) string { return strings.Trim(s, `"'`) }
 
 /* asciiLower folds A-Z only: Unicode folding would turn, say, the Kelvin sign into a k. */
 func asciiLower(s string) string {

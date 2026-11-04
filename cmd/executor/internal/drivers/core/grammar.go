@@ -18,11 +18,13 @@ const (
 )
 
 /*
-Cmd is one command of a mode. Pattern is space-separated: lowercase keywords,
-<type> for one argument of a Spec.Args type, <type...> (last only) for the
-rest of the line. Class is Safe, Dangerous or Control (with Control set);
-Denied comes from the policy only. Enter names the mode the command enters;
-Nav commands are Safe.
+Cmd is one command of a mode. Pattern is space-separated: lowercase keywords
+(or "|" for a pipe filter: filters are keywords, never part of a free
+argument), <type> for one argument of a Spec.Args type, <type...> (last only)
+for the rest of the line. Class is Safe, Dangerous or Control (with Control
+set); Denied comes from the policy only. A Safe command never takes the
+built-in <word>: it names a typed argument. Enter names the mode the command
+enters; Nav commands are Safe.
 */
 type Cmd struct {
 	Pattern string
@@ -41,16 +43,32 @@ type ModeSpec struct {
 }
 
 /*
-ArgType is an argument type. Match says whether a token fits. Kind, when
-set, makes the argument name management targets of that kind ("interface",
-"vlan", ...): Names gives their canonical names (nil: the token in ASCII
-lower case); false means the token cannot be resolved and counts as naming a
-management target.
+ArgType is an argument type. Match says whether a token fits.
+
+Text marks free text the device takes literally (a description, say): its
+tokens may hold ';', '|', '\', quotes and non-ASCII letters. It is off by
+default; set it only where the line's syntax is confirmed for the firmware.
+
+Kind, when set, makes the argument name management targets of that kind
+("interface", "vlan", ...). Names gives their canonical names (nil: the token
+in ASCII lower case). Contract for the drivers:
+  - Every spelling the device accepts for one interface or VLAN (abbreviated
+    or full type name, case, leading zeros, a type keyword followed by a
+    separate port argument) yields the same canonical Target, and the session
+    builds Context.Mgmt through Grammar.Targets with the same types. A
+    spelling split over several tokens ("gigabitethernet 1/0/1") needs a
+    keyword per interface type, each followed by a port type whose Names adds
+    the type.
+  - Ranges and lists ("gi1/0/1-4", "1,10-20") expand to every member.
+  - Names returns false when it cannot resolve the token or when it would
+    return more than limit names; it checks the count before allocating them.
+    False counts as naming a management target.
 */
 type ArgType struct {
 	Match func(tok string) bool
+	Text  bool
 	Kind  string
-	Names func(tok string) ([]string, bool)
+	Names func(tok string, limit int) ([]string, bool)
 }
 
 /* Spec is a grammar: the argument types and the modes, Modes[0] being the root (exec). */
@@ -59,7 +77,7 @@ type Spec struct {
 	Modes []ModeSpec
 }
 
-/* Word matches any token. Every grammar has it as <word>. */
+/* Word matches any pure token. Every grammar has it as <word>, for dangerous commands only. */
 var Word = ArgType{Match: func(string) bool { return true }}
 
 /* Uint matches a decimal number in [lo, hi]; its canonical name is the number without leading zeros. */
@@ -73,9 +91,12 @@ func Uint(lo, hi uint64, kind string) ArgType {
 	}
 	t := ArgType{Match: func(tok string) bool { _, ok := parse(tok); return ok }, Kind: kind}
 	if kind != "" {
-		t.Names = func(tok string) ([]string, bool) {
+		t.Names = func(tok string, limit int) ([]string, bool) {
 			v, ok := parse(tok)
-			return []string{strconv.FormatUint(v, 10)}, ok
+			if !ok || limit < 1 {
+				return nil, false
+			}
+			return []string{strconv.FormatUint(v, 10)}, true
 		}
 	}
 	return t
@@ -86,9 +107,10 @@ type Target struct{ Kind, Name string }
 
 /* Grammar is a compiled Spec. It is immutable and safe for concurrent use. */
 type Grammar struct {
-	root  string
-	args  map[string]ArgType
-	modes map[string]*mode
+	root     string
+	args     map[string]ArgType
+	modes    map[string]*mode
+	controls [][]string /* the Control patterns of every mode; "" for an argument */
 }
 
 type mode struct {
@@ -113,7 +135,7 @@ type edge struct {
 var doNode = &node{}
 
 var (
-	keywordRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:/-]*$`)
+	keywordRe = regexp.MustCompile(`^(?:[a-z0-9][a-z0-9_.:/-]*|\|)$`)
 	typeRe    = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 )
 
@@ -169,6 +191,7 @@ func (g *Grammar) add(n *node, c Cmd) error {
 	if len(words) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
+	var ctl []string
 	for i, w := range words {
 		if !strings.HasPrefix(w, "<") {
 			if !keywordRe.MatchString(w) || n.kw["do"] == doNode && w == "do" {
@@ -180,14 +203,17 @@ func (g *Grammar) add(n *node, c Cmd) error {
 			if n.kw[w] == nil {
 				n.kw[w] = &node{}
 			}
-			n = n.kw[w]
+			n, ctl = n.kw[w], append(ctl, w)
 			continue
 		}
 		name, ok := strings.CutSuffix(w, ">")
 		name, rest := strings.CutSuffix(strings.TrimPrefix(name, "<"), "...")
 		t, known := g.args[name]
-		if !ok || !known || rest && i != len(words)-1 {
+		switch {
+		case !ok || !known || rest && i != len(words)-1:
 			return fmt.Errorf("bad argument %q", w)
+		case name == "word" && c.Class == Safe:
+			return fmt.Errorf("a safe command takes a typed argument, not <word>")
 		}
 		var e *edge
 		for _, x := range n.args {
@@ -199,12 +225,15 @@ func (g *Grammar) add(n *node, c Cmd) error {
 			e = &edge{typ: name, t: t, rest: rest, next: &node{}}
 			n.args = append(n.args, e)
 		}
-		n = e.next
+		n, ctl = e.next, append(ctl, "")
 	}
 	if n.cmd != nil {
 		return fmt.Errorf("repeated pattern")
 	}
 	n.cmd = &c
+	if c.Class == Control {
+		g.controls = append(g.controls, ctl)
+	}
 	return nil
 }
 
@@ -226,19 +255,25 @@ type hit struct {
 
 /* result of parsing one line in one mode. */
 type result struct {
-	toks  []string /* normalized */
-	st    status
-	cmd   *Cmd  /* when parsed */
-	class Class /* Dangerous when any command on the path is */
-	hits  []hit
-	do    bool
+	toks   []string /* normalized */
+	st     status
+	cmd    *Cmd  /* when parsed */
+	class  Class /* Dangerous when any command on the path is */
+	hits   []hit
+	do     bool
+	impure bool /* an impure token outside a keyword or a Text argument */
 }
 
-/* step matches one token at n: a keyword (exact, else unique prefix) or else one argument edge. */
+/*
+step matches one token at n: a keyword (exact, else unique prefix) or else one
+argument edge. A quoted token is never a keyword; an impure one is only an
+exact keyword or a Text argument.
+*/
 func step(n *node, tok string) (*node, string, *edge, status) {
+	ok := pure(tok)
 	var args []*edge
 	for _, e := range n.args {
-		if e.t.Match(tok) {
+		if (ok || e.t.Text) && e.t.Match(tok) {
 			args = append(args, e)
 		}
 	}
@@ -250,7 +285,7 @@ func step(n *node, tok string) (*node, string, *edge, status) {
 		var word string
 		hits := 0
 		for k := range n.kw {
-			if strings.HasPrefix(k, low) {
+			if ok && strings.HasPrefix(k, low) {
 				word, hits = k, hits+1
 			}
 		}
@@ -270,18 +305,27 @@ func step(n *node, tok string) (*node, string, *edge, status) {
 	return nil, "", nil, ambiguous
 }
 
+func anyImpure(toks []string) bool {
+	for _, t := range toks {
+		if !pure(t) {
+			return true
+		}
+	}
+	return false
+}
+
 /* parse walks the tokens of a line in the named mode. */
 func (g *Grammar) parse(toks []string, modeName string) result {
 	md := g.modes[modeName]
 	if md == nil {
-		return result{toks: toks, st: badMode}
+		return result{toks: toks, st: badMode, impure: anyImpure(toks)}
 	}
 	r := result{class: Safe}
 	n := md.top
 	for i := 0; i < len(toks); i++ {
 		nx, word, e, st := step(n, toks[i])
 		if st != parsed {
-			r.toks, r.st = append(r.toks, toks[i:]...), st
+			r.toks, r.st, r.impure = append(r.toks, toks[i:]...), st, anyImpure(toks[i:])
 			return r
 		}
 		switch {
@@ -292,6 +336,7 @@ func (g *Grammar) parse(toks []string, modeName string) result {
 		case e != nil && e.rest:
 			r.toks = append(r.toks, toks[i:]...)
 			r.hits = append(r.hits, hit{e.t, strings.Join(toks[i:], " ")})
+			r.impure = !e.t.Text && anyImpure(toks[i:])
 			i = len(toks)
 		case e != nil:
 			r.toks = append(r.toks, toks[i])
@@ -320,12 +365,45 @@ func (g *Grammar) analyze(line string, m Mode) (result, string, error) {
 	if err != nil {
 		return result{}, "", err
 	}
+	if len(toks) > 1 && doLike(toks[0]) && doLike(toks[1]) {
+		return result{}, "", ErrNestedDo
+	}
 	r := g.parse(toks, m.Name())
+	if r.impure {
+		return result{}, "", ErrImpure
+	}
 	out := strings.Join(r.toks, " ")
 	if len(out) > MaxLine {
 		return result{}, "", ErrTooLong
 	}
 	return r, out, nil
+}
+
+/*
+shadows reports whether toks could be a session-control command as the
+device reads it: each token a prefix of the pattern's keyword (any case,
+quotes stripped), extra words after it, with or without a leading `do`.
+*/
+func (g *Grammar) shadows(toks []string) bool {
+	cands := [][]string{toks}
+	if len(toks) > 1 && doLike(toks[0]) {
+		cands = append(cands, toks[1:])
+	}
+	for _, ws := range cands {
+	next:
+		for _, p := range g.controls {
+			if len(ws) < len(p) {
+				continue
+			}
+			for i, w := range p {
+				if t := unquote(asciiLower(ws[i])); w != "" && (t == "" || !strings.HasPrefix(w, t)) {
+					continue next
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 /* targets resolves the management-relevant arguments of a line. */
@@ -335,11 +413,12 @@ func targets(hits []hit) ([]Target, bool) {
 		if h.t.Kind == "" {
 			continue
 		}
-		names, ok := []string{asciiLower(h.tok)}, true
+		left := MaxTargets - len(out)
+		names, ok := []string{asciiLower(h.tok)}, left > 0
 		if h.t.Names != nil {
-			names, ok = h.t.Names(h.tok)
+			names, ok = h.t.Names(h.tok, left)
 		}
-		if !ok || len(names) > MaxTargets-len(out) {
+		if !ok || len(names) > left {
 			return nil, false
 		}
 		for _, nm := range names {
