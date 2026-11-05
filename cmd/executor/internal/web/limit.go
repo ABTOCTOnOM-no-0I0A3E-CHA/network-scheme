@@ -2,6 +2,7 @@ package web
 
 import (
 	"math"
+	"net"
 	"sync"
 	"time"
 )
@@ -64,4 +65,47 @@ func (b *bucket) refill(now time.Time, rate, burst float64) float64 {
 		b.at = now
 	}
 	return b.tokens
+}
+
+/* limitListener accepts at most n connections at once: the next Accept waits until one closes. */
+func limitListener(ln net.Listener, n int) net.Listener {
+	return &capListener{Listener: ln, sem: make(chan struct{}, n), done: make(chan struct{})}
+}
+
+type capListener struct {
+	net.Listener
+	sem  chan struct{}
+	done chan struct{}
+	once sync.Once
+}
+
+func (l *capListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.Listener.Close()
+}
+
+func (l *capListener) Accept() (net.Conn, error) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitedConn{Conn: c, release: func() { <-l.sem }}, nil
+}
+
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }

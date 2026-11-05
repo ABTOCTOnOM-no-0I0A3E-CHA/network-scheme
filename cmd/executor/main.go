@@ -42,6 +42,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/terminal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/wcreds"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
@@ -170,12 +171,21 @@ func serve(ctx context.Context, cfg config.Config) error {
 		actions[name] = web.Action(a)
 	}
 	actions[wcreds.Action] = web.Action{Describe: wc.Describe, Run: wc.Run}
+	confirms := confirm.New(az, nil)
+	term, err := terminal.New(terminal.Config{Sessions: sessions, Gate: guard, Auth: az, Confirm: confirms, Policy: pol.Current,
+		Origin: cfg.ExecutorOrigin, Log: log, Name: func(ctx context.Context, id int64) (string, error) {
+			p, _, err := devs.Panel(ctx, id)
+			return p.Name, err
+		}})
+	if err != nil {
+		return err
+	}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
-		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
+		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirms, Log: log, Terminal: term.Serve,
 		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())},
 		Sessions: &web.Sessions{
 			Open: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {

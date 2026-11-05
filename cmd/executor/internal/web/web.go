@@ -63,6 +63,7 @@ var (
 	writeTimeout            = 30 * time.Second
 	idleTimeout             = 60 * time.Second
 	shutdownGrace           = 10 * time.Second
+	maxConns                = 256 /* open connections from the gateway */
 )
 
 /*
@@ -145,6 +146,8 @@ type Config struct {
 	Reads   map[string]Read /* authorized reads (ticket + change TOTP) by path, POST routes of their own (read.go) */
 	/* Sessions, if set, serves the change session routes (sessions.go). */
 	Sessions *Sessions
+	/* Terminal, if set, serves GET /x/ws (terminal.Terminal.Serve: its own Origin check and timeouts). */
+	Terminal func(w http.ResponseWriter, r *http.Request, ip string)
 	Log      *slog.Logger
 	Now      func() time.Time /* nil: time.Now */
 }
@@ -197,6 +200,9 @@ func New(cfg Config) (*Server, error) {
 		{http.MethodPost, "/x/confirm", s.confirm, nil},
 	}
 	s.addSessions()
+	if cfg.Terminal != nil {
+		s.routes = append(s.routes, route{http.MethodGet, "/x/ws", cfg.Terminal, nil})
+	}
 	if err := s.addReads(); err != nil {
 		return nil, err
 	}
@@ -285,7 +291,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		BaseContext:  func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- hs.Serve(tls.NewListener(ln, s.tls)) }()
+	go func() { errc <- hs.Serve(tls.NewListener(limitListener(ln, maxConns), s.tls)) }()
 	select {
 	case err := <-errc:
 		return err
