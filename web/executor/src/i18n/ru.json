@@ -1,6 +1,9 @@
 {
   "executor": {
     "title": "Изменение конфигураций",
+    "terminal": {
+      "label": "Терминал устройства"
+    },
     "status": {
       "title": "Состояние executor'а",
       "loading": "Загрузка…",
