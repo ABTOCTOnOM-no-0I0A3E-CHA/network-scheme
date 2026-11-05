@@ -32,12 +32,16 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
+	_ "github.com/beekamai/network-scheme/cmd/executor/internal/drivers/esr" /* the write drivers register themselves */
+	_ "github.com/beekamai/network-scheme/cmd/executor/internal/drivers/mes10"
+	_ "github.com/beekamai/network-scheme/cmd/executor/internal/drivers/mes6"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/netguard"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/wcreds"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
@@ -155,8 +159,12 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	/* One lock per device for every connection of the executor: the scheduler's backups and the change sessions share it. */
+	locks := &backups.Locks{}
 	sched := backups.New(backups.Config{Registry: guard, Net: ng, Open: wc.Open, Pool: pool, BackupPub: bpub,
-		Locks: &backups.Locks{}, Alert: publisher.Alert, Enabled: func() bool { return pol.Current().Enabled() }, Log: log})
+		Locks: locks, Alert: publisher.Alert, Enabled: func() bool { return pol.Current().Enabled() }, Log: log})
+	sessions := session.New(session.Config{Gate: guard, Auth: az, Policy: pol.Current, Pool: pool, MAC: keys.MAC(), Net: ng,
+		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, Log: log})
 	actions := map[string]web.Action{}
 	for name, a := range devs.Actions() {
 		actions[name] = web.Action(a)
@@ -169,6 +177,18 @@ func serve(ctx context.Context, cfg config.Config) error {
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirm.New(az, nil), Log: log,
 		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())},
+		Sessions: &web.Sessions{
+			Open: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {
+				return sessions.Open(ctx, req, ids)
+			},
+			Attach: func(ctx context.Context, id string, req authz.Request) (any, error) {
+				return sessions.Attach(ctx, id, req)
+			},
+			Extend: func(ctx context.Context, id string, req authz.Request) (any, error) {
+				return sessions.Extend(ctx, id, req)
+			},
+			Close: sessions.Close,
+		},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()
 			return pol.Current().Enabled(), frozen
@@ -183,6 +203,10 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	old, cur, _ := pol.Reload(true)
 	adm.PolicyChanged(ctx, "start", old, cur)
+	/* Sessions of a previous process end as interrupted, its device_busy rows go: before /x serves. */
+	if err := sessions.Recover(ctx); err != nil {
+		return fmt.Errorf("recover change sessions: %w", err)
+	}
 	frozen, _ := guard.Frozen()
 	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()), slog.Bool("frozen", frozen),
 		slog.Bool("enabled", cur.Enabled()))
@@ -206,6 +230,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		defer close(reloads)
 		pol.Run(ctx, policyEvery, func(old, cur policy.State) { adm.PolicyChanged(ctx, "reload", old, cur) })
 	}()
+	sessioned := make(chan struct{})
+	go func() {
+		defer close(sessioned)
+		sessions.Run(ctx)
+	}()
 	backedUp := make(chan struct{})
 	go func() {
 		defer close(backedUp)
@@ -221,6 +250,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	err = errors.Join(<-served, <-webbed)
 	<-reloads
 	<-published
+	<-sessioned
 	<-backedUp
 	return err
 }

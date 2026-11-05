@@ -56,7 +56,7 @@ func TestC1DisabledAfterInstallUntilEnabled(t *testing.T) {
 			err = authz.ErrDenied /* no session exists in 4a */
 		}
 		refused(w, err)
-	}})
+	}, nil})
 	call := func(method, path, body string) answer {
 		t.Helper()
 		req := httptest.NewRequest(method, "https://executor"+path, strings.NewReader(body))

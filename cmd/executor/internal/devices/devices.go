@@ -62,6 +62,8 @@ type Device struct {
 	Backup    bool       `json:"backup_via_executor"`
 	Version   int64      `json:"version"`
 	Status    string     `json:"status"`
+	/* ModelGate: "profile" when a model profile of the line is registered (writes may pass the model gate), else "read_only". */
+	ModelGate string `json:"model_gate"`
 }
 
 /* Pinned reports whether the device has a pinned host key (it is confirmed). */
@@ -91,20 +93,48 @@ func fromRow(r registry.Row) Device {
 	return d
 }
 
+/* Model gates of a device (Device.ModelGate). */
+const (
+	GateProfile  = "profile"
+	GateReadOnly = "read_only"
+)
+
+/*
+ModelVerified reports whether a verified snapshot has a model profile of the
+firmware line driver: without one, the transport's model gate allows
+ReadOnly only, so no change session can open on such a device.
+*/
+func ModelVerified(s *registry.Snapshot, driver string) bool {
+	for _, r := range s.Rows("model_profile") {
+		if d, _ := r.Get("write_driver").(string); d == driver {
+			return true
+		}
+	}
+	return false
+}
+
+func withGate(s *registry.Snapshot, d Device) Device {
+	d.ModelGate = GateReadOnly
+	if ModelVerified(s, d.Driver) {
+		d.ModelGate = GateProfile
+	}
+	return d
+}
+
 /* Find returns device id of a verified snapshot. */
 func Find(s *registry.Snapshot, id int64) (Device, bool) {
 	r, ok := s.Get(table, id)
 	if !ok {
 		return Device{}, false
 	}
-	return fromRow(r), true
+	return withGate(s, fromRow(r)), true
 }
 
 /* All lists the devices of a verified snapshot by id. */
 func All(s *registry.Snapshot) []Device {
 	var out []Device
 	for _, r := range s.Rows(table) {
-		out = append(out, fromRow(r))
+		out = append(out, withGate(s, fromRow(r)))
 	}
 	slices.SortFunc(out, func(a, b Device) int { return int(min(max(a.ID-b.ID, -1), 1)) })
 	return out

@@ -32,6 +32,7 @@ var trace = []struct {
 }{
 	{"C1", "executor disabled after install: every /x/* but the status 503 before any route, enable goes down the chain", []ref{
 		{"cmd/executor/internal/web", "TestC1DisabledAfterInstallUntilEnabled"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 		{"cmd/executor/internal/web", "TestDisabledAnswers503"},
 		{"cmd/executor/internal/authz", "TestPolicyAndFreezeGate"},
 		{"cmd/executor/internal/authz", "TestPolicyCheckedAgainInsideTheWrite"},
@@ -47,6 +48,7 @@ var trace = []struct {
 	{"C2b", "a ticket without the grant", []ref{
 		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
 		{"cmd/executor/internal/confirm", "TestChallengeBindsUserAndGrant"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 	}},
 	{"C2c", "the api changes a device's address or group: registration and connections use the registry's address only", []ref{
 		{"cmd/executor/internal/devices", "TestC2cAPIChangesAddressAndGroup"},
@@ -56,6 +58,7 @@ var trace = []struct {
 		{"cmd/executor/internal/netguard", "TestSSRFAddressesRefused"},
 		{"cmd/executor/internal/devices", "TestWithoutWriteAdminRefused"},
 		{"cmd/executor/internal/devices", "TestEveryChangeIsAudited"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
 	}},
 	{"C5", "a host key other than the pinned one: refused before any credential, high alert", []ref{
 		{"cmd/executor/internal/transport", "TestHostKeyStrategy"},
@@ -66,6 +69,7 @@ var trace = []struct {
 		{"cmd/executor/internal/devices", "TestForgedTicketMakesNoConnection"},
 		{"cmd/executor/internal/devices", "TestHostAcceptBindsThePreviewedRow"},
 		{"cmd/nmsctl", "TestDeviceAddConfirmsTheShownKey"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 	}},
 	{"C2d", "the api freezes within 5 s and cannot lift the freeze", []ref{
 		{"cmd/executor/internal/pub", "TestPanelRequestFreezesWithinFiveSeconds"},
@@ -132,6 +136,18 @@ var trace = []struct {
 		{"internal/ssh", "TestBusyHostKeySendsNoCredential"},
 		{"internal/ssh", "TestBusyDevicePinnedKeyOfAnotherTypeSendsNoCredential"},
 		{"internal/ssh", "TestBusyHostKeyCheckFailsClosed"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
+	}},
+	{"4c.2", "the session lifecycle: checks in order (policy, freeze, window/limit/two-person with alert, grants, writes, model, host key, credential, rules), pre-session snapshot, management context, timeouts, connection loss and restart end as interrupted with an alert and free device_busy", []ref{
+		{"cmd/executor/internal/session", "TestOpenAndClose"},
+		{"cmd/executor/internal/session", "TestRefusals"},
+		{"cmd/executor/internal/session", "TestMgmtTargets"},
+		{"cmd/executor/internal/session", "TestTimeouts"},
+		{"cmd/executor/internal/session", "TestAttach"},
+		{"cmd/executor/internal/session", "TestConnectionLoss"},
+		{"cmd/executor/internal/session", "TestRestartMidSession"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
+		{"cmd/executor/internal/web", "TestSessionRoutes"},
 	}},
 	{"RF1", "tampering or rollback freezes; only nmsctl lifts it, after a verification that passes again", []ref{
 		{"cmd/executor/internal/freeze", "TestFreezeOffRefusedWhenVerifyFails"},
@@ -270,8 +286,8 @@ func TestTraceability(t *testing.T) {
 			traced[r.dir+"."+r.name] = true
 		}
 	}
-	/* The scenarios 4a and 4b must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "4c.2", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

@@ -287,12 +287,12 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	if len(r.d.Journal()) != 0 || r.versions(t) != 0 {
 		t.Fatalf("a held device was contacted: %q", r.d.Lines())
 	}
-	if err := r.s.BeforeSession(ctx, le); err != nil || r.versions(t) != 1 {
+	if _, err := r.s.BeforeSession(ctx, le); err != nil || r.versions(t) != 1 {
 		t.Fatalf("before session: %v, versions %d", err, r.versions(t))
 	}
 	le.Release()
 	le.Release()
-	if err := r.s.BeforeSession(ctx, le); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, le); err != errLease {
 		t.Fatalf("released lease: %v", err)
 	}
 	/* a released lease stays dead while another holder (the scheduler) has the device, and cannot free it */
@@ -300,7 +300,7 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	if !ok {
 		t.Fatal("relock")
 	}
-	if err := r.s.BeforeSession(ctx, le); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, le); err != errLease {
 		t.Fatalf("released lease while the device is held again: %v", err)
 	}
 	le.Release()
@@ -309,7 +309,7 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	}
 	other.Release()
 	fl, _ := (&Locks{}).TryLock(r.id)
-	if err := r.s.BeforeSession(ctx, fl); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, fl); err != errLease {
 		t.Fatalf("foreign lease: %v", err)
 	}
 	r.running(r.d.Running() + "hostname after\n")

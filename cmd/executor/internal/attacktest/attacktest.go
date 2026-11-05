@@ -95,9 +95,9 @@ func Stall(t testing.TB, env *testdb.Env, pid uint32) (resume func()) {
 }
 
 /*
-Reset empties the registry and the executor's audit chain (a fresh install),
-the alerts and a pending freeze request for the next test; the other append-only tables stay untouched. The audit
-rows go with the append-only trigger disabled for the statement, as only a
+Reset empties the registry, the executor's audit chain and its sessions (a fresh install),
+the alerts, device_busy, session summaries and a pending freeze request for the next test. The append-only
+rows go with their append-only triggers disabled for the statement, as only a
 superuser could.
 */
 func Reset(t testing.TB, env *testdb.Env) {
@@ -105,6 +105,17 @@ func Reset(t testing.TB, env *testdb.Env) {
 	Tamper(t, env, `DELETE FROM exec.write_device; DELETE FROM exec.write_grant; DELETE FROM exec.change_totp;
 		DELETE FROM exec.model_profile; DELETE FROM exec.write_credential; DELETE FROM exec.exec_state;
 		DELETE FROM exec.registry_counter; DELETE FROM execpub.alert; DELETE FROM execpub.freeze_request;
+		DELETE FROM execpub.device_busy; DELETE FROM execpub.session_summary;
+		ALTER TABLE exec.recording_chunk DISABLE TRIGGER recording_chunk_append_only; DELETE FROM exec.recording_chunk;
+		ALTER TABLE exec.recording_chunk ENABLE TRIGGER recording_chunk_append_only;
+		ALTER TABLE exec.recording_manifest DISABLE TRIGGER recording_manifest_append_only; DELETE FROM exec.recording_manifest;
+		ALTER TABLE exec.recording_manifest ENABLE TRIGGER recording_manifest_append_only;
+		ALTER TABLE exec.session_event DISABLE TRIGGER session_event_append_only; DELETE FROM exec.session_event;
+		ALTER TABLE exec.session_event ENABLE TRIGGER session_event_append_only;
+		ALTER TABLE exec.session_device DISABLE TRIGGER session_device_append_only; DELETE FROM exec.session_device;
+		ALTER TABLE exec.session_device ENABLE TRIGGER session_device_append_only;
+		ALTER TABLE exec.session DISABLE TRIGGER session_append_only; DELETE FROM exec.session;
+		ALTER TABLE exec.session ENABLE TRIGGER session_append_only;
 		ALTER TABLE exec.audit_event DISABLE TRIGGER audit_event_append_only;
 		DELETE FROM exec.audit_event;
 		ALTER TABLE exec.audit_event ENABLE TRIGGER audit_event_append_only;

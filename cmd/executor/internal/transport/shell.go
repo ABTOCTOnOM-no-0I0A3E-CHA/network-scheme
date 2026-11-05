@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
@@ -718,4 +719,13 @@ func (s *Shell) run(ctx context.Context, cmd ssh.ShowCommand) (Output, error) {
 		return Output{}, fmt.Errorf("%w: %q after %s", ErrUnexpectedPrompt, s.st.Prompt, cmd.Name)
 	}
 	return out, err
+}
+
+/* LocalAddr is the executor's own address of the connection: the device's next hop toward the executor is found from it (session management context). */
+func (s *Shell) LocalAddr() netip.Addr {
+	ap, err := netip.ParseAddrPort(s.client.LocalAddr().String())
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ap.Addr().Unmap()
 }
