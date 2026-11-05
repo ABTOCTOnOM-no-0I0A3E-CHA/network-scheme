@@ -74,6 +74,7 @@ const (
 	KindInterrupted   = "session_interrupted"     /* high: a device's connection dropped, or the executor restarted */
 	KindOutsideWindow = "session_outside_window"  /* warning */
 	KindPolicyInvalid = "executor_policy_invalid" /* high: the policy's rules do not fit a line's grammar */
+	KindTamper        = "executor_tamper"         /* a session row fails its MAC (raised high: the registry is not involved) */
 )
 
 /* Statuses of execpub.session_summary. */
@@ -118,11 +119,11 @@ const maxDevices = 64
 
 /* Timing (variables for the tests). */
 var (
-	tick         = 5 * time.Second  /* how often limits and connections are checked */
-	deviceTime   = 5 * time.Minute  /* bound of opening one device */
-	closeTime    = 2 * time.Minute  /* bound of closing one device */
-	recordTime   = 10 * time.Second /* bound of one database statement */
-	recoverLimit = 100              /* sessions ended per Recover */
+	tick        = 5 * time.Second  /* how often limits and connections are checked */
+	deviceTime  = 5 * time.Minute  /* bound of opening one device */
+	closeTime   = 2 * time.Minute  /* bound of closing one device */
+	recordTime  = 10 * time.Second /* bound of one database statement */
+	recoverPage = 100              /* session rows Recover reads at a time */
 )
 
 /* Gate is the decision path: *freeze.Guard. */
@@ -133,7 +134,6 @@ type Gate interface {
 
 /* Authorizer is what a session needs of authz.Authorizer. */
 type Authorizer interface {
-	TicketUser(tok string) (int64, bool)
 	Authorize(ctx context.Context, req authz.Request) (authz.Decision, error)
 	Record(ctx context.Context, ev audit.Event)
 }
@@ -150,7 +150,7 @@ type Publisher interface {
 
 /* Backups is the pre-session snapshot: *backups.Scheduler. */
 type Backups interface {
-	BeforeSession(ctx context.Context, le *backups.Lease) (backups.Pre, error)
+	BeforeSession(ctx context.Context, le *backups.Lease, left func(context.Context, [32]byte) (bool, error)) (backups.Pre, error)
 }
 
 /* Config builds a Manager; every field but Log and Now is required. */
@@ -174,6 +174,7 @@ type Manager struct {
 	cfg      Config
 	mu       sync.Mutex
 	sessions map[[16]byte]*Session
+	stopped  bool /* Run has ended: no session registers any more */
 }
 
 /* New returns a manager. */
@@ -279,7 +280,12 @@ func object(ids []int64) string {
 
 /*
 Open opens a session on ids for the user of req (ticket and change TOTP
-code). See the package comment for the order of the checks.
+code). Before authz only the request's shape, the policy's enabled flag and
+the freeze are checked: nothing about the devices or the user is told,
+alerted or audited under the user's name before the TOTP code passed. A
+device the registry does not have needs a grant no one has, so it is
+refused by authz like a missing grant. See the package comment for the
+order of the checks after authz.
 */
 func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Opened, error) {
 	obj := object(ids)
@@ -297,6 +303,7 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 	groups := map[int64]string{}
 	if err := m.cfg.Gate.View(ctx, func(s *registry.Snapshot) error {
 		for _, id := range ids {
+			groups[id] = noGroup
 			if r, ok := s.Get("write_device", id); ok {
 				groups[id], _ = r.Get("write_group").(string)
 			}
@@ -305,29 +312,8 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 	}); err != nil {
 		return Opened{}, viewErr(err)
 	}
-	/* The policy's refusals (and their alert) only for a ticket whose signature verifies: anyone else meets authz. */
-	user, signed := m.cfg.Auth.TicketUser(req.Ticket)
-	if signed {
-		p := pol.Policy
-		switch {
-		case len(ids) > p.MaxDevicesPerSession:
-			return Opened{}, m.refuse(ctx, req, user, obj, ErrTooManyDevices, "too_many_devices")
-		case !inWindow(m.cfg.Now(), p):
-			m.alert(ctx, KindOutsideWindow, "warning", 0, fmt.Sprintf("user %d asked for a change session on %s outside the change windows; refused", user, obj))
-			return Opened{}, m.refuse(ctx, req, user, obj, ErrOutsideWindow, "outside_window")
-		}
-		for _, g := range groups {
-			if slices.Contains(p.TwoPersonGroups, g) {
-				return Opened{}, m.refuse(ctx, req, user, obj, ErrTwoPerson, "two_person")
-			}
-		}
-	}
 	var need []string
-	for _, id := range ids {
-		g, ok := groups[id]
-		if !ok {
-			return Opened{}, m.refuse(ctx, req, user, obj, authz.ErrDenied, "not_registered")
-		}
+	for _, g := range groups {
 		need = append(need, g)
 	}
 	slices.Sort(need)
@@ -337,6 +323,19 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 	if err != nil {
 		return Opened{}, err
 	}
+	p := pol.Policy
+	switch {
+	case len(ids) > p.MaxDevicesPerSession:
+		return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrTooManyDevices, "too_many_devices")
+	case !inWindow(m.cfg.Now(), p):
+		m.alert(ctx, KindOutsideWindow, "warning", 0, fmt.Sprintf("user %d asked for a change session on %s outside the change windows; refused", by.UserID, obj))
+		return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrOutsideWindow, "outside_window")
+	}
+	for _, g := range groups {
+		if slices.Contains(p.TwoPersonGroups, g) {
+			return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrTwoPerson, "two_person")
+		}
+	}
 	if err := m.preflight(ctx, ids, pol.Policy); err != nil {
 		if r := Refusal(""); errors.As(err, &r) {
 			return Opened{}, m.refuse(ctx, req, by.UserID, obj, err, string(r))
@@ -345,6 +344,9 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 	}
 	return m.open(ctx, req, by, ids, pol)
 }
+
+/* noGroup is the group of a device the registry does not have: no grant can name it (write groups start with a letter or digit). */
+const noGroup = "-unregistered"
 
 /* inWindow reports whether t is in a change window of p (no window: always); a zone that does not load is outside (fail closed). */
 func inWindow(t time.Time, p execpolicy.Policy) bool {
@@ -472,6 +474,11 @@ func (m *Manager) open(ctx context.Context, req authz.Request, by authz.Decision
 	m.mu.Lock()
 	s.token, s.last, s.idle = sha256.Sum256([]byte(token)), now, time.Duration(pol.Policy.IdleMinutes)*time.Minute
 	s.expires = now.Add(time.Duration(pol.Policy.SessionMinutes) * time.Minute)
+	if m.stopped {
+		m.mu.Unlock()
+		m.finish(ctx, s, "aborted", nil) /* Run has ended: nothing would ever time this session out */
+		return Opened{}, authz.ErrUnavailable
+	}
 	m.sessions[s.ID] = s
 	m.mu.Unlock()
 	return m.opened(s, token), nil
@@ -563,7 +570,7 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 	default:
 		return d, err
 	}
-	pre, err := m.cfg.Backups.BeforeSession(ctx, le)
+	pre, err := m.cfg.Backups.BeforeSession(ctx, le, func(ctx context.Context, sum [32]byte) (bool, error) { return m.sessionLeft(ctx, id, sum) })
 	if err != nil {
 		return d, fmt.Errorf("pre-session snapshot: %w", err)
 	}
@@ -770,6 +777,9 @@ func (m *Manager) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			m.mu.Lock()
+			m.stopped = true
+			m.mu.Unlock()
 			for _, s := range m.live() {
 				m.finish(ctx, s, "shutdown", nil)
 			}
@@ -824,7 +834,8 @@ finish ends s once: every device is closed (the driver session, the
 connection), its summary ended, its device_busy row freed and its lease
 released, then the end event. why: closed, timeout, interrupted (lost names
 the devices whose connection dropped), shutdown (the executor stops: every
-device interrupted), frozen, disabled, aborted (the open failed).
+device interrupted), frozen and disabled (interrupted, MES safety net kept),
+aborted (the open failed).
 */
 func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[int64]bool) {
 	m.mu.Lock()
@@ -843,13 +854,19 @@ func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[i
 		switch {
 		case why == "timeout":
 			status = StatusTimeout
-		case why == "shutdown", lost[d.ID]:
+		case why == "shutdown", why == "frozen", why == "disabled", lost[d.ID]:
 			status = StatusInterrupted
 		}
-		m.closeDevice(ctx, s, d, status, !lost[d.ID])
+		/*
+			Frozen or disabled: the executor must not act, so a MES session keeps
+			its reload-in safety net armed (no driver Close); ESR restores the
+			unconfirmed candidate. Either way the rollback is offered.
+		*/
+		keep := (why == "frozen" || why == "disabled") && d.Line != strategy.ESR
+		m.closeDevice(ctx, s, d, status, !lost[d.ID] && !keep)
 	}
 	kind := "closed"
-	if why == "shutdown" || why == "interrupted" {
+	if why != "closed" && why != "timeout" && why != "aborted" {
 		kind = "interrupted"
 	}
 	m.event(ctx, s.ID, kind, map[string]any{"reason": why})
@@ -858,7 +875,7 @@ func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[i
 		Details: map[string]any{"reason": why}})
 }
 
-/* closeDevice closes one device; reachable: its connection is up (the driver closes and the configuration after is read). */
+/* closeDevice closes one device; reachable: its connection is up and the driver closes (the configuration after is read). */
 func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status string, reachable bool) {
 	ctx, cancel := context.WithTimeout(ctx, closeTime)
 	defer cancel()

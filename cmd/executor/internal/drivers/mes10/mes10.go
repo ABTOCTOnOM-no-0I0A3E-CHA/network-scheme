@@ -9,6 +9,7 @@ package mes10
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -165,7 +166,7 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	}
 	if m := o.Strategies.ReloadMinutes; o.Strategies.SafetyNet == "reload-in" {
 		if _, err := s.System(ctx, fmt.Sprintf("reload in %d %d", m/60, m%60)); err != nil {
-			return nil, err
+			return nil, errors.Join(err, s.DropSnapshot(ctx, s.SnapshotFile("flash:"))) /* its own Open failed: no file left behind */
 		}
 		s.armed = true
 	}

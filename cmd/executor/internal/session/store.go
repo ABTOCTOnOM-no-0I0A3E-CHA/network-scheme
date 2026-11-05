@@ -107,46 +107,92 @@ func (m *Manager) event(ctx context.Context, session [16]byte, kind string, payl
 	}
 }
 
+/* recovered is a session row of a previous process as Recover reads it. */
+type recovered struct {
+	id     [16]byte
+	user   int64
+	opened time.Time
+	snap   []byte
+	mac    []byte
+	ended  bool
+	devs   []int64 /* devices whose session_device row passes its MAC */
+}
+
 /*
-Recover runs once at start, before /x serves: every session of a previous
-process without an end event (its MAC checked; a row that fails it is only
-logged) ends as interrupted, with an alert per device (its pre-session
-snapshot stays for a rollback), and every device_busy row and open summary
-of the previous process goes (pub.Publisher.Recover).
+Recover runs once at start, before /x serves. It reads every session row
+in pages (no bound a flood of planted rows could starve) and checks every
+MAC: the session's, its session_device rows' (over sha256(pre_ct) and
+sha256(pre_dek_ct), computed by the database: the envelope never crosses
+the wire) and its end events'. Any row that fails raises a high tamper
+alert and counts as absent (a forged end event does not end a session).
+A session with a valid row and no valid end event ends as interrupted,
+with an alert per device (its pre-session snapshot stays for a rollback).
+Then every device_busy row and open summary of the previous process goes
+(pub.Publisher.Recover).
 */
 func (m *Manager) Recover(ctx context.Context) error {
-	type row struct {
-		id     [16]byte
-		user   int64
-		opened time.Time
-		snap   []byte
-		mac    []byte
-		devs   []int64
-	}
-	qctx, cancel := context.WithTimeout(ctx, recordTime)
-	defer cancel()
-	rows, err := m.cfg.Pool.Query(qctx, `SELECT s.id, s.user_id, s.opened_at, s.policy_snapshot, s.mac,
-			coalesce(array_agg(d.device_id ORDER BY d.device_id) FILTER (WHERE d.device_id IS NOT NULL), '{}')
-		FROM exec.session s LEFT JOIN exec.session_device d ON d.session_id = s.id
-		WHERE NOT EXISTS (SELECT 1 FROM exec.session_event e WHERE e.session_id = s.id AND e.kind IN ('closed', 'interrupted'))
-		GROUP BY s.id ORDER BY s.opened_at DESC LIMIT $1`, recoverLimit)
-	if err != nil {
-		return err
-	}
-	var open []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.user, &r.opened, &r.snap, &r.mac, &r.devs); err != nil {
-			rows.Close()
+	var after [16]byte
+	bad := 0
+	for {
+		page, read, n, err := m.recoverPage(ctx, after)
+		if err != nil {
 			return err
 		}
-		open = append(open, r)
+		bad += n
+		for _, r := range page {
+			if r.ended {
+				continue
+			}
+			m.event(ctx, r.id, "interrupted", map[string]any{"reason": "restart"})
+			for _, d := range r.devs {
+				if err := m.cfg.Pub.SessionClosed(ctx, r.id, d, StatusInterrupted, nil); err != nil {
+					m.cfg.Log.Info("session: no open summary to interrupt", slog.Int64("device_id", d))
+				}
+				m.alert(ctx, KindInterrupted, "high", d, fmt.Sprintf("change session %s on device %d was interrupted by an executor restart; "+
+					"a rollback to the pre-session snapshot is offered", IDString(r.id), d))
+			}
+		}
+		if len(read) < recoverPage {
+			break
+		}
+		after = read[len(read)-1]
+	}
+	if bad > 0 {
+		m.alert(ctx, KindTamper, "high", 0, fmt.Sprintf("%d change session rows fail their MAC; they were ignored", bad))
+	}
+	return m.cfg.Pub.Recover(ctx)
+}
+
+/* recoverPage reads the sessions after id (by id): the valid ones with their verified devices and end events, the ids read, and how many rows fail a MAC. */
+func (m *Manager) recoverPage(ctx context.Context, after [16]byte) (page []recovered, ids [][16]byte, bad int, err error) {
+	qctx, cancel := context.WithTimeout(ctx, recordTime)
+	defer cancel()
+	rows, err := m.cfg.Pool.Query(qctx, `SELECT id, user_id, opened_at, policy_snapshot, mac FROM exec.session
+		WHERE id > $1 ORDER BY id LIMIT $2`, after, recoverPage)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	var all []recovered
+	for rows.Next() {
+		var r recovered
+		if err := rows.Scan(&r.id, &r.user, &r.opened, &r.snap, &r.mac); err != nil {
+			rows.Close()
+			return nil, nil, 0, err
+		}
+		all = append(all, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, nil, 0, err
 	}
-	for _, r := range open {
+	ids = make([][16]byte, len(all))
+	byID := map[[16]byte]*recovered{}
+	for i := range all {
+		ids[i], byID[all[i].id] = all[i].id, &all[i]
+	}
+	valid := map[[16]byte]bool{}
+	for i := range all {
+		r := &all[i]
 		var ps policySnapshot
 		err := json.Unmarshal(r.snap, &ps)
 		var snap []byte
@@ -154,17 +200,94 @@ func (m *Manager) Recover(ctx context.Context) error {
 			snap, err = json.Marshal(ps)
 		}
 		if err != nil || !hmac.Equal(r.mac, m.sessionMAC(r.id, r.user, r.opened, snap)) {
-			m.cfg.Log.Error("session: an unended session row fails its MAC; ignored", slog.String("session", IDString(r.id)))
+			bad++
 			continue
 		}
-		m.event(ctx, r.id, "interrupted", map[string]any{"reason": "restart"})
-		for _, d := range r.devs {
-			if err := m.cfg.Pub.SessionClosed(ctx, r.id, d, StatusInterrupted, nil); err != nil {
-				m.cfg.Log.Info("session: no open summary to interrupt", slog.Int64("device_id", d))
-			}
-			m.alert(ctx, KindInterrupted, "high", d, fmt.Sprintf("change session %s on device %d was interrupted by an executor restart; "+
-				"a rollback to the pre-session snapshot is offered", IDString(r.id), d))
+		valid[r.id] = true
+	}
+	drows, err := m.cfg.Pool.Query(qctx, `SELECT session_id, device_id, pre_sha256, sha256(pre_ct), sha256(pre_dek_ct), mac
+		FROM exec.session_device WHERE session_id = ANY($1) ORDER BY session_id, device_id`, ids)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	for drows.Next() {
+		var (
+			sid             [16]byte
+			dev             int64
+			pre, ct, k, mac []byte
+		)
+		if err := drows.Scan(&sid, &dev, &pre, &ct, &k, &mac); err != nil {
+			drows.Close()
+			return nil, nil, 0, err
+		}
+		if len(pre) != 32 || len(ct) != 32 || len(k) != 32 ||
+			!hmac.Equal(mac, m.macOf("session_device", sid[:], i64(dev), pre, ct, k)) {
+			bad++
+			continue
+		}
+		if r := byID[sid]; r != nil && valid[sid] {
+			r.devs = append(r.devs, dev)
 		}
 	}
-	return m.cfg.Pub.Recover(ctx)
+	drows.Close()
+	if err := drows.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	erows, err := m.cfg.Pool.Query(qctx, `SELECT id, session_id, at, kind, payload, mac FROM exec.session_event
+		WHERE session_id = ANY($1) AND kind IN ('closed', 'interrupted')`, ids)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	for erows.Next() {
+		var (
+			id           int64
+			sid          [16]byte
+			at           time.Time
+			kind         string
+			payload, mac []byte
+		)
+		if err := erows.Scan(&id, &sid, &at, &kind, &payload, &mac); err != nil {
+			erows.Close()
+			return nil, nil, 0, err
+		}
+		var p map[string]any
+		var enc []byte
+		err := json.Unmarshal(payload, &p)
+		if err == nil {
+			enc, err = json.Marshal(p)
+		}
+		if err != nil || !hmac.Equal(mac, m.EventMAC(id, sid, at, kind, enc)) {
+			bad++
+			continue
+		}
+		if r := byID[sid]; r != nil {
+			r.ended = true
+		}
+	}
+	erows.Close()
+	if err := erows.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	for _, r := range all {
+		if valid[r.id] {
+			page = append(page, r)
+		}
+	}
+	return page, ids, bad, nil
+}
+
+/*
+sessionLeft reports whether sum is what a change session left on device
+since its newest configuration version (a closed summary's post_sha256, as
+the poller decides drift): then a pre-session snapshot that differs from the
+newest version is not drift.
+*/
+func (m *Manager) sessionLeft(ctx context.Context, device int64, sum [32]byte) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, recordTime)
+	defer cancel()
+	var ok bool
+	err := m.cfg.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.session_summary
+		WHERE device_id = $1 AND post_sha256 = $2 AND status <> 'open' AND closed_at IS NOT NULL
+		  AND closed_at >= (SELECT max(taken_at) FROM backups.config_version WHERE device_id = $1))`, device, sum[:]).Scan(&ok)
+	return ok, err
 }

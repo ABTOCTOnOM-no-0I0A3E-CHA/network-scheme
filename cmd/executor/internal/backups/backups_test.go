@@ -30,6 +30,7 @@ import (
 	"github.com/beekamai/network-scheme/internal/backup"
 	"github.com/beekamai/network-scheme/internal/backup/open"
 	"github.com/beekamai/network-scheme/internal/creds"
+	"github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/secret"
 	"github.com/beekamai/network-scheme/internal/ssh"
 	"github.com/beekamai/network-scheme/internal/testdb"
@@ -287,12 +288,12 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	if len(r.d.Journal()) != 0 || r.versions(t) != 0 {
 		t.Fatalf("a held device was contacted: %q", r.d.Lines())
 	}
-	if _, err := r.s.BeforeSession(ctx, le); err != nil || r.versions(t) != 1 {
+	if _, err := r.s.BeforeSession(ctx, le, nil); err != nil || r.versions(t) != 1 {
 		t.Fatalf("before session: %v, versions %d", err, r.versions(t))
 	}
 	le.Release()
 	le.Release()
-	if _, err := r.s.BeforeSession(ctx, le); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, le, nil); err != errLease {
 		t.Fatalf("released lease: %v", err)
 	}
 	/* a released lease stays dead while another holder (the scheduler) has the device, and cannot free it */
@@ -300,7 +301,7 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	if !ok {
 		t.Fatal("relock")
 	}
-	if _, err := r.s.BeforeSession(ctx, le); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, le, nil); err != errLease {
 		t.Fatalf("released lease while the device is held again: %v", err)
 	}
 	le.Release()
@@ -309,7 +310,7 @@ func TestDeviceInSessionIsSkipped(t *testing.T) {
 	}
 	other.Release()
 	fl, _ := (&Locks{}).TryLock(r.id)
-	if _, err := r.s.BeforeSession(ctx, fl); err != errLease {
+	if _, err := r.s.BeforeSession(ctx, fl, nil); err != errLease {
 		t.Fatalf("foreign lease: %v", err)
 	}
 	r.running(r.d.Running() + "hostname after\n")
@@ -396,5 +397,57 @@ func TestFailureTouchesOnlyTheExecutorsState(t *testing.T) {
 	r.s.cfg.BackupPub = nil
 	if err := r.s.backup(ctx, r.id); err == nil || failed() != 1 {
 		t.Fatalf("failure of an executor-backed device not recorded: %v", err)
+	}
+}
+
+/*
+I2: an out-of-band change before a session stays visible as drift: the
+pre-session version is drift when it differs from the newest version and
+is no session's result; what a session left is not drift.
+*/
+func TestPreSessionKeepsDriftVisible(t *testing.T) {
+	r := newRig(t, "mes6")
+	ctx := context.Background()
+	r.backup(t)
+	pre := func() (Pre, bool) {
+		t.Helper()
+		le, ok := r.s.cfg.Locks.TryLock(r.id)
+		if !ok {
+			t.Fatal("lock")
+		}
+		defer le.Release()
+		p, err := r.s.BeforeSession(ctx, le, func(ctx context.Context, sum [32]byte) (bool, error) {
+			var ok bool
+			err := r.env.Pool("nms_executor").QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM execpub.session_summary WHERE device_id = $1 AND post_sha256 = $2)`,
+				r.id, sum[:]).Scan(&ok)
+			return ok, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var drift bool
+		if err := r.env.Pool("postgres").QueryRow(ctx, `SELECT drift FROM backups.config_version WHERE device_id = $1 AND source = 'pre_session'
+			ORDER BY id DESC LIMIT 1`, r.id).Scan(&drift); err != nil {
+			t.Fatal(err)
+		}
+		return p, drift
+	}
+	if _, drift := pre(); drift {
+		t.Fatal("an unchanged configuration is drift")
+	}
+	r.running(r.d.Running() + "hostname out-of-band\n")
+	if _, drift := pre(); !drift {
+		t.Fatal("an out-of-band change is not drift")
+	}
+	/* a session left this configuration */
+	left := r.d.Running() + "hostname by-session\n"
+	r.running(left)
+	sum := sha256.Sum256([]byte(drivers.NormalizeText(left)))
+	if _, err := r.env.Pool("nms_executor").Exec(ctx, `INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, closed_at, status, post_sha256)
+		VALUES (gen_random_uuid(), 1, $1, now() - interval '1 minute', now(), 'closed', $2)`, r.id, sum[:]); err != nil {
+		t.Fatal(err)
+	}
+	if p, drift := pre(); drift || p.SHA256 != sum {
+		t.Fatalf("a session's result is drift (%v) or hashed otherwise", drift)
 	}
 }

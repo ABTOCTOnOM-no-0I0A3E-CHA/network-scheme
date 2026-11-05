@@ -279,10 +279,11 @@ BeforeSession reads the device of le, which the caller (a change session)
 holds, before the session sends anything, and stores the configuration as a
 'pre_session' version: always, whatever the device's backup_via_executor
 (backup_state and the poller's stamp only for a device the executor backs
-up). The read uses the caller's lease, so the session's connection and the
+up); the version is drift when it differs from the newest one and left does
+not report it as a session's result (drifted). The read uses the caller's lease, so the session's connection and the
 backup's never overlap.
 */
-func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease) (Pre, error) {
+func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease, left func(context.Context, [32]byte) (bool, error)) (Pre, error) {
 	if !s.cfg.Locks.holds(le) {
 		return Pre{}, errLease
 	}
@@ -292,7 +293,11 @@ func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease) (Pre, error) {
 	if err != nil {
 		return Pre{}, err
 	}
-	v, err := s.version(drv, le.id, raw, sum, false)
+	drift, err := s.drifted(ctx, le.id, sum, left)
+	if err != nil {
+		return Pre{}, err
+	}
+	v, err := s.version(drv, le.id, raw, sum, drift)
 	if err != nil {
 		return Pre{}, err
 	}
@@ -526,4 +531,24 @@ func (s *Scheduler) store(ctx context.Context, id int64, sum [32]byte, v *versio
 			ON CONFLICT (device_id) DO UPDATE SET at = now()`, id)
 		return err
 	})
+}
+
+/*
+drifted reports whether sum, a configuration read before a session, is
+drift: it differs from the newest version of any source and left does not
+say it is what a change session left since (the session package reads
+its own summaries; nil: drift). A change made outside every session thus
+stays visible as drift although the pre-session version, not the
+poller's, records it first.
+*/
+func (s *Scheduler) drifted(ctx context.Context, id int64, sum [32]byte, left func(context.Context, [32]byte) (bool, error)) (bool, error) {
+	newest, err := s.newest(ctx, id)
+	if err != nil || newest == nil || *newest == sum {
+		return false, err
+	}
+	if left == nil {
+		return true, nil
+	}
+	session, err := left(ctx, sum)
+	return !session, err
 }

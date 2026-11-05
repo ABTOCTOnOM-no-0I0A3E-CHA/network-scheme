@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,7 +391,7 @@ func (f *fx) refused(t *testing.T, what string, u who, ids []int64, want error) 
 
 /*
 Every refusal path, in the order of the checks: the executor disabled after
-the install (C1), a freeze, the device limit, outside the window (an
+the install (C1), a freeze, and after authz the device limit, outside the window (an
 alert), a two-person group, no grant on the group (C2b), writes_enabled,
 model, host key mismatch at the connection (C5, its alert), no credential,
 policy rules that do not fit the grammar (an alert). Nothing is left open.
@@ -401,7 +403,11 @@ func TestRefusals(t *testing.T) {
 	ids := []int64{f.id}
 
 	f.policy(t, "max_devices_per_session: 1\n")
-	f.refused(t, "device limit", u, []int64{f.id, f.id + 1}, session.ErrTooManyDevices)
+	second := f.panelDevice(t, fmt.Sprintf("10.250.%d.%d", 1+addrs.Add(1)%250, 1+time.Now().UnixNano()%250))
+	row2 := maps.Clone(f.row)
+	row2["device_id"], row2["address"] = second, netip.MustParseAddr("192.0.2.11")
+	f.put(t, "write_device", row2)
+	f.refused(t, "device limit", u, []int64{f.id, second}, session.ErrTooManyDevices)
 	f.refused(t, "duplicate devices", u, []int64{f.id, f.id}, session.ErrBadDevices)
 
 	day := strings.ToLower(f.now().UTC().Add(48 * time.Hour).Weekday().String()[:3])
@@ -651,5 +657,119 @@ func TestRestartMidSession(t *testing.T) {
 	}
 	if err := restarted.Recover(ctx); err != nil || f.alerts(t, session.KindInterrupted) != 1 {
 		t.Fatal("a second start alerted again")
+	}
+}
+
+/*
+I1: before authz nothing tells about the devices or the user. A ticket that
+does not verify, without a code, gets the same answer for an unknown
+device, a device in a two-person group and one outside the window, and
+leaves no alert and no audit row naming the user.
+*/
+func TestNothingBeforeAuthz(t *testing.T) {
+	f := newFx(t)
+	u := f.user(t, "core")
+	forged := func() authz.Request {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		tok, _, err := ticket.Issue(priv, u.id, u.name, f.now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return authz.Request{Ticket: tok, IP: "192.0.2.201"}
+	}
+	ctx := context.Background()
+	day := strings.ToLower(f.now().UTC().Add(48 * time.Hour).Weekday().String()[:3])
+	var answers []string
+	for _, c := range []struct {
+		policy string
+		ids    []int64
+	}{
+		{"", []int64{f.id + 1000}},
+		{"two_person_groups: [core]\n", []int64{f.id}},
+		{"windows:\n  - days: [" + day + "]\n    start: \"00:00\"\n    end: \"24:00\"\n", []int64{f.id}},
+	} {
+		f.policy(t, c.policy)
+		_, err := f.m.Open(ctx, forged(), c.ids)
+		answers = append(answers, fmt.Sprint(err))
+	}
+	if answers[0] != answers[1] || answers[1] != answers[2] || !strings.Contains(answers[0], authz.ErrDenied.Error()) {
+		t.Fatalf("answers differ: %q", answers)
+	}
+	if n := f.count(t, `SELECT count(*) FROM execpub.alert`); n != 0 {
+		t.Fatalf("%d alerts before authz", n)
+	}
+	if n := f.count(t, `SELECT count(*) FROM exec.audit_event WHERE user_id = $1`, u.id); n != 0 {
+		t.Fatalf("%d audit rows name the user", n)
+	}
+}
+
+/*
+M2: a freeze ends the session as interrupted with an alert and leaves the
+MES reload-in safety net armed (no driver Close, no reload cancel).
+*/
+func TestFreezeKeepsTheSafetyNet(t *testing.T) {
+	f := newFx(t)
+	f.policy(t, "mes_reload_in_min: 5\n")
+	u := f.user(t, "core")
+	o := f.open(t, u)
+	if f.d.ReloadAt().IsZero() {
+		t.Fatal("the safety net is not armed")
+	}
+	if r := f.host(execadmin.Request{Cmd: execadmin.CmdFreezeOn, Reason: "test"}); !r.OK {
+		t.Fatal(r.Error)
+	}
+	f.m.Check(context.Background())
+	if f.status(t, o.ID) != "interrupted" || f.alerts(t, session.KindInterrupted) != 1 {
+		t.Fatalf("status %s", f.status(t, o.ID))
+	}
+	if f.d.ReloadAt().IsZero() || slices.Contains(f.d.Lines(), "reload cancel") {
+		t.Fatal("the safety net was cancelled")
+	}
+	f.free(t, "frozen")
+}
+
+/* M3: once Run has stopped, no session registers (nothing would time it out); the device is left free. */
+func TestNoSessionAfterRun(t *testing.T) {
+	f := newFx(t)
+	u := f.user(t, "core")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.m.Run(ctx)
+	if _, err := f.m.Open(context.Background(), f.req(t, u), []int64{f.id}); !errors.Is(err, authz.ErrUnavailable) {
+		t.Fatalf("open after Run: %v", err)
+	}
+	f.free(t, "after Run")
+}
+
+/*
+M1: Recover pages through every session row; a forged end event or a
+session_device row failing its MAC raises a high tamper alert and does not
+count (the session still ends as interrupted, its forged device gets no
+alert); planted rows cannot starve the real session.
+*/
+func TestRecoverChecksEveryMAC(t *testing.T) {
+	f := newFx(t)
+	defer session.SetRecoverPage(2)()
+	u := f.user(t, "core")
+	o := f.open(t, u)
+	for range 5 {
+		attacktest.Tamper(t, f.env, `INSERT INTO exec.session (id, user_id, opened_at, policy_snapshot, mac)
+			VALUES (gen_random_uuid(), 1, now(), '{}', $1)`, make([]byte, 32))
+	}
+	attacktest.Tamper(t, f.env, `INSERT INTO exec.session_event (session_id, at, kind, payload, mac) VALUES ($1, now(), 'closed', '{}', $2)`,
+		o.ID, make([]byte, 32))
+	attacktest.Tamper(t, f.env, `INSERT INTO exec.session_device (session_id, device_id, pre_sha256, pre_ct, pre_dek_ct, mac)
+		VALUES ($1, 424242, $2, '\x01', '\x01', $2)`, o.ID, make([]byte, 32))
+	f.d.Disconnect()
+	if err := session.New(f.cfg).Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.status(t, o.ID) != "interrupted" || f.alerts(t, session.KindInterrupted) != 1 {
+		t.Fatalf("status %s, interrupted alerts %d", f.status(t, o.ID), f.alerts(t, session.KindInterrupted))
+	}
+	var sev string
+	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT severity FROM execpub.alert WHERE kind = $1`,
+		session.KindTamper).Scan(&sev); err != nil || sev != "high" {
+		t.Fatalf("tamper alert: %q %v", sev, err)
 	}
 }

@@ -142,6 +142,13 @@ var trace = []struct {
 		{"cmd/executor/internal/session", "TestOpenAndClose"},
 		{"cmd/executor/internal/session", "TestRefusals"},
 		{"cmd/executor/internal/session", "TestMgmtTargets"},
+		{"cmd/executor/internal/session", "TestMgmtTargetsWidened"},
+		{"cmd/executor/internal/session", "TestNothingBeforeAuthz"},
+		{"cmd/executor/internal/session", "TestFreezeKeepsTheSafetyNet"},
+		{"cmd/executor/internal/session", "TestNoSessionAfterRun"},
+		{"cmd/executor/internal/session", "TestRecoverChecksEveryMAC"},
+		{"cmd/executor/internal/backups", "TestPreSessionKeepsDriftVisible"},
+		{"cmd/executor/internal/drivers/mes10", "TestFailedOpenDeletesItsSnapshot"},
 		{"cmd/executor/internal/session", "TestTimeouts"},
 		{"cmd/executor/internal/session", "TestAttach"},
 		{"cmd/executor/internal/session", "TestConnectionLoss"},
@@ -205,6 +212,17 @@ var trace = []struct {
 		{"cmd/executor/internal/drivers", "TestC4DangerousCommands"},
 		{"cmd/executor/internal/drivers", "TestManagementContextEverySpelling"},
 		{"cmd/executor/internal/drivers", "TestEverySaveAliasIsControl"},
+		{"cmd/executor/internal/terminal", "TestC4EveryDangerousSpellingIsHeld"},
+		{"cmd/executor/internal/terminal", "TestC4DangerousLineNeedsNameAndNewCode"},
+	}},
+	{"4c.3", "the line terminal: only whole classified lines reach the device; a paste over paste_confirm_lines waits for confirmation; a partial line at disconnect is dropped; device escapes (OSC 52 included) never reach the browser; Tab and ? never reach the device; Origin, first-frame token, control lines and the hourly limit", []ref{
+		{"cmd/executor/internal/terminal", "TestPasteOverTheLimitWaitsForConfirmation"},
+		{"cmd/executor/internal/terminal", "TestPartialLineNotSentAtDisconnect"},
+		{"cmd/executor/internal/terminal", "TestDeviceEscapesNeverReachTheBrowser"},
+		{"cmd/executor/internal/terminal", "TestTabAndHelpNeverReachTheDevice"},
+		{"cmd/executor/internal/terminal", "TestOriginTokenControlAndLimit"},
+		{"cmd/executor/internal/terminal", "TestEditorKeys"},
+		{"cmd/executor/internal/terminal", "TestCleanStripsEscapes"},
 	}},
 	{"C7", "roll back the whole session = pre-session, hash checked, high alert otherwise (emulator; real models: stand)", []ref{
 		{"cmd/executor/internal/drivers/mes6", "TestRollbackInverseJournal"},
@@ -287,7 +305,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "4c.2", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "4c.2", "4c.3", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

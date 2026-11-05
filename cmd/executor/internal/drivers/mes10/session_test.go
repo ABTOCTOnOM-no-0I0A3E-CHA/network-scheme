@@ -115,3 +115,14 @@ func TestSnapshotProtectedAndDeletedAtClose(t *testing.T) {
 		t.Fatalf("second close: %v", err)
 	}
 }
+
+/* M3: an Open that fails after the flash snapshot (the reload-in safety net refused) deletes its own snapshot. */
+func TestFailedOpenDeletesItsSnapshot(t *testing.T) {
+	d, tm := New(), drvtest.New(t, strategy.MES10)
+	tm.D.Reject(`^reload in`, "% Invalid input detected")
+	_, err := d.open(context.Background(), tm, drivers.Options{SessionID: "s1", Alert: (&drvtest.Alerts{}).Add,
+		Strategies: drivers.Strategies{Apply: "", SafetyNet: "reload-in", ReloadMinutes: 5, Save: "write-startup", Rollback: "replace", Mask: "always"}})
+	if err == nil || !slices.Equal(tm.Deleted, []string{"flash:nms-pre-s1"}) {
+		t.Fatalf("open: %v, deleted %q", err, tm.Deleted)
+	}
+}
