@@ -195,7 +195,8 @@ func (s stampReader) Walk(ctx context.Context, root string, fn func(snmp.Var) er
 /*
 driver returns the device's driver, identifying the device on first contact:
 the configured driver, or (for "auto" or an unknown name) the registry's
-choice by sysObjectID and sysDescr. Identity is stored once per process and
+choice by sysObjectID and sysDescr, narrowed to the firmware line the
+identity shows (drivers.ForIdentity). Identity is stored once per process and
 device.
 */
 func (p *Poller) driver(ctx context.Context, d device, cache *devCache, r snmp.Reader) (drivers.Driver, error) {
@@ -232,6 +233,7 @@ func (p *Poller) driver(ctx context.Context, d device, cache *devCache, r snmp.R
 	if err := p.storeIdentity(ctx, d.ID, ident, drv.Name()); err != nil {
 		return nil, fmt.Errorf("%w: %w", errDB, err)
 	}
+	drv = drivers.ForIdentity(drv, ident)
 	cache.drv = drv
 	return drv, nil
 }

@@ -17,10 +17,10 @@ const LINE_TONE = (l: string) =>
         ? "text-sky-700 dark:text-sky-300"
         : "";
 
-/* The fixed English texts of backup_state.last_error (internal/poller/backup.go) and their i18n keys; anything else is shown generically. */
+/* The fixed English texts of backup_state.last_error (internal/poller/backup.go, cmd/executor/internal/backups) and their i18n keys; anything else is shown generically. */
 const BACKUP_ERRORS: Record<string, string> = {
   "configuration backups are not configured on the poller": "noBackupKey",
-  "reading the configuration of this model needs a write account; not backed up before phase 4": "needsWrite",
+  "reading the configuration of this model needs a write account; register the device in the executor to back it up from there": "needsWrite",
   "the driver cannot read the configuration": "noReader",
   "no usable SSH read credential": "noSSHProfile",
   "SSH connection failed": "sshFailed",
@@ -32,6 +32,7 @@ const BACKUP_ERRORS: Record<string, string> = {
   "configuration backup timed out": "timeout",
   "the poller is busy with other backups; try again later": "busy",
   "the device is in a change session of the executor; backed up after it": "inSession",
+  "the executor could not back up the configuration": "executorFailed",
 };
 
 /** Drift badge of a version (a change made outside a change session of the panel). */

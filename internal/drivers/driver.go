@@ -65,7 +65,9 @@ type Driver interface {
 	ConfigSections(masked string) []Section
 	/*
 		ConfigNeedsWrite reports that reading the configuration requires an
-		account with write rights; such devices are not backed up before Phase 4.
+		account with write rights (per firmware line, see LineDriver). The
+		executor's scheduler backs such devices up once it has taken them
+		over; until then the poller keeps trying with the read account.
 	*/
 	ConfigNeedsWrite() bool
 	/* ShowCommands lists the on-demand show commands (never a configuration dump). */
@@ -78,6 +80,24 @@ type Driver interface {
 		come from the device inventory (checked by the caller).
 	*/
 	ShowCommand(key string, args []string) (ssh.ShowCommand, error)
+}
+
+/*
+LineDriver is implemented by a driver that covers several firmware lines whose
+read dialect or configuration privilege differ (eltex-mes: MES 6.x and 10.x).
+ForIdentity returns the driver for the line the identity shows, with the same
+Name; when the line cannot be told it returns the driver unchanged.
+*/
+type LineDriver interface {
+	ForIdentity(id Identity) Driver
+}
+
+/* ForIdentity returns d for the firmware line of id, or d itself when d covers a single line. */
+func ForIdentity(d Driver, id Identity) Driver {
+	if l, ok := d.(LineDriver); ok {
+		return l.ForIdentity(id)
+	}
+	return d
 }
 
 /* ShowRunner runs an allowlisted show command over SSH; *ssh.Runner implements it. */

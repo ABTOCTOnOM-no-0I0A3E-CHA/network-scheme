@@ -1,0 +1,26 @@
+## source: docs [R §2b] (copy to flash, replace running-config, reload in hours minutes)
+<<< sw10-lab-01#
+>>> copy running-config flash:good.conf
+Copy operation completed successfully
+<<< sw10-lab-01#
+>>> configure terminal
+<<< sw10-lab-01(config)#
+>>> hostname sw10-broken
+<<< sw10-broken(config)#
+>>> end
+<<< sw10-broken#
+>>> reload in 0 15
+<<< Do you want to continue (y/n) [n]?
+>>> y
+<<< sw10-broken#
+>>> show reload
+Reload scheduled at 2026-01-01 00:15:00
+<<< sw10-broken#
+>>> replace running-config flash:good.conf
+Copy operation completed successfully
+<<< sw10-lab-01#
+>>> reload cancel
+<<< sw10-lab-01#
+>>> show reload
+No reload is scheduled
+<<< sw10-lab-01#

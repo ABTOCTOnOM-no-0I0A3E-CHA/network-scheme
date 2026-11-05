@@ -690,8 +690,9 @@ paths:
       summary: State of the last configuration backup of the device
       description: |
         last_error is one of a fixed set of texts (never device output). needs_write:
-        the model needs a write account to read its configuration, so it is not
-        backed up before phase 4. latest_version carries the drift flag of the
+        the model needs a write account to read its configuration, so the poller
+        cannot back it up (the executor does, once the device is registered there
+        with backups via the executor). latest_version carries the drift flag of the
         newest version; all fields are empty for a device never backed up.
       x-permission: devices.read
       x-scoped: true

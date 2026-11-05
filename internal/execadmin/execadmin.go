@@ -45,7 +45,7 @@ const (
 	CmdRegistryVerify = "registry-verify"
 	CmdRegistryReset  = "registry-reset"
 	CmdAuditVerify    = "audit-verify"
-	CmdDevice         = "device" /* Action add|accept-hostkey|writes-on|writes-off (task 4b.3) */
+	CmdDevice         = "device" /* Action add|accept-hostkey|writes-on|writes-off|list */
 )
 
 /* Commands lists every command. */
@@ -94,6 +94,19 @@ type Request struct {
 	Firmware    string            `json:"firmware,omitempty"`
 	Note        string            `json:"note,omitempty"`
 	Strategies  map[string]string `json:"strategies,omitempty"`
+	/*
+		The device commands: the device, its routing fields and flags (accept-hostkey: only those
+		that change; a nil flag keeps the registry's), Fingerprint, the host key the host confirmed
+		(without it: a preview), and DeviceVersion, the registry row version the preview showed
+		(accept-hostkey: a row changed since is refused).
+	*/
+	DeviceID      int64  `json:"device_id,omitempty"`
+	Address       string `json:"address,omitempty"`
+	Port          int64  `json:"port,omitempty"`
+	AllowSHA1     *bool  `json:"allow_ssh_rsa_sha1,omitempty"`
+	Backup        *bool  `json:"backup_via_executor,omitempty"`
+	Fingerprint   string `json:"fingerprint,omitempty"`
+	DeviceVersion int64  `json:"device_version,omitempty"`
 }
 
 var (
@@ -101,7 +114,12 @@ var (
 	groupRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	operatorRe = regexp.MustCompile(`^[A-Za-z0-9._@-]{0,64}$`)
 	strategyRe = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
+	/* FingerprintRe is a host key's SHA-256 fingerprint as OpenSSH prints it (exec.write_device.hostkey_fp). */
+	FingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
 )
+
+/* DeviceActions are the actions of CmdDevice. */
+var DeviceActions = []string{"add", "accept-hostkey", "writes-on", "writes-off", "list"}
 
 /* printable reports whether s is valid UTF-8 without control characters. */
 func printable(s string) bool {
@@ -114,7 +132,7 @@ const MaxPattern = 250
 /* uses lists the optional fields each command takes; any other field set is refused. */
 var uses = map[string][]string{
 	CmdPolicyReload:  {"action"},
-	CmdDevice:        {"action"},
+	CmdDevice:        {"action", "device_id", "address", "port", "group", "driver", "allow_ssh_rsa_sha1", "backup_via_executor", "fingerprint", "device_version"},
 	CmdEnroll:        {"user", "user_id", "user_created_at", "replace"},
 	CmdGrant:         {"user", "user_id", "user_created_at", "kind", "group"},
 	CmdRevoke:        {"user", "kind", "group", "all"},
@@ -132,6 +150,8 @@ func (r Request) fields() map[string]bool {
 		"group": r.Group != "", "all": r.All, "replace": r.Replace, "global": r.Global, "i_understand": r.IUnderstand, "drop_panel_request": r.DropPanel,
 		"reason": r.Reason != "", "action": r.Action != "", "driver": r.Driver != "", "model": r.Model != "",
 		"firmware": r.Firmware != "", "note": r.Note != "", "strategies": len(r.Strategies) > 0,
+		"device_id": r.DeviceID != 0, "address": r.Address != "", "port": r.Port != 0, "allow_ssh_rsa_sha1": r.AllowSHA1 != nil,
+		"backup_via_executor": r.Backup != nil, "fingerprint": r.Fingerprint != "", "device_version": r.DeviceVersion != 0,
 	}
 }
 
@@ -203,11 +223,35 @@ func (r Request) Validate() error {
 			return fmt.Errorf("policy-reload action %q", r.Action)
 		}
 	case CmdDevice:
-		if !slices.Contains([]string{"add", "accept-hostkey", "writes-on", "writes-off"}, r.Action) {
-			return fmt.Errorf("device action %q", r.Action)
-		}
+		return r.validateDevice()
 	case CmdModelVerify:
 		return r.validateModel()
+	}
+	return nil
+}
+
+/*
+validateDevice checks the form of a device command; whether the device,
+address and key are acceptable the daemon decides (and audits).
+*/
+func (r Request) validateDevice() error {
+	switch {
+	case !slices.Contains(DeviceActions, r.Action):
+		return fmt.Errorf("device action %q", r.Action)
+	case r.DeviceID < 0 || r.DeviceVersion < 0:
+		return errors.New("bad device id or version")
+	case r.DeviceVersion != 0 && (r.Action != "accept-hostkey" || r.Fingerprint == ""):
+		return errors.New("device_version binds an accept-hostkey confirmation only")
+	case r.Address != "" && len(r.Address) > 64:
+		return errors.New("bad address")
+	case r.Port < 0 || r.Port > 65535:
+		return errors.New("port: 1..65535")
+	case r.Group != "" && !groupRe.MatchString(r.Group):
+		return errors.New("write group: a-z0-9_.-, up to 64")
+	case r.Driver != "" && !slices.Contains(Drivers, r.Driver):
+		return fmt.Errorf("driver %q, want one of %s", r.Driver, strings.Join(Drivers, ", "))
+	case r.Fingerprint != "" && !FingerprintRe.MatchString(r.Fingerprint):
+		return errors.New("fingerprint: SHA256:<43 base64 characters>, as ssh-keygen -l prints it")
 	}
 	return nil
 }
@@ -267,4 +311,22 @@ type Response struct {
 	Text       string      `json:"text,omitempty"`
 	Confirm    *User       `json:"confirm,omitempty"`
 	Enrollment *Enrollment `json:"enrollment,omitempty"`
+	Device     *Device     `json:"device,omitempty"` /* a device add or accept-hostkey preview: what the host confirms */
+}
+
+/* Device is what the host confirms of a device: its routing fields, flags and the host key the executor read, and the panel's view (display only). */
+type Device struct {
+	ID           int64  `json:"id"`
+	Address      string `json:"address"`
+	Port         int64  `json:"port"`
+	Group        string `json:"write_group"`
+	Driver       string `json:"write_driver"`
+	AllowSHA1    bool   `json:"allow_ssh_rsa_sha1"`
+	Backup       bool   `json:"backup_via_executor"`
+	Algo         string `json:"hostkey_algo"`
+	Fingerprint  string `json:"hostkey_fp"`
+	PinnedFP     string `json:"pinned_fp,omitempty"`
+	Version      int64  `json:"version,omitempty"` /* accept-hostkey: the registry row version previewed */
+	PanelName    string `json:"panel_name,omitempty"`
+	PanelAddress string `json:"panel_address,omitempty"`
 }

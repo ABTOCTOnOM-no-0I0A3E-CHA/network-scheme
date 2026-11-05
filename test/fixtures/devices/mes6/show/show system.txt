@@ -1,0 +1,7 @@
+System Description:                       MES2324 28-port 1G/10G Managed Switch
+System Up Time (days,hour:min:sec):       12,04:31:07
+System Contact:                           noc
+System Name:                              sw-lab-01
+System Location:                          lab rack 1
+System MAC Address:                       e8:28:c1:00:00:11
+System Object ID:                         1.3.6.1.4.1.89.6.1.4

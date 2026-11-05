@@ -44,7 +44,8 @@ const pt = (ts: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const range = { from: new Date("2026-10-21T10:00:00Z"), to: new Date("2026-10-21T11:00:00Z") };
+/* the last hour, relative to now: the picked step depends on the age of the range (pickStep), so a fixed date would drift */
+const range = { from: new Date(Date.now() - 3_600_000), to: new Date() };
 const steps: (string | null)[] = [];
 let handler: (n: number) => Response;
 const server = setupServer(

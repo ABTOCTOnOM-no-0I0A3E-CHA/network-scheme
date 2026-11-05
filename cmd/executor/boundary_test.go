@@ -24,11 +24,14 @@ func violations(dir, text string) []string {
 	if dir != "internal/registry" && dir != "internal/attacktest" && registrySQL.MatchString(text) {
 		out = append(out, "names a registry table; use registry.View / registry.Write")
 	}
-	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dir != "internal/pub" && dbAccess.MatchString(text) {
+	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dir != "internal/pub" && dir != "internal/backups" && dbAccess.MatchString(text) {
 		out = append(out, "opens or holds a database connection; decisions go through the registry")
 	}
 	if dir == "internal/pub" && execSQL.MatchString(text) {
 		out = append(out, "names schema exec; pub writes execpub only (the audit row goes through package audit)")
+	}
+	if dir == "internal/backups" && execSQL.MatchString(text) {
+		out = append(out, "names schema exec; backups reads its devices through the registry only")
 	}
 	if dir != "internal/attacktest" && strings.Contains(text, "internal/attacktest") {
 		out = append(out, "imports attacktest outside tests")
@@ -42,9 +45,10 @@ later code in cmd/executor:
   - only package registry names the registry tables in SQL (everyone else
     reads through registry.View and writes through registry.Write, which
     verify and seal);
-  - no package but registry, freeze (its alert), pub (schema execpub only)
-    and main holds or opens a database connection, so decision code cannot
-    run its own queries;
+  - no package but registry, freeze (its alert), pub (schema execpub only),
+    backups (its configuration versions, backup_state and
+    execpub.backup_taken; never schema exec) and main holds or opens a
+    database connection, so decision code cannot run its own queries;
   - attacktest (superuser tampering) is imported by tests only.
 */
 func TestRegistryBoundary(t *testing.T) {
@@ -105,5 +109,13 @@ func TestRegistryBoundaryCatchesBypasses(t *testing.T) {
 	}
 	if v := violations("internal/pub", "var p *pgxpool.Pool; q := `DELETE FROM execpub.freeze_request`"); len(v) != 0 {
 		t.Errorf("pub: false positive %v", v)
+	}
+	for _, src := range []string{"q := `SELECT * FROM exec.session_device`", `q := "SELECT 1 FROM \"exec\".\"write_device\""`, "q := `select * from EXEC . audit_head`"} {
+		if len(violations("internal/backups", src)) == 0 {
+			t.Errorf("backups: not caught: %s", src)
+		}
+	}
+	if v := violations("internal/backups", "var p *pgxpool.Pool; q := `INSERT INTO execpub.backup_taken (device_id) VALUES ($1)`"); len(v) != 0 {
+		t.Errorf("backups: false positive %v", v)
 	}
 }

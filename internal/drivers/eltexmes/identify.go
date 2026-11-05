@@ -54,3 +54,72 @@ func (d Driver) Identify(ctx context.Context, r snmp.Reader) (drivers.Identity, 
 	}
 	return id, nil
 }
+
+/* Line is an MES firmware line: the read dialect and the configuration privilege differ between them. */
+type Line string
+
+/* Firmware lines. LineUnknown keeps the behaviour from before the lines were told apart (the 6.x dialect). */
+const (
+	LineUnknown Line = ""
+	LineMES6    Line = "mes6"
+	LineMES10   Line = "mes10"
+)
+
+var (
+	/* firmwareRe takes the major version from a firmware such as "6.6.2" or "10.4.5.2" (entPhysicalSoftwareRev). */
+	firmwareRe = regexp.MustCompile(`^([0-9]{1,3})\.[0-9]`)
+	/* modelRe takes the series (first two digits) from a model such as "MES2324P" or "MES-3710". */
+	modelRe = regexp.MustCompile(`^MES-?([0-9]{2})[0-9]{2}`)
+)
+
+/*
+modelLines maps a model series to its firmware line. Source: the model lists
+on the titles of [UM6] (MES23xx, MES33xx, MES35xx, MES53xx, MES54xx, MES5500:
+firmware 6.x) and [UM10] (MES14xx, MES24xx, MES3400, MES37xx: firmware 10.x),
+research [R §0]. Other series (e.g. MES31xx) name no line.
+*/
+var modelLines = map[string]Line{
+	"23": LineMES6, "33": LineMES6, "35": LineMES6, "53": LineMES6, "54": LineMES6, "55": LineMES6,
+	"14": LineMES10, "24": LineMES10, "34": LineMES10, "37": LineMES10,
+}
+
+/*
+lineOf tells the firmware line from the identity the poller already read
+(model from entPhysicalModelName or sysDescr, firmware from entPhysicalSoftwareRev;
+the MES sysObjectIDs per model are not documented). Conservatively:
+a reported firmware decides when its major version is 6 or 10 and the model
+does not name the other line; a reported firmware of any other form gives
+LineUnknown; without a firmware the model series decides. Not verified on hardware.
+*/
+func lineOf(id drivers.Identity) Line {
+	byModel := LineUnknown
+	if len(id.Model) <= maxSysDescr {
+		if m := modelRe.FindStringSubmatch(id.Model); m != nil {
+			byModel = modelLines[m[1]]
+		}
+	}
+	if id.Firmware == "" {
+		return byModel
+	}
+	byFirmware := LineUnknown
+	if len(id.Firmware) <= maxSysDescr {
+		if m := firmwareRe.FindStringSubmatch(id.Firmware); m != nil {
+			switch m[1] {
+			case "6":
+				byFirmware = LineMES6
+			case "10":
+				byFirmware = LineMES10
+			}
+		}
+	}
+	if byModel != LineUnknown && byModel != byFirmware {
+		return LineUnknown
+	}
+	return byFirmware
+}
+
+/* ForIdentity returns the driver for the firmware line id shows; implements drivers.LineDriver. */
+func (d Driver) ForIdentity(id drivers.Identity) drivers.Driver {
+	d.line = lineOf(id)
+	return d
+}

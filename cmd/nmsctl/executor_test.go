@@ -70,6 +70,7 @@ func withPolicy(t *testing.T, body string) string {
 
 /* Every command becomes exactly one request on the stdin of docker compose exec in the executor container; argv carries nothing else. */
 func TestExecutorCommandsBecomeRequests(t *testing.T) {
+	yes, no := true, false
 	withPolicy(t, "enabled: false\n")
 	for _, c := range []struct {
 		args []string
@@ -91,7 +92,17 @@ func TestExecutorCommandsBecomeRequests(t *testing.T) {
 		{[]string{"registry", "reset", "--i-understand"}, execadmin.Request{Cmd: "registry-reset", IUnderstand: true}},
 		{[]string{"registry", "reset"}, execadmin.Request{Cmd: "registry-reset"}},
 		{[]string{"audit", "verify"}, execadmin.Request{Cmd: "audit-verify"}},
-		{[]string{"device", "writes", "on", "7"}, execadmin.Request{Cmd: "device", Action: "writes-on"}},
+		{[]string{"device", "writes", "on", "--device", "7"}, execadmin.Request{Cmd: "device", Action: "writes-on", DeviceID: 7}},
+		{[]string{"device", "writes", "off", "--device", "7"}, execadmin.Request{Cmd: "device", Action: "writes-off", DeviceID: 7}},
+		{[]string{"device", "list"}, execadmin.Request{Cmd: "device", Action: "list"}},
+		{[]string{"device", "add", "--device", "7", "--address", "10.1.2.3", "--group", "core", "--driver", "mes6", "--port", "2222",
+			"--allow-ssh-rsa-sha1", "--backup-via-executor", "--fingerprint", testFP},
+			execadmin.Request{Cmd: "device", Action: "add", DeviceID: 7, Address: "10.1.2.3", Group: "core", Driver: "mes6", Port: 2222,
+				AllowSHA1: &yes, Backup: &yes, Fingerprint: testFP}},
+		{[]string{"device", "accept-hostkey", "--device", "7", "--fingerprint", testFP},
+			execadmin.Request{Cmd: "device", Action: "accept-hostkey", DeviceID: 7, Fingerprint: testFP}},
+		{[]string{"device", "accept-hostkey", "--device", "7", "--allow-ssh-rsa-sha1=false", "--backup-via-executor=false", "--fingerprint", testFP},
+			execadmin.Request{Cmd: "device", Action: "accept-hostkey", DeviceID: 7, AllowSHA1: &no, Backup: &no, Fingerprint: testFP}},
 		{[]string{"policy", "show"}, execadmin.Request{Cmd: "policy-show"}},
 		{[]string{"policy", "check"}, execadmin.Request{Cmd: "policy-check"}},
 	} {
@@ -113,6 +124,55 @@ func TestExecutorCommandsBecomeRequests(t *testing.T) {
 	}
 }
 
+var testFP = "SHA256:" + strings.Repeat("A", 43)
+
+/*
+Without --fingerprint, device add is two steps: the executor's preview (the
+host key it read, the panel's view shown apart) is confirmed on the terminal
+and the confirmation carries exactly the fingerprint and fields shown (and,
+for accept-hostkey, the previewed row version); a "no" sends nothing more,
+and there is no --yes (TOFU).
+*/
+func TestDeviceAddConfirmsTheShownKey(t *testing.T) {
+	withPolicy(t, "enabled: false\n")
+	preview := func(req execadmin.Request) execadmin.Response {
+		if req.Fingerprint != "" {
+			return execadmin.Response{OK: true, Text: "pinned"}
+		}
+		return execadmin.Response{OK: true, Device: &execadmin.Device{ID: 7, Address: "10.1.2.3", Port: 22, Group: "core", Driver: "esr",
+			Algo: "ssh-ed25519", Fingerprint: testFP, PanelName: "sw\x1b]52;c;eA==\x07", PanelAddress: "10.9.9.9"}}
+	}
+	args := []string{"device", "add", "--device", "7", "--address", "10.1.2.3", "--group", "core", "--driver", "esr"}
+	sys := &daemon{respond: preview}
+	code, out := execRun(t, sys, "yes\n", args...)
+	if code != 0 || len(sys.reqs) != 2 || sys.reqs[0].Fingerprint != "" || sys.reqs[1].Fingerprint != testFP {
+		t.Fatalf("exit %d, requests %+v\n%s", code, sys.reqs, out)
+	}
+	if !strings.Contains(out, testFP) || !strings.Contains(out, "10.9.9.9") || strings.ContainsAny(out, "\x1b\x07") {
+		t.Fatalf("preview not shown safely:\n%q", out)
+	}
+	if c := sys.reqs[1]; c.Address != "10.1.2.3" || c.Port != 22 || c.Group != "core" || c.Driver != "esr" || c.AllowSHA1 == nil ||
+		*c.AllowSHA1 || c.Backup == nil || *c.Backup || c.DeviceVersion != 0 {
+		t.Fatalf("confirmation %+v", c)
+	}
+	sys = &daemon{respond: preview}
+	if code, _ := execRun(t, sys, "no\n", args...); code == 0 || len(sys.reqs) != 1 {
+		t.Fatalf("refused confirmation: exit %d, %d requests", code, len(sys.reqs))
+	}
+	accept := func(req execadmin.Request) execadmin.Response {
+		r := preview(req)
+		if r.Device != nil {
+			r.Device.Version, r.Device.PinnedFP, r.Device.Backup = 12, "SHA256:"+strings.Repeat("B", 43), true
+		}
+		return r
+	}
+	sys = &daemon{respond: accept}
+	if code, out := execRun(t, sys, "y\n", "device", "accept-hostkey", "--device", "7"); code != 0 || len(sys.reqs) != 2 ||
+		sys.reqs[1].DeviceVersion != 12 || sys.reqs[1].Backup == nil || !*sys.reqs[1].Backup || sys.reqs[1].Address != "10.1.2.3" {
+		t.Fatalf("accept-hostkey confirmation: exit %d %+v\n%s", code, sys.reqs, out)
+	}
+}
+
 func cmdline(c install.Cmd) string { return c.Name + " " + strings.Join(c.Args, " ") }
 
 /* Malformed commands never reach the executor; nmsctl executor runs only on the host. */
@@ -124,7 +184,9 @@ func TestExecutorUsageAndHostOnly(t *testing.T) {
 		{"unlock"}, {"unlock", "alice", "bob"}, {"model-verify", "--driver", "ios", "--model", "x", "--firmware", "y", "--note", "n"},
 		{"model-verify", "--driver", "esr", "--model", "x", "--firmware", "y"}, {"registry", "verify", "--i-understand"},
 		{"registry", "verify", "--drop-panel-request"}, {"freeze", "on", "--drop-panel-request"},
-		{"enroll"}, {"enroll", "--replace"}, {"device", "writes", "maybe"}, {"enable", "now"}, {"grant", "bad\x01name", "unmask"},
+		{"enroll"}, {"enroll", "--replace"}, {"device", "writes", "maybe"}, {"device", "writes", "on"}, {"device", "writes", "on", "7"},
+		{"device", "add", "--address", "10.1.2.3"}, {"device", "list", "--device", "7"}, {"device", "add", "--device", "7", "--yes"},
+		{"device", "add", "--device", "7", "--fingerprint", "MD5:x"}, {"device", "remove", "--device", "7"}, {"enable", "now"}, {"grant", "bad\x01name", "unmask"},
 	} {
 		sys := &daemon{}
 		if code, _ := execRun(t, sys, "", args...); code == 0 || len(sys.cmds) != 0 {

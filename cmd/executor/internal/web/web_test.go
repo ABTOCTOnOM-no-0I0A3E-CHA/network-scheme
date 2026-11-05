@@ -948,3 +948,56 @@ func TestSlowBodyAndLargeHeaders(t *testing.T) {
 		t.Errorf("headers of %d bytes: %d", 2*maxHeader, a.status)
 	}
 }
+
+type codeRefusal string
+
+func (c codeRefusal) Error() string       { return "refused: " + string(c) }
+func (c codeRefusal) RefusalCode() string { return string(c) }
+
+type unknownOutcome struct{}
+
+func (unknownOutcome) Error() string       { return "outcome unknown" }
+func (unknownOutcome) RefusalCode() string { return "outcome_unknown" }
+func (unknownOutcome) HTTPStatus() int     { return http.StatusServiceUnavailable }
+
+/* An action's own refusal (Refusal) answers 422 with its code at issue and at confirm, or its own status; a freeze answers 503 frozen. */
+func TestActionRefusalsAnswer422(t *testing.T) {
+	runs := 0
+	refusing := Action{
+		Describe: func(_ context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error) {
+			switch string(params) {
+			case `"stale"`:
+				return authz.Need{}, confirm.Description{}, fmt.Errorf("wrapped: %w", codeRefusal("stale"))
+			case `"frozen"`:
+				return authz.Need{}, confirm.Description{}, authz.ErrFrozen
+			}
+			return testAction.Describe(context.Background(), by, json.RawMessage(`{"device":"sw1"}`))
+		},
+		Run: func(context.Context, confirm.Challenge, authz.Decision) (any, error) {
+			if runs++; runs > 1 {
+				return nil, unknownOutcome{}
+			}
+			return nil, codeRefusal("mismatch")
+		},
+	}
+	h := start(t, func(c *Config) { c.Actions["test.echo"] = refusing })
+	for p, want := range map[string]struct {
+		status int
+		code   string
+	}{`"stale"`: {422, "stale"}, `"frozen"`: {503, "frozen"}} {
+		if a := h.do(t, http.MethodPost, "/x/confirm/issue", `{"ticket":"user-1","action":"test.echo","params":`+p+`}`, hdr()); a.status != want.status || a.code != want.code {
+			t.Errorf("issue %s: %d %s", p, a.status, a.body)
+		}
+	}
+	a := h.do(t, http.MethodPost, "/x/confirm/issue", `{"ticket":"user-1","action":"test.echo","params":"ok"}`, hdr())
+	var ch challengeBody
+	if err := json.Unmarshal([]byte(a.body), &ch); err != nil || a.status != http.StatusOK {
+		t.Fatalf("issue: %d %s", a.status, a.body)
+	}
+	if a := h.do(t, http.MethodPost, "/x/confirm", `{"ticket":"user-1","challenge_id":"`+ch.ID+`","h":"`+ch.H+`","code":"123456"}`, hdr()); a.status != 422 || a.code != "mismatch" {
+		t.Errorf("confirm: %d %s", a.status, a.body)
+	}
+	if a := h.do(t, http.MethodPost, "/x/confirm", `{"ticket":"user-1","challenge_id":"`+ch.ID+`","h":"`+ch.H+`","code":"123456"}`, hdr()); a.status != 503 || a.code != "outcome_unknown" {
+		t.Errorf("confirm with an unknown outcome: %d %s", a.status, a.body)
+	}
+}

@@ -80,6 +80,7 @@ var (
 type Authorizer interface {
 	TicketUser(tok string) (int64, bool)
 	Identify(ctx context.Context, req authz.Request) (authz.Decision, error)
+	Authorize(ctx context.Context, req authz.Request) (authz.Decision, error)
 }
 
 /* Confirmer is what the server needs of confirm.Store. */
@@ -99,6 +100,35 @@ type Action struct {
 	Run      func(ctx context.Context, c confirm.Challenge, by authz.Decision) (any, error)
 }
 
+/*
+Refusal is an action's own refusal with a code the UI has a text for: a
+Describe or Run error that implements it answers 422 with that code, or the
+status of its HTTPStatus method when it has one (e.g. 503 outcome_unknown).
+*/
+type Refusal interface {
+	error
+	RefusalCode() string
+}
+
+/* actionRefused answers an action's Refusal (422) or freeze (503) and reports whether it did. */
+func actionRefused(w http.ResponseWriter, err error) bool {
+	var rf Refusal
+	switch {
+	case errors.As(err, &rf):
+		status := http.StatusUnprocessableEntity
+		var st interface{ HTTPStatus() int }
+		if errors.As(err, &st) {
+			status = st.HTTPStatus()
+		}
+		fail(w, status, rf.RefusalCode())
+	case errors.Is(err, authz.ErrFrozen):
+		refused(w, err)
+	default:
+		return false
+	}
+	return true
+}
+
 /* Config builds a Server. */
 type Config struct {
 	CertFile, KeyFile, ClientCAFile string
@@ -111,6 +141,7 @@ type Config struct {
 	/* State reports what /x/status shows: whether the policy enables the executor, and the freeze. */
 	State   func() (enabled, frozen bool)
 	Actions map[string]Action
+	Reads   map[string]Read /* authorized reads (ticket + change TOTP) by path, POST routes of their own (read.go) */
 	Log     *slog.Logger
 	Now     func() time.Time /* nil: time.Now */
 }
@@ -160,6 +191,9 @@ func New(cfg Config) (*Server, error) {
 		{http.MethodGet, "/x/status", s.status},
 		{http.MethodPost, "/x/confirm/issue", s.issue},
 		{http.MethodPost, "/x/confirm", s.confirm},
+	}
+	if err := s.addReads(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -529,6 +563,9 @@ func (s *Server) issue(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	need, d, err := act.Describe(r.Context(), by, req.Params)
+	if err != nil && actionRefused(w, err) {
+		return
+	}
 	if err != nil {
 		s.c.Log.Info("web: action not described", slog.String("action", req.Action), slog.Any("err", err))
 		fail(w, http.StatusBadRequest, "bad_params")
@@ -594,6 +631,9 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	res, err := act.Run(r.Context(), c, by)
+	if err != nil && actionRefused(w, err) {
+		return
+	}
 	if err != nil {
 		s.c.Log.Error("web: confirmed action failed", slog.String("action", c.Action), slog.Any("err", err))
 		fail(w, http.StatusInternalServerError, "action_failed")

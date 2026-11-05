@@ -150,6 +150,7 @@ func TestExecutorRoleGrants(t *testing.T) {
 		"exec.audit_head":        "SELECT UPDATE",
 		"execpub.freeze_request": "SELECT DELETE",
 		"execpub.alert":          dml, "execpub.device_busy": dml, "execpub.session_summary": dml, "execpub.status": dml,
+		"execpub.backup_taken":   dml,
 		"core.device":            "SELECT(address,driver,firmware,group_id,id,model,name)",
 		`core."user"`:            "SELECT(created_at,disabled,id,username)",
 		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
@@ -246,10 +247,10 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 	requireGrants(t, "nms_api", map[string]string{
 		"execpub.freeze_request": "INSERT(requested_by)",
 		"execpub.alert":          "SELECT", "execpub.device_busy": "SELECT",
-		"execpub.session_summary": "SELECT", "execpub.status": "SELECT",
+		"execpub.session_summary": "SELECT", "execpub.status": "SELECT", "execpub.backup_taken": "SELECT",
 	}, "execpub")
 	requireGrants(t, "nms_poller", map[string]string{
-		"execpub.device_busy": "SELECT", "execpub.session_summary": "SELECT",
+		"execpub.device_busy": "SELECT", "execpub.session_summary": "SELECT", "execpub.backup_taken": "SELECT",
 	}, "execpub")
 	for _, role := range []string{"nms_eventd", "nms_cli"} {
 		requireGrants(t, role, map[string]string{}, "execpub")
@@ -277,12 +278,13 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 		`INSERT INTO execpub.status (enabled, frozen) VALUES (false, false)`,
 		`INSERT INTO execpub.device_busy (device_id, session_id) VALUES (1, gen_random_uuid())`,
 		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`,
+		`INSERT INTO execpub.backup_taken (device_id) VALUES (1)`,
 	} {
 		requireDenied(t, "nms_api", sql)
 	}
 	set := map[string]string{"execpub.freeze_request": "requested_by = 1", "execpub.alert": "text = ''",
 		"execpub.device_busy": "since = now()", "execpub.session_summary": "closed_at = now()",
-		"execpub.status": "frozen = false"}
+		"execpub.status": "frozen = false", "execpub.backup_taken": "at = now()"}
 	for _, rel := range relations(t, "execpub") {
 		for _, sql := range []string{"UPDATE " + rel + " SET " + set[rel], "DELETE FROM " + rel, "TRUNCATE " + rel} {
 			for _, role := range []string{"nms_api", "nms_poller", "nms_eventd", "nms_cli"} {
@@ -295,10 +297,11 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 		`INSERT INTO execpub.alert (kind, severity, text) VALUES ('x', 'info', 'x')`,
 		`INSERT INTO execpub.status (enabled, frozen) VALUES (false, false)`,
 		`INSERT INTO execpub.device_busy (device_id, session_id) VALUES (1, gen_random_uuid())`,
-		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`} {
+		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`,
+		`INSERT INTO execpub.backup_taken (device_id) VALUES (1)`} {
 		requireDenied(t, "nms_poller", sql)
 	}
-	for _, sql := range []string{`SELECT 1 FROM execpub.device_busy`, `SELECT 1 FROM execpub.session_summary`} {
+	for _, sql := range []string{`SELECT 1 FROM execpub.device_busy`, `SELECT 1 FROM execpub.session_summary`, `SELECT 1 FROM execpub.backup_taken`} {
 		if _, err := env.Pool("nms_poller").Exec(ctx, sql); err != nil {
 			t.Errorf("poller %q: %v", sql, err)
 		}

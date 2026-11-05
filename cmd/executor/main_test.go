@@ -38,7 +38,7 @@ func writeConfig(t *testing.T) (cfgPath, secrets string) {
 	for p, body := range map[string]string{
 		filepath.Join(dir, "db_password"): pw.Reveal(),
 		filepath.Join(dir, "policy.yaml"): "enabled: false\n",
-		filepath.Join(dir, "egress.yaml"): "mgmt_subnets: []\n",
+		filepath.Join(dir, "egress.yaml"): "devices_subnet: 172.30.1.0/24\nmgmt_subnets: [10.0.0.0/8]\n",
 	} {
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -59,6 +59,7 @@ client_ca_file: %q
 listen_xnet: "172.30.2.2:8444"
 core_subnet: "172.30.0.0/24"
 xnet_subnet: "172.30.2.0/24"
+edge_subnet: "172.30.3.0/24"
 panel_origin: "https://nms.example.org"
 executor_origin: "https://nms.example.org:8443"
 state_dir: %q

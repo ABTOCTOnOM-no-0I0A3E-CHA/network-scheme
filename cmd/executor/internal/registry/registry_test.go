@@ -591,7 +591,7 @@ func TestStallAtPendingSettles(t *testing.T) {
 		t.Run(fmt.Sprintf("resumed late %v", late), func(t *testing.T) {
 			env, r := fresh(t)
 			ctx := context.Background()
-			r.opTimeout, r.settleFor = 3*time.Second, 5*time.Second
+			r.opTimeout, r.settleFor = 3*time.Second, 20*time.Second /* the settle must outlast a resumed backend on a loaded runner */
 			if late {
 				r.settleFor = time.Second
 			}

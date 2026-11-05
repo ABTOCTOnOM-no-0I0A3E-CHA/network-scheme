@@ -54,8 +54,15 @@ func (d Driver) FetchConfig(ctx context.Context, sh drivers.ShowRunner) (string,
 }
 
 /*
-ConfigNeedsWrite is false by assumption: the MES documentation shows
-"show running-config" in privileged EXEC, which the read prompt (#) already
-is, and says nothing about a write right. The hardware stand must confirm it.
+ConfigNeedsWrite reports, per firmware line, whether "show running-config"
+needs a write-privileged account. Source: research [R §3] (ruling Q4).
+  - MES 10.x: true. Levels 1..14 give access but no configuration and level 15
+    gives both ([UM10] p. 75); no per-command "privilege" exists in 10.x, so the
+    read is taken to need 15.
+  - MES 6.x: false. "privilege exec 4 show running-config" lowers the level of
+    exactly that command ([UM6] §4.5.1).
+  - unknown line: false; the poller tries the read and records a refusal by
+    the device as needs_write.
+Not verified on hardware.
 */
-func (Driver) ConfigNeedsWrite() bool { return false }
+func (d Driver) ConfigNeedsWrite() bool { return d.line == LineMES10 }

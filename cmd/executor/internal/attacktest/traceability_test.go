@@ -20,8 +20,8 @@ file (dir: that file, e.g. the e2e spec or the CI workflow).
 type ref struct{ dir, name string }
 
 /*
-trace is the one index of the Phase 4a attack scenarios (plan
-2026-10-25-phase-4-executor, "Критерии Фазы 4" and "Review Focus 4a"; the
+trace is the one index of the Phase 4 attack scenarios (plan
+2026-10-25-phase-4-executor, "Критерии Фазы 4" and the Review Focus lists; the
 security traceability of 4d.3 starts from it): each scenario and where it is
 proved. The attacker throughout is the api (Attacker: nms_api and the
 ticket signing key), and for exec the superuser (Tamper, Copy, Stall).
@@ -47,6 +47,25 @@ var trace = []struct {
 	{"C2b", "a ticket without the grant", []ref{
 		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
 		{"cmd/executor/internal/confirm", "TestChallengeBindsUserAndGrant"},
+	}},
+	{"C2c", "the api changes a device's address or group: registration and connections use the registry's address only", []ref{
+		{"cmd/executor/internal/devices", "TestC2cAPIChangesAddressAndGroup"},
+		{"cmd/executor/internal/devices", "TestStaleConfirmationRefused"},
+		{"cmd/executor/internal/devices", "TestResetDeviceUnusableUntilConfirmed"},
+		{"cmd/executor/internal/devices", "TestSSRFAddressesRefused"},
+		{"cmd/executor/internal/netguard", "TestSSRFAddressesRefused"},
+		{"cmd/executor/internal/devices", "TestWithoutWriteAdminRefused"},
+		{"cmd/executor/internal/devices", "TestEveryChangeIsAudited"},
+	}},
+	{"C5", "a host key other than the pinned one: refused before any credential, high alert", []ref{
+		{"cmd/executor/internal/transport", "TestHostKeyStrategy"},
+		{"cmd/executor/internal/transport", "TestNoKeyOfThePinnedTypeIsAMismatch"},
+		{"cmd/executor/internal/transport", "TestNetguardAndHostKeyAtDial"},
+		{"cmd/executor/internal/devices", "TestReplacedKeyOnlyThroughConfirmation"},
+		{"cmd/executor/internal/devices", "TestSHA1HostKeyNeedsTheFlag"},
+		{"cmd/executor/internal/devices", "TestForgedTicketMakesNoConnection"},
+		{"cmd/executor/internal/devices", "TestHostAcceptBindsThePreviewedRow"},
+		{"cmd/nmsctl", "TestDeviceAddConfirmsTheShownKey"},
 	}},
 	{"C2d", "the api freezes within 5 s and cannot lift the freeze", []ref{
 		{"cmd/executor/internal/pub", "TestPanelRequestFreezesWithinFiveSeconds"},
@@ -74,6 +93,18 @@ var trace = []struct {
 	{"C2g", "change TOTP secrets swapped with a recomputed MAC (AAD)", []ref{
 		{"cmd/executor/internal/authz", "TestC2gSwappedSecretsWithValidMAC"},
 		{"cmd/executor/internal/seal", "TestTOTPSealIsBoundToTheUser"},
+	}},
+	{"C2j", "a write credential sealed for another device or replayed; never readable by the api or the poller", []ref{
+		{"cmd/executor/internal/wcreds", "TestC2jCiphertextOfAnotherDeviceIsAMismatch"},
+		{"cmd/executor/internal/wcreds", "TestC2jReplayIsStale"},
+		{"cmd/executor/internal/wcreds", "TestStoredCredentialIsBoundInside"},
+		{"cmd/executor/internal/wcreds", "TestAPIAndPollerCannotReadWriteCredentials"},
+		{"cmd/executor/internal/wcreds", "TestDescribeTellsNothingOfTheCiphertext"},
+		{"cmd/executor/internal/wcreds", "TestRunRefusesWhatChangedSinceTheConfirmation"},
+		{"cmd/executor/internal/admin", "TestResetDropsEveryWriteCredential"},
+		{"cmd/executor/internal/attacktest", "TestAPICannotLearnTheWriteCredential"},
+		{"internal/creds", "TestOpenRefusesTheWriteKind"},
+		{"internal/poller", "TestWriteCredentialKindRejected"},
 	}},
 	{"C2k", "confirm(H): another description under the same challenge", []ref{
 		{"cmd/executor/internal/confirm", "TestC2kChangedDescription"},
@@ -144,6 +175,28 @@ var trace = []struct {
 		{"internal/install", "TestComposeHardening"},
 		{"internal/install", "TestRunInExecutor"},
 		{"scripts/check-isolation.sh", `done < <(go list -deps "./cmd/$name" | tr -d '\r')`},
+	}},
+	{"4b.5", "the transport: registry row and netguard at dial, host key before credentials, model gate, expired password, ReadOnly allowlist, no escapes to clients", []ref{
+		{"cmd/executor/internal/transport", "TestDialUsesTheVerifiedRegistry"},
+		{"cmd/executor/internal/transport", "TestNetguardAndHostKeyAtDial"},
+		{"cmd/executor/internal/transport", "TestModelGate"},
+		{"cmd/executor/internal/transport", "TestExpiredPasswordStops"},
+		{"cmd/executor/internal/transport", "TestReadOnlySendsOnlyTheAllowlist"},
+		{"cmd/executor/internal/transport", "TestEscapesNeverReachTheClient"},
+		{"cmd/executor/internal/strategy", "TestEveryStrategyHasResearchRef"},
+	}},
+	{"C4", "dangerous commands of every firmware line in every spelling (abbreviation, do, case, spaces, tabs, control characters), the management context in every spelling, save aliases never sent", []ref{
+		{"cmd/executor/internal/drivers", "TestC4DangerousCommands"},
+		{"cmd/executor/internal/drivers", "TestManagementContextEverySpelling"},
+		{"cmd/executor/internal/drivers", "TestEverySaveAliasIsControl"},
+	}},
+	{"C7", "roll back the whole session = pre-session, hash checked, high alert otherwise (emulator; real models: stand)", []ref{
+		{"cmd/executor/internal/drivers/mes6", "TestRollbackInverseJournal"},
+		{"cmd/executor/internal/drivers/mes6", "TestRollbackHashMismatchAlerts"},
+		{"cmd/executor/internal/drivers/mes10", "TestSnapshotReplaceRollbackAndSave"},
+		{"cmd/executor/internal/drivers/mes10", "TestReplaceMismatchAlerts"},
+		{"cmd/executor/internal/drivers/esr", "TestRollbackBeforeAndAfterConfirm"},
+		{"cmd/executor/internal/drivers/esr", "TestRollbackMismatchIsNotConfirmed"},
 	}},
 }
 
@@ -217,8 +270,8 @@ func TestTraceability(t *testing.T) {
 			traced[r.dir+"."+r.name] = true
 		}
 	}
-	/* The scenarios 4a must prove (the plan's table rows owned by 4a, the 4a.7 attack, the five review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2d", "C2e", "C2f", "C2g", "C2k", "C3", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	/* The scenarios 4a and 4b must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

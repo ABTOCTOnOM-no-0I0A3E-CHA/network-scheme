@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -277,6 +278,32 @@ func TestBadProfileMarkedNotPolled(t *testing.T) {
 		if s := h.str(`SELECT state FROM inventory.device_status WHERE device_id = $1`, id); s != "partial" {
 			t.Fatalf("%s: device status = %q", want, s)
 		}
+	}
+}
+
+/*
+Task 4b.4: the poller never uses a write credential. One sealed with kind
+ssh_write inside an ssh_read profile is a mismatch (kind check) and is not
+used; the profile table does not even take the kind ssh_write.
+*/
+func TestWriteCredentialKindRejected(t *testing.T) {
+	h := newHarness(t, "")
+	p := h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
+	ctx := context.Background()
+	id := h.device(netip.MustParseAddrPort("198.51.100.231:161"))
+	owner := devices.Owner{Kind: devices.OwnerDevice, ID: id}
+	login := map[string]string{"username": "netadmin", "password": "Wr1te-Pass-0123456"}
+	h.profile(id, creds.KindSSHRead, credstest.Seal(h.pub, owner, creds.KindSSHWrite, login, time.Now()))
+	var pgErr *pgconn.PgError
+	if _, err := p.credential(ctx, owner, newDevCache(), creds.KindSSHRead); !errors.Is(err, errNoProfile) {
+		t.Fatalf("an ssh_write payload in an ssh_read profile: %v", err)
+	}
+	if got := h.str(`SELECT status FROM core.access_profile WHERE owner_kind = 'device' AND owner_id = $1`, id); got != profileMismatch {
+		t.Fatalf("profile status = %q, want %q", got, profileMismatch)
+	}
+	if _, err := h.env.Pool("nms_api").Exec(ctx, `INSERT INTO core.access_profile (owner_kind, owner_id, kind, ciphertext, key_version)
+		VALUES ('device', $1, 'ssh_write', $2, 1)`, id, []byte{1}); !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("core.access_profile with the kind ssh_write: %v, want a check violation", err)
 	}
 }
 

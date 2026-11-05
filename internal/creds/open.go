@@ -2,6 +2,7 @@ package creds
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -23,9 +24,28 @@ verifies it: strict payload format, binding to want and kind, and a
 created_at not older than lastAccepted (zero when none was accepted; equal is
 the same credential opened again) and not later than now+5m.
 Checks run in the order malformed, owner, kind, stale, secret shape, weak.
-Returned errors never contain secret material.
+A write credential (ssh_write, asked for or inside) is a kind mismatch: the
+read path never opens one. Returned errors never contain secret material.
 */
 func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind string, lastAccepted, now time.Time) (Credential, error) {
+	if kind == KindSSHWrite {
+		return Credential{}, ErrKindMismatch
+	}
+	return open(priv, pub, ciphertext, want, kind, lastAccepted, now)
+}
+
+/*
+OpenWrite is Open for the executor's write credentials: the write-domain key
+pair, owner device:<deviceID> and kind ssh_write, the same checks in the
+same order. A key is additionally weak when it is DSA or RSA below 2048 bits.
+The stricter rules of accepting a new one (created_at strictly newer, a new
+nonce) are the caller's: equal is the stored credential opened again.
+*/
+func OpenWrite(priv, pub *[32]byte, ciphertext []byte, deviceID int64, lastAccepted, now time.Time) (Credential, error) {
+	return open(priv, pub, ciphertext, devices.Owner{Kind: devices.OwnerDevice, ID: deviceID}, KindSSHWrite, lastAccepted, now)
+}
+
+func open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind string, lastAccepted, now time.Time) (Credential, error) {
 	pt, ok := box.OpenAnonymous(nil, ciphertext, pub, priv)
 	if !ok {
 		return Credential{}, ErrUndecryptable
@@ -46,7 +66,8 @@ func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind strin
 	if err != nil || createdAt.After(now.Add(maxSkew)) {
 		return Credential{}, ErrMalformed
 	}
-	if n, err := base64.StdEncoding.DecodeString(env.Nonce); err != nil || len(n) != nonceLen {
+	nonce, err := base64.StdEncoding.DecodeString(env.Nonce)
+	if err != nil || len(nonce) != nonceLen {
 		return Credential{}, ErrMalformed
 	}
 	if owner != want {
@@ -58,7 +79,7 @@ func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind strin
 	if createdAt.Before(lastAccepted) {
 		return Credential{}, ErrStale
 	}
-	c := Credential{Kind: env.Kind, Owner: owner, CreatedAt: createdAt}
+	c := Credential{Kind: env.Kind, Owner: owner, CreatedAt: createdAt, Nonce: nonce}
 	if err := c.fill(env.Secret); err != nil {
 		return Credential{}, err
 	}
@@ -66,7 +87,7 @@ func Open(priv, pub *[32]byte, ciphertext []byte, want devices.Owner, kind strin
 }
 
 func validKind(k string) bool {
-	return k == KindSNMP2c || k == KindSNMP3 || k == KindSSHRead || k == KindTelnet
+	return k == KindSNMP2c || k == KindSNMP3 || k == KindSSHRead || k == KindTelnet || k == KindSSHWrite
 }
 
 /* decodeStrict rejects unknown fields and trailing data. */
@@ -141,7 +162,7 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		}
 		c.User, c.AuthProto, c.PrivProto = *s.User, *s.AuthProto, *s.PrivProto
 		c.AuthKey, c.PrivKey = secret.New(*s.AuthKey), secret.New(*s.PrivKey)
-	default: /* ssh_read, telnet_read */
+	default: /* ssh_read, telnet_read, ssh_write */
 		var s loginSecret
 		if decodeStrict(raw, &s) != nil || !okStr(s.Username, maxUsername) {
 			return ErrMalformed
@@ -149,7 +170,7 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		hasPw := s.Password != nil && *s.Password != ""
 		hasKey := s.PrivateKey != nil && *s.PrivateKey != ""
 		if s.Password != nil && !hasPw || s.PrivateKey != nil && !hasKey || hasPw == hasKey ||
-			(hasKey && c.Kind != KindSSHRead) {
+			(hasKey && c.Kind != KindSSHRead && c.Kind != KindSSHWrite) {
 			return ErrMalformed
 		}
 		if hasPw && !okStr(s.Password, maxField) {
@@ -160,8 +181,14 @@ func (c *Credential) fill(raw json.RawMessage) error {
 			if len(*s.PrivateKey) > maxPrivateKey || !clean(*s.PrivateKey, true) {
 				return ErrMalformed
 			}
-			if _, err := ssh.ParseRawPrivateKey([]byte(*s.PrivateKey)); err != nil {
+			k, err := ssh.ParseRawPrivateKey([]byte(*s.PrivateKey))
+			if err != nil {
 				return ErrMalformed
+			}
+			if c.Kind == KindSSHWrite {
+				if c.KeyType, err = writeKeyType(k); err != nil {
+					return err
+				}
 			}
 		}
 		if hasPw && short(*s.Password, minPassword) {
@@ -175,4 +202,20 @@ func (c *Credential) fill(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+/* writeKeyType is the SSH algorithm of a write key; DSA and RSA below minRSABits are weak. */
+func writeKeyType(k any) (string, error) {
+	if r, ok := k.(*rsa.PrivateKey); ok && r.N.BitLen() < minRSABits {
+		return "", ErrWeak
+	}
+	signer, err := ssh.NewSignerFromKey(k)
+	if err != nil {
+		return "", ErrMalformed
+	}
+	t := signer.PublicKey().Type()
+	if t == "ssh-dss" {
+		return "", ErrWeak
+	}
+	return t, nil
 }

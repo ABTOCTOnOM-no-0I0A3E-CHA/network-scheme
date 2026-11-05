@@ -1,0 +1,39 @@
+## source: docs [R §2b] (configure terminal, write startup-config, set cli pagination off)
+<<< sw10-lab-01#
+>>> set cli pagination off
+<<< sw10-lab-01#
+>>> set cli prompt off
+<<< sw10-lab-01#
+>>> configure
+% Incomplete Command
+<<< sw10-lab-01#
+>>> configure terminal
+<<< sw10-lab-01(config)#
+>>> interface gigabitethernet 0/2
+<<< sw10-lab-01(config-if)#
+>>> no shutdown
+<<< sw10-lab-01(config-if)#
+>>> end
+<<< sw10-lab-01#
+>>> write startup-config
+Copy operation completed successfully
+<<< sw10-lab-01#
+>>> show startup-config
+!
+hostname sw10-lab-01
+username admin password sha512 $6$abcdefgh$0000000000000000000000000000000000000000 privilege 15
+!
+vlan 99
+ name mgmt
+!
+interface gigabitethernet 0/1
+ description uplink
+ switchport mode trunk
+!
+interface gigabitethernet 0/2
+!
+interface vlan 99
+ ip address 192.0.2.20 255.255.255.0
+!
+ssh enable
+<<< sw10-lab-01#

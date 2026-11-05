@@ -1,0 +1,66 @@
+# Eltex ESR, firmware 1.24-1.28 CLI as documented. Every entry says where it comes from:
+#   docs [R §N]        .superpowers/research/eltex-cli.md, section N (official manuals unless the section says secondary)
+#   device <model/fw>  captured from a real device (see ../README.md)
+#   guess …            not documented; replace with a device capture
+line: esr
+model: ESR-1000, firmware 1.24-1.28 (documentation only)
+source: "docs [R §0]"
+hostname: {text: esr, source: "docs [R §5]"}
+banner: {text: "", source: "guess [R §4] (banner login/exec is configuration; none by default)"}
+prompts:
+  exec: {text: "{host}>", source: "docs [R §5]"}
+  privileged: {text: "{host}#", source: "docs [R §5]"}
+  config: {text: "{host}(config)#", source: "docs [R §5]"}
+  context: {text: "{host}({ctx})#", source: "docs [R §5]"}
+contexts:
+  - {match: '^interface gigabitethernet \S+$', mode: config-if-gi, source: "docs [R §5]"}
+  - {match: '^interface tengigabitethernet \S+$', mode: config-if-te, source: "guess [R §5] (by analogy with config-if-gi)"}
+  - {match: '^username \S+$', mode: config-user, source: "docs [R §3]"}
+  - {match: '^line ssh$', mode: config-line-ssh, source: "docs [R §5]"}
+  - {match: '^line console$', mode: config-line-console, source: "guess [R §5] (by analogy with config-line-ssh)"}
+  - {match: '^archive$', mode: config-archive, source: "docs [R §1]"}
+  - {match: '^snmp-server user \S+$', mode: config-snmp-user, source: "docs [R §5]"}
+config:
+  indent: {text: "  ", source: "guess [R §1] (two spaces, as in documented examples)"}
+  exit: {text: exit, source: "docs [R §5]"}
+  exit_indent: parent
+  comment: {text: "#", source: "guess [R §1] (\"#!/usr/bin/clish\" header)"}
+pager:
+  prompt: {text: "More? Enter – next line; Space – next page; Q – quit; R – show the rest.", source: "docs [R §5]"}
+  lines: 24
+  erase: {text: "\r                                                                          \r", source: "guess [R §5]"}
+errors:
+  unknown: {text: "% Unrecognized command", source: "guess [R §5] (parser errors are not documented for ESR)"}
+  incomplete: {text: "% Incomplete command", source: "guess [R §5]"}
+  invalid: {text: "% Invalid input", source: "guess [R §5]"}
+confirm:
+  reload: {text: "Do you really want to reload system ? (y/N):", source: "docs [R §5]"}
+messages:
+  commit: {text: "Configuration has been successfully applied and saved to flash. Commit timer started, changes will be reverted in {timeout} seconds.", source: "guess [R §1] (documented up to \"changes will be\")"}
+  commit_failed: {text: "Can't commit configuration", source: "docs [R §1] (secondary, Netmiko)"}
+  confirm: {text: "Configuration has been confirmed. Commit timer canceled.", source: "docs [R §1]"}
+  nothing_to_confirm: {text: "Nothing to confirm in configuration", source: "docs [R §1] (secondary, Netmiko)"}
+  restore: {text: "Reversion to the last confirmed configuration is completed.", source: "docs [R §1] (EN 1.8.2)"}
+  no_backup: {text: "Can't find backup of previous configuration!", source: "docs [R §1] (secondary, Netmiko)"}
+  rollback: {text: "All uncommitted changes have been reverted.", source: "guess [R §1] (translated from the Russian manual)"}
+  save: {text: "Configuration has been successfully saved to flash.", source: "guess [R §1] (translated from the Russian manual)"}
+  copy_done: {text: "", source: "guess [R §1]"}
+login:
+  user: {text: "User Name:", source: "docs [R §4]"}
+  password: {text: "Password:", source: "docs [R §4]"}
+  failed: {text: "% Authentication failed", source: "guess [R §4]"}
+  expired: {text: "Your password has expired. You must change it now.", source: "guess [R §4] (mode CHANGE-EXPIRED-PASSWORD is documented, its text is not)"}
+  new_password: {text: "New password:", source: "guess [R §4]"}
+syslog:
+  pattern: {text: '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d [+-]\d\d:\d\d %[A-Z0-9_]+-[A-Z]-', source: "guess [R §5]"}
+  stamp: {text: "2006-01-02T15:04:05 -07:00", source: "guess [R §5]"}
+ssh:
+  host_key: rsa
+  kex: [ecdh-sha2-nistp256, ecdh-sha2-nistp384, ecdh-sha2-nistp521, diffie-hellman-group14-sha1]
+  ciphers: [aes128-ctr, aes192-ctr, aes256-ctr]
+  auth: [password]
+  source: "docs [R §4] (no curve25519, no gcm/chacha; the password method is a guess)"
+defaults:
+  confirm_timeout: {text: "600", source: "docs [R §1]"}
+  confirm_timeout_min: {text: "120", source: "docs [R §1]"}
+  confirm_timeout_max: {text: "86400", source: "docs [R §1]"}

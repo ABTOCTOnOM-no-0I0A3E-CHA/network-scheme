@@ -1,0 +1,10 @@
+## source: docs [R §5] (privilege 1 lands in EXEC; enable)
+## privilege: 1
+<<< sw-lab-01>
+>>> configure
+% Unrecognized command
+<<< sw-lab-01>
+>>> enable
+<<< sw-lab-01#
+>>> disable
+<<< sw-lab-01>

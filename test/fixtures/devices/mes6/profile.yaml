@@ -1,0 +1,57 @@
+# Eltex MES23xx/33xx/35xx/53xx/54xx/5500, firmware 6.x CLI as documented. Every entry says where it comes from:
+#   docs [R §N]        .superpowers/research/eltex-cli.md, section N (official manuals unless the section says secondary)
+#   device <model/fw>  captured from a real device (see ../README.md)
+#   guess …            not documented; replace with a device capture
+line: mes6
+model: MES2324, firmware 6.6.x (documentation only)
+source: "docs [R §0]"
+hostname: {text: console, source: "docs [R §5]"}
+banner: {text: "", source: "guess [R §4]"}
+prompts:
+  exec: {text: "{host}>", source: "docs [R §5]"}
+  privileged: {text: "{host}#", source: "docs [R §5]"}
+  config: {text: "{host}(config)#", source: "docs [R §5]"}
+  context: {text: "{host}({ctx})#", source: "docs [R §5]"}
+contexts:
+  - {match: '^interface (gigabitethernet|tengigabitethernet|port-channel|vlan|oob) ?\S+$', mode: config-if, source: "docs [R §5]"}
+  - {match: '^interface range \S.*$', mode: config-if-range, source: "guess [R §5]"}
+  - {match: '^vlan database$', mode: config-vlan, source: "docs [R §5]"}
+  - {match: '^line (console|telnet|ssh)$', mode: config-line, source: "docs [R §5]"}
+  - {match: '^crypto key pubkey-chain ssh$', mode: config-pubkey-chain, source: "docs [R §5]"}
+  - {match: '^user-key \S+ (rsa|dsa)$', mode: config-pubkey-key, source: "docs [R §5]"}
+config:
+  indent: {text: " ", source: "guess [R §2a] (one space)"}
+  exit: {text: exit, source: "docs [R §5]"}
+  exit_indent: parent
+  comment: {text: "!", source: "guess [R §2a]"}
+pager:
+  prompt: {text: "More: <space>,  Quit: q or CTRL+Z, One line: <return> ", source: "docs [R §5]"}
+  lines: 24
+  erase: {text: "\r                                                        \r", source: "guess [R §5]"}
+errors:
+  unknown: {text: "% Unrecognized command", source: "docs [R §5] (secondary, blog and forum)"}
+  incomplete: {text: "% Incomplete command", source: "guess [R §5] (Cisco SMB analogy)"}
+  invalid: {text: "% Wrong number of parameters or invalid range, size or characters entered", source: "guess [R §5] (Cisco SMB analogy)"}
+confirm:
+  write: {text: "Overwrite file [startup-config].... (Y/N)[N] ?", source: "docs [R §2a]"}
+  delete: {text: "Delete {file}? [confirm]", source: "docs [R §2a]"}
+  reload: {text: "This command will reset the whole system and disconnect your current session. Do you want to continue (y/n) [n]?", source: "docs [R §5] (reload; asked for \"reload in\" too: guess)"}
+messages:
+  copy_done: {text: "Copy succeeded", source: "docs [R §2a] (secondary, blog)"}
+login:
+  user: {text: "User Name:", source: "docs [R §4] (in-band login inside the channel is itself a guess)"}
+  password: {text: "Password:", source: "docs [R §4]"}
+  failed: {text: "% Authentication failed", source: "guess [R §4]"}
+  expired: {text: "Your password has expired. Please change it now.", source: "guess [R §4] (passwords aging 180 days by default; the text is not documented)"}
+  new_password: {text: "Enter new password:", source: "guess [R §4]"}
+syslog:
+  pattern: {text: '^\d{2}-\w{3}-\d{4} \d\d:\d\d:\d\d %[A-Z0-9_]+-[A-Z]-', source: "docs [R §5]"}
+  stamp: {text: "02-Jan-2006 15:04:05", source: "docs [R §5]"}
+  copy_start: {text: "%COPY-I-FILECPY: Files Copy - source URL running-config destination URL flash://startup-config", source: "docs [R §5]"}
+  copy_done: {text: "%COPY-N-TRAP: The copy operation was completed successfully", source: "docs [R §2a]"}
+ssh:
+  host_key: rsa
+  host_key_algorithms: [ssh-rsa]
+  auth: [password, keyboard-interactive]
+  source: "docs [R §4] (RSA/DSA host keys only; SHA-1 \"ssh-rsa\" only and keyboard-interactive are the pessimistic guesses of [R §4])"
+defaults: {}

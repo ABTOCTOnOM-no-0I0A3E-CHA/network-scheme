@@ -150,6 +150,14 @@ func TestVerifiedFlag(t *testing.T) {
 	}
 }
 
+/* Ruling Q4 [R §3]: "show running-config" needs level 10, which already configures; ESR is one line. */
+func TestConfigNeedsWrite(t *testing.T) {
+	d := eltexesr.New()
+	if !d.ConfigNeedsWrite() || !drivers.ForIdentity(d, drivers.Identity{Model: "ESR-20", Firmware: "1.24.0"}).ConfigNeedsWrite() {
+		t.Fatal("ESR configuration read must need a write account")
+	}
+}
+
 func TestESRPortKinds(t *testing.T) {
 	inv, err := eltexesr.New().Inventory(ctx(t), reader(t), nil)
 	if err != nil {

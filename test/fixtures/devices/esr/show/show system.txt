@@ -1,0 +1,7 @@
+System type:           Eltex ESR-1000 Service Router
+System name:           esr-lab-01
+Software version:      1.23.3 build 3 (date 27/03/2024 time 21:13:26)
+Hardware version:      2v1
+System uptime:         21 days, 7 hours, 12 minutes and 40 seconds
+System MAC address:    e8:28:c1:00:00:12
+System serial number:  NP00000012
