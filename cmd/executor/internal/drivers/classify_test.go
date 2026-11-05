@@ -296,7 +296,7 @@ func TestNamesCappedBeforeAllocation(t *testing.T) {
 	if _, ok := vl.Names("1-4094,1-4094", core.MaxTargets); ok {
 		t.Fatal("vlan list over the limit resolved")
 	}
-	if a := testing.AllocsPerRun(20, func() { rng.Names(big, core.MaxTargets) }); a > 16 {
+	if a := testing.AllocsPerRun(20, func() { rng.Names(big, core.MaxTargets) }); a > 16 && !raceEnabled {
 		t.Fatalf("Names allocates %v times for a refused range", a)
 	}
 	if ns, ok := rng.Names("gi1/0/1-3,1/0/7", 10); !ok || !slices.Equal(ns, []string{"gigabitethernet1/0/1", "gigabitethernet1/0/2", "gigabitethernet1/0/3", "gigabitethernet1/0/7"}) {
