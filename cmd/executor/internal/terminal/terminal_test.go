@@ -115,27 +115,49 @@ type fx struct {
 	flows  []core.Verdict           /* the control lines handed to Typed */
 }
 
-/* recorder keeps what the terminal records. */
+/* recorder keeps what the terminal records; with fail set every call fails. */
 type recorder struct {
-	mu      sync.Mutex
-	in, out []string
+	mu             sync.Mutex
+	in, out, marks []string
+	fail           error
 }
 
-func (r *recorder) Input(_ context.Context, _ *session.Session, _ int64, l string) {
+func (r *recorder) RecordInput(_ context.Context, _ *session.Session, _ int64, l string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.fail != nil {
+		return r.fail
+	}
 	r.in = append(r.in, l)
+	return nil
 }
 
-func (r *recorder) Output(_ context.Context, _ *session.Session, _ int64, t string) {
+func (r *recorder) RecordOutput(_ context.Context, _ *session.Session, _ int64, t string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.fail != nil {
+		return r.fail
+	}
 	r.out = append(r.out, t)
+	return nil
+}
+
+func (r *recorder) RecordMark(_ context.Context, _ *session.Session, _ int64, l string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail != nil {
+		return r.fail
+	}
+	r.marks = append(r.marks, l)
+	return nil
 }
 
 func (f *fx) now() time.Time { return f.start.Add(time.Duration(f.offset.Load())) }
 
-func newFx(t *testing.T) *fx {
+func newFx(t *testing.T) *fx { return newFxWith(t, nil) }
+
+/* newFxWith is newFx whose terminal records with rec (nil: the fixture's recorder). */
+func newFxWith(t *testing.T, rec terminal.Recorder) *fx {
 	t.Helper()
 	env := testdb.New(t)
 	attacktest.Reset(t, env)
@@ -199,7 +221,10 @@ func newFx(t *testing.T) *fx {
 		f.flows = append(f.flows, v)
 		return session.Flow{Kind: "save"}, nil
 	}
-	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: f.cs, Record: f.rec, Typed: typed,
+	if rec == nil {
+		rec = f.rec
+	}
+	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: f.cs, Record: rec, Typed: typed,
 		Policy: f.pol.Current, Origin: f.srv.URL, Log: log, Now: f.now,
 		Name: func(_ context.Context, id int64) (string, error) { return f.names[id], nil }})
 	if err != nil {

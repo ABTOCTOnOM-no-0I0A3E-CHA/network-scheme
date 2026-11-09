@@ -39,6 +39,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/netguard"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/recording"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
@@ -170,8 +171,15 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer clear(bpriv[:])
-	sessions := session.New(session.Config{Gate: guard, Auth: az, Policy: pol.Current, Pool: pool, MAC: keys.MAC(), Net: ng,
-		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, BackupPriv: bpriv, BackupPub: bpub, Log: log})
+	/* Every device of a session is recorded (masked, sealed to the backup domain) and replayed only here, by audit-read + TOTP. */
+	var sessions *session.Manager
+	recs, err := recording.New(recording.Config{Pool: pool, MAC: keys.MAC(), Pub: bpub, Priv: bpriv, Clean: terminal.Clean,
+		Policy: pol.Current, Live: func(id [16]byte) bool { return sessions.Live(id) }, Alert: publisher.Alert, Audit: az.Record, Log: log})
+	if err != nil {
+		return err
+	}
+	sessions = session.New(session.Config{Gate: guard, Auth: az, Policy: pol.Current, Pool: pool, MAC: keys.MAC(), Net: ng,
+		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, BackupPriv: bpriv, BackupPub: bpub, Recordings: recs, Log: log})
 	actions := map[string]web.Action{}
 	for name, a := range devs.Actions() {
 		actions[name] = web.Action(a)
@@ -180,12 +188,16 @@ func serve(ctx context.Context, cfg config.Config) error {
 	actions[session.RollbackAction] = web.Action{Describe: sessions.DescribeRollback, Run: sessions.RunRollback}
 	confirms := confirm.New(az, nil)
 	term, err := terminal.New(terminal.Config{Sessions: sessions, Gate: guard, Auth: az, Confirm: confirms, Policy: pol.Current,
-		Origin: cfg.ExecutorOrigin, Log: log, Typed: sessions.Typed, Name: func(ctx context.Context, id int64) (string, error) {
+		Origin: cfg.ExecutorOrigin, Log: log, Typed: sessions.Typed, Record: sessions, Name: func(ctx context.Context, id int64) (string, error) {
 			p, _, err := devs.Panel(ctx, id)
 			return p.Name, err
 		}})
 	if err != nil {
 		return err
+	}
+	reads := map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())}
+	for p, r := range recs.Reads() {
+		reads[p] = web.Read(r)
 	}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
@@ -193,7 +205,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirms, Log: log, Terminal: term.Serve,
-		Actions: actions, Reads: map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())},
+		Actions: actions, Reads: reads,
 		Sessions: &web.Sessions{
 			Open: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {
 				return sessions.Open(ctx, req, ids)

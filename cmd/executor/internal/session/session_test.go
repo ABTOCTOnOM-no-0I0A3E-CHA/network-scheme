@@ -34,9 +34,11 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/recording"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/terminal"
 	"github.com/beekamai/network-scheme/internal/creds"
 	"github.com/beekamai/network-scheme/internal/drivers/eltexmes"
 	"github.com/beekamai/network-scheme/internal/execadmin"
@@ -93,7 +95,8 @@ type fx struct {
 	offset atomic.Int64
 	start  time.Time
 	bpub   *[32]byte /* the backup domain: the pre-session envelopes */
-	users  string    /* ESR: what show users lists (under mu) */
+	rec    *recording.Store
+	users  string /* ESR: what show users lists (under mu) */
 	noDial atomic.Bool
 }
 
@@ -216,8 +219,13 @@ func newLineFx(t *testing.T, line string) *fx {
 	f.locks = &backups.Locks{}
 	sched := backups.New(backups.Config{Registry: f.guard, Net: dialer{f}, Open: open, Pool: pool, BackupPub: bpub,
 		Locks: f.locks, Alert: f.pub.Alert, Log: log})
+	if f.rec, err = recording.New(recording.Config{Pool: pool, MAC: keys.MAC(), Pub: bpub, Priv: bpriv, Clean: terminal.Clean,
+		Policy: f.pol.Current, Live: func(id [16]byte) bool { return f.m.Live(id) }, Alert: f.pub.Alert, Audit: f.az.Record, Log: log,
+		Now: f.now}); err != nil {
+		t.Fatal(err)
+	}
 	f.cfg = session.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Pool: pool, MAC: keys.MAC(), Net: dialer{f},
-		Open: open, Backups: sched, Locks: f.locks, Pub: f.pub, Log: log, Now: f.now, BackupPriv: bpriv, BackupPub: bpub}
+		Open: open, Backups: sched, Locks: f.locks, Pub: f.pub, Log: log, Now: f.now, BackupPriv: bpriv, BackupPub: bpub, Recordings: f.rec}
 	f.m = session.New(f.cfg)
 	return f
 }
@@ -705,6 +713,12 @@ func TestRestartMidSession(t *testing.T) {
 	}
 	if err := restarted.Recover(ctx); err != nil || f.alerts(t, session.KindInterrupted) != 1 {
 		t.Fatal("a second start alerted again")
+	}
+	/* the recording the old process left open gets the marker of its loss and its manifest (4c.5) */
+	sid, _ := session.ParseID(o.ID)
+	r, err := f.rec.Replay(ctx, sid, f.id)
+	if err != nil || !strings.HasPrefix(r.Events[len(r.Events)-1].Data, "recording recovered after an executor restart") {
+		t.Fatalf("recovered recording: %v", err)
 	}
 }
 

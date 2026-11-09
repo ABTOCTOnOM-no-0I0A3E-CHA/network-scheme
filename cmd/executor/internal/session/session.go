@@ -60,6 +60,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/identify"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/recording"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/strategy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/transport"
@@ -112,6 +113,7 @@ const (
 	ErrChanged         Refusal = "config_changed"
 	ErrDevice          Refusal = "device_failed"
 	ErrNoSession       Refusal = "no_session"
+	ErrRecording       Refusal = "recording_failed" /* the device's recording could not start */
 )
 
 /* maxDevices bounds a request whatever the policy says. */
@@ -167,8 +169,10 @@ type Config struct {
 	Pub     Publisher
 	/* BackupPriv and BackupPub open the pre-session envelopes for a rollback (backup_key_file). */
 	BackupPriv, BackupPub *[32]byte
-	Log                   *slog.Logger
-	Now                   func() time.Time
+	/* Recordings records every device of a session (*recording.Store); without it no device opens. */
+	Recordings Recordings
+	Log        *slog.Logger
+	Now        func() time.Time
 }
 
 /* Manager holds the open sessions. */
@@ -231,6 +235,7 @@ type Device struct {
 	Pre     [32]byte        /* exec.session_device.pre_sha256 */
 
 	sh      *transport.Shell
+	rec     *recording.Stream /* the device's recording, from its open to its end */
 	lease   *backups.Lease
 	busy    bool
 	summary bool
@@ -608,6 +613,13 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		return d, ErrLineMismatch
 	}
 	d.Driver = drv
+	if m.cfg.Recordings == nil {
+		return d, ErrRecording
+	}
+	if d.rec, err = m.cfg.Recordings.Open(ctx, s.ID, id, s.Username, drv.MaskSecrets); err != nil {
+		m.cfg.Log.Error("session: recording not started", slog.Int64("device_id", id), slog.String("err", err.Error()))
+		return d, ErrRecording
+	}
 	rules, err := m.rules(ctx, d.Line, p, id)
 	if err != nil {
 		return d, err
@@ -890,7 +902,11 @@ func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[i
 			unconfirmed candidate. Either way the rollback is offered.
 		*/
 		keep := (why == "frozen" || why == "disabled") && d.Line != strategy.ESR
-		m.closeDevice(ctx, s, d, status, !lost[d.ID] && !keep)
+		label := "session ended: " + why
+		if lost[d.ID] {
+			label = "session interrupted: the connection to the device dropped"
+		}
+		m.closeDevice(ctx, s, d, status, !lost[d.ID] && !keep, label)
 	}
 	kind := "closed"
 	if why != "closed" && why != "timeout" && why != "aborted" {
@@ -902,8 +918,12 @@ func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[i
 		Details: map[string]any{"reason": why}})
 }
 
-/* closeDevice closes one device; reachable: its connection is up and the driver closes (the configuration after is read). */
-func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status string, reachable bool) {
+/*
+closeDevice closes one device; reachable: its connection is up and the
+driver closes (the configuration after is read). Its recording ends with
+label and its manifest.
+*/
+func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status string, reachable bool, label string) {
 	ctx, cancel := context.WithTimeout(ctx, closeTime)
 	defer cancel()
 	var post []byte
@@ -918,6 +938,11 @@ func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status
 	}
 	if d.sh != nil {
 		_ = d.sh.Close()
+	}
+	if d.rec != nil {
+		if err := d.rec.Close(ctx, label); err != nil {
+			m.cfg.Log.Error("session: recording not completed", slog.Int64("device_id", d.ID), slog.String("err", err.Error()))
+		}
 	}
 	if d.summary {
 		if err := m.cfg.Pub.SessionClosed(ctx, s.ID, d.ID, status, post); err != nil {

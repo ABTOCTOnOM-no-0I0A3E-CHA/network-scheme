@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -126,11 +127,16 @@ sha256(pre_dek_ct), computed by the database: the envelope never crosses
 the wire) and its end events'. Any row that fails raises a high tamper
 alert and counts as absent (a forged end event does not end a session).
 A session with a valid row and no valid end event ends as interrupted,
-with an alert per device (its pre-session snapshot stays for a rollback).
+with an alert per device (its pre-session snapshot stays for a rollback);
+first each device's recording is recovered (recording.Store.Recover: a
+marker of the loss and its manifest).
 Then every device_busy row and open summary of the previous process goes
 (pub.Publisher.Recover).
 */
 func (m *Manager) Recover(ctx context.Context) error {
+	if m.cfg.Recordings == nil {
+		return errors.New("session: no recordings")
+	}
 	var after [16]byte
 	bad := 0
 	for {
@@ -142,6 +148,12 @@ func (m *Manager) Recover(ctx context.Context) error {
 		for _, r := range page {
 			if r.ended {
 				continue
+			}
+			for _, d := range r.devs {
+				/* before the end event: a crash in between finds the session again, and the manifest */
+				if err := m.cfg.Recordings.Recover(ctx, r.id, d, r.opened); err != nil {
+					m.cfg.Log.Error("session: recording not recovered", slog.Int64("device_id", d), slog.String("err", err.Error()))
+				}
 			}
 			m.event(ctx, r.id, "interrupted", map[string]any{"reason": "restart"})
 			for _, d := range r.devs {

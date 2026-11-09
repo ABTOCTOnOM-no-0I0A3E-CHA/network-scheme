@@ -39,7 +39,8 @@ for paste_confirm, the text shown first (the server counts, not the
 client). A line that is not sent stops the rest of its frame. What is being
 typed when the connection ends is dropped. Device output is cleaned of
 every escape and control (clean), masked (MaskSecrets) and bounded in
-volume and rate.
+volume and rate. Every line is recorded (Recorder) before it is sent: a
+recording that fails or is full refuses the line, nothing goes unrecorded.
 */
 package terminal
 
@@ -110,24 +111,18 @@ type Confirmer interface {
 }
 
 /*
-Recorder is the session recording (4c.5): every line sent to a device and
-the device's answer, both already cleaned and masked (MaskSecrets).
+Recorder is the session recording (session.Manager, package recording):
+every line before it is sent (an error: the line is not sent), the device's
+whole answer and the confirmations, all already cleaned and masked
+(MaskSecrets; the recording masks again).
 */
 type Recorder interface {
-	Input(ctx context.Context, s *session.Session, deviceID int64, line string)
-	Output(ctx context.Context, s *session.Session, deviceID int64, text string)
+	RecordInput(ctx context.Context, s *session.Session, deviceID int64, line string) error
+	RecordOutput(ctx context.Context, s *session.Session, deviceID int64, text string) error
+	RecordMark(ctx context.Context, s *session.Session, deviceID int64, label string) error
 }
 
-/* Nop records nothing (until 4c.5). */
-type Nop struct{}
-
-/* Input does nothing. */
-func (Nop) Input(context.Context, *session.Session, int64, string) {}
-
-/* Output does nothing. */
-func (Nop) Output(context.Context, *session.Session, int64, string) {}
-
-/* Config builds a Terminal; every field but Record, Log and Now is required. */
+/* Config builds a Terminal; every field but Log and Now is required. */
 type Config struct {
 	Sessions Sessions
 	Gate     session.Gate /* *freeze.Guard: the registry and the freeze before every decision */
@@ -160,11 +155,8 @@ type Terminal struct {
 /* New returns a Terminal. */
 func New(c Config) (*Terminal, error) {
 	u, err := url.Parse(c.Origin)
-	if err != nil || u.Host == "" || c.Sessions == nil || c.Gate == nil || c.Auth == nil || c.Confirm == nil || c.Policy == nil || c.Name == nil {
+	if err != nil || u.Host == "" || c.Sessions == nil || c.Gate == nil || c.Auth == nil || c.Confirm == nil || c.Policy == nil || c.Name == nil || c.Record == nil {
 		return nil, errors.New("terminal: incomplete configuration")
-	}
-	if c.Record == nil {
-		c.Record = Nop{}
 	}
 	if c.Log == nil {
 		c.Log = slog.New(slog.DiscardHandler)
@@ -461,6 +453,16 @@ func (c *conn) handle(ctx context.Context, f frame) error {
 			c.edit(ctx)
 			return nil
 		}
+		if err := c.use(func(s *session.Session, d *session.Device) error {
+			return c.t.c.Record.RecordMark(ctx, s, d.ID, fmt.Sprintf("paste of %d lines confirmed", strings.Count(p, "\n")+1))
+		}); err != nil {
+			if errors.Is(err, errEnded) {
+				return err
+			}
+			c.refuse(ctx, code(err), nil)
+			c.edit(ctx)
+			return nil
+		}
 		return c.input(ctx, p, true)
 	case "resize":
 		if f.Cols < 1 || f.Cols > 1000 || f.Rows < 1 || f.Rows > 1000 {
@@ -646,17 +648,27 @@ func (c *conn) control(ctx context.Context, s *session.Session, d *session.Devic
 	_ = c.send(ctx, map[string]any{"type": "flow", "flow": f.Kind, "diff": f.Diff})
 }
 
-/* sendLine sends a classified line (within the hourly limit) and shows the device's cleaned, masked, bounded answer. */
+/*
+sendLine sends a classified line (within the hourly limit, recorded first:
+a recording that failed or is full refuses it) and shows the device's
+cleaned, masked, bounded answer. An answer that cannot be recorded stops
+the frame (the recording then refuses every further line).
+*/
 func (c *conn) sendLine(ctx context.Context, s *session.Session, d *session.Device, v core.Verdict) error {
 	if !c.t.lines.take(s.User, c.t.c.Policy().Policy.MaxConfigLinesPerHour, c.t.c.Now()) {
 		c.refuse(ctx, "line_limit", nil)
 		return errStop
 	}
-	c.t.c.Record.Input(ctx, s, d.ID, d.Driver.MaskSecrets(v.Line))
+	if err := c.t.c.Record.RecordInput(ctx, s, d.ID, d.Driver.MaskSecrets(v.Line)); err != nil {
+		c.t.c.Log.Warn("terminal: a line was not recorded, so not sent", slog.Int64("device", d.ID), slog.Any("err", err))
+		c.refuse(ctx, code(err), nil)
+		return errStop
+	}
 	out, err := d.Session.Send(ctx, v)
 	text := d.Driver.MaskSecrets(clean(strings.Join(append(append([]string(nil), out.Async...), out.Lines...), "\n")))
+	var recErr error
 	if text != "" {
-		c.t.c.Record.Output(ctx, s, d.ID, text) /* the whole answer: the browser's bounds below do not cut the recording */
+		recErr = c.t.c.Record.RecordOutput(ctx, s, d.ID, text+"\n") /* the whole answer: the browser's bounds below do not cut the recording */
 	}
 	limited := false
 	if len(text) > maxOutput {
@@ -668,6 +680,9 @@ func (c *conn) sendLine(ctx context.Context, s *session.Session, d *session.Devi
 	c.prompt = clean(out.State.Prompt)
 	_ = c.send(ctx, map[string]any{"type": "output", "sent": v.Line, "text": text, "limited": limited, "prompt": c.prompt})
 	switch {
+	case recErr != nil:
+		c.refuse(ctx, code(recErr), nil)
+		return errStop
 	case err == nil:
 		return nil
 	case errors.Is(err, transport.ErrDevice):
@@ -799,6 +814,10 @@ func (c *conn) confirm(ctx context.Context, f frame) error {
 		if v.Class != core.Dangerous || v.Line != field(p.ch.Description, "line") || d.Session.Mode().Name() != field(p.ch.Description, "mode") ||
 			tg != p.dev || tg.address != field(p.ch.Description, "address") {
 			c.refuse(ctx, "changed", nil)
+			return errStop
+		}
+		if err := c.t.c.Record.RecordMark(ctx, s, d.ID, "dangerous line confirmed (challenge "+p.ch.ID+")"); err != nil {
+			c.refuse(ctx, code(err), nil)
 			return errStop
 		}
 		return c.sendLine(ctx, s, d, v)

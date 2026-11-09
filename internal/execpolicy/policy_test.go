@@ -54,6 +54,8 @@ esr_commit_timer_s: 1200
 paste_confirm_lines: 1
 unmask_per_hour: 1
 mass_unmask_alert: 10000
+recording_max_mib: 64
+recording_views_per_hour: 1
 `
 	p, err = Parse([]byte(full))
 	if err != nil {

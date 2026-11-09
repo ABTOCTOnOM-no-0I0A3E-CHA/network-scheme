@@ -253,6 +253,25 @@ var trace = []struct {
 		{"cmd/executor/internal/terminal", "TestPreauthConnectionsAreBounded"},
 		{"cmd/executor/internal/terminal", "TestRecordingBeforeTheBrowserBounds"},
 	}},
+	{"C8", "the recording is the fact without secrets: input and output masked before anything is stored (also split across answers, chunks and blocks); the replay equals the emulator's journal and the shown output but for the masks; no known test secret in chunks, ciphertext, logs, audit or alerts (as is, base64, hex)", []ref{
+		{"cmd/executor/internal/terminal", "TestC8ReplayIsTheFactWithoutSecrets"},
+		{"cmd/executor/internal/recording", "TestC8RecordingHoldsNoSecret"},
+		{"internal/drivers/mask", "TestStreamKeepsBlocksAcrossPieces"},
+	}},
+	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert (unmask: 4d.1)", []ref{
+		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP"},
+		{"cmd/executor/internal/recording", "TestReplayRefusesTampering"},
+	}},
+	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
+		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
+		{"cmd/executor/internal/recording", "TestRecorderFailureIsFailClosed"},
+		{"cmd/executor/internal/recording", "TestVolumeLimit"},
+		{"cmd/executor/internal/recording", "TestChunkSizeBound"},
+		{"cmd/executor/internal/recording", "TestRecover"},
+		{"cmd/executor/internal/session", "TestSessionIsRecorded"},
+		{"cmd/executor/internal/session", "TestFormRefusedWhenTheRecordingFails"},
+		{"cmd/executor/internal/session", "TestRestartMidSession"},
+	}},
 }
 
 /*
@@ -326,7 +345,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "4a.7", "4c.2", "4c.3", "4c.4", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

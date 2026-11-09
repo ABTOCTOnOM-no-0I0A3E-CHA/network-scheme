@@ -13,7 +13,10 @@ control (C0 but '\n' and '\t', DEL, C1) and format character is dropped,
 and invalid UTF-8 becomes U+FFFD. The UI renders the result as text only;
 this keeps the device from driving the terminal or the clipboard at all.
 */
-func clean(s string) string {
+func clean(s string) string { return Clean(s) }
+
+/* Clean is clean for the session recording (it records and replays what the browser would get). */
+func Clean(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for len(s) > 0 {

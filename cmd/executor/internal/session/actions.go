@@ -169,6 +169,7 @@ func (m *Manager) Diff(ctx context.Context, id, token string) ([]DeviceDiff, err
 	var out []DeviceDiff
 	err := m.Use(id, token, func(s *Session) error {
 		for _, d := range s.Devices {
+			_ = m.RecordMark(ctx, s, d.ID, "diff") /* a read: its marker is not a condition */
 			dd, err := m.readDiff(ctx, d)
 			if err != nil {
 				return err
@@ -240,6 +241,13 @@ func (m *Manager) save(ctx context.Context, s *Session, device int64, sum string
 		sctx, cancel = context.WithTimeout(ctx, left)
 		defer cancel()
 	}
+	what := "save (startup configuration)"
+	if d.Line == strategy.ESR {
+		what = "confirm of the pending commit"
+	}
+	if err := m.RecordMark(ctx, s, d.ID, what); err != nil { /* the hash is in the session event (a marker would mask it) */
+		return DeviceDiff{}, err /* nothing changes the device unrecorded */
+	}
 	if err := d.Session.Save(sctx); err != nil {
 		if errors.Is(err, drivers.ErrNothingToConfirm) {
 			return DeviceDiff{}, ErrNothingToSave
@@ -300,6 +308,9 @@ func (m *Manager) commit(ctx context.Context, s *Session, d *Device) (DeviceDiff
 		return DeviceDiff{}, deviceRefusal(err)
 	}
 	timeout := time.Duration(m.cfg.Policy().Policy.ESRCommitTimerS) * time.Second
+	if err := m.RecordMark(ctx, s, d.ID, fmt.Sprintf("commit (confirm timer %d s)", int(timeout/time.Second))); err != nil {
+		return DeviceDiff{}, err
+	}
 	at := m.cfg.Now()
 	if err := d.Session.Commit(ctx, timeout); err != nil {
 		return DeviceDiff{}, err
@@ -320,6 +331,7 @@ func (m *Manager) commit(ctx context.Context, s *Session, d *Device) (DeviceDiff
 		if rs, ok := d.Session.(restorer); ok && rs.Restore(ctx) == nil {
 			d.pending = time.Time{}
 		}
+		_ = m.RecordMark(ctx, s, d.ID, "health check failed: the pending commit restored")
 		m.event(ctx, s.ID, "health_failed", map[string]any{"device_id": d.ID})
 		return DeviceDiff{}, ErrHealth
 	}
@@ -416,7 +428,11 @@ func (m *Manager) apply(ctx context.Context, s *Session, p formParams) (FormAppl
 	if err := m.allowed(ctx, d.ID); err != nil {
 		return FormApplied{}, err
 	}
-	sent, err := forms.Apply(ctx, d.Driver, d.Session, p.Form, p.Lines)
+	if err := m.RecordMark(ctx, s, d.ID, fmt.Sprintf("form %s: %d lines confirmed", p.Form.Kind, len(p.Lines))); err != nil {
+		return FormApplied{}, err
+	}
+	/* each line recorded before it is sent, as the terminal's */
+	sent, err := forms.Apply(ctx, d.Driver, recorded{Session: d.Session, m: m, s: s, d: d}, p.Form, p.Lines)
 	m.event(ctx, s.ID, "form", map[string]any{"device_id": d.ID, "kind": p.Form.Kind, "sent": sent})
 	switch {
 	case errors.Is(err, forms.ErrForm):
@@ -741,6 +757,11 @@ func (m *Manager) rollbackDevice(ctx context.Context, s *Session, d *Device, to 
 			return fail(deviceRefusal(err))
 		}
 	}
+	/*
+		Not a condition: the rollback restores the recorded pre-session state
+		and is in the executor's audit; an ended session's recording is closed.
+	*/
+	_ = m.RecordMark(ctx, s, d.ID, "rollback of the whole session to the pre-session snapshot")
 	if err := d.Session.Rollback(ctx, to); err != nil {
 		return fail(err)
 	}

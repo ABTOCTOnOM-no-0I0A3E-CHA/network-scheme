@@ -52,3 +52,9 @@ paste_confirm_lines: 5
 # the mass_unmask alert.
 unmask_per_hour: 10
 mass_unmask_alert: 20
+
+# Recording of a change session per device (MiB of masked text; when it is
+# reached the session refuses further lines, it never goes on unrecorded),
+# and replays of recordings per user and hour (more: refused, alert).
+recording_max_mib: 16
+recording_views_per_hour: 20
