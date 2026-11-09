@@ -14,14 +14,24 @@ look at the policy, the freeze and the device's registry row):
   - dangerous: never sent as typed. The executor shows Verdict.Line, the
     client asks for a challenge with a fresh ticket of the session's user
     (dangerous_issue: authz.Identify, then confirm.Store.Issue binding H to
-    the device's name and id, the line, the mode and the session), and the
-    line goes only after dangerous_confirm with that challenge, the device's
-    name typed exactly and a change TOTP code whose step is above the last
-    one (confirm + authz), when Classify still gives the same line;
+    the device's registry address, port and id from the verified
+    write_device row, its name, the line, the mode and the session), and
+    the line goes only after dangerous_confirm with that challenge, the
+    device's name typed exactly and a change TOTP code whose step is above
+    the last one (confirm + authz), when Classify still gives the same line
+    and the registry still gives the same address, port and write group;
   - control (save, commit, ...): the UI's buttons (4c.4), nothing is sent;
   - denied or refused: the reason, nothing is sent.
 
 Tab and '?' list the grammar's words (Complete) and never reach the device.
+RULING R8: the device's name comes from core.device (the api's data): it is
+shown and typed only as a guard against a mistaken device, never as what
+binds the confirmation; the registry's address, port and id in H do. A
+dropped, refused or abandoned dangerous line discards its challenge.
+
+At most maxPreauth connections, maxPreauthIP per client address, may wait
+for their auth frame (authTime), so unauthenticated clients cannot take the
+terminals of the session's users.
 A keys or paste frame with more than paste_confirm_lines line breaks waits
 for paste_confirm, the text shown first (the server counts, not the
 client). A line that is not sent stops the rest of its frame. What is being
@@ -40,6 +50,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -66,6 +77,8 @@ const LineAction = "session.line"
 /* Bounds; variables for the tests. */
 var (
 	maxConns                    = 32               /* open terminals of the executor */
+	maxPreauth                  = 8                /* of them, waiting for their auth frame ... */
+	maxPreauthIP                = 2                /* ... from one client address */
 	maxFrame              int64 = 64 << 10         /* bytes of one client frame */
 	authTime                    = 10 * time.Second /* until the first frame */
 	writeTime                   = 10 * time.Second
@@ -91,6 +104,7 @@ type Authorizer interface {
 type Confirmer interface {
 	Issue(user int64, need authz.Need, d confirm.Description) (confirm.Challenge, error)
 	Confirm(ctx context.Context, id string, h []byte, req authz.Request) (confirm.Challenge, authz.Decision, error)
+	Discard(id string)
 }
 
 /*
@@ -118,7 +132,7 @@ type Config struct {
 	Auth     Authorizer
 	Confirm  Confirmer
 	Policy   func() policy.State
-	/* Name is the device's name the user must type for a dangerous line (devices.Service.Panel: display only). */
+	/* Name is the device's name the user must type for a dangerous line (devices.Service.Panel: display and mistake guard only, R8). */
 	Name   func(ctx context.Context, deviceID int64) (string, error)
 	Origin string /* the executor origin: the only Origin accepted */
 	Record Recorder
@@ -132,9 +146,11 @@ type Terminal struct {
 	origin string /* host[:port] of the origin, for the upgrade's own check */
 	lines  lineLimit
 
-	mu    sync.Mutex
-	conns int
-	live  map[string]*conn /* session/device: the one connection */
+	mu      sync.Mutex
+	conns   int
+	preauth int              /* connections before their auth frame */
+	waiting map[string]int   /* of them, per client address */
+	live    map[string]*conn /* session/device: the one connection */
 }
 
 /* New returns a Terminal. */
@@ -152,7 +168,7 @@ func New(c Config) (*Terminal, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &Terminal{c: c, origin: u.Host, live: map[string]*conn{}, lines: lineLimit{users: map[int64]*[60]bucketMin{}}}, nil
+	return &Terminal{c: c, origin: u.Host, live: map[string]*conn{}, waiting: map[string]int{}, lines: lineLimit{users: map[int64]*[60]bucketMin{}}}, nil
 }
 
 func deny(w http.ResponseWriter, status int, code string) {
@@ -173,16 +189,31 @@ func (t *Terminal) Serve(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	t.mu.Lock()
-	full := t.conns >= maxConns
+	full := t.conns >= maxConns || t.preauth >= maxPreauth || t.waiting[ip] >= maxPreauthIP
 	if !full {
 		t.conns++
+		t.preauth++
+		t.waiting[ip]++
 	}
 	t.mu.Unlock()
 	if full {
 		deny(w, http.StatusServiceUnavailable, "too_many_terminals")
 		return
 	}
+	authed := false
+	authOver := func() {
+		t.mu.Lock()
+		if !authed {
+			authed = true
+			t.preauth--
+			if t.waiting[ip]--; t.waiting[ip] == 0 {
+				delete(t.waiting, ip)
+			}
+		}
+		t.mu.Unlock()
+	}
 	defer func() {
+		authOver()
 		t.mu.Lock()
 		t.conns--
 		t.mu.Unlock()
@@ -200,7 +231,7 @@ func (t *Terminal) Serve(w http.ResponseWriter, r *http.Request, ip string) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	now := time.Now() /* the rate buckets run on the monotonic clock */
-	c := &conn{t: t, ws: ws, ip: ip, ua: r.UserAgent(),
+	c := &conn{t: t, ws: ws, ip: ip, ua: r.UserAgent(), authOver: authOver,
 		frames: bucket{rate: frameRate, burst: frameBurst, tokens: frameBurst, last: now},
 		authz:  bucket{rate: authzRate, burst: authzBurst, tokens: authzBurst, last: now},
 		out:    bucket{rate: outRate, burst: outBurst, tokens: outBurst, last: now}}
@@ -231,12 +262,14 @@ type pending struct {
 	mode  string
 	ch    *confirm.Challenge
 	name  string
+	dev   target /* the registry's device the challenge was issued for */
 }
 
 type conn struct {
-	t      *Terminal
-	ws     *websocket.Conn
-	ip, ua string
+	t        *Terminal
+	ws       *websocket.Conn
+	ip, ua   string
+	authOver func() /* the auth frame was handled: no longer counted as waiting */
 	sid    string
 	token  string
 	dev    int64
@@ -308,6 +341,7 @@ func (c *conn) run(ctx context.Context, cancel context.CancelFunc) string {
 	if err != nil || f.Type != "auth" || f.SessionID == "" || len(f.Token) > 128 || f.DeviceID <= 0 {
 		return "auth"
 	}
+	defer c.dropDanger()
 	var line string
 	err = c.t.c.Sessions.Use(f.SessionID, f.Token, func(s *session.Session) error {
 		for _, d := range s.Devices {
@@ -322,6 +356,7 @@ func (c *conn) run(ctx context.Context, cancel context.CancelFunc) string {
 		_ = c.send(ctx, map[string]any{"type": "ended", "code": "no_session"})
 		return "no_session"
 	}
+	c.authOver()
 	c.sid, c.token, c.dev = f.SessionID, f.Token, f.DeviceID
 	k := key(c.sid, c.dev)
 	c.cancel = cancel
@@ -382,7 +417,8 @@ func (c *conn) handle(ctx context.Context, f frame) error {
 	case "keys", "paste":
 		if c.paste != nil || c.danger != nil {
 			if f.Type == "keys" && strings.ContainsRune(f.Data, 0x03) { /* Ctrl-C drops what waits */
-				c.paste, c.danger = nil, nil
+				c.paste = nil
+				c.dropDanger()
 				c.edit(ctx)
 			}
 			return nil
@@ -486,25 +522,46 @@ func (c *conn) complete(ctx context.Context, tab bool) error {
 	return c.send(ctx, map[string]any{"type": "help", "words": words})
 }
 
+/* dropDanger drops the pending dangerous line and discards its challenge, if one was issued. */
+func (c *conn) dropDanger() {
+	if c.danger != nil && c.danger.ch != nil {
+		c.t.c.Confirm.Discard(c.danger.ch.ID)
+	}
+	c.danger = nil
+}
+
+/* target is a device as the verified registry has it: what a dangerous line's H binds (R8) and the grant it needs. */
+type target struct {
+	address string /* address:port of the write_device row */
+	group   string
+}
+
 /*
 check looks again at what a decision on the device rests on: the policy
 enables the executor, the registry verifies and is not frozen, the device's
-write_device row is there with writes enabled. It returns its write group.
+write_device row is there with writes enabled. It returns its address, port
+and write group.
 */
-func (c *conn) check(ctx context.Context, dev int64) (string, error) {
+func (c *conn) check(ctx context.Context, dev int64) (target, error) {
 	if !c.t.c.Policy().Enabled() {
-		return "", authz.ErrDisabled
+		return target{}, authz.ErrDisabled
 	}
-	var group string
+	var tg target
 	err := c.t.c.Gate.View(ctx, func(s *registry.Snapshot) error {
 		r, ok := s.Get("write_device", dev)
 		if !ok || r.Get("writes_enabled") != true {
 			return session.ErrWritesDisabled
 		}
-		group, _ = r.Get("write_group").(string)
+		a, _ := r.Get("address").(netip.Addr)
+		p, _ := r.Get("port").(int64)
+		if !a.IsValid() || p < 1 || p > 65535 {
+			return session.ErrWritesDisabled
+		}
+		tg.address = netip.AddrPortFrom(a, uint16(p)).String() // #nosec G115 -- checked above
+		tg.group, _ = r.Get("write_group").(string)
 		return nil
 	})
-	return group, err
+	return tg, err
 }
 
 /* code is the client's code of a refusal (authz, confirm, session or the gate). */
@@ -559,18 +616,18 @@ func (c *conn) sendLine(ctx context.Context, s *session.Session, d *session.Devi
 		c.refuse(ctx, "line_limit", nil)
 		return errStop
 	}
-	out, err := d.Session.Send(ctx, v)
 	c.t.c.Record.Input(ctx, s, d.ID, d.Driver.MaskSecrets(v.Line))
+	out, err := d.Session.Send(ctx, v)
 	text := d.Driver.MaskSecrets(clean(strings.Join(append(append([]string(nil), out.Async...), out.Lines...), "\n")))
+	if text != "" {
+		c.t.c.Record.Output(ctx, s, d.ID, text) /* the whole answer: the browser's bounds below do not cut the recording */
+	}
 	limited := false
 	if len(text) > maxOutput {
 		text, limited = text[:maxOutput], true
 	}
 	if !c.out.take(float64(len(text)), time.Now()) {
 		text, limited = "", true
-	}
-	if text != "" {
-		c.t.c.Record.Output(ctx, s, d.ID, text)
 	}
 	c.prompt = clean(out.State.Prompt)
 	_ = c.send(ctx, map[string]any{"type": "output", "sent": v.Line, "text": text, "limited": limited, "prompt": c.prompt})
@@ -619,7 +676,7 @@ func (c *conn) issue(ctx context.Context, f frame) error {
 			c.refuse(ctx, code, nil)
 			return nil
 		}
-		group, err := c.check(ctx, d.ID)
+		tg, err := c.check(ctx, d.ID)
 		if err != nil {
 			return fail(code(err))
 		}
@@ -635,14 +692,14 @@ func (c *conn) issue(ctx context.Context, f frame) error {
 		if err != nil || name == "" {
 			return fail("no_device_name")
 		}
-		desc := confirm.Description{Action: LineAction, Fields: []confirm.Field{
+		desc := confirm.Description{Action: LineAction, Fields: []confirm.Field{{Key: "address", Value: tg.address},
 			{Key: "device", Value: name}, {Key: "device_id", Value: strconv.FormatInt(d.ID, 10)}, {Key: "line", Value: p.v.Line},
 			{Key: "mode", Value: p.mode}, {Key: "session", Value: session.IDString(s.ID)}}}
-		ch, err := c.t.c.Confirm.Issue(by.UserID, authz.Need{Kind: execadmin.KindWrite, Groups: []string{group}}, desc)
+		ch, err := c.t.c.Confirm.Issue(by.UserID, authz.Need{Kind: execadmin.KindWrite, Groups: []string{tg.group}}, desc)
 		if err != nil {
 			return fail(code(err))
 		}
-		p.ch, p.name = &ch, name
+		p.ch, p.name, p.dev = &ch, name, tg
 		fields := make([]map[string]string, 0, len(desc.Fields))
 		for _, f := range desc.Fields {
 			fields = append(fields, map[string]string{"key": f.Key, "value": f.Value})
@@ -657,15 +714,24 @@ confirm sends the pending dangerous line after its confirmation: the
 challenge it was issued, the device's name typed exactly, then confirm +
 authz (ticket, change TOTP above the last step, the write grant), then a
 fresh look at the gate and Classify giving the line H covers, in the mode H
-covers. Any outcome spends the pending line; nothing is retried.
+covers, for the registry's same address, port and write group (a device
+moved to another group was authorized for the old one: changed). Any
+outcome spends the pending line and its challenge; nothing is retried.
 */
 func (c *conn) confirm(ctx context.Context, f frame) error {
 	p := c.danger
-	c.danger = nil
 	if p == nil || p.ch == nil || f.ChallengeID != p.ch.ID {
+		c.dropDanger()
 		c.refuse(ctx, "nothing_pending", nil)
 		return nil
 	}
+	c.danger = nil
+	spent := false
+	defer func() {
+		if !spent {
+			c.t.c.Confirm.Discard(p.ch.ID)
+		}
+	}()
 	if f.DeviceName != p.name {
 		user := c.user
 		c.t.c.Auth.Record(ctx, audit.Event{UserID: &user, IP: c.ip, UA: c.ua, Action: "confirm." + LineAction, Object: "challenge",
@@ -678,6 +744,7 @@ func (c *conn) confirm(ctx context.Context, f frame) error {
 		return nil
 	}
 	return c.use(func(s *session.Session, d *session.Device) error {
+		spent = true
 		_, by, err := c.t.c.Confirm.Confirm(ctx, p.ch.ID, p.ch.H[:], authz.Request{Ticket: f.Ticket, Code: f.TOTP, IP: c.ip, UA: c.ua,
 			Object: "session:" + c.sid, Details: map[string]any{"device_id": d.ID}})
 		if err == nil && by.UserID != s.User {
@@ -687,12 +754,14 @@ func (c *conn) confirm(ctx context.Context, f frame) error {
 			c.refuse(ctx, code(err), nil)
 			return errStop
 		}
-		if _, err := c.check(ctx, d.ID); err != nil {
+		tg, err := c.check(ctx, d.ID)
+		if err != nil {
 			c.refuse(ctx, code(err), nil)
 			return errStop
 		}
 		v := d.Session.Classify(p.typed)
-		if v.Class != core.Dangerous || v.Line != field(p.ch.Description, "line") || d.Session.Mode().Name() != field(p.ch.Description, "mode") {
+		if v.Class != core.Dangerous || v.Line != field(p.ch.Description, "line") || d.Session.Mode().Name() != field(p.ch.Description, "mode") ||
+			tg != p.dev || tg.address != field(p.ch.Description, "address") {
 			c.refuse(ctx, "changed", nil)
 			return errStop
 		}

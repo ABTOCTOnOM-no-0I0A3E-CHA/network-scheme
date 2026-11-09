@@ -247,6 +247,17 @@ func (s *Store) Issue(user int64, need authz.Need, d Description) (Challenge, er
 }
 
 /*
+Discard drops challenge id unconfirmed (its line was dropped by the user,
+refused or its connection ended): it can no longer be confirmed and stops
+counting against the user's pending limit.
+*/
+func (s *Store) Discard(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, id)
+}
+
+/*
 Confirm runs the confirmation of challenge id with hash h: the challenge is
 spent by this attempt whatever its outcome (one-time), it must not have
 expired, h must be its H, and then authz decides req as the challenge's

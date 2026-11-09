@@ -109,6 +109,27 @@ type fx struct {
 	names  map[int64]string
 	srv    *httptest.Server
 	code   string /* the last code used */
+	cs     *confirm.Store
+	rec    *recorder
+	rows   map[int64]map[string]any /* the write_device rows */
+}
+
+/* recorder keeps what the terminal records. */
+type recorder struct {
+	mu      sync.Mutex
+	in, out []string
+}
+
+func (r *recorder) Input(_ context.Context, _ *session.Session, _ int64, l string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.in = append(r.in, l)
+}
+
+func (r *recorder) Output(_ context.Context, _ *session.Session, _ int64, t string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.out = append(r.out, t)
 }
 
 func (f *fx) now() time.Time { return f.start.Add(time.Duration(f.offset.Load())) }
@@ -122,7 +143,8 @@ func newFx(t *testing.T) *fx {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fx{env: env, start: time.Now(), terms: map[int64]*drvtest.Term{}, names: map[int64]string{}}
+	f := &fx{env: env, start: time.Now(), terms: map[int64]*drvtest.Term{}, names: map[int64]string{},
+		rec: &recorder{}, rows: map[int64]map[string]any{}}
 	pool := env.Pool("nms_executor")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := t.TempDir()
@@ -151,9 +173,10 @@ func newFx(t *testing.T) *fx {
 	}
 	s := &session.Session{ID: [16]byte{0x4c, 3}, User: f.u.id, Username: f.u.name, Opened: f.now()}
 	for i, l := range lines {
-		f.put(t, "write_device", map[string]any{"device_id": l.id, "address": netip.AddrFrom4([4]byte{192, 0, 2, byte(10 + i)}), "port": 22,
+		f.rows[l.id] = map[string]any{"device_id": l.id, "address": netip.AddrFrom4([4]byte{192, 0, 2, byte(10 + i)}), "port": 22,
 			"protocol": "ssh", "write_group": "core", "write_driver": l.name, "hostkey_algo": hk.Type(),
-			"hostkey_fp": gossh.FingerprintSHA256(hk), "allow_ssh_rsa_sha1": false, "writes_enabled": true, "backup_via_executor": false})
+			"hostkey_fp": gossh.FingerprintSHA256(hk), "allow_ssh_rsa_sha1": false, "writes_enabled": true, "backup_via_executor": false}
+		f.put(t, "write_device", f.rows[l.id])
 		tm := drvtest.New(t, strategy.Line(l.name))
 		a, ok1 := l.d.Targets("interface", l.mgmtIf)
 		b, ok2 := l.d.Targets("vlan", "99")
@@ -170,7 +193,8 @@ func newFx(t *testing.T) *fx {
 	}
 	f.ss = &sessions{s: s, token: "bearer-token-of-the-session"}
 	f.srv = httptest.NewServer(nil)
-	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: confirm.New(f.az, f.now),
+	f.cs = confirm.New(f.az, f.now)
+	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: f.cs, Record: f.rec,
 		Policy: f.pol.Current, Origin: f.srv.URL, Log: log, Now: f.now,
 		Name: func(_ context.Context, id int64) (string, error) { return f.names[id], nil }})
 	if err != nil {
@@ -478,7 +502,9 @@ func TestC4DangerousLineNeedsNameAndNewCode(t *testing.T) {
 			}
 			h, _ := d.Hash()
 			/* H covers what is shown: the normalized line (Verdict.Line, not the typed text), the device, the session */
+			/* R8: H binds the registry's address and port; the typed name only guards against a mistaken device */
 			if ch["h"] != hex.EncodeToString(h[:]) || fields["line"] != res[0]["line"] || fields["line"] == typed ||
+				fields["address"] != netip.AddrPortFrom(f.rows[l.id]["address"].(netip.Addr), 22).String() ||
 				fields["device"] != f.names[l.id] || fields["device_id"] != fmt.Sprint(l.id) || fields["session"] != session.IDString(f.ss.s.ID) {
 				t.Fatalf("%s: challenge %v for %v", l.name, ch, res[0])
 			}
