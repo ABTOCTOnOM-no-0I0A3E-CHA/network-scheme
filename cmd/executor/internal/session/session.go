@@ -165,8 +165,10 @@ type Config struct {
 	Backups Backups
 	Locks   *backups.Locks /* the scheduler's: one connection per device */
 	Pub     Publisher
-	Log     *slog.Logger
-	Now     func() time.Time
+	/* BackupPriv and BackupPub open the pre-session envelopes for a rollback (backup_key_file). */
+	BackupPriv, BackupPub *[32]byte
+	Log                   *slog.Logger
+	Now                   func() time.Time
 }
 
 /* Manager holds the open sessions. */
@@ -174,7 +176,9 @@ type Manager struct {
 	cfg      Config
 	mu       sync.Mutex
 	sessions map[[16]byte]*Session
-	stopped  bool /* Run has ended: no session registers any more */
+	/* interrupted are ended sessions with a device whose driver session was not closed: the rollback of 4c.4 */
+	interrupted map[[16]byte]*Session
+	stopped     bool /* Run has ended: no session registers any more */
 }
 
 /* New returns a manager. */
@@ -185,7 +189,7 @@ func New(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}}
+	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}}
 }
 
 /*
@@ -206,6 +210,7 @@ type Session struct {
 	idle    time.Duration
 	last    time.Time
 	ended   bool
+	endedAt time.Time
 }
 
 /* Device is one device of a session. */
@@ -220,6 +225,9 @@ type Device struct {
 	lease   *backups.Lease
 	busy    bool
 	summary bool
+	/* guarded by Session.mu */
+	pending time.Time /* ESR: the confirm timer's end of a commit not yet confirmed */
+	closed  bool      /* the driver session was closed */
 }
 
 /* Lock serializes the use of a session's devices (Unlock ends it). */
@@ -578,22 +586,7 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 	if err := m.insertDevice(ctx, s.ID, id, pre); err != nil {
 		return d, err
 	}
-	var c creds.Credential
-	if err := m.cfg.Gate.View(ctx, func(snap *registry.Snapshot) error {
-		if err := deviceAllowed(snap, id); err != nil {
-			return err
-		}
-		var err error
-		c, err = m.cfg.Open(snap, id)
-		return err
-	}); err != nil {
-		return d, err
-	}
-	d.sh, err = transport.Dial(ctx, transport.Config{DeviceID: id, Access: transport.Write, Registry: m.cfg.Gate, Net: m.cfg.Net,
-		Alert:      m.cfg.Pub.Alert,
-		Credential: transport.Credential{Username: c.Username, Password: c.Password, PrivateKey: c.PrivateKey}})
-	c.Wipe()
-	if err != nil {
+	if d.sh, err = m.dial(ctx, id, transport.Write); err != nil {
 		return d, err
 	}
 	d.Line = d.sh.Line()
@@ -623,6 +616,25 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		return d, ErrChanged /* the configuration changed between the snapshot and the session */
 	}
 	return d, nil
+}
+
+/* dial connects to device id with its write credential, after the registry allows it again. */
+func (m *Manager) dial(ctx context.Context, id int64, access transport.Access) (*transport.Shell, error) {
+	var c creds.Credential
+	if err := m.cfg.Gate.View(ctx, func(snap *registry.Snapshot) error {
+		if err := deviceAllowed(snap, id); err != nil {
+			return err
+		}
+		var err error
+		c, err = m.cfg.Open(snap, id)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	defer c.Wipe()
+	return transport.Dial(ctx, transport.Config{DeviceID: id, Access: access, Registry: m.cfg.Gate, Net: m.cfg.Net,
+		Alert:      m.cfg.Pub.Alert,
+		Credential: transport.Credential{Username: c.Username, Password: c.Password, PrivateKey: c.PrivateKey}})
 }
 
 /* mgmt reads the device's ARP and MAC tables (read allowlist) and builds the management context. */
@@ -843,11 +855,12 @@ func (m *Manager) finish(ctx context.Context, s *Session, why string, lost map[i
 		m.mu.Unlock()
 		return
 	}
-	s.ended = true
+	s.ended, s.endedAt = true, m.cfg.Now()
 	delete(m.sessions, s.ID)
 	m.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer m.keep(s)
 	ctx = context.WithoutCancel(ctx)
 	for _, d := range s.Devices {
 		status := StatusClosed
@@ -881,6 +894,7 @@ func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status
 	defer cancel()
 	var post []byte
 	if d.Session != nil && reachable {
+		d.closed = true
 		if err := d.Session.Close(ctx); err != nil {
 			m.cfg.Log.Warn("session: driver close failed", slog.Int64("device_id", d.ID), slog.String("err", err.Error()))
 		} else if out, err := d.sh.Run(ctx, ssh.ShowCommand{Name: "show running-config", LongOutput: true}); err == nil {
@@ -904,9 +918,41 @@ func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status
 	}
 	d.lease.Release()
 	if status == StatusInterrupted {
-		m.alert(ctx, KindInterrupted, "high", d.ID, fmt.Sprintf("change session %s on device %d was interrupted; "+
-			"a rollback to the pre-session snapshot is offered", IDString(s.ID), d.ID))
+		offer := "a rollback to the pre-session snapshot is offered"
+		if !d.pending.IsZero() && !d.closed {
+			/* ESR: the device reverts the unconfirmed commit by its own timer; the executor sends nothing (no confirm) */
+			offer = "the unconfirmed commit reverts by the device's timer at " + d.pending.UTC().Format(time.RFC3339) + "; no confirm is sent"
+		}
+		m.alert(ctx, KindInterrupted, "high", d.ID, fmt.Sprintf("change session %s on device %d was interrupted; %s", IDString(s.ID), d.ID, offer))
 	}
+}
+
+/* Bounds of the interrupted sessions kept for a rollback (variables for the tests). */
+var (
+	keepFor  = 24 * time.Hour
+	keepMost = 256
+)
+
+/* keep holds an ended session with a device whose driver session is still open (connection lost, freeze) for its rollback. */
+func (m *Manager) keep(s *Session) {
+	if !slices.ContainsFunc(s.Devices, func(d *Device) bool { return d.Session != nil && !d.closed }) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.cfg.Now()
+	var oldest *Session
+	for id, k := range m.interrupted {
+		if now.Sub(k.endedAt) >= keepFor {
+			delete(m.interrupted, id)
+		} else if oldest == nil || k.endedAt.Before(oldest.endedAt) {
+			oldest = k
+		}
+	}
+	if len(m.interrupted) >= keepMost && oldest != nil {
+		delete(m.interrupted, oldest.ID)
+	}
+	m.interrupted[s.ID] = s
 }
 
 /* done is closed when the device's connection is gone. */

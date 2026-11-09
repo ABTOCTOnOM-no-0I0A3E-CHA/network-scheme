@@ -449,9 +449,28 @@ func (s *Shell) setup(ctx context.Context) error {
 		}
 	}
 	if s.access == Write && s.line == strategy.ESR && s.set.Concurrency == "exclusive" {
-		return s.exclusive(ctx)
+		return s.exclusive(ctx, true)
 	}
 	return nil
+}
+
+/*
+Exclusive checks the ESR exclusivity again from the privileged prompt (4c:
+before commit and before confirm, since another session may have logged in
+after the open): this the only session in show users, and with empty also
+an empty candidate (before commit the candidate holds the session's own
+changes). Other lines, ReadOnly and concurrency "trust": nil.
+*/
+func (s *Shell) Exclusive(ctx context.Context, empty bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.access != Write || s.line != strategy.ESR || s.set.Concurrency != "exclusive" {
+		return nil
+	}
+	if s.st.Mode != ModePrivileged {
+		return fmt.Errorf("%w: not at the privileged prompt (%q)", ErrNotExclusive, s.st.Prompt)
+	}
+	return s.exclusive(ctx, empty)
 }
 
 /*
@@ -459,9 +478,10 @@ exclusive: this must be the only session on the ESR, and the shared
 candidate empty [R §8, §9.11]. Every non-blank line of show users but the
 header and separator lines is a session; exactly one is allowed, marked "*"
 (this one). It is a check at open only: another session may log in later,
-so 4c checks again before commit and confirm.
+so 4c checks again before commit and confirm (Exclusive). empty: the
+candidate must have no changes too.
 */
-func (s *Shell) exclusive(ctx context.Context) error {
+func (s *Shell) exclusive(ctx context.Context, empty bool) error {
 	users, err := s.exec(ctx, "show users", false)
 	if err != nil {
 		return fmt.Errorf("%w: show users: %w", ErrNotExclusive, err)
@@ -482,6 +502,9 @@ func (s *Shell) exclusive(ctx context.Context) error {
 	}
 	if m := s.set.UsersRow.FindStringSubmatch(rows[0]); m == nil || m[1] != "*" {
 		return fmt.Errorf("%w: the only session in show users is not this one", ErrNotExclusive)
+	}
+	if !empty {
+		return nil
 	}
 	ch, err := s.exec(ctx, "show configuration changes", false)
 	if err != nil {

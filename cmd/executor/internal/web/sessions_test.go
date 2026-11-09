@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,7 +24,7 @@ close takes only the bearer token (no token: 401); any other path under
 /x/sessions is 404.
 */
 func TestSessionRoutes(t *testing.T) {
-	var gotID, gotToken string
+	var gotID, gotToken, gotOp, gotParams string
 	var gotIDs []int64
 	h := start(t, func(c *Config) {
 		c.Sessions = &Sessions{
@@ -46,10 +47,19 @@ func TestSessionRoutes(t *testing.T) {
 				}
 				return nil
 			},
+			Act: func(_ context.Context, id, token, op string, params json.RawMessage) (any, error) {
+				gotID, gotToken, gotOp, gotParams = id, token, op, string(params)
+				if op == "save" {
+					return nil, refusalCode("diff_changed")
+				}
+				return op, nil
+			},
 		}
 	})
 	h.setEnabled(true)
-	want := []string{"POST /x/sessions", "POST /x/sessions/{id}/attach", "POST /x/sessions/{id}/extend", "POST /x/sessions/{id}/close"}
+	want := []string{"POST /x/sessions", "POST /x/sessions/{id}/attach", "POST /x/sessions/{id}/extend", "POST /x/sessions/{id}/close",
+		"POST /x/sessions/{id}/diff", "POST /x/sessions/{id}/save", "POST /x/sessions/{id}/commit", "POST /x/sessions/{id}/form",
+		"POST /x/sessions/{id}/form-apply"}
 	for _, r := range want {
 		if !slices.Contains(h.srv.Routes(), r) {
 			t.Errorf("route %s missing", r)
@@ -81,6 +91,20 @@ func TestSessionRoutes(t *testing.T) {
 	}
 	if a := do("/x/sessions/"+id+"/close", `{}`, "Authorization", "Bearer tok"); a.status != 200 || gotToken != "tok" {
 		t.Errorf("close: %d %s", a.status, gotToken)
+	}
+	/* the actions take the bearer token and hand their params on; a refusal is 422 with its code */
+	if a := do("/x/sessions/"+id+"/diff", `{}`); a.status != 401 {
+		t.Errorf("diff without a token: %d", a.status)
+	}
+	if a := do("/x/sessions/"+id+"/form-apply", `{"device_id":3}`, "Authorization", "Bearer tok"); a.status != 200 || gotOp != "form-apply" ||
+		gotParams != `{"device_id":3}` || gotToken != "tok" || gotID != id {
+		t.Errorf("form-apply: %d %s %s", a.status, gotOp, gotParams)
+	}
+	if a := do("/x/sessions/"+id+"/save", `{"device_id":3,"sha256":"x"}`, "Authorization", "Bearer tok"); a.status != 422 || a.code != "diff_changed" {
+		t.Errorf("save refusal: %d %s", a.status, a.code)
+	}
+	if a := do("/x/sessions/"+id+"/close", `{"x":1}`, "Authorization", "Bearer tok"); a.status != 400 {
+		t.Errorf("close with a body: %d", a.status)
 	}
 	for _, p := range []string{"/x/sessions/" + id, "/x/sessions/" + id + "/open", "/x/sessions/NOT-AN-ID/close", "/x/sessions/" + id + "/close/x"} {
 		if a := do(p, `{}`); a.status != 404 {

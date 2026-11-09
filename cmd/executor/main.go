@@ -164,16 +164,23 @@ func serve(ctx context.Context, cfg config.Config) error {
 	locks := &backups.Locks{}
 	sched := backups.New(backups.Config{Registry: guard, Net: ng, Open: wc.Open, Pool: pool, BackupPub: bpub,
 		Locks: locks, Alert: publisher.Alert, Enabled: func() bool { return pol.Current().Enabled() }, Log: log})
+	/* The change sessions open their pre-session snapshots for a rollback (4c.4): the backup domain's private key stays in memory. */
+	bpriv, err := nmsconfig.ReadKeyFile(cfg.BackupKeyFile)
+	if err != nil {
+		return err
+	}
+	defer clear(bpriv[:])
 	sessions := session.New(session.Config{Gate: guard, Auth: az, Policy: pol.Current, Pool: pool, MAC: keys.MAC(), Net: ng,
-		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, Log: log})
+		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, BackupPriv: bpriv, BackupPub: bpub, Log: log})
 	actions := map[string]web.Action{}
 	for name, a := range devs.Actions() {
 		actions[name] = web.Action(a)
 	}
 	actions[wcreds.Action] = web.Action{Describe: wc.Describe, Run: wc.Run}
+	actions[session.RollbackAction] = web.Action{Describe: sessions.DescribeRollback, Run: sessions.RunRollback}
 	confirms := confirm.New(az, nil)
 	term, err := terminal.New(terminal.Config{Sessions: sessions, Gate: guard, Auth: az, Confirm: confirms, Policy: pol.Current,
-		Origin: cfg.ExecutorOrigin, Log: log, Name: func(ctx context.Context, id int64) (string, error) {
+		Origin: cfg.ExecutorOrigin, Log: log, Typed: sessions.Typed, Name: func(ctx context.Context, id int64) (string, error) {
 			p, _, err := devs.Panel(ctx, id)
 			return p.Name, err
 		}})
@@ -198,6 +205,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 				return sessions.Extend(ctx, id, req)
 			},
 			Close: sessions.Close,
+			Act:   sessions.Act,
 		},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()

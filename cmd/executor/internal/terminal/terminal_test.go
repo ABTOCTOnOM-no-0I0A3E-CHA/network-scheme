@@ -112,6 +112,7 @@ type fx struct {
 	cs     *confirm.Store
 	rec    *recorder
 	rows   map[int64]map[string]any /* the write_device rows */
+	flows  []core.Verdict           /* the control lines handed to Typed */
 }
 
 /* recorder keeps what the terminal records. */
@@ -194,7 +195,11 @@ func newFx(t *testing.T) *fx {
 	f.ss = &sessions{s: s, token: "bearer-token-of-the-session"}
 	f.srv = httptest.NewServer(nil)
 	f.cs = confirm.New(f.az, f.now)
-	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: f.cs, Record: f.rec,
+	typed := func(_ context.Context, _ *session.Session, _ int64, v core.Verdict) (session.Flow, error) {
+		f.flows = append(f.flows, v)
+		return session.Flow{Kind: "save"}, nil
+	}
+	term, err := terminal.New(terminal.Config{Sessions: f.ss, Gate: f.guard, Auth: f.az, Confirm: f.cs, Record: f.rec, Typed: typed,
 		Policy: f.pol.Current, Origin: f.srv.URL, Log: log, Now: f.now,
 		Name: func(_ context.Context, id int64) (string, error) { return f.names[id], nil }})
 	if err != nil {
@@ -682,12 +687,12 @@ func TestOriginTokenControlAndLimit(t *testing.T) {
 	c = f.dial(t, dev)
 	before := f.typed(dev)
 	for _, l := range []string{"write", "copy running-config startup-config", "wr mem"} {
-		if res := c.line(l); res["type"] != "refused" || res["code"] != "control" && res["code"] != "denied" {
+		if res := c.line(l); res["type"] != "flow" && (res["type"] != "refused" || res["code"] != "denied") {
 			t.Fatalf("%q: %v", l, res)
 		}
 	}
-	if f.typed(dev) != before {
-		t.Fatal("a control line reached the device")
+	if f.typed(dev) != before || len(f.flows) == 0 || f.flows[0].Class != core.Control || f.flows[0].Control != core.Save {
+		t.Fatalf("a control line reached the device, or not its flow (%v)", f.flows)
 	}
 	f.policy(t, "max_config_lines_per_hour: 2\n")
 	f.mustSend(t, c, dev, "show running-config")

@@ -68,6 +68,20 @@ func NewCore(ctx context.Context, sh Shell, d Classifier, g *core.Grammar, o Opt
 	return c, nil
 }
 
+/*
+Rebind moves the session to a new connection of the same device after its
+own dropped (4c.4: the rollback of an interrupted session); the mode
+follows the new prompt from the root.
+*/
+func (c *Core) Rebind(ctx context.Context, sh Shell) error {
+	if sh.DeviceID() != c.Sh.DeviceID() {
+		return errors.New("drivers: rebind to another device")
+	}
+	c.Sh, c.mode = sh, c.G.Root()
+	c.reconcile()
+	return c.ToRoot(ctx)
+}
+
 /* Mode is the session's mode. */
 func (c *Core) Mode() core.Mode { return c.mode }
 

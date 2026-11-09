@@ -20,7 +20,9 @@ look at the policy, the freeze and the device's registry row):
     device's name typed exactly and a change TOTP code whose step is above
     the last one (confirm + authz), when Classify still gives the same line
     and the registry still gives the same address, port and write group;
-  - control (save, commit, ...): the UI's buttons (4c.4), nothing is sent;
+  - control (save, commit, ...): the flows of session.Manager.Typed (the
+    commit, or the save or rollback flow with its diff); the typed text is
+    never sent;
   - denied or refused: the reason, nothing is sent.
 
 Tab and '?' list the grammar's words (Complete) and never reach the device.
@@ -135,6 +137,8 @@ type Config struct {
 	/* Name is the device's name the user must type for a dangerous line (devices.Service.Panel: display and mistake guard only, R8). */
 	Name   func(ctx context.Context, deviceID int64) (string, error)
 	Origin string /* the executor origin: the only Origin accepted */
+	/* Typed runs the flow of a typed control line (session.Manager.Typed, the session locked); nil: refused. */
+	Typed  func(ctx context.Context, s *session.Session, device int64, v core.Verdict) (session.Flow, error)
 	Record Recorder
 	Log    *slog.Logger
 	Now    func() time.Time
@@ -270,18 +274,18 @@ type conn struct {
 	ws       *websocket.Conn
 	ip, ua   string
 	authOver func() /* the auth frame was handled: no longer counted as waiting */
-	sid    string
-	token  string
-	dev    int64
-	user   int64
-	ed     editor
-	paste  *string  /* a paste waiting for paste_confirm */
-	danger *pending /* a dangerous line waiting for its confirmation */
-	prompt string
-	cancel context.CancelFunc
-	frames bucket
-	authz  bucket
-	out    bucket
+	sid      string
+	token    string
+	dev      int64
+	user     int64
+	ed       editor
+	paste    *string  /* a paste waiting for paste_confirm */
+	danger   *pending /* a dangerous line waiting for its confirmation */
+	prompt   string
+	cancel   context.CancelFunc
+	frames   bucket
+	authz    bucket
+	out      bucket
 }
 
 /* errStop ends the processing of a frame (a line was not sent); errEnded ends the connection. */
@@ -602,12 +606,31 @@ func (c *conn) line(ctx context.Context, text string) error {
 			c.danger = &pending{typed: text, v: v, mode: d.Session.Mode().Name()}
 			_ = c.send(ctx, map[string]any{"type": "dangerous", "line": v.Line, "reason": string(v.Reason)})
 		case core.Control:
-			c.refuse(ctx, "control", map[string]any{"line": v.Line, "control": int(v.Control)}) /* the Save/Commit buttons (4c.4) */
+			c.control(ctx, s, d, v)
 		default:
 			c.refuse(ctx, "denied", map[string]any{"line": v.Line, "reason": string(v.Reason)})
 		}
 		return errStop
 	})
+}
+
+/*
+control hands a typed control line to its flow (4c.4): a typed commit is the
+ESR commit with its health check; save, write, confirm and reload cancel
+open the save flow with the diff; restore opens the rollback. The typed text
+itself never reaches the device.
+*/
+func (c *conn) control(ctx context.Context, s *session.Session, d *session.Device, v core.Verdict) {
+	if c.t.c.Typed == nil {
+		c.refuse(ctx, "control", map[string]any{"line": v.Line, "control": int(v.Control)})
+		return
+	}
+	f, err := c.t.c.Typed(ctx, s, d.ID, v)
+	if err != nil {
+		c.refuse(ctx, code(err), map[string]any{"line": v.Line})
+		return
+	}
+	_ = c.send(ctx, map[string]any{"type": "flow", "flow": f.Kind, "diff": f.Diff})
 }
 
 /* sendLine sends a classified line (within the hourly limit) and shows the device's cleaned, masked, bounded answer. */

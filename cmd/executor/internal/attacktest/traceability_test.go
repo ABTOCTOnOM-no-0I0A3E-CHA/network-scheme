@@ -114,6 +114,7 @@ var trace = []struct {
 		{"cmd/executor/internal/confirm", "TestC2kChangedDescription"},
 		{"cmd/executor/internal/confirm", "TestConfirmOnce"},
 		{"cmd/executor/internal/web", "TestConfirmFlowWithRealAuthz"},
+		{"cmd/executor/internal/session", "TestRollbackOnlyAsConfirmed"},
 	}},
 	{"C3", "TOTP replay, growing locks, global freeze", []ref{
 		{"cmd/executor/internal/authz", "TestAcceptOnceAndAudit"},
@@ -231,6 +232,23 @@ var trace = []struct {
 		{"cmd/executor/internal/drivers/mes10", "TestReplaceMismatchAlerts"},
 		{"cmd/executor/internal/drivers/esr", "TestRollbackBeforeAndAfterConfirm"},
 		{"cmd/executor/internal/drivers/esr", "TestRollbackMismatchIsNotConfirmed"},
+		{"cmd/executor/internal/session", "TestC7RollbackRestoresThePreSessionSnapshot"},
+	}},
+	{"C2i", "rollback only to the snapshot of exec.session_device under its MAC: a tampered pre_ct/pre_sha256 or a foreign backup refuses with an alert; the poller's copy is never read", []ref{
+		{"cmd/executor/internal/session", "TestC2iRollbackOnlyToTheMACdSnapshot"},
+	}},
+	{"C6", "link loss mid-session: ESR reverts by its own timer and the executor sends nothing; MES alerts and rolls back from the snapshot (emulator; real models: stand)", []ref{
+		{"cmd/executor/internal/session", "TestC6ESRRevertsByItsTimer"},
+		{"cmd/executor/internal/session", "TestC6MESRollbackAfterLinkLoss"},
+	}},
+	{"4c.4", "session actions: diff, save of the shown configuration, typed control lines to their flows, forms only as shown and Safe, no rollback over a later session; 4c.3 review: H binds the registry device, dropped challenges discarded, pre-auth bound, recording before the browser's bounds", []ref{
+		{"cmd/executor/internal/session", "TestDiffSaveTypedAndForms"},
+		{"cmd/executor/internal/session", "TestRollbackSupersededByALaterSession"},
+		{"cmd/executor/internal/web", "TestSessionRoutes"},
+		{"cmd/executor/internal/terminal", "TestDangerousLineBoundToTheRegistryDevice"},
+		{"cmd/executor/internal/terminal", "TestDroppedDangerousLineDiscardsItsChallenge"},
+		{"cmd/executor/internal/terminal", "TestPreauthConnectionsAreBounded"},
+		{"cmd/executor/internal/terminal", "TestRecordingBeforeTheBrowserBounds"},
 	}},
 }
 
@@ -305,7 +323,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "4c.2", "4c.3", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "4a.7", "4c.2", "4c.3", "4c.4", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

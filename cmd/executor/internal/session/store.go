@@ -149,7 +149,7 @@ func (m *Manager) Recover(ctx context.Context) error {
 					m.cfg.Log.Info("session: no open summary to interrupt", slog.Int64("device_id", d))
 				}
 				m.alert(ctx, KindInterrupted, "high", d, fmt.Sprintf("change session %s on device %d was interrupted by an executor restart; "+
-					"a rollback to the pre-session snapshot is offered", IDString(r.id), d))
+					"its driver session is lost, so no automatic rollback: compare with the pre-session snapshot and restore by hand", IDString(r.id), d))
 			}
 		}
 		if len(read) < recoverPage {

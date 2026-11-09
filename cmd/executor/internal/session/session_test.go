@@ -92,6 +92,7 @@ type fx struct {
 	dialed []string
 	offset atomic.Int64
 	start  time.Time
+	bpub   *[32]byte /* the backup domain: the pre-session envelopes */
 }
 
 func (f *fx) now() time.Time { return f.start.Add(time.Duration(f.offset.Load())) }
@@ -105,8 +106,31 @@ func (d dialer) Dial(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "tcp", d.f.emu.String())
 }
 
-func newFx(t *testing.T) *fx {
+func newFx(t *testing.T) *fx { return newLineFx(t, "mes6") }
+
+/*
+lineOf is what an emulated line needs for a session: the registry address
+its fixture's interface carries, the default route appended to its
+configuration, the next hop's ARP entry and MAC table row on its uplink, and
+(ESR) show users listing only this session.
+*/
+var lineOf = map[string]struct {
+	addr                      netip.Addr
+	gateway, arp, macs, users string
+}{
+	"mes6": {devAddr, gatewayLine, arpOut, macOut, ""},
+	"mes10": {netip.MustParseAddr("192.0.2.20"), gatewayLine, strings.ReplaceAll(arpOut, "gi1/0/1", "gi0/1"),
+		strings.ReplaceAll(macOut, "gi1/0/1", "gi0/1"), ""},
+	"esr": {netip.MustParseAddr("192.0.2.1"), "ip route 0.0.0.0/0 192.0.2.254\n",
+		"Interface   IP address     MAC address        State\ngi1/0/1     192.0.2.254    a8:f9:4b:00:00:01  reachable\n",
+		"Vlan  MAC address        Interface  Type\n1     a8:f9:4b:00:00:01  gi1/0/1    dynamic\n",
+		"SID  User  Timeout  Level  Protocol  Host\n*  1  admin  00:29:59  15  ssh  192.0.2.200"},
+}
+
+/* newLineFx is fx over an emulated device of line (mes6, mes10, esr) whose running configuration follows what the session does. */
+func newLineFx(t *testing.T, line string) *fx {
 	t.Helper()
+	lo := lineOf[line]
 	env := testdb.New(t)
 	attacktest.Reset(t, env)
 	ctx := context.Background()
@@ -133,35 +157,44 @@ func newFx(t *testing.T) *fx {
 	f.adm = &admin.Admin{Guard: f.guard, Reg: reg, Keys: keys, Policy: f.pol, Log: log, Lockouts: f.az}
 	f.pub = pub.New(pool, log)
 
-	f.d = devemu.NewLine(t, "mes6", devemu.Options{})
-	running := strings.TrimRight(f.d.Running(), "\n") + "\n" + gatewayLine
+	dfx, err := devemu.LoadLine(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dfx.Running = strings.TrimRight(dfx.Running, "\n") + "\n" + lo.gateway
+	f.d = devemu.New(dfx, devemu.Options{})
 	f.d.SetShowLookup(func(cmd string) (string, bool) {
 		switch cmd {
-		case "show running-config":
-			return running, true
 		case "show arp":
-			return arpOut, true
+			return lo.arp, true
 		case "show mac address-table":
-			return macOut, true
+			return lo.macs, true
+		case "show users":
+			return lo.users, lo.users != ""
 		}
 		return "", false
 	})
 	/* every RSA signature, so that the poller's SSH (no ssh-rsa) meets the host key gate, not an algorithm mismatch */
 	f.emu, f.key, f.log = devemu.StartSSH(t, f.d, func(c *sshemu.Config) { c.Username, c.Password, c.HostKeyAlgorithms = "admin", pw, nil })
 	f.id = f.panelDevice(t, fmt.Sprintf("10.%d.%d.%d", 1+addrs.Add(1)%250, time.Now().UnixNano()%250, 1+time.Now().UnixNano()/1000%250))
-	f.row = map[string]any{"device_id": f.id, "address": devAddr, "port": 22, "protocol": "ssh", "write_group": "core",
-		"write_driver": "mes6", "hostkey_algo": f.key.Type(), "hostkey_fp": gossh.FingerprintSHA256(f.key),
+	f.row = map[string]any{"device_id": f.id, "address": lo.addr, "port": 22, "protocol": "ssh", "write_group": "core",
+		"write_driver": line, "hostkey_algo": f.key.Type(), "hostkey_fp": gossh.FingerprintSHA256(f.key),
 		"allow_ssh_rsa_sha1": true, "writes_enabled": true, "backup_via_executor": false}
 	f.put(t, "write_device", f.row)
-	f.put(t, "model_profile", map[string]any{"id": int64(1), "write_driver": "mes6", "model_re": "^(?:MES2324)$",
-		"firmware_re": `^(?:6\.6\..*)$`, "strategies": json.RawMessage(`{}`), "note": "stand"})
+	mp := map[string]any{"id": int64(1), "write_driver": line, "model_re": "^(?:.*)$", "firmware_re": "^(?:.*)$",
+		"strategies": json.RawMessage(`{}`), "note": "stand"}
+	if line == "mes6" {
+		mp["model_re"], mp["firmware_re"] = "^(?:MES2324)$", `^(?:6\.6\..*)$`
+	}
+	f.put(t, "model_profile", mp)
 	f.put(t, "write_credential", map[string]any{"device_id": f.id, "kind": "ssh_write", "ciphertext": []byte{1},
 		"created_at": time.Now(), "nonce": make([]byte, 16)})
 
-	bpub, _, err := box.GenerateKey(rand.Reader)
+	bpub, bpriv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.bpub = bpub
 	open := func(*registry.Snapshot, int64) (creds.Credential, error) {
 		return creds.Credential{Username: "admin", Password: secret.New(pw)}, nil
 	}
@@ -169,7 +202,7 @@ func newFx(t *testing.T) *fx {
 	sched := backups.New(backups.Config{Registry: f.guard, Net: dialer{f}, Open: open, Pool: pool, BackupPub: bpub,
 		Locks: f.locks, Alert: f.pub.Alert, Log: log})
 	f.cfg = session.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Pool: pool, MAC: keys.MAC(), Net: dialer{f},
-		Open: open, Backups: sched, Locks: f.locks, Pub: f.pub, Log: log, Now: f.now}
+		Open: open, Backups: sched, Locks: f.locks, Pub: f.pub, Log: log, Now: f.now, BackupPriv: bpriv, BackupPub: bpub}
 	f.m = session.New(f.cfg)
 	return f
 }
