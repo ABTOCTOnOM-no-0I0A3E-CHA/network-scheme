@@ -192,12 +192,13 @@ func (t *Terminal) Serve(w http.ResponseWriter, r *http.Request, ip string) {
 		deny(w, http.StatusForbidden, "origin")
 		return
 	}
+	client := clientKey(ip)
 	t.mu.Lock()
-	full := t.conns >= maxConns || t.preauth >= maxPreauth || t.waiting[ip] >= maxPreauthIP
+	full := t.conns >= maxConns || t.preauth >= maxPreauth || t.waiting[client] >= maxPreauthIP
 	if !full {
 		t.conns++
 		t.preauth++
-		t.waiting[ip]++
+		t.waiting[client]++
 	}
 	t.mu.Unlock()
 	if full {
@@ -210,8 +211,8 @@ func (t *Terminal) Serve(w http.ResponseWriter, r *http.Request, ip string) {
 		if !authed {
 			authed = true
 			t.preauth--
-			if t.waiting[ip]--; t.waiting[ip] == 0 {
-				delete(t.waiting, ip)
+			if t.waiting[client]--; t.waiting[client] == 0 {
+				delete(t.waiting, client)
 			}
 		}
 		t.mu.Unlock()
@@ -241,6 +242,18 @@ func (t *Terminal) Serve(w http.ResponseWriter, r *http.Request, ip string) {
 		out:    bucket{rate: outRate, burst: outBurst, tokens: outBurst, last: now}}
 	code := c.run(ctx, cancel)
 	_ = ws.Close(websocket.StatusNormalClosure, code)
+}
+
+/* clientKey is a client for the pre-auth bound: its address, an IPv6 one by its /64 (as the web server's limiter). */
+func clientKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if a = a.Unmap(); a.Is4() {
+		return a.String()
+	}
+	return netip.PrefixFrom(a, 64).Masked().String()
 }
 
 /* frame is every client frame; which fields count depends on Type. */

@@ -123,3 +123,12 @@ func TestRecordingBeforeTheBrowserBounds(t *testing.T) {
 		t.Fatalf("recorded %q / %q", f.rec.in, f.rec.out)
 	}
 }
+
+/* The pre-auth bound counts an IPv6 client by its /64 and a v4-mapped one as IPv4 (m5). */
+func TestPreauthClientKey(t *testing.T) {
+	if terminal.ClientKey("2001:db8:1:2::5") != terminal.ClientKey("2001:db8:1:2:ffff::9") ||
+		terminal.ClientKey("2001:db8:1:2::5") == terminal.ClientKey("2001:db8:1:3::5") ||
+		terminal.ClientKey("::ffff:192.0.2.7") != "192.0.2.7" || terminal.ClientKey("192.0.2.7") == terminal.ClientKey("192.0.2.8") {
+		t.Fatal("client keys")
+	}
+}

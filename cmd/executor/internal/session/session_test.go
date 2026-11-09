@@ -93,6 +93,15 @@ type fx struct {
 	offset atomic.Int64
 	start  time.Time
 	bpub   *[32]byte /* the backup domain: the pre-session envelopes */
+	users  string    /* ESR: what show users lists (under mu) */
+	noDial atomic.Bool
+}
+
+/* setUsers sets what the ESR's show users lists. */
+func (f *fx) setUsers(u string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users = u
 }
 
 func (f *fx) now() time.Time { return f.start.Add(time.Duration(f.offset.Load())) }
@@ -103,6 +112,9 @@ func (d dialer) Dial(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
 	d.f.mu.Lock()
 	d.f.dialed = append(d.f.dialed, ap.String())
 	d.f.mu.Unlock()
+	if d.f.noDial.Load() {
+		return nil, errors.New("test: the device refuses new connections")
+	}
 	return (&net.Dialer{}).DialContext(ctx, "tcp", d.f.emu.String())
 }
 
@@ -163,6 +175,7 @@ func newLineFx(t *testing.T, line string) *fx {
 	}
 	dfx.Running = strings.TrimRight(dfx.Running, "\n") + "\n" + lo.gateway
 	f.d = devemu.New(dfx, devemu.Options{})
+	f.users = lo.users
 	f.d.SetShowLookup(func(cmd string) (string, bool) {
 		switch cmd {
 		case "show arp":
@@ -170,7 +183,9 @@ func newLineFx(t *testing.T, line string) *fx {
 		case "show mac address-table":
 			return lo.macs, true
 		case "show users":
-			return lo.users, lo.users != ""
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.users, f.users != ""
 		}
 		return "", false
 	})

@@ -179,6 +179,15 @@ type Manager struct {
 	/* interrupted are ended sessions with a device whose driver session was not closed: the rollback of 4c.4 */
 	interrupted map[[16]byte]*Session
 	stopped     bool /* Run has ended: no session registers any more */
+	/* lastOpen is when a session last began opening each device, in this process: the superseded check's second source beside exec */
+	lastOpen map[int64]time.Time
+}
+
+/* openedAfter reports whether a session of this process began opening device after t. */
+func (m *Manager) openedAfter(device int64, t time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastOpen[device].After(t)
 }
 
 /* New returns a manager. */
@@ -189,7 +198,7 @@ func New(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}}
+	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}, lastOpen: map[int64]time.Time{}}
 }
 
 /*
@@ -226,8 +235,9 @@ type Device struct {
 	busy    bool
 	summary bool
 	/* guarded by Session.mu */
-	pending time.Time /* ESR: the confirm timer's end of a commit not yet confirmed */
-	closed  bool      /* the driver session was closed */
+	pending  time.Time /* ESR: the confirm timer's end of a commit not yet confirmed */
+	reloadIn int       /* MES: the reload-in safety net armed at open, minutes (0: none) */
+	closed   bool      /* the driver session was closed */
 }
 
 /* Lock serializes the use of a session's devices (Unlock ends it). */
@@ -555,6 +565,9 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		return nil, ErrBusy
 	}
 	d := &Device{ID: id, lease: le}
+	m.mu.Lock()
+	m.lastOpen[id] = s.Opened
+	m.mu.Unlock()
 	var (
 		row     registry.Row
 		address netip.Addr
@@ -608,6 +621,7 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 	if p.MESReloadInMin > 0 && d.Line != strategy.ESR {
 		o.Strategies = drv.Strategies()
 		o.Strategies.SafetyNet, o.Strategies.ReloadMinutes = "reload-in", p.MESReloadInMin
+		d.reloadIn = p.MESReloadInMin
 	}
 	if d.Session, err = drv.Open(ctx, d.sh, o); err != nil {
 		return d, err
@@ -919,9 +933,19 @@ func (m *Manager) closeDevice(ctx context.Context, s *Session, d *Device, status
 	d.lease.Release()
 	if status == StatusInterrupted {
 		offer := "a rollback to the pre-session snapshot is offered"
-		if !d.pending.IsZero() && !d.closed {
-			/* ESR: the device reverts the unconfirmed commit by its own timer; the executor sends nothing (no confirm) */
-			offer = "the unconfirmed commit reverts by the device's timer at " + d.pending.UTC().Format(time.RFC3339) + "; no confirm is sent"
+		switch {
+		case d.closed:
+		case d.Line == strategy.ESR:
+			/* the executor sends nothing (no confirm); the shared candidate keeps what was typed, and a Write connection refuses it */
+			offer = "an uncommitted candidate configuration may remain on the device: discard it there (rollback) before anyone " +
+				"commits; until then the executor cannot roll back"
+			if !d.pending.IsZero() {
+				offer = "the unconfirmed commit reverts by the device's timer at " + d.pending.UTC().Format(time.RFC3339) +
+					" (no confirm is sent); " + offer
+			}
+		case d.reloadIn > 0:
+			offer = fmt.Sprintf("the device's safety net may still reload it within %d minutes of the session's start (reload in, "+
+				"the running configuration is lost unless saved); a rollback to the pre-session snapshot is offered", d.reloadIn)
 		}
 		m.alert(ctx, KindInterrupted, "high", d.ID, fmt.Sprintf("change session %s on device %d was interrupted; %s", IDString(s.ID), d.ID, offer))
 	}

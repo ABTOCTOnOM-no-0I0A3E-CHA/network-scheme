@@ -237,6 +237,25 @@ func (s *session) drop(ctx context.Context, restore bool) error {
 }
 
 /*
+Restore reverts only the pending (unconfirmed) commit [R §1]: what an
+earlier confirm made permanent stays, and nothing is confirmed. Without a
+pending commit it sends nothing.
+*/
+func (s *session) Restore(ctx context.Context) error {
+	if !s.pending {
+		return nil
+	}
+	if err := s.ToRoot(ctx); err != nil {
+		return err
+	}
+	if _, err := s.System(ctx, "restore"); err != nil {
+		return err
+	}
+	s.pending = false
+	return nil
+}
+
+/*
 Rollback before confirm is restore + rollback; after a confirm it copies the
 snapshot of Open into the candidate, commits it with the policy's timer,
 checks the hash and only then confirms (a mismatch restores instead) [R §1].

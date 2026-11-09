@@ -19,3 +19,6 @@ var MaxPreauth = maxPreauth
 
 /* MaxPreauthIP is how many of them may come from one client address. */
 var MaxPreauthIP = maxPreauthIP
+
+/* ClientKey is the pre-auth bound's client key. */
+var ClientKey = clientKey

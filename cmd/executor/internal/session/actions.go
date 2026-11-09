@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -86,7 +87,9 @@ const (
 	ErrCommitTimer    Refusal = "commit_timer"  /* ESR, interrupted: the device's timer reverts the commit */
 	ErrNoRollback     Refusal = "rollback_unavailable"
 	ErrRollbackFailed Refusal = "rollback_failed"
-	ErrSuperseded     Refusal = "superseded" /* another session opened on the device after this one ended */
+	ErrSuperseded     Refusal = "superseded"     /* another session opened on the device after this one ended */
+	ErrCommitPending  Refusal = "commit_pending" /* ESR: a commit waits for its confirm (or restore) */
+	ErrSaveMismatch   Refusal = "save_mismatch"  /* after the save the running configuration is not the one saved (alerted) */
 )
 
 /* Bounds (variables for the tests). */
@@ -216,9 +219,6 @@ func (m *Manager) save(ctx context.Context, s *Session, device int64, sum string
 	if d.Line == strategy.ESR && d.pending.IsZero() {
 		return DeviceDiff{}, ErrNothingToSave
 	}
-	if d.Line == strategy.ESR && !m.cfg.Now().Before(d.pending.Add(-confirmMargin)) {
-		return DeviceDiff{}, ErrCommitTimer /* the device's timer reverts (or reverted) it: a confirm now could land after it */
-	}
 	_, cur, err := m.diff(ctx, d)
 	if err != nil {
 		return DeviceDiff{}, err
@@ -226,12 +226,21 @@ func (m *Manager) save(ctx context.Context, s *Session, device int64, sum string
 	if hex.EncodeToString(cur.SHA256[:]) != sum {
 		return DeviceDiff{}, ErrStale
 	}
+	sctx := ctx
 	if d.Line == strategy.ESR {
 		if err := d.sh.Exclusive(ctx, true); err != nil {
 			return DeviceDiff{}, deviceRefusal(err)
 		}
+		/* last thing before the confirm, and the confirm bounded by it: never at or after the device's timer */
+		left := d.pending.Sub(m.cfg.Now()) - confirmMargin
+		if left <= 0 {
+			return DeviceDiff{}, ErrCommitTimer
+		}
+		var cancel context.CancelFunc
+		sctx, cancel = context.WithTimeout(ctx, left)
+		defer cancel()
 	}
-	if err := d.Session.Save(ctx); err != nil {
+	if err := d.Session.Save(sctx); err != nil {
 		if errors.Is(err, drivers.ErrNothingToConfirm) {
 			return DeviceDiff{}, ErrNothingToSave
 		}
@@ -240,6 +249,11 @@ func (m *Manager) save(ctx context.Context, s *Session, device int64, sum string
 	d.pending = time.Time{}
 	m.event(ctx, s.ID, "saved", map[string]any{"device_id": d.ID, "sha256": sum})
 	out, _, err := m.diff(ctx, d)
+	if err == nil && out.SHA256 != sum {
+		m.alert(ctx, drivers.KindRollbackMismatch, "high", d.ID, fmt.Sprintf("device %d, change session %s: after the save the running "+
+			"configuration is not the one the user saved (%s)", d.ID, IDString(s.ID), sum))
+		return out, ErrSaveMismatch
+	}
 	return out, err
 }
 
@@ -276,6 +290,9 @@ func (m *Manager) commit(ctx context.Context, s *Session, d *Device) (DeviceDiff
 	if !ok {
 		return DeviceDiff{}, ErrNotApplicable
 	}
+	if !d.pending.IsZero() {
+		return DeviceDiff{}, ErrCommitPending /* one unconfirmed commit at a time: its timer is the one shown */
+	}
 	if err := r.ToRoot(ctx); err != nil {
 		return DeviceDiff{}, err
 	}
@@ -294,14 +311,24 @@ func (m *Manager) commit(ctx context.Context, s *Session, d *Device) (DeviceDiff
 		err = m.login(ctx, d.ID)
 	}
 	if err != nil {
-		/* the health check failed: restore now rather than wait for the timer (only to the exec snapshot) */
-		if to, serr := m.snapshot(ctx, s.ID, d); serr == nil && d.Session.Rollback(ctx, to) == nil {
+		/*
+			The health check failed: revert only this pending commit (restore),
+			never the whole session (that is the rollback's, under confirm(H)):
+			what an earlier confirm made permanent stays. Without a restore the
+			device's timer reverts it.
+		*/
+		if rs, ok := d.Session.(restorer); ok && rs.Restore(ctx) == nil {
 			d.pending = time.Time{}
 		}
 		m.event(ctx, s.ID, "health_failed", map[string]any{"device_id": d.ID})
 		return DeviceDiff{}, ErrHealth
 	}
 	return out, nil
+}
+
+/* restorer reverts only a pending ESR commit (esr session.Restore). */
+type restorer interface {
+	Restore(ctx context.Context) error
 }
 
 /* login is the health check's new connection: it must log in (ReadOnly: no exclusivity, this session is still there). */
@@ -546,6 +573,7 @@ the grant is for. s is locked by the caller.
 */
 func (m *Manager) describe(ctx context.Context, s *Session) (authz.Need, confirm.Description, error) {
 	var groups []string
+	addrs := map[int64]string{}
 	if err := m.cfg.Gate.View(ctx, func(snap *registry.Snapshot) error {
 		for _, d := range s.Devices {
 			r, ok := snap.Get("write_device", d.ID)
@@ -554,6 +582,12 @@ func (m *Manager) describe(ctx context.Context, s *Session) (authz.Need, confirm
 			}
 			g, _ := r.Get("write_group").(string)
 			groups = append(groups, g)
+			a, _ := r.Get("address").(netip.Addr)
+			p, _ := r.Get("port").(int64)
+			if !a.IsValid() || p < 1 || p > 65535 {
+				return authz.ErrDenied
+			}
+			addrs[d.ID] = netip.AddrPortFrom(a, uint16(p)).String() // #nosec G115 -- checked above
 		}
 		return nil
 	}); err != nil {
@@ -577,7 +611,8 @@ func (m *Manager) describe(ctx context.Context, s *Session) (authz.Need, confirm
 		case ended:
 			state = "interrupted"
 		}
-		fields = append(fields, confirm.Field{Key: "pre_sha256_" + ids[i], Value: hex.EncodeToString(d.Pre[:])},
+		fields = append(fields, confirm.Field{Key: "address_" + ids[i], Value: addrs[d.ID]},
+			confirm.Field{Key: "pre_sha256_" + ids[i], Value: hex.EncodeToString(d.Pre[:])},
 			confirm.Field{Key: "state_" + ids[i], Value: state})
 	}
 	fields = append(fields, confirm.Field{Key: "devices", Value: strings.Join(ids, ",")})
@@ -700,6 +735,12 @@ func (m *Manager) rollbackDevice(ctx context.Context, s *Session, d *Device, to 
 		}
 		defer done()
 	}
+	if d.Line == strategy.ESR {
+		/* the rollback may commit and confirm the snapshot: no other session on the device (its own candidate is dropped first) */
+		if err := d.sh.Exclusive(ctx, false); err != nil {
+			return fail(deviceRefusal(err))
+		}
+	}
 	if err := d.Session.Rollback(ctx, to); err != nil {
 		return fail(err)
 	}
@@ -751,7 +792,7 @@ func (m *Manager) reattach(ctx context.Context, s *Session, d *Device) (done fun
 	case err != nil:
 		release()
 		return nil, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
-	case later:
+	case later, m.openedAfter(d.ID, s.Opened):
 		release()
 		return nil, ErrSuperseded
 	}

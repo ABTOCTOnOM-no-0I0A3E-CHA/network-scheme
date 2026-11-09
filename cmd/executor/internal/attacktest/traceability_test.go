@@ -244,6 +244,9 @@ var trace = []struct {
 	{"4c.4", "session actions: diff, save of the shown configuration, typed control lines to their flows, forms only as shown and Safe, no rollback over a later session; 4c.3 review: H binds the registry device, dropped challenges discarded, pre-auth bound, recording before the browser's bounds", []ref{
 		{"cmd/executor/internal/session", "TestDiffSaveTypedAndForms"},
 		{"cmd/executor/internal/session", "TestRollbackSupersededByALaterSession"},
+		{"cmd/executor/internal/session", "TestESRExclusivityAndTimerBeforeConfirm"},
+		{"cmd/executor/internal/session", "TestESRHealthCheckRestoresOnlyThePendingCommit"},
+		{"cmd/executor/internal/terminal", "TestPreauthClientKey"},
 		{"cmd/executor/internal/web", "TestSessionRoutes"},
 		{"cmd/executor/internal/terminal", "TestDangerousLineBoundToTheRegistryDevice"},
 		{"cmd/executor/internal/terminal", "TestDroppedDangerousLineDiscardsItsChallenge"},

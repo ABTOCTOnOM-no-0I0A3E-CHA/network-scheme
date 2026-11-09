@@ -195,10 +195,16 @@ func TestC2iRollbackOnlyToTheMACdSnapshot(t *testing.T) {
 	f := newFx(t)
 	u := f.user(t, "core")
 	o := f.open(t, u)
+	preText := f.d.Running()
 	f.typeLines(t, o, "configure", "hostname edge-7", "end")
-	var ct, dek, sum []byte
-	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT pre_ct, pre_dek_ct, pre_sha256 FROM exec.session_device
-		WHERE session_id = $1`, o.ID).Scan(&ct, &dek, &sum); err != nil {
+	var ct, dek, sum, mac []byte
+	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT pre_ct, pre_dek_ct, pre_sha256, mac FROM exec.session_device
+		WHERE session_id = $1`, o.ID).Scan(&ct, &dek, &sum, &mac); err != nil {
+		t.Fatal(err)
+	}
+	/* the same snapshot in a new envelope: it opens under its AAD and hashes right; only the row's MAC tells */
+	rct, rdek, err := backup.Seal(f.bpub, []byte(preText), backup.AAD(f.id, hex.EncodeToString(sum)))
+	if err != nil {
 		t.Fatal(err)
 	}
 	other := "hostname planted\n"
@@ -214,6 +220,8 @@ func TestC2iRollbackOnlyToTheMACdSnapshot(t *testing.T) {
 		"pre_ct":           {"pre_ct = $2", []any{append(append([]byte(nil), ct...), 0)}},
 		"pre_sha256":       {"pre_sha256 = $2", []any{osum[:]}},
 		"a foreign backup": {"pre_ct = $2, pre_dek_ct = $3, pre_sha256 = $4", []any{oct, odek, osum[:]}},
+		"a new envelope":   {"pre_ct = $2, pre_dek_ct = $3", []any{rct, rdek}},
+		"the mac":          {"mac = set_byte(mac, 0, get_byte(mac, 0) # 1)", nil},
 	} {
 		alerts, lines := f.alerts(t, session.KindTamper), len(f.d.Lines())
 		f.tamper(t, o, c.set, c.args...)
@@ -223,7 +231,7 @@ func TestC2iRollbackOnlyToTheMACdSnapshot(t *testing.T) {
 		if f.alerts(t, session.KindTamper) != alerts+1 || len(f.d.Lines()) != lines {
 			t.Fatalf("%s: alerts %d, device got %q", name, f.alerts(t, session.KindTamper)-alerts, f.d.Lines()[lines:])
 		}
-		f.tamper(t, o, "pre_ct = $2, pre_dek_ct = $3, pre_sha256 = $4", ct, dek, sum)
+		f.tamper(t, o, "pre_ct = $2, pre_dek_ct = $3, pre_sha256 = $4, mac = $5", ct, dek, sum, mac)
 	}
 	/* the poller's copy is not a rollback source: planting another configuration there changes nothing */
 	if _, err := f.env.Pool("postgres").Exec(context.Background(), `UPDATE backups.config_version SET sha256 = $2
