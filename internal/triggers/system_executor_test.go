@@ -2,7 +2,12 @@ package triggers_test
 
 import (
 	"encoding/json"
+	"io/fs"
+	"maps"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +57,7 @@ func TestExecutorAlertProblems(t *testing.T) {
 	want := map[string]string{"executor_tamper": "disaster", "executor_bruteforce": "disaster", "executor_freeze": "warning",
 		"executor_policy_invalid": "high", "executor_guards_unwritable": "high", "executor_unverifiable": "high",
 		"hostkey_mismatch_write": "high", "mass_unmask": "high", "session_interrupted": "high", "session_outside_window": "warning",
+		"executor_recording_failed": "high", "executor_recording_full": "warning", "executor_recording_views": "high",
 		"executor_password_expired": "high", "executor_line_mismatch": "high", "executor_rollback_mismatch": "high"}
 	for kind := range want {
 		h.alert(kind, "info", 0, "first "+kind, time.Minute)
@@ -202,17 +208,76 @@ func TestEverySystemKindHasNames(t *testing.T) {
 	if err := json.Unmarshal(raw, &ru); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{string(triggers.SystemPollerUnavailable), triggers.SystemUnknownSource, triggers.SystemProfileMismatch,
-		triggers.SystemSSHMismatch, triggers.SystemConfigDrift, triggers.SystemExecutorTamper, triggers.SystemExecutorBruteforce,
-		triggers.SystemExecutorFreeze, triggers.SystemExecutorPolicyInvalid, triggers.SystemExecutorGuards,
-		triggers.SystemExecutorUnverifiable, triggers.SystemHostKeyMismatchWrite, triggers.SystemMassUnmask,
-		triggers.SystemSessionInterrupted, triggers.SystemSessionOutsideWindow, triggers.SystemExecutorAlert,
-		triggers.SystemExecutorUnreachable} {
+	kinds := []string{string(triggers.SystemPollerUnavailable), triggers.SystemUnknownSource, triggers.SystemProfileMismatch,
+		triggers.SystemSSHMismatch, triggers.SystemConfigDrift, triggers.SystemExecutorAlert, triggers.SystemExecutorUnreachable}
+	/* every executor kind with its own severity, so a kind added there cannot miss its names */
+	kinds = append(kinds, slices.Sorted(maps.Keys(triggers.ExecutorSeverity()))...)
+	for _, k := range kinds {
 		if triggers.SystemName(k) == "System problem" {
 			t.Errorf("%s has no English name", k)
 		}
 		if strings.TrimSpace(ru.Problems.SystemKind[k]) == "" {
 			t.Errorf("%s has no Russian name in ru.json", k)
+		}
+	}
+}
+
+/*
+Every alert kind the executor declares (a Kind... = "..." constant under
+cmd/executor) is a problem kind of its own here, so none falls to the generic
+executor_alert, and every call that raises one with a literal severity raises
+the severity the panel shows. The one exception is documented: a session or
+recording row that fails its MAC is alerted high without a freeze, and the
+panel shows every executor_tamper as the disaster of a frozen executor.
+*/
+func TestEveryExecutorAlertKindIsKnown(t *testing.T) {
+	sev := triggers.ExecutorSeverity()
+	decl := regexp.MustCompile(`\b(Kind\w+)\s*=\s*"([a-z_]+)"`)
+	call := regexp.MustCompile(`(?i)\balert\(\w+, (?:\w+\.)?(Kind\w+), "(\w+)"`)
+	names := map[string]string{}
+	type use struct{ file, name, severity string }
+	var uses []use
+	err := filepath.WalkDir("../../cmd/executor", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, m := range decl.FindAllStringSubmatch(string(b), -1) {
+			if old, ok := names[m[1]]; ok && old != m[2] {
+				t.Errorf("%s names both %q and %q", m[1], old, m[2])
+			}
+			names[m[1]] = m[2]
+		}
+		for _, m := range call.FindAllStringSubmatch(string(b), -1) {
+			uses = append(uses, use{p, m[1], m[2]})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) < 10 || len(uses) < 10 {
+		t.Fatalf("the scan found %d kinds and %d alerts: the patterns no longer match the executor's code", len(names), len(uses))
+	}
+	for name, kind := range names {
+		if _, ok := sev[kind]; !ok && kind != "executor_unfrozen" {
+			t.Errorf("%s (%s) has no problem kind of its own: it would show as executor_alert", name, kind)
+		}
+	}
+	for _, u := range uses {
+		kind, ok := names[u.name]
+		if !ok {
+			t.Errorf("%s: %s is not declared", u.file, u.name)
+			continue
+		}
+		if kind == "executor_unfrozen" || (kind == triggers.SystemExecutorTamper && u.severity == "high") {
+			continue
+		}
+		if sev[kind] != u.severity {
+			t.Errorf("%s raises %s as %s, the panel shows it as %s", u.file, kind, u.severity, sev[kind])
 		}
 	}
 }

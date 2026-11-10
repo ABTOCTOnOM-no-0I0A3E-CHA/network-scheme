@@ -43,6 +43,9 @@ const (
 	SystemExecutorPassword      = "executor_password_expired"
 	SystemExecutorLineMismatch  = "executor_line_mismatch"
 	SystemExecutorRollback      = "executor_rollback_mismatch"
+	SystemRecordingFailed       = "executor_recording_failed"
+	SystemRecordingFull         = "executor_recording_full"
+	SystemRecordingViews        = "executor_recording_views"
 	SystemExecutorAlert         = "executor_alert"
 	SystemExecutorUnreachable   = "executor_unreachable"
 	executorUnfrozen            = "executor_unfrozen"
@@ -54,6 +57,7 @@ var executorSeverity = map[string]string{
 	SystemHostKeyMismatchWrite: "high", SystemMassUnmask: "high", SystemSessionInterrupted: "high",
 	SystemSessionOutsideWindow: "warning",
 	SystemExecutorPassword:     "high", SystemExecutorLineMismatch: "high", SystemExecutorRollback: "high",
+	SystemRecordingFailed: "high", SystemRecordingFull: "warning", SystemRecordingViews: "high",
 }
 
 /*
@@ -155,6 +159,12 @@ func systemName(kind string) string {
 		return "Device firmware line does not match its write driver"
 	case SystemExecutorRollback:
 		return "Configuration after rollback does not match the snapshot"
+	case SystemRecordingFailed:
+		return "Change session recording failed; the session sends nothing more"
+	case SystemRecordingFull:
+		return "Change session recording reached its size limit"
+	case SystemRecordingViews:
+		return "Too many change session recordings viewed"
 	case SystemExecutorAlert:
 		return "Executor alert"
 	case SystemExecutorUnreachable:
