@@ -122,8 +122,8 @@ test("messages from another origin or of the wrong shape are ignored without a r
 /*
  * C1, the enabled half: the CI step "The executor is off after install (C1)" saw every /x/* but the status answer 503
  * executor_disabled, then ran nmsctl executor enable. Now the same requests go down the check chain: authz refuses
- * a forged ticket and an unknown challenge for a real one (403 denied, audited by the executor), the empty action
- * table of 4a answers unknown_action, and POST /x/sessions has no route yet (404).
+ * a forged ticket and an unknown challenge for a real one (403 denied, audited by the executor), an action the
+ * table does not have answers unknown_action, and POST /x/sessions without devices is refused (422 bad_devices).
  */
 test("C1: after nmsctl executor enable requests go past the policy gate to the route table and authz", async ({ page }) => {
   await page.goto("/");
@@ -140,5 +140,6 @@ test("C1: after nmsctl executor enable requests go past the policy gate to the r
   expect(await x("/x/confirm", { ticket: "forged.ticket", challenge_id: "c", h, code: "000000" })).toEqual({ status: 403, code: "denied" });
   expect(await x("/x/confirm", { ticket, challenge_id: "c", h, code: "000000" })).toEqual({ status: 403, code: "denied" });
   expect(await x("/x/confirm/issue", { ticket, action: "session.open", params: {} })).toEqual({ status: 404, code: "unknown_action" });
-  expect((await x("/x/sessions", { ticket })).status).toBe(404);
+  /* the session route exists since 4c.2: a request without devices is refused before authz (no code is spent) */
+  expect(await x("/x/sessions", { ticket })).toEqual({ status: 422, code: "bad_devices" });
 });
