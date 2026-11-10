@@ -10,16 +10,18 @@ import { expect, ORIGIN, testWith } from "./guard";
  * safe line → dangerous line (exact device name + new code) → form with its equivalent commands → diff → save (MES) /
  * commit + confirm (ESR) → rollback (confirm(H)) → end → replay of the recording. Navigation in the panel must not
  * tear the session down; both origins must stay free of CSP violations (guard.ts watches every frame); device text
- * is only ever text.
+ * is only ever text. Before the session the write credential goes in through the executor's page (write-admin +
+ * confirm(H)); after it, the pre-session configuration is shown unmasked (unmask + confirm(H)) and the executor's
+ * audit shows that view.
  *
- * Preconditions (CI job e2e, after "The executor is off after install (C1), then enable, enroll and grant"):
- *   - a write emulator per line in the devices subnet, registered on the host: nmsctl executor device add (+
- *     accept-hostkey, writes on, model-verify for its profile) with a write credential, and the panel device of
- *     the same address;
- *   - the admin has the change TOTP of change-totp-secret (enroll) and the grants write (the devices' write
- *     groups) and audit-read;
+ * Preconditions (CI job e2e, "Register the write emulators with the executor (session e2e)"):
+ *   - a write emulator per line in the devices subnet (sshemud -profile, account WRITE below), registered on the
+ *     host: the panel device of the same address, nmsctl executor device add with the logged host key, writes on,
+ *     model-verify for its profile;
+ *   - the admin has the change TOTP of change-totp-secret (enroll) and the grants write-admin, write (the devices'
+ *     write group), audit-read and unmask;
  *   - NMS_E2E_SESSION_DEVICES names the panel devices: "mes6=<id>,esr=<id>".
- * Without NMS_E2E_SESSION_DEVICES the specs are skipped (the CI wiring of the write emulators is an open item).
+ * Without NMS_E2E_SESSION_DEVICES the specs are skipped (a run without the write emulators).
  */
 const EXECUTOR = process.env.NMS_E2E_EXECUTOR_ORIGIN ?? "https://localhost:8443";
 const test = testWith([ORIGIN, EXECUTOR]);
@@ -45,14 +47,33 @@ async function changeCode(): Promise<string> {
   return generate({ secret: readFileSync(join(dir, "change-totp-secret"), "utf8").trim(), epoch: lastStep * PERIOD });
 }
 
-/* per line: a dangerous config line harmless to the emulator, the prompt of its config mode and the save step */
+/* per line: a dangerous config line harmless to the emulator, the command of its config mode, a VLAN for the form and a line of its configuration */
 const LINES = {
-  mes6: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3077 },
-  esr: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3078 },
+  mes6: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3077, iface: "interface vlan 99" },
+  esr: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3078, iface: "interface gigabitethernet 1/0/1" },
 } as const;
+
+/* test values of the emulators' write account, the same as in the CI step that starts them */
+const WRITE = { username: "e2e-write", password: "e2e-write-session-pw" };
 
 const frame = (page: Page) => page.frameLocator('iframe[title="Сессия изменений"]');
 const term = (f: FrameLocator, device: number) => f.getByTestId(`device-term-${device}`).getByTestId("terminal");
+
+/* the device's write credential, sealed by the executor's page to its write key and stored under confirm(H) */
+async function storeCredential(page: Page, device: number) {
+  await page.goto(`/devices/${device}?tab=session`);
+  await page.getByRole("button", { name: "Открыть сессию для этого устройства" }).click();
+  const f = frame(page);
+  await f.getByTestId("nav-devices").click();
+  await expect(f.getByTestId("write-key")).toBeVisible();
+  await f.locator("#wc-device").fill(String(device));
+  await f.locator("#wc-account").fill(WRITE.username);
+  await f.locator("#wc-secret").fill(WRITE.password);
+  await f.getByRole("button", { name: "Зашифровать и проверить" }).click();
+  await f.locator("#cp-code").fill(await changeCode());
+  await f.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await expect(f.getByTestId("done")).toContainText(`Учётка устройства ${device} сохранена`);
+}
 
 async function typeLine(page: Page, f: FrameLocator, device: number, line: string) {
   await term(f, device).click();
@@ -80,11 +101,13 @@ async function openSession(page: Page, device: number): Promise<FrameLocator> {
 for (const line of ["mes6", "esr"] as const) {
   test.describe(`change session on ${line}`, () => {
     test.skip(!DEVICES[line], `NMS_E2E_SESSION_DEVICES names no ${line} device (the write emulators are not wired into this run)`);
-    test.setTimeout(10 * 60_000);
+    /* nine change TOTP codes, each waiting for a new 30 s step */
+    test.setTimeout(15 * 60_000);
 
-    test("open, dangerous line, form, diff, save, rollback, end and replay; navigation keeps the session", async ({ page }) => {
+    test("credential, open, dangerous line, form, diff, save, rollback, end, replay, unmasked config and audit; navigation keeps the session", async ({ page }) => {
       const id = DEVICES[line];
       const L = LINES[line];
+      await storeCredential(page, id);
       const f = await openSession(page, id);
 
       /* a safe line goes; its output is text */
@@ -179,6 +202,29 @@ for (const line of ["mes6", "esr"] as const) {
       await expect(player).toContainText(L.danger);
       await expect(player).toContainText("dangerous line confirmed");
       await expect(player.locator("*")).toHaveCount(0);
+
+      /* the pre-session configuration unmasked: the list costs a code, the view a confirm(H) with the next one; text only */
+      await g.getByTestId("nav-configs").click();
+      await g.locator("input[name=cfg-device]").fill(String(id));
+      await g.locator("input[name=cfg-code]").fill(await changeCode());
+      await g.getByRole("button", { name: "Показать версии" }).click();
+      await g.locator('[data-testid^="version-"]').first().getByRole("button", { name: "Показать", exact: true }).click();
+      await expect(g.getByTestId("field-device_id")).toHaveText(String(id));
+      await g.locator("#cp-code").fill(await changeCode());
+      await g.getByRole("button", { name: "Подтвердить", exact: true }).click();
+      const config = g.getByTestId("config-text");
+      await expect(config).toContainText(L.iface);
+      await expect(config.locator("*")).toHaveCount(0);
+
+      /* the executor's audit shows that view (its own view is audited too) */
+      await g.getByTestId("nav-audit").click();
+      await g.locator("input[name=aud-action]").fill("config.view");
+      await g.locator("input[name=aud-device]").fill(String(id));
+      await g.locator("input[name=aud-code]").fill(await changeCode());
+      await g.getByRole("button", { name: "Показать", exact: true }).click();
+      const audit = g.getByTestId("audit-table");
+      await expect(audit).toContainText("config.view");
+      await expect(audit.locator("td *")).toHaveCount(0);
     });
   });
 }

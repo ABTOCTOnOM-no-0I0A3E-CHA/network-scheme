@@ -295,6 +295,15 @@ var trace = []struct {
 		{"web/executor/src/audit/AuditPage.test.tsx", `it("reads a page with the filters and one code, shows it as text only and continues by the cursor"`},
 		{"web/executor/src/audit/AuditPage.test.tsx", `it("sends nothing for a malformed filter and names the executor's refusals"`},
 	}},
+	{"4d.4", "end to end on the installed stack: write emulators registered from the host (device add with the console fingerprint, writes on, model-verify, grants), the write credential through the executor's page, then the full change session on mes6 and esr, its replay, the unmasked pre-session configuration and its audit row; the executor's chain verifies after the run; ZAP baseline on :8443", []ref{
+		{".github/workflows/ci.yml", "- name: Register the write emulators with the executor (session e2e)"},
+		{".github/workflows/ci.yml", "-e NMS_E2E_SESSION_DEVICES -w /e2e"},
+		{".github/workflows/ci.yml", "- name: The change sessions ran on the write emulators, and the executor's audit chain verifies"},
+		{".github/workflows/ci.yml", "target: https://localhost:8443"},
+		{"test/e2e/session.spec.ts", "await storeCredential(page, id);"},
+		{"test/e2e/session.spec.ts", `await g.getByTestId("nav-configs").click();`},
+		{"test/e2e/session.spec.ts", `await expect(audit).toContainText("config.view");`},
+	}},
 	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
 		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
 		{"cmd/executor/internal/recording", "TestRecorderFailureIsFailClosed"},
@@ -383,7 +392,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4d.4", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}
