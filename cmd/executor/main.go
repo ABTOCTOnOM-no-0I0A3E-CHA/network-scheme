@@ -31,6 +31,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/auditview"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/changeset"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
@@ -226,6 +227,9 @@ func serve(ctx context.Context, cfg config.Config) error {
 		{Path: "/x/download/configs/{device}/{version}", Re: regexp.MustCompile(`^/x/download/configs/([1-9][0-9]{0,17})/([1-9][0-9]{0,17})$`),
 			Action: unmask.ActionExport, File: unm.Export},
 	}
+	/* Changesets: authored, stored, dry-run and approved only here, under the executor's row MACs (Phase 5). */
+	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log,
+		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}})
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil
@@ -245,6 +249,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 			},
 			Close: sessions.Close,
 			Act:   sessions.Act,
+		},
+		Changesets: &web.Changesets{
+			Open: func(ctx context.Context, req authz.Request) (any, error) { return changes.Open(ctx, req) },
+			Op:   changes.Op,
+			Ops:  changeset.Ops,
 		},
 		State: func() (bool, bool) {
 			frozen, _ := guard.Frozen()
