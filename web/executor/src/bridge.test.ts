@@ -29,6 +29,18 @@ describe("executor bridge", () => {
     await expect(p).resolves.toBe("payload.signature");
   });
 
+  it("tells the panel whether a session is open and asks it to expand the frame", () => {
+    const { parent, bridge } = setup();
+    bridge.session(true);
+    bridge.expand();
+    bridge.session(false);
+    expect(parent.postMessage.mock.calls).toEqual([
+      [{ v: 1, type: "status", state: "session", open: true }, PANEL],
+      [{ v: 1, type: "status", state: "expand" }, PANEL],
+      [{ v: 1, type: "status", state: "session", open: false }, PANEL],
+    ]);
+  });
+
   it("never posts to '*': every send names the panel origin", async () => {
     const { parent, bridge, deliver } = setup();
     bridge.ready();

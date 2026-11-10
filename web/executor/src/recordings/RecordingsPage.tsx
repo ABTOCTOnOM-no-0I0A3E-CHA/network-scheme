@@ -18,7 +18,12 @@ const EMPTY: Screen = { shown: 0, text: "", cut: false };
 /* screen after events up to `to` were shown: appended to what is shown (never rebuilt), the tail kept. */
 function advance(sc: Screen, r: Replay, to: number): Screen {
   if (to <= sc.shown) return sc;
-  const text = sc.text + r.events.slice(sc.shown, to).map(eventText).join("");
+  let text = sc.text;
+  for (const e of r.events.slice(sc.shown, to)) {
+    /* an executor's marker starts a line of its own, also after a prompt */
+    if (e.code === "m" && text !== "" && !text.endsWith("\n")) text += "\n";
+    text += eventText(e);
+  }
   return text.length > MAX_SHOWN ? { shown: to, text: text.slice(text.length - MAX_SHOWN), cut: true } : { shown: to, text, cut: sc.cut };
 }
 
@@ -27,9 +32,9 @@ function advance(sc: Screen, r: Replay, to: number): Screen {
  * replay costs one change TOTP code (grant audit-read; the executor audits each view). The player is the read-only line
  * terminal: the executor verified the recording and cleaned every event; it is rendered as text only.
  */
-export function RecordingsPage({ poster }: { poster: Poster }) {
+export function RecordingsPage({ poster, initial }: { poster: Poster; initial?: { session: string; device: number } }) {
   const { t } = useTranslation();
-  const [device, setDevice] = useState("");
+  const [device, setDevice] = useState(initial ? String(initial.device) : "");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Message | null>(null);
@@ -73,7 +78,7 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
     else setMsg(messageOf(r.failure));
   };
 
-  const play = async (it: Item) => {
+  const play = async (it: Pick<Item, "session_id" | "device_id">) => {
     if (!/^\d{6}$/.test(code)) return;
     setReplay(null);
     setPlaying(false);
@@ -97,22 +102,31 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
         <CardTitle>{t("executor.recordings.title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
-        <p>{t("executor.recordings.cost")}</p>
+        <p className="text-muted-foreground">{t("executor.recordings.cost")}</p>
         <div className="flex flex-wrap gap-3">
-          <label className="block">
+          <label className="block font-medium">
             {t("executor.recordings.device")}
-            <input className="block w-32 rounded border px-2 py-1" name="rec-device" inputMode="numeric" maxLength={18} autoComplete="off"
+            <input className="mt-1 block h-9 w-36 rounded-md border bg-background px-3 font-normal outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" name="rec-device" inputMode="numeric" maxLength={18} autoComplete="off"
               value={device} onChange={(e) => setDevice(e.target.value)} />
           </label>
-          <label className="block">
+          <label className="block font-medium">
             {t("executor.confirm.code")}
-            <input className="block w-32 rounded border px-2 py-1" name="rec-code" inputMode="numeric" maxLength={6} autoComplete="off"
+            <input className="mt-1 block h-9 w-36 rounded-md border bg-background px-3 font-normal outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" name="rec-code" inputMode="numeric" maxLength={6} autoComplete="off"
               value={code} onChange={(e) => setCode(e.target.value)} />
           </label>
         </div>
-        <Button type="button" disabled={busy || !codeOk || !/^\d{1,18}$/.test(device)} onClick={() => void load()}>
-          {t("executor.recordings.load")}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" disabled={busy || !codeOk || !/^\d{1,18}$/.test(device)} onClick={() => void load()}>
+            {t("executor.recordings.load")}
+          </Button>
+          {/* the panel's "Воспроизвести" names one session of one device: played directly, without the list (one code) */}
+          {initial && (
+            <Button type="button" variant="outline" disabled={busy || !codeOk} data-testid="play-initial"
+              onClick={() => void play({ session_id: initial.session, device_id: initial.device })}>
+              {t("executor.recordings.playSession", { session: initial.session.slice(0, 8), device: initial.device })}
+            </Button>
+          )}
+        </div>
         {msg && (
           <p role="alert" className="text-destructive" data-testid="failure">
             {t(msg.key, msg.params)}

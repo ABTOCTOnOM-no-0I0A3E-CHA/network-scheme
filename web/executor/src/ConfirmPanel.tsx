@@ -21,6 +21,10 @@ export function ConfirmPanel(p: {
   onConfirm: (code: string) => void;
   onCancel: () => void;
   children?: ReactNode;
+  /* a further condition of the caller's (e.g. the device name typed exactly), checked like the code */
+  extraReady?: boolean;
+  /* emphasised fields: shown first, larger */
+  lead?: ReactNode;
 }) {
   const { t } = useTranslation();
   const [code, setCode] = useState("");
@@ -29,7 +33,7 @@ export function ConfirmPanel(p: {
   useEffect(() => {
     visible.current = unobscured;
   }, [unobscured]);
-  const ready = /^\d{6}$/.test(code);
+  const ready = /^\d{6}$/.test(code) && p.extraReady !== false;
 
   const send = () => {
     if (!visible.current || !ready || p.busy) return;
@@ -39,28 +43,38 @@ export function ConfirmPanel(p: {
   };
 
   return (
-    <div ref={ref} className="space-y-2" data-testid="confirm">
-      <p className="font-semibold">{p.title}</p>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3">
+    <div ref={ref} className="space-y-3 text-sm" data-testid="confirm">
+      <p className="text-base font-semibold">{p.title}</p>
+      {p.lead}
+      <dl className="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-4 gap-y-1.5 rounded-lg border bg-muted/40 px-3 py-2.5">
         {p.fields.flatMap((f) => [
-          <dt key={`${f.key}-k`}>{f.label}</dt>,
-          <dd key={`${f.key}-v`} className="break-all" data-testid={`field-${f.key}`}>
+          <dt key={`${f.key}-k`} className="text-muted-foreground">
+            {f.label}
+          </dt>,
+          <dd key={`${f.key}-v`} className="font-mono text-[13px] break-all" data-testid={`field-${f.key}`}>
             {f.value}
-            {f.warn && <strong className="ml-2 text-destructive">{f.warn}</strong>}
+            {f.warn && <strong className="ml-2 font-sans text-destructive">{f.warn}</strong>}
           </dd>,
         ])}
       </dl>
-      <p className="font-mono text-base break-all" data-testid="h">
-        H: {p.h}
-      </p>
+      <div className="rounded-lg border-2 border-foreground/80 px-3 py-2">
+        <p className="text-xs text-muted-foreground">{t("executor.confirm.hHint")}</p>
+        <p className="font-mono text-[15px] leading-6 font-semibold tracking-wide break-all" data-testid="h">
+          H: {p.h}
+        </p>
+      </div>
       {p.children}
-      <label className="block">
+      <label className="block font-medium">
         {t("executor.confirm.code")}
-        <input className="block w-32 rounded border px-2 py-1" id="cp-code" name="cp-code" inputMode="numeric" maxLength={6} autoComplete="off"
-          value={code} onChange={(e) => setCode(e.target.value)} />
+        <input className="mt-1 block h-9 w-36 rounded-md border bg-background px-3 font-mono text-base tracking-[0.3em] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          id="cp-code" name="cp-code" inputMode="numeric" maxLength={6} autoComplete="off" value={code} onChange={(e) => setCode(e.target.value)} />
       </label>
-      {!unobscured && <p role="alert">{t(supported ? "executor.obscured" : "executor.visibilityUnsupported")}</p>}
-      <div className="flex gap-2">
+      {!unobscured && (
+        <p role="alert" className="text-destructive">
+          {t(supported ? "executor.obscured" : "executor.visibilityUnsupported")}
+        </p>
+      )}
+      <div className="flex gap-2 pt-1">
         <Button type="button" disabled={p.busy || !unobscured || !ready} onClick={send}>
           {p.confirmLabel}
         </Button>

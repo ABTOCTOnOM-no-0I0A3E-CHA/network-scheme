@@ -21,9 +21,16 @@ export const ticketMessage = z.strictObject({
   ticket: z.string().min(1).max(MAX_TICKET).regex(/^[\x21-\x7e]+$/),
 });
 
+/*
+ * `session` tells the panel whether a change session is open in the frame (it keeps the frame mounted and shown while
+ * one is: FR-CHG-7); `expand` asks the panel to show the frame at full size (a button of the compact session bar).
+ * Both only steer the panel's own layout: the panel decides nothing else from them.
+ */
 export const statusMessage = z.discriminatedUnion("state", [
   z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("ready") }),
   z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("ticket_needed"), id: ID }),
+  z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("session"), open: z.boolean() }),
+  z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("expand") }),
 ]);
 
 export type TicketMessage = z.infer<typeof ticketMessage>;

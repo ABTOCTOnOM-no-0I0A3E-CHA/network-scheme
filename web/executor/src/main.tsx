@@ -24,6 +24,6 @@ const poster = createPoster({
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App poster={poster} />
+    <App poster={poster} bridge={bridge} />
   </StrictMode>,
 );

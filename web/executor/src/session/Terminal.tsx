@@ -38,9 +38,13 @@ export type TerminalProps = {
   onPaste: (text: string) => void;
   /** Read-only mode (recording player): no input is forwarded. */
   readOnly?: boolean;
+  /** Where the executor's line editor has its cursor, as an index into output: drawn as a block (text, not a style). */
+  caret?: number;
+  /** Extra classes (height) for the screen. */
+  className?: string;
 };
 
-export function Terminal({ output, onKeys, onPaste, readOnly = false }: TerminalProps) {
+export function Terminal({ output, onKeys, onPaste, readOnly = false, caret, className }: TerminalProps) {
   const { t } = useTranslation();
   const ref = useRef<HTMLPreElement>(null);
 
@@ -74,11 +78,21 @@ export function Terminal({ output, onKeys, onPaste, readOnly = false }: Terminal
       aria-label={t("executor.terminal.label")}
       tabIndex={0}
       data-testid="terminal"
-      className="h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-black p-2 font-mono text-sm text-neutral-100 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className={`${className ?? "h-96"} overflow-auto whitespace-pre-wrap break-all rounded-md border border-neutral-800 bg-neutral-950 p-3 font-mono text-[13px] leading-5 text-neutral-100 outline-none focus-visible:ring-2 focus-visible:ring-ring`}
       onKeyDown={keyDown}
       onPaste={paste}
     >
-      {output}
+      {caret === undefined || caret < 0 || caret > output.length ? (
+        output
+      ) : (
+        <>
+          {output.slice(0, caret)}
+          <span data-testid="caret" className="bg-neutral-200 text-neutral-950">
+            {output[caret] === undefined || output[caret] === "\n" ? " " : output[caret]}
+          </span>
+          {output.slice(caret + (output[caret] === undefined || output[caret] === "\n" ? 0 : 1))}
+        </>
+      )}
     </pre>
   );
 }
