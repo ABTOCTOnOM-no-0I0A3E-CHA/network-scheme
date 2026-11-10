@@ -29,6 +29,9 @@ async function embed(page: Page, name = "exec"): Promise<void> {
     f.title = "executor";
     f.setAttribute("sandbox", "allow-scripts allow-same-origin");
     f.referrerPolicy = "no-referrer";
+    /* a frame this small would be the dock's compact strip (header and status hidden); the panel gives it a full page */
+    f.width = "1100";
+    f.height = "700";
     f.src = `${src}/`;
     document.body.append(f);
   }, { src: EXECUTOR, name });
@@ -87,6 +90,8 @@ test("messages from another origin or of the wrong shape are ignored without a r
     const f = document.createElement("iframe");
     f.id = f.name = "other";
     f.setAttribute("sandbox", "allow-scripts allow-same-origin");
+    f.width = "1100";
+    f.height = "700";
     f.src = `${src}/`;
     document.body.append(f);
   }, EXECUTOR);
