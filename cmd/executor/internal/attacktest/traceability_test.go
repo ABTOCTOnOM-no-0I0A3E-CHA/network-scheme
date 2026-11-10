@@ -279,6 +279,18 @@ var trace = []struct {
 		{"internal/store", "TestAPIRoleHasNoExecRights"},
 		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("exports through a fetch with the code in the body and saves the executor's text"`},
 	}},
+	{"4d.2", "the executor's audit: viewed only with audit-read + a change TOTP code, every view itself audited and bounded per hour, filters and pages bounded, text cleaned; the whole chain (catalog of the audit tables, sealed segments, anchor) verified in the background, a break or truncation freezes with the executor_tamper disaster alert; every event of security.md 10 has its row (coverage table)", []ref{
+		{"cmd/executor/internal/auditview", "TestAuditViewNeedsAuditReadAndTOTP"},
+		{"cmd/executor/internal/auditview", "TestAuditViewFiltersAndPages"},
+		{"cmd/executor/internal/auditview", "TestAuditViewCleansText"},
+		{"cmd/executor/internal/auditview", "TestAuditViewLimit"},
+		{"cmd/executor/internal/admin", "TestBackgroundAuditVerificationFreezesOnABreak"},
+		{"cmd/executor/internal/admin", "TestAuditVerifyCatchesBreakAndTruncation"},
+		{"cmd/executor/internal/attacktest", "TestAuditCoverage"},
+		{"cmd/executor/internal/session", "TestAuditCoversTheSessionLifecycle"},
+		{"cmd/executor/internal/terminal", "TestEveryLineIsAudited"},
+		{"cmd/executor/internal/wcreds", "TestStoredCredentialIsBoundInside"},
+	}},
 	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
 		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
 		{"cmd/executor/internal/recording", "TestRecorderFailureIsFailClosed"},
@@ -367,7 +379,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

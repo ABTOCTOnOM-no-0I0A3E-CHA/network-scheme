@@ -303,6 +303,12 @@ func TestStoredCredentialIsBoundInside(t *testing.T) {
 	if err := f.submit(t, 1, ct); err != nil {
 		t.Fatal(err)
 	}
+	/* the stored credential is a registry change: one executor audit row, in its transaction (security.md 10) */
+	var n int
+	if err := f.env.Pool("postgres").QueryRow(context.Background(), `SELECT count(*) FROM exec.audit_event
+		WHERE action = 'credential.set' AND result = 'ok' AND object = 'device:1'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("%d credential.set audit rows (%v)", n, err)
+	}
 	c, err := f.st.Open(view(t, f), 1)
 	if err != nil || c.Password.Reveal() != password || c.Username != "netadmin" {
 		t.Fatalf("open: %v", err)

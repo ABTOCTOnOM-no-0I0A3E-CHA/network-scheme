@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/auditview"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/config"
@@ -213,6 +214,12 @@ func serve(ctx context.Context, cfg config.Config) error {
 	reads["/x/configs"] = web.Read{Action: unmask.ActionList, NeedFor: unm.ListNeed, Run: unm.List}
 	actions[unmask.ActionView] = web.Action{Describe: unm.Describe(unmask.ActionView)}
 	actions[unmask.ActionExport] = web.Action{Describe: unm.Describe(unmask.ActionExport)}
+	/* The executor's audit chain: audit-read + TOTP, every view audited (4d.2). */
+	av, err := auditview.New(auditview.Config{Reg: reg, Clean: terminal.Clean, Audit: az.Record})
+	if err != nil {
+		return err
+	}
+	reads["/x/audit"] = web.Read{Action: auditview.ActionRead, Need: auditview.Need(), Run: av.Run}
 	confirmed := []web.Confirmed{
 		{Path: "/x/configs/{device}/{version}", Re: regexp.MustCompile(`^/x/configs/([1-9][0-9]{0,17})/([1-9][0-9]{0,17})$`),
 			Action: unmask.ActionView, Run: unm.View},
@@ -290,6 +297,12 @@ func serve(ctx context.Context, cfg config.Config) error {
 		defer close(backedUp)
 		sched.Run(ctx)
 	}()
+	/* The whole audit chain, verified in the background: a break freezes (executor_tamper, disaster). */
+	audited := make(chan struct{})
+	go func() {
+		defer close(audited)
+		adm.WatchAudit(ctx, auditEvery)
+	}()
 	published := make(chan struct{})
 	go func() {
 		defer close(published)
@@ -302,13 +315,15 @@ func serve(ctx context.Context, cfg config.Config) error {
 	<-published
 	<-sessioned
 	<-backedUp
+	<-audited
 	return err
 }
 
-/* adminSocket, policyEvery and listen are variables for the tests. */
+/* adminSocket, policyEvery, auditEvery and listen are variables for the tests. */
 var (
 	adminSocket = admin.SocketPath
 	policyEvery = 2 * time.Second
+	auditEvery  = time.Hour
 	listen      = net.Listen
 )
 
