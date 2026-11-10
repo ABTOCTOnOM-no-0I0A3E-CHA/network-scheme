@@ -27,11 +27,12 @@ export const replayAnswer = z.object({
 });
 export type Replay = z.infer<typeof replayAnswer>["result"];
 
-const REFUSALS = ["recording_tampered", "recording_open", "recording_too_large", "view_limit", "not_found", "bad_params"];
+const REFUSALS = ["recording_tampered", "recording_open", "view_limit", "not_found", "bad_params"];
 
 export function messageOf(f: Failure): Message {
   if (f.kind === "http" && f.status === 422) return { key: REFUSALS.includes(f.code) ? `executor.recordings.refused.${f.code}` : "executor.recordings.refused.other" };
   if (f.kind === "http" && f.status === 403 && f.code !== "origin") return { key: "executor.recordings.refused.denied" };
+  if (f.kind === "http" && f.status === 503 && f.code === "replays_busy") return { key: "executor.recordings.refused.replays_busy" };
   return failureMessage(f);
 }
 

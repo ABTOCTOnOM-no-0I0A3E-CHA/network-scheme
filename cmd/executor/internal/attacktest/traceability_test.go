@@ -257,6 +257,9 @@ var trace = []struct {
 		{"cmd/executor/internal/terminal", "TestC8ReplayIsTheFactWithoutSecrets"},
 		{"cmd/executor/internal/recording", "TestC8RecordingHoldsNoSecret"},
 		{"internal/drivers/mask", "TestStreamKeepsBlocksAcrossPieces"},
+		{"internal/drivers/mask", "TestStreamOpenerDoesNotHideLaterLines"},
+		{"cmd/executor/internal/recording", "TestOpenerHidesNoLaterLine"},
+		{"cmd/executor/internal/recording", "TestReplayCleansAgain"},
 	}},
 	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert (unmask: 4d.1)", []ref{
 		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP"},
@@ -271,6 +274,11 @@ var trace = []struct {
 		{"cmd/executor/internal/session", "TestSessionIsRecorded"},
 		{"cmd/executor/internal/session", "TestFormRefusedWhenTheRecordingFails"},
 		{"cmd/executor/internal/session", "TestRestartMidSession"},
+		{"cmd/executor/internal/recording", "TestAnswerBoundAndEscaping"},
+		{"cmd/executor/internal/recording", "TestFailedLineIsNotRecorded"},
+		{"cmd/executor/internal/recording", "TestConcurrentReplaysBounded"},
+		{"cmd/executor/internal/terminal", "TestConfirmationMarkersFailClosed"},
+		{"cmd/executor/internal/session", "TestAbortedOpenLeavesAReplayableRecording"},
 	}},
 }
 

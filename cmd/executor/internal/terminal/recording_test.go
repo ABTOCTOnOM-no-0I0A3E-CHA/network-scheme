@@ -231,3 +231,35 @@ func TestRecorderFailureSendsNothing(t *testing.T) {
 		t.Fatalf("full: %v", res)
 	}
 }
+
+/*
+m4: a dangerous line and an accepted paste are sent only after their
+confirmation's marker is recorded: a marker that fails refuses them and
+the device gets nothing.
+*/
+func TestConfirmationMarkersFailClosed(t *testing.T) {
+	t.Cleanup(terminal.Unlimited())
+	f := newFx(t)
+	l := lines[0]
+	c := f.dial(t, l.id)
+	f.mustSend(t, c, l.id, l.cfg)
+	f.mustSend(t, c, l.id, "interface "+l.mgmtIf)
+	f.rec.failMark = recording.ErrFailed
+	before := f.typed(l.id)
+	if res := c.do("keys", "DESCR  nms-test\r"); len(res) != 1 || res[0]["type"] != "dangerous" {
+		t.Fatalf("dangerous: %v", res)
+	}
+	res := f.confirm(t, c, f.issue(t, c), f.names[l.id], f.newCode(t))
+	if !slices.ContainsFunc(res, func(m map[string]any) bool { return m["type"] == "refused" && m["code"] == "recording_failed" }) ||
+		f.typed(l.id) != before {
+		t.Fatalf("dangerous line with a failing marker: %v, device got %d lines", res, f.typed(l.id)-before)
+	}
+	c.send(map[string]any{"type": "paste", "data": "hostname a1\nhostname a2\nhostname a3\nhostname a4\nhostname a5\nhostname a6\n"})
+	if m := c.next(); m["type"] != "paste_pending" {
+		t.Fatal(m)
+	}
+	c.send(map[string]any{"type": "paste_confirm", "accept": true})
+	if res := c.until(); len(res) != 1 || res[0]["code"] != "recording_failed" || f.typed(l.id) != before {
+		t.Fatalf("paste with a failing marker: %v, device got %d lines", res, f.typed(l.id)-before)
+	}
+}

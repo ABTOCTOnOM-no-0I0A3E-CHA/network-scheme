@@ -40,3 +40,25 @@ func Outputs(clean, mask func(string) string, pieces ...string) string {
 	s.flushCarry()
 	return string(s.buf)
 }
+
+/* SetMaxAnswer bounds one recorded answer for a test. */
+func SetMaxAnswer(n int) (restore func()) {
+	old := maxAnswer
+	maxAnswer = n
+	return func() { maxAnswer = old }
+}
+
+/* ReplayBound is the most a recording under a limit of maxMiB holds. */
+func ReplayBound(maxMiB int) int { return replayBound(maxMiB) }
+
+/* Busy takes every replay slot until release. */
+func (st *Store) Busy() (release func()) {
+	for range cap(st.replays) {
+		st.replays <- struct{}{}
+	}
+	return func() {
+		for range cap(st.replays) {
+			<-st.replays
+		}
+	}
+}

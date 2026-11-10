@@ -98,9 +98,10 @@ func TestSessionIsRecorded(t *testing.T) {
 	if want := append([]string{"configure", "hostname edge-9", "end"}, shown...); !slices.Equal(in, want) {
 		t.Fatalf("input %q, want %q", in, want)
 	}
-	if len(marks) != 5 || !strings.HasPrefix(marks[0], "session opened by "+u.name) || marks[1] != "diff" ||
-		marks[2] != "save (startup configuration)" ||
-		!strings.HasPrefix(marks[3], "form interface-description") || marks[4] != "session ended: closed" {
+	/* m8: the form's way back to the privileged prompt is marked before its lines */
+	if len(marks) != 6 || !strings.HasPrefix(marks[0], "session opened by "+u.name) || marks[1] != "diff" ||
+		marks[2] != "save (startup configuration)" || !strings.HasPrefix(marks[3], "form interface-description") ||
+		!strings.HasPrefix(marks[4], "the executor returns to the privileged prompt") || marks[5] != "session ended: closed" {
 		t.Fatalf("marks %q", marks)
 	}
 }
@@ -159,5 +160,30 @@ func TestFormRefusedWhenTheRecordingFails(t *testing.T) {
 	}
 	if f.alerts(t, recording.KindFailed) == 0 {
 		t.Fatal("no alert")
+	}
+}
+
+/*
+m2: a device whose open fails after its session_device row (here its Write
+connection) still has a complete recording: replayed with its abort, no
+tamper alert.
+*/
+func TestAbortedOpenLeavesAReplayableRecording(t *testing.T) {
+	f := newFx(t)
+	u := f.user(t, "core")
+	f.dialsOK.Store(1) /* the pre-session snapshot connects, the Write connection does not */
+	if _, err := f.m.Open(ctx(t), f.req(t, u), []int64{f.id}); err == nil {
+		t.Fatal("opened without its Write connection")
+	}
+	var sid [16]byte
+	if err := f.env.Pool("postgres").QueryRow(ctx(t), `SELECT session_id FROM exec.session_device WHERE device_id = $1`, f.id).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	r, err := f.rec.Replay(ctx(t), sid, f.id)
+	if err != nil || r.Events[len(r.Events)-1].Data != "session ended: aborted" {
+		t.Fatalf("replay %+v: %v", r, err)
+	}
+	if n := f.alerts(t, recording.KindTamper); n != 0 {
+		t.Fatalf("%d tamper alerts", n)
 	}
 }

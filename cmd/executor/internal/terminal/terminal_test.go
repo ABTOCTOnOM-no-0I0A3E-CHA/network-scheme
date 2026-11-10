@@ -120,6 +120,7 @@ type recorder struct {
 	mu             sync.Mutex
 	in, out, marks []string
 	fail           error
+	failMark       error /* only the markers fail */
 }
 
 func (r *recorder) RecordInput(_ context.Context, _ *session.Session, _ int64, l string) error {
@@ -145,7 +146,10 @@ func (r *recorder) RecordOutput(_ context.Context, _ *session.Session, _ int64, 
 func (r *recorder) RecordMark(_ context.Context, _ *session.Session, _ int64, l string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.fail != nil {
+	if r.fail != nil || r.failMark != nil {
+		if r.fail == nil {
+			return r.failMark
+		}
 		return r.fail
 	}
 	r.marks = append(r.marks, l)

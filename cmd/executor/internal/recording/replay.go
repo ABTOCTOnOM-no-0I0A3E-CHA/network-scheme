@@ -21,7 +21,20 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/internal/backup/open"
 	"github.com/beekamai/network-scheme/internal/execadmin"
+	"github.com/beekamai/network-scheme/internal/execpolicy"
 )
+
+/*
+ErrBusy refuses a replay while maxReplays run (503: try again). Streaming
+or paging the replay is deferred: each request needs a new TOTP code.
+*/
+var ErrBusy = busy{}
+
+type busy struct{}
+
+func (busy) Error() string       { return "recording: replays busy" }
+func (busy) RefusalCode() string { return "replays_busy" }
+func (busy) HTTPStatus() int     { return 503 }
 
 /* Actions of the reads (the audit's action of authz's decision). */
 const (
@@ -179,6 +192,15 @@ func (st *Store) replay(ctx context.Context, by authz.Decision, params json.RawM
 	user := by.UserID
 	ev := audit.Event{UserID: &user, Action: actionView, Object: "session:" + idString(sid), Result: audit.OK,
 		Details: map[string]any{"device_id": p.Device}}
+	/* a replay holds up to replayBound in memory, twice (text and JSON): at most maxReplays at once */
+	select {
+	case st.replays <- struct{}{}:
+		defer func() { <-st.replays }()
+	default:
+		ev.Result, ev.Details["class"] = audit.Denied, "busy"
+		st.c.Audit(ctx, ev)
+		return nil, ErrBusy
+	}
 	limit := st.c.Policy().Policy.RecordingViewsPerHour
 	if ok, first := st.views.take(user, limit, st.c.Now()); !ok {
 		if first {
@@ -279,9 +301,9 @@ func (st *Store) Replay(ctx context.Context, session [16]byte, device int64) (Re
 			bad = fmt.Sprintf("chunk %d does not open under its AAD", n)
 			break
 		}
-		if len(pt)+len(p) > maxReplayBytes {
-			rows.Close()
-			return Replay{}, ErrTooLarge
+		if len(pt)+len(p) > replayBound(execpolicy.MaxRecordingMiB) {
+			bad = "it is larger than any recording the executor writes"
+			break
 		}
 		pt = append(pt, p...)
 		total.Write(c[:])

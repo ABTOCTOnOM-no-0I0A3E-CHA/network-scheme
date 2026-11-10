@@ -4,7 +4,7 @@ import { Button } from "@nms/shared/ui/button";
 import type { Poster } from "../client";
 import type { Message } from "../errors";
 import { Confirmation } from "./Confirmation";
-import { ACTIONS, DRIVERS, issue, messageOf, shownFields, type Challenge } from "./api";
+import { ACTIONS, DRIVERS, issue, messageOf, probeAnswer, type Challenge } from "./api";
 
 type Kind = "register" | "accept_hostkey";
 const ACTION = { register: ACTIONS.register, accept_hostkey: ACTIONS.accept } as const;
@@ -46,12 +46,12 @@ export function KeyFlow({ poster, kind, deviceId, onFinished }: { poster: Poster
     const c = code;
     setCode(""); /* sent once, never again */
     setBusy(true);
-    const r = await poster.post("/x/devices/probe", { code: c, params: { kind, ...params } }, shownFields);
+    const r = await poster.post("/x/devices/probe", { code: c, params: { kind, ...params } }, probeAnswer);
     if (!r.ok) {
       setBusy(false);
       return setMsg(messageOf(r.failure));
     }
-    const f = r.value;
+    const f = r.value.result;
     if (!f.hostkey_algo || f.hostkey_algo === "none" || !f.hostkey_fp || f.hostkey_fp === "none") {
       setBusy(false);
       return setMsg({ key: "executor.devices.noKey" });

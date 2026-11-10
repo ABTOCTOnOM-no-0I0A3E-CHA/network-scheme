@@ -98,6 +98,8 @@ type fx struct {
 	rec    *recording.Store
 	users  string /* ESR: what show users lists (under mu) */
 	noDial atomic.Bool
+	/* dialsOK, if set, is how many dials succeed before the device refuses */
+	dialsOK atomic.Int32
 }
 
 /* setUsers sets what the ESR's show users lists. */
@@ -114,8 +116,9 @@ type dialer struct{ f *fx }
 func (d dialer) Dial(ctx context.Context, ap netip.AddrPort) (net.Conn, error) {
 	d.f.mu.Lock()
 	d.f.dialed = append(d.f.dialed, ap.String())
+	n := len(d.f.dialed)
 	d.f.mu.Unlock()
-	if d.f.noDial.Load() {
+	if d.f.noDial.Load() || d.f.dialsOK.Load() > 0 && n > int(d.f.dialsOK.Load()) {
 		return nil, errors.New("test: the device refuses new connections")
 	}
 	return (&net.Dialer{}).DialContext(ctx, "tcp", d.f.emu.String())

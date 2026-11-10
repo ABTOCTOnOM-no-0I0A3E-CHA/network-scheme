@@ -9,6 +9,18 @@ import { eventText, listAnswer, messageOf, replayAnswer, type Item, type Replay 
 
 /* Longest pause between two events while playing (a session idles for minutes). */
 const MAX_PAUSE_MS = 2000;
+/* The terminal shows at most the last MAX_SHOWN characters (a recording may hold tens of MiB), with a notice. */
+export const MAX_SHOWN = 2 << 20;
+
+type Screen = { shown: number; text: string; cut: boolean };
+const EMPTY: Screen = { shown: 0, text: "", cut: false };
+
+/* screen after events up to `to` were shown: appended to what is shown (never rebuilt), the tail kept. */
+function advance(sc: Screen, r: Replay, to: number): Screen {
+  if (to <= sc.shown) return sc;
+  const text = sc.text + r.events.slice(sc.shown, to).map(eventText).join("");
+  return text.length > MAX_SHOWN ? { shown: to, text: text.slice(text.length - MAX_SHOWN), cut: true } : { shown: to, text, cut: sc.cut };
+}
 
 /*
  * Session recordings (Task 4c.5): the list of a device's or a session's recordings and the player. Every list and every
@@ -23,7 +35,8 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
   const [msg, setMsg] = useState<Message | null>(null);
   const [items, setItems] = useState<Item[] | null>(null);
   const [replay, setReplay] = useState<Replay | null>(null);
-  const [shown, setShown] = useState(0);
+  const [screen, setScreen] = useState<Screen>(EMPTY);
+  const shown = screen.shown;
   const [playing, setPlaying] = useState(false);
   const alive = useRef(true);
   useEffect(() => {
@@ -39,7 +52,7 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
     if (!active || !replay) return;
     const prev = shown > 0 ? replay.events[shown - 1].t : 0;
     const wait = Math.min(Math.max(replay.events[shown].t - prev, 0) * 1000, MAX_PAUSE_MS);
-    const id = window.setTimeout(() => setShown((n) => n + 1), wait);
+    const id = window.setTimeout(() => setScreen((sc) => advance(sc, replay, sc.shown + 1)), wait);
     return () => window.clearTimeout(id);
   }, [active, replay, shown]);
 
@@ -72,11 +85,10 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
       return;
     }
     setReplay(r.value.result);
-    setShown(0);
+    setScreen(EMPTY);
     setPlaying(true);
   };
 
-  const output = replay ? replay.events.slice(0, shown).map(eventText).join("") : "";
   const codeOk = /^\d{6}$/.test(code);
 
   return (
@@ -124,14 +136,15 @@ export function RecordingsPage({ poster }: { poster: Poster }) {
         {replay && (
           <div className="space-y-2" data-testid="player">
             <p>{replay.title}</p>
-            <Terminal output={output} readOnly onKeys={() => {}} onPaste={() => {}} />
+            {screen.cut && <p data-testid="cut">{t("executor.recordings.cut")}</p>}
+            <Terminal output={screen.text} readOnly onKeys={() => {}} onPaste={() => {}} />
             <div className="flex gap-2">
               <Button type="button" size="sm" variant="outline" disabled={shown >= replay.events.length} onClick={() => setPlaying((p) => !p)}>
                 {t(active ? "executor.recordings.pause" : "executor.recordings.resume")}
               </Button>
               <Button type="button" size="sm" variant="outline" onClick={() => {
                 setPlaying(false);
-                setShown(replay.events.length);
+                setScreen((sc) => advance(sc, replay, replay.events.length));
               }}>
                 {t("executor.recordings.all")}
               </Button>

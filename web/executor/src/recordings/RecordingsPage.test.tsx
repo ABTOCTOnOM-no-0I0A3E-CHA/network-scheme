@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
 import { createPoster } from "../client";
-import { RecordingsPage } from "./RecordingsPage";
+import { MAX_SHOWN, RecordingsPage } from "./RecordingsPage";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const SID = "0a1b2c3d-0000-4000-8000-00000000abcd";
@@ -71,6 +71,31 @@ describe("RecordingsPage", () => {
     await u.click(screen.getByRole("button", { name: "Воспроизвести" }));
     expect(await screen.findByTestId("failure")).toHaveTextContent("не прошла проверку целостности");
     expect(screen.queryByTestId("player")).toBeNull();
+  });
+
+  it("shows at most the last MAX_SHOWN characters of a large recording, with a notice", async () => {
+    const u = userEvent.setup();
+    await listed(u);
+    const big = "y".repeat(MAX_SHOWN - 10) + "\n";
+    const many = [{ t: 0, code: "o", data: big }, { t: 0.1, code: "o", data: "z".repeat(1000) + "\n" }, { t: 0.2, code: "m", data: "session ended: closed" }];
+    reply(json(200, { result: { session_id: SID, device_id: 5, timestamp: 1, title: "t", events: many } }));
+    await u.type(screen.getByLabelText("Код TOTP изменений"), "555555");
+    await u.click(screen.getByRole("button", { name: "Воспроизвести" }));
+    await screen.findByTestId("player");
+    await u.click(screen.getByRole("button", { name: "Показать всё" }));
+    const term = screen.getByTestId("terminal");
+    await waitFor(() => expect(term.textContent).toContain("session ended: closed"));
+    expect(term.textContent!.length).toBeLessThanOrEqual(MAX_SHOWN);
+    expect(screen.getByTestId("cut")).toHaveTextContent("Показан только конец записи");
+  });
+
+  it("names a busy executor's refusal of a replay", async () => {
+    const u = userEvent.setup();
+    await listed(u);
+    reply(json(503, { error: { code: "replays_busy" } }));
+    await u.type(screen.getByLabelText("Код TOTP изменений"), "666666");
+    await u.click(screen.getByRole("button", { name: "Воспроизвести" }));
+    expect(await screen.findByTestId("failure")).toHaveTextContent("слишком много записей");
   });
 
   it("refuses a malformed answer instead of rendering it", async () => {

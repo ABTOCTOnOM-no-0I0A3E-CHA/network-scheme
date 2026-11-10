@@ -91,10 +91,14 @@ func (r recorded) Send(ctx context.Context, v core.Verdict) (transport.Output, e
 	return out, err
 }
 
-/* ToRoot is the driver session's (forms.Apply needs the privileged prompt). */
+/* ToRoot is the driver session's (forms.Apply needs the privileged prompt), its lines marked first: no marker, no line. */
 func (r recorded) ToRoot(ctx context.Context) error {
-	if rr, ok := r.Session.(rooter); ok {
-		return rr.ToRoot(ctx)
+	rr, ok := r.Session.(rooter)
+	if !ok {
+		return ErrNotApplicable
 	}
-	return ErrNotApplicable
+	if err := r.m.RecordMark(ctx, r.s, r.d.ID, "the executor returns to the privileged prompt (end/exit lines)"); err != nil {
+		return err
+	}
+	return rr.ToRoot(ctx)
 }

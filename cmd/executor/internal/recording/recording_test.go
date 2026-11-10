@@ -82,6 +82,7 @@ type fx struct {
 	pol       *policy.Holder
 	polF      string
 	pub, priv *[32]byte
+	mac       *[32]byte
 	logs      *syncBuf
 	start     time.Time
 	offset    atomic.Int64
@@ -138,6 +139,7 @@ func newFx(t *testing.T) *fx {
 	if f.pub, f.priv, err = box.GenerateKey(rand.Reader); err != nil {
 		t.Fatal(err)
 	}
+	f.mac = keys.MAC()
 	if f.st, err = recording.New(recording.Config{Pool: pool, MAC: keys.MAC(), Pub: f.pub, Priv: f.priv, Clean: terminal.Clean,
 		Policy: f.pol.Current, Live: func(id [16]byte) bool {
 			f.mu.Lock()
@@ -340,7 +342,7 @@ func TestChunkSizeBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	big := strings.Repeat(strings.Repeat("y", 99)+"\n", 3<<20/100)
+	big := strings.Repeat(strings.Repeat("y ", 49)+"y\n", 3<<20/100) /* words, not key material */
 	if err := s.Output(ctx, big); err != nil {
 		t.Fatal(err)
 	}

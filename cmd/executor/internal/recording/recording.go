@@ -7,12 +7,15 @@ then events "i" for a line sent to the device, "o" for the device's answer,
 "m" for the executor's own markers: session opened and ended, a dangerous
 line or a paste confirmed, diff, save, commit, form, rollback). Every event's
 text is cleaned of escapes and controls (Config.Clean, the live terminal's)
-and masked before it is buffered: by a mask.Stream (a PEM or "crypto ...
-import" block left open by one piece goes on being masked in the next) and
-then by the driver's MaskSecrets. Device output without its line end is held
-unmasked only inside the Stream, until the line ends (so a secret split
-across two answers is masked whole), the next event or the end. Nothing
-unmasked is ever buffered beyond that, stored or logged.
+and masked line by line before it is buffered: a line of key material
+(mask.KeyMaterial) whole, any other by the driver's MaskSecrets on its own.
+In the output a PEM or "crypto ... import" block one answer opens goes on in
+the next (mask.Stream) only while its lines are key material: any other line
+ends it, so an opener the device did not take hides nothing after it.
+Device output without its line end is held unmasked only inside the Stream,
+until the line ends (so a secret split across two answers is masked whole),
+the next event or the end. Nothing unmasked is ever buffered beyond that,
+stored or logged.
 
 The masked text is stored in chunks of at most maxChunk bytes (below
 registry.MaxMessage, so the normal pool reads them), each sealed with the
@@ -23,14 +26,17 @@ under MAC in exec.recording_manifest when the device's session ends. Both
 tables are append-only. Every line sent is stored before it is sent
 (Input stores synchronously); a failure to store makes the Stream refuse
 every further line (fail closed, high alert): a session never sends a line
-it has not recorded. Past recording_max_mib (policy) Input refuses every
-further line too (warning alert); markers and the device's answers to lines
-already sent are still recorded, so a recording can exceed the limit by at
-most one answer (transport bounds it).
+it has not recorded, and a line whose store failed is dropped from the
+buffer (it never appears as sent). Past recording_max_mib (policy) Input
+refuses every further line too (warning alert); the answer to a line already
+sent (at most maxAnswer of masked text, cut with a marker) and markers (at
+most markerBudget) are still recorded: a recording stays within
+replayBound(its limit).
 
 A replay (POST /x/recordings/replay: grant audit-read and a change TOTP code
 through authz, ruling R3; every view in the executor's audit; at most
-recording_views_per_hour per user, more refused with a high alert) verifies
+recording_views_per_hour per user, more refused with a high alert; at most
+maxReplays at once, more refused with 503: the answer is built in memory) verifies
 the manifest's MAC, then every chunk's number (0, 1, ... in order), MAC and
 AAD, their count and the total hash before anything is returned; any
 failure refuses the replay with a high executor_tamper alert. The events go
@@ -53,6 +59,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -80,11 +87,10 @@ func (r Refusal) RefusalCode() string { return string(r) }
 
 /* Refusals. */
 const (
-	ErrFailed    Refusal = "recording_failed"    /* the recording could not be stored: nothing more is sent */
-	ErrFull      Refusal = "recording_full"      /* recording_max_mib reached: nothing more is sent */
-	ErrOpen      Refusal = "recording_open"      /* the session is still open: no manifest yet */
-	ErrTampered  Refusal = "recording_tampered"  /* the recording fails its verification */
-	ErrTooLarge  Refusal = "recording_too_large" /* above what a replay returns */
+	ErrFailed    Refusal = "recording_failed"   /* the recording could not be stored: nothing more is sent */
+	ErrFull      Refusal = "recording_full"     /* recording_max_mib reached: nothing more is sent */
+	ErrOpen      Refusal = "recording_open"     /* the session is still open: no manifest yet */
+	ErrTampered  Refusal = "recording_tampered" /* the recording fails its verification */
 	ErrViewLimit Refusal = "view_limit"
 	ErrNotFound  Refusal = "not_found"
 	ErrParams    Refusal = "bad_params"
@@ -92,13 +98,25 @@ const (
 
 /* Bounds (variables for the tests). */
 var (
-	maxChunk       = 1<<20 - 16<<10 /* plaintext bytes of a chunk: its row stays below registry.MaxMessage */
-	maxCarry       = 64 << 10       /* device output without its line end held for the masker */
-	maxChunks      = 999_000        /* chunks of a recording: Input refuses beyond (the table allows 0..1000000) */
-	maxReplayBytes = 80 << 20       /* plaintext a replay returns: recording_max_mib (64) and an answer over */
-	listMost       = 200            /* recordings a list returns */
-	recordTime     = 10 * time.Second
+	maxChunk     = 1<<20 - 16<<10 /* plaintext bytes of a chunk: its row stays below registry.MaxMessage */
+	maxCarry     = 64 << 10       /* device output without its line end held for the masker */
+	maxChunks    = 999_000        /* chunks of a recording: Input refuses beyond (the table allows 0..1000000) */
+	maxAnswer    = 4 << 20        /* masked text of one answer recorded; the rest is cut with a marker saying so */
+	markerBudget = 64 << 10       /* bytes of markers recorded past recording_max_mib (the end marker always) */
+	listMost     = 200            /* recordings a list returns */
+	maxReplays   = 2              /* replays at once */
+	recordTime   = 10 * time.Second
 )
+
+/*
+replayBound is the most a recording under a limit of maxMiB can hold: the
+limit, then one line sent just below it, its answer (at most maxAnswer of
+masked text, at most twice that in JSON: escapes double a character at
+most, no HTML escaping), the markers past the limit and the header and
+end. A replay reads at most replayBound(execpolicy.MaxRecordingMiB): more
+is tampering, never a recording the executor wrote.
+*/
+func replayBound(maxMiB int) int { return maxMiB<<20 + 2*maxAnswer + markerBudget + 512<<10 }
 
 /* Config builds a Store; every field but Log and Now is required. */
 type Config struct {
@@ -119,8 +137,9 @@ type Config struct {
 
 /* Store records and replays. */
 type Store struct {
-	c     Config
-	views views
+	c       Config
+	views   views
+	replays chan struct{} /* a slot per replay running */
 }
 
 /* New returns a Store. */
@@ -135,7 +154,7 @@ func New(c Config) (*Store, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &Store{c: c, views: views{users: map[int64]*userViews{}}}, nil
+	return &Store{c: c, views: views{users: map[int64]*userViews{}}, replays: make(chan struct{}, maxReplays)}, nil
 }
 
 const macDomain = "nms/recording/v1"
@@ -191,16 +210,18 @@ type Stream struct {
 	start  time.Time
 	limit  int64
 
-	mu      sync.Mutex
-	buf     []byte    /* masked asciicast text not stored yet */
-	n       int       /* the next chunk's number */
-	total   hash.Hash /* over every stored chunk's sha256(ct)||sha256(dek_ct) */
-	size    int64     /* bytes recorded (stored and buffered) */
-	in, out mask.Stream
-	carry   string /* device output after its last line end: unmasked, never buffered or stored as is */
-	err     error  /* the first failure to store: no line is sent any more */
-	full    bool
-	closed  bool
+	mu    sync.Mutex
+	buf   []byte      /* masked asciicast text not stored yet */
+	n     int         /* the next chunk's number */
+	total hash.Hash   /* over every stored chunk's sha256(ct)||sha256(dek_ct) */
+	size  int64       /* bytes recorded (stored and buffered) */
+	out   mask.Stream /* the device output's PEM and import blocks */
+	carry string      /* device output after its last line end: unmasked, never buffered or stored as is */
+	err   error       /* the first failure to store: no line is sent any more */
+	full  bool
+	/* pastLimit counts the markers' bytes recorded past recording_max_mib (at most markerBudget) */
+	pastLimit int64
+	closed    bool
 }
 
 /*
@@ -231,29 +252,54 @@ func (s *Stream) header() {
 	s.size += int64(len(h) + 1)
 }
 
-/* event appends one asciicast event of masked text. */
+/* event appends one asciicast event of masked text (JSON without HTML escaping: at most twice its size). */
 func (s *Stream) event(code, masked string) {
 	t := max(s.st.c.Now().Sub(s.start), 0).Seconds()
-	d, _ := json.Marshal(masked)
-	line := fmt.Appendf(nil, "[%s, %q, %s]\n", strconv.FormatFloat(t, 'f', 6, 64), code, d)
+	var d bytes.Buffer
+	e := json.NewEncoder(&d)
+	e.SetEscapeHTML(false)
+	_ = e.Encode(masked)
+	line := fmt.Appendf(nil, "[%s, %q, %s]\n", strconv.FormatFloat(t, 'f', 6, 64), code, bytes.TrimSuffix(d.Bytes(), []byte("\n")))
 	s.buf = append(s.buf, line...)
 	s.size += int64(len(line))
+}
+
+/* undo drops what was buffered since mark (an event whose store failed: it must not be stored later, the device never got it). */
+func (s *Stream) undo(at int, size int64) {
+	if len(s.buf) >= at {
+		s.buf, s.size = s.buf[:at], size
+	}
 }
 
 /* label is a marker's text as recorded: cleaned and masked (a marker names no secret, but nothing is recorded unmasked). */
 func (s *Stream) label(l string) string { return s.mask(mask.Secrets(s.st.c.Clean(l))) }
 
 /*
-output masks device output (whole lines but maybe the last): cleaned, the
-output stream's block state, the driver's mask; the final line break is
-not a line of its own (inside a block it would become a mask).
+output masks device output line by line: cleaned, then a line inside a PEM
+or import block, or one of key material, is masked whole (mask.Stream: the
+block state goes across answers, but only key material stays in a block),
+any other line by the driver's mask on its own (so no opener hides the
+lines after it).
 */
 func (s *Stream) output(text string) string {
-	body, nl := strings.CutSuffix(s.st.c.Clean(text), "\n")
-	if body = s.mask(s.out.Secrets(body)); nl {
-		body += "\n"
+	lines := strings.Split(s.st.c.Clean(text), "\n")
+	for i, l := range lines {
+		if s.out.Block(l) {
+			lines[i] = mask.Mark
+		} else if l != "" {
+			lines[i] = s.mask(l)
+		}
 	}
-	return body
+	return strings.Join(lines, "\n")
+}
+
+/* input masks a line sent: whole when it is key material, else by the driver's mask (no state: a line never hides another). */
+func (s *Stream) input(line string) string {
+	l := s.st.c.Clean(line)
+	if mask.KeyMaterial(strings.TrimSpace(l)) {
+		return mask.Mark
+	}
+	return s.mask(l)
 }
 
 /* flushCarry records the output held without its line end. */
@@ -328,8 +374,16 @@ func (s *Stream) Input(ctx context.Context, line string) error {
 		}
 		return ErrFull
 	}
-	s.event("i", s.mask(s.in.Secrets(s.st.c.Clean(line)))+"\n")
-	return s.flush(ctx, false)
+	if err := s.flush(ctx, false); err != nil { /* what came before, so that a failure below is this line's alone */
+		return err
+	}
+	at, size := len(s.buf), s.size
+	s.event("i", s.input(line)+"\n")
+	if err := s.flush(ctx, false); err != nil {
+		s.undo(at, size) /* not sent: never recorded as sent */
+		return err
+	}
+	return nil
 }
 
 /*
@@ -351,9 +405,39 @@ func (s *Stream) Output(ctx context.Context, text string) error {
 	}
 	s.carry = rest
 	if whole != "" {
-		s.event("o", s.output(whole))
+		s.answer(whole)
 	}
 	return s.flush(ctx, true)
+}
+
+/*
+answer records one answer, at most maxAnswer bytes of masked text: a longer
+one is cut at a line end of the device's text (then of the masked text)
+and a marker says how much was not recorded. This bounds what one answer
+adds past recording_max_mib (replayBound).
+*/
+func (s *Stream) answer(whole string) {
+	raw := whole
+	if len(raw) > maxAnswer {
+		cut := strings.LastIndexByte(raw[:maxAnswer], '\n') + 1
+		if cut == 0 {
+			cut = maxAnswer
+		}
+		raw = raw[:cut]
+	}
+	o := s.output(raw)
+	if len(o) > maxAnswer {
+		cut := maxAnswer
+		for cut > 0 && !utf8.RuneStart(o[cut]) {
+			cut--
+		}
+		o = o[:cut]
+	}
+	s.event("o", o)
+	if len(raw) < len(whole) || len(o) < len(s.output(raw)) {
+		s.event("m", fmt.Sprintf("the device's answer is cut here in the recording: %d bytes of it were not recorded (bound of one answer)",
+			len(whole)-len(raw)))
+	}
 }
 
 /* Mark records a marker of the executor (stored at once); it is recorded past recording_max_mib too. */
@@ -364,8 +448,23 @@ func (s *Stream) Mark(ctx context.Context, label string) error {
 		return ErrFailed
 	}
 	s.flushCarry()
+	over := s.size >= s.limit
+	if over && s.pastLimit >= int64(markerBudget) {
+		return ErrFull
+	}
+	if err := s.flush(ctx, false); err != nil {
+		return err
+	}
+	at, size := len(s.buf), s.size
 	s.event("m", s.label(label))
-	return s.flush(ctx, false)
+	if err := s.flush(ctx, false); err != nil {
+		s.undo(at, size) /* the action is refused: its marker must not be stored later */
+		return err
+	}
+	if over {
+		s.pastLimit += s.size - size
+	}
+	return nil
 }
 
 /*

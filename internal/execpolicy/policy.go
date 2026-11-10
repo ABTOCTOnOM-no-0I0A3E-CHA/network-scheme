@@ -89,6 +89,9 @@ type ClassOverride struct {
 	Class   string `yaml:"class" json:"class"`
 }
 
+/* MaxRecordingMiB bounds recording_max_mib: a replay reads at most this and one answer per recording. */
+const MaxRecordingMiB = 64
+
 /* Default is the policy of a fresh install (security.md 5.5). */
 func Default() Policy {
 	return Policy{
@@ -233,7 +236,7 @@ func (p Policy) Validate() error {
 		inRange("paste_confirm_lines", p.PasteConfirmLines, 1, 100),
 		inRange("unmask_per_hour", p.UnmaskPerHour, 1, 1000),
 		inRange("mass_unmask_alert", p.MassUnmaskAlert, 1, 10000),
-		inRange("recording_max_mib", p.RecordingMaxMiB, 1, 64),
+		inRange("recording_max_mib", p.RecordingMaxMiB, 1, MaxRecordingMiB),
 		inRange("recording_views_per_hour", p.RecordingViewsPerHour, 1, 1000),
 	); err != nil {
 		return err

@@ -604,6 +604,18 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 	if err := m.insertDevice(ctx, s.ID, id, pre); err != nil {
 		return d, err
 	}
+	/*
+		The recording right after its session_device row, before anything can
+		fail (an abort then ends it with its manifest, never a recording without
+		one). drivers.Mask is every line's MaskSecrets (drivers.Base).
+	*/
+	if m.cfg.Recordings == nil {
+		return d, ErrRecording
+	}
+	if d.rec, err = m.cfg.Recordings.Open(ctx, s.ID, id, s.Username, drivers.Mask); err != nil {
+		m.cfg.Log.Error("session: recording not started", slog.Int64("device_id", id), slog.String("err", err.Error()))
+		return d, ErrRecording
+	}
 	if d.sh, err = m.dial(ctx, id, transport.Write); err != nil {
 		return d, err
 	}
@@ -613,13 +625,6 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		return d, ErrLineMismatch
 	}
 	d.Driver = drv
-	if m.cfg.Recordings == nil {
-		return d, ErrRecording
-	}
-	if d.rec, err = m.cfg.Recordings.Open(ctx, s.ID, id, s.Username, drv.MaskSecrets); err != nil {
-		m.cfg.Log.Error("session: recording not started", slog.Int64("device_id", id), slog.String("err", err.Error()))
-		return d, ErrRecording
-	}
 	rules, err := m.rules(ctx, d.Line, p, id)
 	if err != nil {
 		return d, err
