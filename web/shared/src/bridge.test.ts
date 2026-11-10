@@ -19,10 +19,24 @@ describe("channel (panel side)", () => {
     const { got, deliver } = panel();
     deliver({ v: 1, type: "status", state: "ready" });
     deliver({ v: 1, type: "status", state: "ticket_needed", id: ID });
+    deliver({ v: 1, type: "status", state: "session", open: true });
+    deliver({ v: 1, type: "status", state: "expand" });
+    deliver({ v: 1, type: "status", state: "dialog", open: true });
     expect(got).toEqual([
       { v: 1, type: "status", state: "ready" },
       { v: 1, type: "status", state: "ticket_needed", id: ID },
+      { v: 1, type: "status", state: "session", open: true },
+      { v: 1, type: "status", state: "expand" },
+      { v: 1, type: "status", state: "dialog", open: true },
     ]);
+  });
+
+  it("drops a session status without a boolean and an expand with extra fields", () => {
+    const { got, deliver } = panel();
+    deliver({ v: 1, type: "status", state: "session" });
+    deliver({ v: 1, type: "status", state: "session", open: "yes" });
+    deliver({ v: 1, type: "status", state: "expand", to: "full" });
+    expect(got).toEqual([]);
   });
 
   it("drops foreign origins, other windows and malformed messages, silently", () => {

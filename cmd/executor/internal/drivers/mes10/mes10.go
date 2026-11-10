@@ -9,6 +9,7 @@ package mes10
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -150,6 +151,15 @@ func (d Driver) Open(ctx context.Context, sh *transport.Shell, o drivers.Options
 	return d.open(ctx, sh, o)
 }
 
+/* OpenShell opens a session on any drivers.Shell (the in-memory emulator of other packages' tests); the executor opens through Open. */
+func (d Driver) OpenShell(ctx context.Context, sh drivers.Shell, o drivers.Options) (drivers.Session, error) {
+	s, err := d.open(ctx, sh, o)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (*session, error) {
 	o, err := drivers.Prepare(d.L, d.S, o)
 	if err != nil {
@@ -165,7 +175,7 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	}
 	if m := o.Strategies.ReloadMinutes; o.Strategies.SafetyNet == "reload-in" {
 		if _, err := s.System(ctx, fmt.Sprintf("reload in %d %d", m/60, m%60)); err != nil {
-			return nil, err
+			return nil, errors.Join(err, s.DropSnapshot(ctx, s.SnapshotFile("flash:"))) /* its own Open failed: no file left behind */
 		}
 		s.armed = true
 	}

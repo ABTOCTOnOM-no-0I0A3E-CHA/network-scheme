@@ -40,6 +40,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -62,6 +63,7 @@ var (
 	writeTimeout            = 30 * time.Second
 	idleTimeout             = 60 * time.Second
 	shutdownGrace           = 10 * time.Second
+	maxConns                = 256 /* open connections from the gateway */
 )
 
 /*
@@ -142,8 +144,12 @@ type Config struct {
 	State   func() (enabled, frozen bool)
 	Actions map[string]Action
 	Reads   map[string]Read /* authorized reads (ticket + change TOTP) by path, POST routes of their own (read.go) */
-	Log     *slog.Logger
-	Now     func() time.Time /* nil: time.Now */
+	/* Sessions, if set, serves the change session routes (sessions.go). */
+	Sessions *Sessions
+	/* Terminal, if set, serves GET /x/ws (terminal.Terminal.Serve: its own Origin check and timeouts). */
+	Terminal func(w http.ResponseWriter, r *http.Request, ip string)
+	Log      *slog.Logger
+	Now      func() time.Time /* nil: time.Now */
 }
 
 /* Server serves /x. */
@@ -159,6 +165,7 @@ type Server struct {
 type route struct {
 	method, path string
 	handle       func(w http.ResponseWriter, r *http.Request, ip string)
+	re           *regexp.Regexp /* if set, the paths it matches (path is then only how Routes shows it) */
 }
 
 /* New loads the certificate, the key and the client CA (the server does not start without them) and builds the server. */
@@ -188,9 +195,13 @@ func New(cfg Config) (*Server, error) {
 		global: newLimiter(globalRate, globalBurst, 1, cfg.Now),
 	}
 	s.routes = []route{
-		{http.MethodGet, "/x/status", s.status},
-		{http.MethodPost, "/x/confirm/issue", s.issue},
-		{http.MethodPost, "/x/confirm", s.confirm},
+		{http.MethodGet, "/x/status", s.status, nil},
+		{http.MethodPost, "/x/confirm/issue", s.issue, nil},
+		{http.MethodPost, "/x/confirm", s.confirm, nil},
+	}
+	s.addSessions()
+	if cfg.Terminal != nil {
+		s.routes = append(s.routes, route{http.MethodGet, "/x/ws", cfg.Terminal, nil})
 	}
 	if err := s.addReads(); err != nil {
 		return nil, err
@@ -280,7 +291,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		BaseContext:  func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- hs.Serve(tls.NewListener(ln, s.tls)) }()
+	go func() { errc <- hs.Serve(tls.NewListener(limitListener(ln, maxConns), s.tls)) }()
 	select {
 	case err := <-errc:
 		return err
@@ -393,7 +404,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var allow []string
 	for _, rt := range s.routes {
-		if rt.path != r.URL.Path {
+		if rt.path != r.URL.Path && (rt.re == nil || !rt.re.MatchString(r.URL.Path)) {
 			continue
 		}
 		if rt.method == r.Method {

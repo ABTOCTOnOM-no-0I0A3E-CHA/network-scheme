@@ -154,6 +154,7 @@ func TestMaskAbbreviatedSecretInput(t *testing.T) {
 		"authentication pre-shared-key hexa " + s, "key-string " + s, "key chain k1 " + s,
 		"ip ssh-client password " + s, "ip ssh client pa " + s, "ip ftp client pa " + s, "ip sftp client pass " + s,
 		"line ssh pa " + s, "no username bob pa " + s, "do enable pa " + s, "aaa x y " + s, "crypto key " + s,
+		"wlan x pas " + s, "tunnel y sec " + s, "probe z com " + s,
 		"copy scp://u:a@b" + s + "@192.0.2.1/x running-config", "copy sftp://u:" + s + "@x@192.0.2.1/x flash:y",
 	} {
 		for name, f := range lines {

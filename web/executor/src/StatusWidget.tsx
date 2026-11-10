@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@nms/shared/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@nms/shared/ui/card";
 import { getStatus, type ExecutorStatus } from "./client";
 import { failureMessage, type Failure } from "./errors";
 
@@ -36,39 +35,42 @@ export function useExecutorStatus(): View & { refresh: () => void } {
   return { ...view, refresh: () => setTick((n) => n + 1) };
 }
 
-/* /x/status as a widget: whether the executor is enabled and frozen. Text only; no grants, no per-user data. */
+const dot = (ok: boolean) => `size-2 shrink-0 rounded-full ${ok ? "bg-emerald-500" : "bg-destructive"}`;
+
+/* /x/status as a strip of the header: whether the executor is enabled and frozen. Text only; no grants, no per-user data. */
 export function StatusWidget() {
   const { t, i18n } = useTranslation();
   const { last, failure, loaded, refresh } = useExecutorStatus();
   const msg = failure && failureMessage(failure);
   return (
-    <Card aria-live="polite">
-      <CardHeader>
-        <CardTitle>{t("executor.status.title")}</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2 text-sm">
-        {!loaded && <p className="text-muted-foreground">{t("executor.status.loading")}</p>}
-        {loaded && !last && <p>{t("executor.status.unknown")}</p>}
-        {last && (
-          <ul>
-            <li data-testid="enabled">{t(last.status.enabled ? "executor.status.enabled" : "executor.status.disabled")}</li>
-            <li data-testid="frozen">{t(last.status.frozen ? "executor.status.frozen" : "executor.status.notFrozen")}</li>
-          </ul>
-        )}
-        {msg && (
-          <p role="alert" className="text-destructive" data-testid="failure">
-            {t(msg.key, msg.params)}
-          </p>
-        )}
-        {last && failure && (
-          <p className="text-muted-foreground" data-testid="stale">
-            {t("executor.status.stale", { time: last.at.toLocaleTimeString(i18n.language) })}
-          </p>
-        )}
-        <Button variant="outline" size="sm" onClick={refresh}>
-          {t("executor.status.retry")}
-        </Button>
-      </CardContent>
-    </Card>
+    <section aria-live="polite" aria-label={t("executor.status.title")} className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+      {!loaded && <p className="text-muted-foreground">{t("executor.status.loading")}</p>}
+      {loaded && !last && <p className="text-muted-foreground">{t("executor.status.unknown")}</p>}
+      {last && (
+        <ul className="flex items-center gap-4">
+          <li className="flex items-center gap-1.5">
+            <span aria-hidden className={dot(last.status.enabled)} />
+            <span data-testid="enabled">{t(last.status.enabled ? "executor.status.enabled" : "executor.status.disabled")}</span>
+          </li>
+          <li className="flex items-center gap-1.5">
+            <span aria-hidden className={dot(!last.status.frozen)} />
+            <span data-testid="frozen">{t(last.status.frozen ? "executor.status.frozen" : "executor.status.notFrozen")}</span>
+          </li>
+        </ul>
+      )}
+      {msg && (
+        <p role="alert" className="text-destructive" data-testid="failure">
+          {t(msg.key, msg.params)}
+        </p>
+      )}
+      {last && failure && (
+        <p className="text-muted-foreground" data-testid="stale">
+          {t("executor.status.stale", { time: last.at.toLocaleTimeString(i18n.language) })}
+        </p>
+      )}
+      <Button variant="ghost" size="xs" onClick={refresh}>
+        {t("executor.status.retry")}
+      </Button>
+    </section>
   );
 }

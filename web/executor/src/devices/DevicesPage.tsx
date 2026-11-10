@@ -7,7 +7,7 @@ import type { Message } from "../errors";
 import { CredentialForm } from "../credentials/CredentialForm";
 import { Confirmation } from "./Confirmation";
 import { KeyFlow } from "./KeyFlow";
-import { ACTIONS, deviceList, issue, messageOf, type Challenge, type Device } from "./api";
+import { ACTIONS, deviceListAnswer, issue, messageOf, type Challenge, type Device } from "./api";
 
 type Flow = { kind: "register" } | { kind: "accept"; id: number } | { kind: "writes"; challenge: Challenge } | null;
 const STATUSES = ["from_reset_unconfirmed", "writes_off", "writes_on"];
@@ -39,10 +39,10 @@ export function DevicesPage({ poster }: { poster: Poster }) {
     setMsg(null);
     setNote(null);
     setBusy(true);
-    const r = await poster.post("/x/devices", { code: c, params: {} }, deviceList);
+    const r = await poster.post("/x/devices", { code: c, params: {} }, deviceListAnswer);
     if (!alive.current) return;
     setBusy(false);
-    if (r.ok) setDevices(r.value);
+    if (r.ok) setDevices(r.value.result);
     else setMsg(messageOf(r.failure));
   };
 

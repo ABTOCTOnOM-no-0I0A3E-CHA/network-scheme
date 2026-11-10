@@ -161,6 +161,21 @@ func (p *Publisher) SessionClosed(ctx context.Context, session [16]byte, deviceI
 	return err
 }
 
+/*
+Recover runs at the start of a process, before any session opens: every
+device_busy row is a previous process's (the executor is one process), so all
+go (else the poller never reaches those devices again), and every summary
+still open ends as interrupted.
+*/
+func (p *Publisher) Recover(ctx context.Context) error {
+	if _, err := p.exec(ctx, `DELETE FROM execpub.device_busy`); err != nil {
+		return err
+	}
+	_, err := p.exec(ctx, `UPDATE execpub.session_summary SET status = 'interrupted', closed_at = greatest(now(), opened_at)
+		WHERE status = 'open'`)
+	return err
+}
+
 /* Freezer is the part of freeze.Guard that Run uses. */
 type Freezer interface {
 	Frozen() (bool, string)

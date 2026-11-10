@@ -63,6 +63,8 @@ type Policy struct {
 	PasteConfirmLines     int             `yaml:"paste_confirm_lines" json:"paste_confirm_lines"`
 	UnmaskPerHour         int             `yaml:"unmask_per_hour" json:"unmask_per_hour"`
 	MassUnmaskAlert       int             `yaml:"mass_unmask_alert" json:"mass_unmask_alert"`
+	RecordingMaxMiB       int             `yaml:"recording_max_mib" json:"recording_max_mib"`
+	RecordingViewsPerHour int             `yaml:"recording_views_per_hour" json:"recording_views_per_hour"`
 }
 
 /*
@@ -87,6 +89,9 @@ type ClassOverride struct {
 	Class   string `yaml:"class" json:"class"`
 }
 
+/* MaxRecordingMiB bounds recording_max_mib: a replay reads at most this and one answer per recording. */
+const MaxRecordingMiB = 64
+
 /* Default is the policy of a fresh install (security.md 5.5). */
 func Default() Policy {
 	return Policy{
@@ -101,6 +106,8 @@ func Default() Policy {
 		PasteConfirmLines:     5,
 		UnmaskPerHour:         10,
 		MassUnmaskAlert:       20,
+		RecordingMaxMiB:       16,
+		RecordingViewsPerHour: 20,
 	}
 }
 
@@ -229,6 +236,8 @@ func (p Policy) Validate() error {
 		inRange("paste_confirm_lines", p.PasteConfirmLines, 1, 100),
 		inRange("unmask_per_hour", p.UnmaskPerHour, 1, 1000),
 		inRange("mass_unmask_alert", p.MassUnmaskAlert, 1, 10000),
+		inRange("recording_max_mib", p.RecordingMaxMiB, 1, MaxRecordingMiB),
+		inRange("recording_views_per_hour", p.RecordingViewsPerHour, 1, 1000),
 	); err != nil {
 		return err
 	}

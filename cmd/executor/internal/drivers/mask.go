@@ -18,8 +18,8 @@ forms, PEM and "crypto ... import" blocks) and then:
     snmp, encrypted, ...; also abbreviated) keeps only its first words;
   - an abbreviation of ascii-text or hexadecimal masks the rest of the line;
   - the token after "encrypted" (or an abbreviation of it) is masked;
-  - an abbreviated secret keyword as an operator types it ("passw", "secr",
-    "commu", "key-str") masks the rest of the line.
+  - an abbreviated secret keyword as an operator types it ("pas", "sec",
+    "com", "key-str") masks the rest of the line.
 
 Over-masking is the safe side. Mask is idempotent.
 */
@@ -34,12 +34,12 @@ func Mask(text string) string {
 /* urlInfoRe: the userinfo runs to the last '@' before a space or '/' (a password may hold '@'). */
 var urlInfoRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/]*@`)
 
-/* abbrevKeywords: an operator's abbreviation (4 letters or more, not ending a hyphen part) of one of them starts a secret. */
+/* abbrevKeywords: an operator's abbreviation (3 letters or more, not ending a hyphen part) of one of them starts a secret. */
 var abbrevKeywords = []string{"password", "secret", "community", "key-string", "pre-shared-key", "authpassword",
 	"privpassword", "root-password", "passphrase", "authentication-key"}
 
 func abbreviates(t string, kws ...string) bool {
-	if len(t) < 4 {
+	if len(t) < 3 {
 		return false
 	}
 	for _, k := range kws {

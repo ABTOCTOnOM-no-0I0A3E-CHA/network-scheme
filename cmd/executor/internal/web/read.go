@@ -40,7 +40,7 @@ func (s *Server) addReads() error {
 		if !readPath.MatchString(p) || taken || rd.Run == nil || !rd.Need.Valid() {
 			return fmt.Errorf("web: bad read %q", p)
 		}
-		s.routes = append(s.routes, route{http.MethodPost, p, func(w http.ResponseWriter, r *http.Request, ip string) { s.read(w, r, ip, p, rd) }})
+		s.routes = append(s.routes, route{http.MethodPost, p, func(w http.ResponseWriter, r *http.Request, ip string) { s.read(w, r, ip, p, rd) }, nil})
 	}
 	return nil
 }

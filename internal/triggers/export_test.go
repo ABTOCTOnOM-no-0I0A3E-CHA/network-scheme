@@ -1,6 +1,9 @@
 package triggers
 
-import "context"
+import (
+	"context"
+	"maps"
+)
 
 /* StepAll runs one full evaluation round (every stream, configuration reload and system checks). */
 func (e *Engine) StepAll(ctx context.Context) error { return e.cycle(ctx, cycleAll) }
@@ -17,6 +20,9 @@ func SetPaging(samplePageN, samplePagesN, seqRangeN, maxRangesN int) func() {
 	samplePage, samplePages, seqRange, maxRanges = samplePageN, samplePagesN, seqRangeN, maxRangesN
 	return func() { samplePage, samplePages, seqRange, maxRanges = a, b, c, d }
 }
+
+/* ExecutorSeverity is the fixed severity of each executor alert kind with a problem kind of its own. */
+func ExecutorSeverity() map[string]string { return maps.Clone(executorSeverity) }
 
 /* AfterLoad installs a hook that runs after a round loaded the open problems (to interleave another engine). */
 func (e *Engine) AfterLoad(f func()) { e.afterLoad = f }

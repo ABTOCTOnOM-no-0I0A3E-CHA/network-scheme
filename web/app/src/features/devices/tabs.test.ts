@@ -5,8 +5,8 @@ import { DATA_TABS, parseTabRef, splitTabRef, TABS } from "./tabs";
 
 describe("device tabs", () => {
   it("follow FR-UI-DEV order with Физика first", () => {
-    expect(TABS).toEqual(["physical", "config", "cli", "data", "graphs", "backups", "journal", "access"]);
-    expect(TABS.map((k) => ru.card.tab[k])).toEqual(["Физика", "Конфиг", "CLI", "Данные", "Графики", "Бэкапы", "Журнал", "Доступ"]);
+    expect(TABS).toEqual(["physical", "config", "cli", "data", "graphs", "backups", "journal", "access", "session"]);
+    expect(TABS.map((k) => ru.card.tab[k])).toEqual(["Физика", "Конфиг", "CLI", "Данные", "Графики", "Бэкапы", "Журнал", "Доступ", "Сессия"]);
     expect(DATA_TABS.map((k) => ru.card.tab[k])).toEqual(["Интерфейсы", "ARP", "MAC", "VLAN", "LLDP", "Маршруты", "Компоненты"]);
     expect(splitTabRef(undefined)).toEqual({ tab: "physical", data: "interfaces" });
   });
