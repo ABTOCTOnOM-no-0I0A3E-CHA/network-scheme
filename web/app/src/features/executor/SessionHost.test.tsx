@@ -86,6 +86,41 @@ describe("the change session dock", () => {
     expect(frame).toHaveAttribute("src", `${EXECUTOR}/#replay=${SID}&device=7`);
   });
 
+  it("gives the frame the whole viewport while the executor shows a dialog, then restores the dock (review 4c.6 I1)", async () => {
+    renderShell();
+    await userEvent.click(screen.getByRole("button", { name: ru.session.open }));
+    const frame = (await screen.findByTitle(ru.executor.dock.title)) as HTMLIFrameElement;
+    const dock = screen.getByTestId("session-dock");
+    await userEvent.click(within(dock).getByRole("button", { name: ru.executor.dock.collapse }));
+    expect(dock).toHaveClass("h-14");
+    fromExecutor(frame, { v: 1, type: "status", state: "dialog", open: true });
+    await waitFor(() => expect(dock).toHaveClass("top-0", "h-dvh"));
+    /* nothing to collapse it with meanwhile */
+    expect(within(dock).queryByRole("button", { name: ru.executor.dock.collapse })).toBeNull();
+    expect(within(dock).queryByRole("button", { name: ru.executor.dock.expand })).toBeNull();
+    expect(screen.getByTitle(ru.executor.dock.title)).toBe(frame);
+    fromExecutor(frame, { v: 1, type: "status", state: "dialog", open: false });
+    await waitFor(() => expect(dock).toHaveClass("h-14"));
+  });
+
+  it("forgets the session and the dialog when the frame's page loads again, and warns before leaving while one is open", async () => {
+    renderShell();
+    await userEvent.click(screen.getByRole("button", { name: ru.session.open }));
+    const frame = (await screen.findByTitle(ru.executor.dock.title)) as HTMLIFrameElement;
+    fromExecutor(frame, { v: 1, type: "status", state: "session", open: true });
+    fromExecutor(frame, { v: 1, type: "status", state: "dialog", open: true });
+    const leave = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leave);
+    expect(leave.defaultPrevented).toBe(true);
+    fromExecutor(frame, { v: 1, type: "status", state: "ready" });
+    const dock = screen.getByTestId("session-dock");
+    await waitFor(() => expect(within(dock).getByRole("button", { name: ru.executor.dock.close })).toBeEnabled());
+    expect(dock).not.toHaveClass("h-dvh");
+    const again = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(again);
+    expect(again.defaultPrevented).toBe(false);
+  });
+
   it("ignores session statuses from another origin", async () => {
     renderShell();
     await userEvent.click(screen.getByRole("button", { name: ru.session.open }));

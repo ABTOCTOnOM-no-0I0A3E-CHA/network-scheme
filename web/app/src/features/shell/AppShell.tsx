@@ -10,7 +10,7 @@ import { logout, useSession } from "@/features/auth/useSession";
 import { DeviceCard, DeviceStateBadge } from "@/features/devices/DeviceCard";
 import { DeviceWindowsProvider } from "@/features/devices/DeviceWindows";
 import { StepUpDialog } from "@/features/common/StepUpDialog";
-import { SessionHostProvider } from "@/features/executor/SessionHost";
+import { SessionHostProvider, useSessionHost } from "@/features/executor/SessionHost";
 import { NotificationCenter } from "@/features/notify/NotificationCenter";
 import { getTheme, setTheme } from "@/lib/theme";
 import { CommandPalette } from "./CommandPalette";
@@ -85,7 +85,7 @@ export function AppShell() {
                 <Button variant="ghost" size="icon" aria-label={t("theme.toggle")} onClick={toggleTheme}>
                   {theme === "dark" ? <Sun /> : <Moon />}
                 </Button>
-                <UserMenu username={session?.username ?? ""} onLogout={() => void signOut()} />
+                <GuardedUserMenu username={session?.username ?? ""} onLogout={() => void signOut()} />
               </div>
             </header>
             <main className="flex-1 p-6">
@@ -98,4 +98,11 @@ export function AppShell() {
       </DeviceWindowsProvider>
     </SessionHostProvider>
   );
+}
+
+/* The user menu; logging out while a change session is open asks first: the session would stay until its idle timeout. */
+function GuardedUserMenu({ username, onLogout }: { username: string; onLogout: () => void }) {
+  const { t } = useTranslation();
+  const host = useSessionHost();
+  return <UserMenu username={username} onLogout={() => (!host?.sessionOpen || window.confirm(t("executor.dock.leave"))) && onLogout()} />;
 }

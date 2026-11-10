@@ -17,7 +17,7 @@ import { api } from "@/lib/api";
  * POST /api/executor/ticket with its own session and hands it over by postMessage to the executor origin only.
  * The panel keeps no ticket.
  */
-export function ExecutorFrame({ title, className, hash, onSession, onExpand }: {
+export function ExecutorFrame({ title, className, hash, onSession, onExpand, onDialog }: {
   title: string;
   className?: string;
   /* what the executor page may preselect (device ids, a recording): its own fragment, which it only uses to prefill */
@@ -25,13 +25,15 @@ export function ExecutorFrame({ title, className, hash, onSession, onExpand }: {
   /* the executor says whether a change session is open in it, or asks to be shown at full size */
   onSession?: (open: boolean) => void;
   onExpand?: () => void;
+  /* a dialog (a confirmation) opened or closed in the executor page */
+  onDialog?: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
   const frame = useRef<HTMLIFrameElement>(null);
-  const cbs = useRef({ onSession, onExpand });
+  const cbs = useRef({ onSession, onExpand, onDialog });
   useEffect(() => {
-    cbs.current = { onSession, onExpand };
-  }, [onSession, onExpand]);
+    cbs.current = { onSession, onExpand, onDialog };
+  }, [onSession, onExpand, onDialog]);
   const origins = useQuery({ queryKey: ["origins"], queryFn: loadOrigins, staleTime: 5 * 60_000 });
   /* the published panel origin must be the one this page runs on, else the configuration is not ours */
   const o = origins.data?.panel === window.location.origin ? origins.data : undefined;
@@ -46,7 +48,13 @@ export function ExecutorFrame({ title, className, hash, onSession, onExpand }: {
       incoming: statusMessage,
       outgoing: ticketMessage,
       onMessage(m) {
+        if (m.state === "ready") {
+          /* a (re)loaded page has no session and no dialog: whatever the panel knew of the old one is gone */
+          cbs.current.onSession?.(false);
+          return cbs.current.onDialog?.(false);
+        }
         if (m.state === "session") return cbs.current.onSession?.(m.open);
+        if (m.state === "dialog") return cbs.current.onDialog?.(m.open);
         if (m.state === "expand") return cbs.current.onExpand?.();
         if (m.state !== "ticket_needed" || asking) return;
         asking = true;
