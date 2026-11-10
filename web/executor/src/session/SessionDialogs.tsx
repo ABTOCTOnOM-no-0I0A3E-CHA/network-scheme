@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@nms/shared/ui/button";
 import type { Poster } from "../client";
 import { ConfirmPanel, type ShownField } from "../ConfirmPanel";
 import type { Message } from "../errors";
-import { useUnobscured } from "../useUnobscured";
+import { GateNotice, useConfirmGate } from "../frame";
 import { challengeSchema, refusalKey, ROLLBACK, rollbackAnswer, sessionMessage, type Challenge, type DeviceDiff, type RolledBack } from "./api";
 import { Alert, Dialog } from "./Dialog";
 import { DiffView } from "./DiffView";
@@ -66,7 +66,7 @@ export function RollbackDialog({ poster, session, onClose, onDone }: { poster: P
   const fields: ShownField[] = c ? c.fields.map((f) => ({ key: f.key, label: label(f.key), value: f.value, warn: warn(f.key, f.value) })) : [];
 
   return (
-    <Dialog title={t("executor.session.rollback.title")} tone="danger" busy={busy} onClose={onClose} testId="rollback-dialog">
+    <Dialog title={t("executor.session.rollback.title")} wide tone="danger" busy={busy} onClose={onClose} testId="rollback-dialog">
       {!c && !result && (
         <>
           <p>{t("executor.session.rollback.explain")}</p>
@@ -83,7 +83,7 @@ export function RollbackDialog({ poster, session, onClose, onDone }: { poster: P
       )}
       {c && !result && (
         <ConfirmPanel title={t("executor.session.rollback.confirmTitle")} fields={fields} h={c.h} confirmLabel={t("executor.session.rollback.confirm")} busy={busy}
-          onConfirm={(code) => void confirm(code)} onCancel={onClose}>
+          onConfirm={(code) => void confirm(code)} onCancel={onClose} fieldsView={<RollbackFields fields={fields} />}>
           <p className="text-muted-foreground">{t("executor.session.rollback.newCode")}</p>
         </ConfirmPanel>
       )}
@@ -112,36 +112,110 @@ export function RollbackDialog({ poster, session, onClose, onDone }: { poster: P
 }
 
 /*
+ * The rollback description laid out to fit a dock (review 4c.6 I1): the session-wide fields as a list, then one row
+ * per device (registry address:port, state, the full pre-session hash on one line). Every field is shown once, each
+ * with its data-testid; a key of no known shape stays in the list.
+ */
+function RollbackFields({ fields }: { fields: ShownField[] }) {
+  const { t } = useTranslation();
+  const rows = new Map<string, Partial<Record<"address" | "pre_sha256" | "state", ShownField>>>();
+  const rest: ShownField[] = [];
+  for (const f of fields) {
+    const m = /^(address|pre_sha256|state)_(\d+)$/.exec(f.key);
+    if (!m) {
+      rest.push(f);
+      continue;
+    }
+    const r = rows.get(m[2]) ?? {};
+    r[m[1] as "address" | "pre_sha256" | "state"] = f;
+    rows.set(m[2], r);
+  }
+  const cell = (f: ShownField | undefined, cls: string): ReactNode => (
+    <td className={`px-2.5 py-1.5 align-top ${cls}`} data-testid={f ? `field-${f.key}` : undefined}>
+      {f?.value ?? "-"}
+      {f?.warn && <span className="block font-sans text-xs whitespace-normal text-destructive">{f.warn}</span>}
+    </td>
+  );
+  return (
+    <div className="space-y-2">
+      <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] gap-x-4 gap-y-1 rounded-lg border bg-muted/40 px-3 py-2">
+        {rest.flatMap((f) => [
+          <dt key={`${f.key}-k`} className="text-muted-foreground">
+            {f.label}
+          </dt>,
+          <dd key={`${f.key}-v`} className="font-mono text-[13px] break-all" data-testid={`field-${f.key}`}>
+            {f.value}
+          </dd>,
+        ])}
+      </dl>
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-[13px]">
+          <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
+            <tr>
+              <th className="px-2.5 py-1.5 font-medium">{t("executor.session.rollback.col.device")}</th>
+              <th className="px-2.5 py-1.5 font-medium">{t("executor.session.rollback.col.address")}</th>
+              <th className="px-2.5 py-1.5 font-medium">{t("executor.session.rollback.col.state")}</th>
+              <th className="px-2.5 py-1.5 font-medium">{t("executor.session.rollback.col.pre")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...rows].sort((a, b) => Number(a[0]) - Number(b[0])).map(([id, r]) => (
+              <tr key={id} className="border-t" data-testid={`rollback-row-${id}`}>
+                <td className="px-2.5 py-1.5 align-top font-medium whitespace-nowrap">{t("executor.session.deviceShort", { id })}</td>
+                {cell(r.address, "font-mono whitespace-nowrap")}
+                {cell(r.state, "font-mono whitespace-nowrap")}
+                {cell(r.pre_sha256, "font-mono text-[11.5px] whitespace-nowrap")}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* A dialog's gated part: the observed element holds the text and the buttons; the notices stay outside it. */
+function Gated({ children, notice }: { children: (gate: Omit<ReturnType<typeof useConfirmGate>, "ref">) => ReactNode; notice?: ReactNode }) {
+  const { ref: gateRef, ...gate } = useConfirmGate();
+  return (
+    <div className="space-y-2">
+      <div ref={gateRef} className="space-y-3">
+        {children(gate)}
+      </div>
+      <GateNotice gate={gate} />
+      {notice}
+    </div>
+  );
+}
+
+/*
  * Save (MES: the startup configuration) or confirm the pending commit (ESR) of one device, with the diff the user saw:
  * its hash is what the executor saves, anything else is refused (diff_changed). The button is gated like a confirm.
  */
 export function SaveDialog(p: { diff: DeviceDiff; esr: boolean; busy: boolean; msg: Message | null; secondsLeft?: number; onSave: () => void; onClose: () => void }) {
   const { t } = useTranslation();
-  const { ref, unobscured, supported } = useUnobscured();
-  const seen = useRef(false);
-  useEffect(() => {
-    seen.current = unobscured;
-  }, [unobscured]);
   const late = p.esr && p.secondsLeft !== undefined && p.secondsLeft <= 15;
   const nothing = p.esr && !p.diff.commit_pending_until;
   return (
     <Dialog title={t(p.esr ? "executor.session.save.titleEsr" : "executor.session.save.title", { id: p.diff.device_id })} wide busy={p.busy} onClose={p.onClose} testId="save-dialog">
-      <div ref={ref} className="space-y-3">
-        <p>{t(p.esr ? "executor.session.save.explainEsr" : "executor.session.save.explain")}</p>
-        <DiffView diff={p.diff} />
-        {nothing && <Alert tone="warn">{t("executor.session.refused.nothing_to_confirm")}</Alert>}
-        {late && <Alert>{t("executor.session.refused.commit_timer")}</Alert>}
-        {!unobscured && <Alert>{t(supported ? "executor.obscured" : "executor.visibilityUnsupported")}</Alert>}
-        {p.msg && <Alert>{t(p.msg.key, p.msg.params)}</Alert>}
-        <div className="flex gap-2">
-          <Button type="button" disabled={p.busy || !unobscured || nothing || late} onClick={() => seen.current && p.onSave()}>
-            {t(p.esr ? "executor.session.save.confirmEsr" : "executor.session.save.confirm")}
-          </Button>
-          <Button type="button" variant="outline" disabled={p.busy} onClick={p.onClose}>
-            {t("executor.confirm.cancel")}
-          </Button>
-        </div>
-      </div>
+      <Gated notice={p.msg && <Alert>{t(p.msg.key, p.msg.params)}</Alert>}>
+        {(gate) => (
+          <>
+            <p>{t(p.esr ? "executor.session.save.explainEsr" : "executor.session.save.explain")}</p>
+            <DiffView diff={p.diff} maxHeight="max-h-[35vh]" />
+            {nothing && <Alert tone="warn">{t("executor.session.refused.nothing_to_confirm")}</Alert>}
+            {late && <Alert>{t("executor.session.refused.commit_timer")}</Alert>}
+            <div className="flex gap-2">
+              <Button type="button" disabled={p.busy || !gate.unobscured || nothing || late} onClick={() => gate.visibleNow() && p.onSave()}>
+                {t(p.esr ? "executor.session.save.confirmEsr" : "executor.session.save.confirm")}
+              </Button>
+              <Button type="button" variant="outline" disabled={p.busy} onClick={p.onClose}>
+                {t("executor.confirm.cancel")}
+              </Button>
+            </div>
+          </>
+        )}
+      </Gated>
     </Dialog>
   );
 }
@@ -175,22 +249,51 @@ export function ExtendDialog({ busy, msg, onExtend, onClose }: { busy: boolean; 
   );
 }
 
-/* Ending the session: ESR devices with a commit not confirmed are restored by the executor. */
+/* Ending the session (gated like a confirm): ESR devices with a commit not confirmed are restored by the executor. */
 export function EndDialog({ busy, msg, pendingEsr, onEnd, onClose }: { busy: boolean; msg: Message | null; pendingEsr: boolean; onEnd: () => void; onClose: () => void }) {
   const { t } = useTranslation();
   return (
     <Dialog title={t("executor.session.end.title")} busy={busy} onClose={onClose} testId="end-dialog">
-      <p>{t("executor.session.end.explain")}</p>
-      {pendingEsr && <Alert tone="warn">{t("executor.session.end.pendingEsr")}</Alert>}
-      {msg && <Alert>{t(msg.key, msg.params)}</Alert>}
-      <div className="flex gap-2">
-        <Button type="button" variant="destructive" disabled={busy} onClick={onEnd}>
-          {t("executor.session.end.confirm")}
-        </Button>
-        <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
-          {t("executor.confirm.cancel")}
-        </Button>
-      </div>
+      <Gated notice={msg && <Alert>{t(msg.key, msg.params)}</Alert>}>
+        {(gate) => (
+          <>
+            <p>{t("executor.session.end.explain")}</p>
+            {pendingEsr && <Alert tone="warn">{t("executor.session.end.pendingEsr")}</Alert>}
+            <div className="flex gap-2">
+              <Button type="button" variant="destructive" disabled={busy || !gate.unobscured} onClick={() => gate.visibleNow() && onEnd()}>
+                {t("executor.session.end.confirm")}
+              </Button>
+              <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
+                {t("executor.confirm.cancel")}
+              </Button>
+            </div>
+          </>
+        )}
+      </Gated>
+    </Dialog>
+  );
+}
+
+/* ESR commit (gated like a confirm): the policy's confirm timer starts, then the health check; confirm afterwards. */
+export function CommitDialog({ device, busy, msg, onCommit, onClose }: { device: number; busy: boolean; msg: Message | null; onCommit: () => void; onClose: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <Dialog title={t("executor.session.commit.title", { id: device })} busy={busy} onClose={onClose} testId="commit-dialog">
+      <Gated notice={msg && <Alert>{t(msg.key, msg.params)}</Alert>}>
+        {(gate) => (
+          <>
+            <p>{t("executor.session.commit.explain")}</p>
+            <div className="flex gap-2">
+              <Button type="button" disabled={busy || !gate.unobscured} onClick={() => gate.visibleNow() && onCommit()}>
+                {t("executor.session.commit.confirm")}
+              </Button>
+              <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
+                {t("executor.confirm.cancel")}
+              </Button>
+            </div>
+          </>
+        )}
+      </Gated>
     </Dialog>
   );
 }

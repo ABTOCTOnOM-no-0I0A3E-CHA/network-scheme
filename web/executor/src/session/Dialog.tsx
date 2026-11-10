@@ -1,13 +1,20 @@
 import { useEffect, useId, type ReactNode } from "react";
+import { useFrame } from "../frame";
 
 /*
  * A modal of the session screen, without a dialog library: Radix's scroll lock injects a runtime <style> the CSP
  * forbids. No transform, no opacity on the box (IntersectionObserver v2 would report the confirm as not visible): the
- * backdrop is only a translucent background colour. Escape closes it unless busy.
+ * backdrop is only a translucent background colour. Escape closes it unless busy. While it is open the panel gives
+ * the frame the whole viewport (dialog status), so a confirmation fits; in the compact strip it is not drawn.
  */
 export function Dialog(p: { title: string; onClose?: () => void; busy?: boolean; wide?: boolean; tone?: "danger"; children: ReactNode; testId?: string }) {
   const id = useId();
   const { onClose, busy } = p;
+  const { compact, dialog } = useFrame();
+  useEffect(() => {
+    dialog(true);
+    return () => dialog(false);
+  }, [dialog]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && onClose && !busy) onClose();
@@ -15,8 +22,9 @@ export function Dialog(p: { title: string; onClose?: () => void; busy?: boolean;
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, busy]);
+  if (compact) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-4 py-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-4 py-4">
       <div
         role="dialog"
         aria-modal="true"

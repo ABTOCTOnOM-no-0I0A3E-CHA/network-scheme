@@ -4,13 +4,13 @@ import type { z } from "zod";
 import { Button } from "@nms/shared/ui/button";
 import { sessionPost, type Poster, type Result } from "../client";
 import type { Message } from "../errors";
-import { closedAnswer, diffAnswer, oneDiffAnswer, openedAnswer, sessionGone, sessionMessage, type DeviceDiff, type Opened, type RolledBack } from "./api";
+import { closedAnswer, diffAnswer, oneDiffAnswer, openedAnswer, sessionGone, sessionMessage, type DeviceDiff, type Opened, type OpenedDevice, type RolledBack } from "./api";
 import { Alert, Dialog } from "./Dialog";
 import { DeviceTerminal, type Flow } from "./DeviceTerminal";
 import { DiffView } from "./DiffView";
 import { FormPanel } from "./FormPanel";
 import type { SocketFactory } from "./socket";
-import { EndDialog, ExtendDialog, RollbackDialog, SaveDialog } from "./SessionDialogs";
+import { CommitDialog, EndDialog, ExtendDialog, RollbackDialog, SaveDialog } from "./SessionDialogs";
 
 const LINE_NAMES: Record<string, string> = { mes6: "MES 6.x", mes10: "MES 10.x", esr: "ESR" };
 export const lineName = (l: string) => LINE_NAMES[l] ?? l;
@@ -43,12 +43,43 @@ function EsrBanner({ dev, secs, busy, onConfirm }: { dev: number; secs: number; 
   );
 }
 
+/*
+ * Review 4c.6 I2: the panel chose only the device ids. Right after the open (nothing about a device is shown before
+ * the TOTP code, R7) every device is named as the executor's registry and the device itself name it: address:port,
+ * write group, model and firmware. A wrong one is ended at once.
+ */
+function OpenedOn({ devices, onOk, onEnd }: { devices: OpenedDevice[]; onOk: () => void; onEnd: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <section role="alert" data-testid="opened-on" className="space-y-2 rounded-lg border border-sky-400/60 bg-sky-50 px-4 py-3 text-sm text-sky-950 dark:border-sky-500/40 dark:bg-sky-950/40 dark:text-sky-100">
+      <p className="font-medium">{t("executor.session.openedOn.title")}</p>
+      <ul className="space-y-0.5">
+        {devices.map((d) => (
+          <li key={d.device_id} data-testid={`opened-${d.device_id}`}>
+            {t("executor.session.openedOn.row", { id: d.device_id, address: d.address, group: d.write_group, model: d.model, firmware: d.firmware, line: lineName(d.line) })}
+          </li>
+        ))}
+      </ul>
+      <div className="flex flex-wrap items-center gap-2">
+        <span>{t("executor.session.openedOn.wrong")}</span>
+        <Button type="button" size="sm" variant="destructive" onClick={onEnd}>
+          {t("executor.session.actions.end")}
+        </Button>
+        <Button type="button" size="sm" variant="outline" onClick={onOk}>
+          {t("executor.session.openedOn.ok")}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 type DialogState =
   | { kind: "diff"; diffs: DeviceDiff[] }
   | { kind: "save"; diff: DeviceDiff }
   | { kind: "rollback" }
   | { kind: "extend" }
   | { kind: "end" }
+  | { kind: "commit"; device: number }
   | null;
 
 export type Ended = { reason: "closed" | "gone"; rolledBack?: boolean };
@@ -80,6 +111,8 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
   const [dialogMsg, setDialogMsg] = useState<Message | null>(null);
   const [pending, setPending] = useState<Record<number, string>>({});
   const [side, setSide] = useState(true);
+  /* the user acknowledged which devices the session is on (shown until then) */
+  const [checked, setChecked] = useState(false);
   const [tick, setTick] = useState(now());
   const [last, setLast] = useState(now());
   const inFlight = useRef(false);
@@ -148,10 +181,11 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
   };
 
   const commit = async (device: number) => {
-    setMsg(null);
+    setDialogMsg(null);
     const r = await act("commit", { device_id: device }, oneDiffAnswer);
-    if (!r.ok) return setMsg(sessionMessage(r.failure));
+    if (!r.ok) return setDialogMsg(sessionMessage(r.failure));
     seeDiff(r.value.result);
+    setDialog(null);
   };
 
   const extend = async (code: string) => {
@@ -248,7 +282,9 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
           <span className={`text-sm tabular-nums ${idleLeft < 120 ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}>
             {t("executor.session.idleShort", { time: clock(idleLeft) })}
           </span>
-          <span className="min-w-0 truncate text-sm text-muted-foreground">{opened.devices.map((d) => t("executor.session.deviceShort", { id: d.device_id })).join(", ")}</span>
+          <span className="min-w-0 truncate text-sm text-muted-foreground" data-testid="compact-devices">
+            {opened.devices.map((d) => `${t("executor.session.deviceShort", { id: d.device_id })} ${d.address}`).join(", ")}
+          </span>
           {banners.length > 0 && (
             <span className="min-w-0 truncate text-sm font-medium text-amber-700 dark:text-amber-300">
               {t("executor.session.esr.compact", { n: Math.max(0, Math.ceil(Math.min(...banners.map((b) => b.secs)))) })}
@@ -271,6 +307,7 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
           </Button>
           <div className="ml-auto">{buttons(false)}</div>
         </div>
+        {!checked && <OpenedOn devices={opened.devices} onOk={() => setChecked(true)} onEnd={() => setDialog({ kind: "end" })} />}
         {banner}
         {msg && <Alert tone={msg.key.startsWith("executor.session.save.done") || msg.key === "executor.session.rollback.done" ? "info" : "error"}>{t(msg.key, msg.params)}</Alert>}
         <div className="flex min-h-0 flex-1 gap-3">
@@ -281,13 +318,17 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
                   className={`-mb-px flex shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-sm whitespace-nowrap ${d.device_id === active ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                   onClick={() => setActive(d.device_id)}>
                   {t("executor.session.deviceLabel", { id: d.device_id })}
+                  <span className="font-mono text-xs text-muted-foreground">{d.address}</span>
                   <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">{lineName(d.line)}</span>
                   {pending[d.device_id] && <span aria-hidden className="size-1.5 rounded-full bg-amber-500" />}
                 </button>
               ))}
               <div className="ml-auto flex items-center gap-2 pb-1.5">
                 {esr && !pending[active] && (
-                  <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => void commit(active)}>
+                  <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => {
+                    setDialogMsg(null);
+                    setDialog({ kind: "commit", device: active });
+                  }}>
                     {t("executor.session.actions.commit")}
                   </Button>
                 )}
@@ -331,6 +372,9 @@ export function SessionView({ poster, opened, token, compact, onExpand, onUpdate
       )}
       {dialog?.kind === "rollback" && <RollbackDialog poster={poster} session={id} onClose={() => setDialog(null)} onDone={rolledBack} />}
       {dialog?.kind === "extend" && <ExtendDialog busy={busy} msg={dialogMsg} onExtend={(c) => void extend(c)} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "commit" && (
+        <CommitDialog device={dialog.device} busy={busy} msg={dialogMsg} onCommit={() => void commit(dialog.device)} onClose={() => setDialog(null)} />
+      )}
       {dialog?.kind === "end" && (
         <EndDialog busy={busy} msg={dialogMsg} pendingEsr={banners.some((b) => b.secs > 0)} onEnd={() => void end()} onClose={() => setDialog(null)} />
       )}

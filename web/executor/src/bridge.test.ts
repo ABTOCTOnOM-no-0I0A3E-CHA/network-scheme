@@ -34,10 +34,12 @@ describe("executor bridge", () => {
     bridge.session(true);
     bridge.expand();
     bridge.session(false);
+    bridge.dialog(true);
     expect(parent.postMessage.mock.calls).toEqual([
       [{ v: 1, type: "status", state: "session", open: true }, PANEL],
       [{ v: 1, type: "status", state: "expand" }, PANEL],
       [{ v: 1, type: "status", state: "session", open: false }, PANEL],
+      [{ v: 1, type: "status", state: "dialog", open: true }, PANEL],
     ]);
   });
 

@@ -21,6 +21,8 @@ export type ExecutorBridge = {
   session(open: boolean): void;
   /* Asks the panel to show this frame at full size. */
   expand(): void;
+  /* Tells the panel a dialog opened or closed (it gives the frame the whole viewport meanwhile). */
+  dialog(open: boolean): void;
   readonly dropped: number;
   close(): void;
 };
@@ -73,6 +75,9 @@ export function createExecutorBridge(o: { panelOrigin: string; self?: Window; ti
     },
     expand() {
       ch.send({ v: 1, type: "status", state: "expand" });
+    },
+    dialog(open) {
+      ch.send({ v: 1, type: "status", state: "dialog", open });
     },
     get dropped() {
       return ch.dropped;

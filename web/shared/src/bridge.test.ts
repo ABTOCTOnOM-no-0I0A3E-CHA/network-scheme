@@ -21,11 +21,13 @@ describe("channel (panel side)", () => {
     deliver({ v: 1, type: "status", state: "ticket_needed", id: ID });
     deliver({ v: 1, type: "status", state: "session", open: true });
     deliver({ v: 1, type: "status", state: "expand" });
+    deliver({ v: 1, type: "status", state: "dialog", open: true });
     expect(got).toEqual([
       { v: 1, type: "status", state: "ready" },
       { v: 1, type: "status", state: "ticket_needed", id: ID },
       { v: 1, type: "status", state: "session", open: true },
       { v: 1, type: "status", state: "expand" },
+      { v: 1, type: "status", state: "dialog", open: true },
     ]);
   });
 

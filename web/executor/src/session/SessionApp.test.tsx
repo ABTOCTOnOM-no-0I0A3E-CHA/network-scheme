@@ -19,7 +19,8 @@ const CUR = "5e".repeat(32);
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const opened = (over: Record<string, unknown> = {}) => ({
   result: { session_id: SID, token: "tok-1", expires: new Date(Date.now() + 30 * 60_000).toISOString(), idle_seconds: 600,
-    devices: [{ device_id: 12, line: "mes6", pre_sha256: PRE }, { device_id: 14, line: "esr", pre_sha256: PRE }], ...over },
+    devices: [{ device_id: 12, line: "mes6", pre_sha256: PRE, address: "10.0.0.12:22", write_group: "access", model: "MES2324", firmware: "6.6.2" },
+      { device_id: 14, line: "esr", pre_sha256: PRE, address: "10.0.0.14:22", write_group: "branch", model: "ESR-20", firmware: "1.30.2" }], ...over },
 });
 const diff = (device: number, over: Record<string, unknown> = {}) => ({ device_id: device, line: device === 14 ? "esr" : "mes6", pre_sha256: PRE, sha256: CUR,
   diff: "--- pre-session\n+++ running\n@@ -1 +1 @@\n-a\n+b\n", ...over });
@@ -133,6 +134,39 @@ describe("opening a session", () => {
     await userEvent.type(screen.getByLabelText(ru.executor.confirm.code, { selector: "#ss-code" }), "123456");
     await userEvent.click(screen.getByRole("button", { name: S.start.open }));
     expect(await screen.findByTestId("failure")).toHaveTextContent("Вход заблокирован до");
+  });
+});
+
+describe("which devices the session is on (review 4c.6 I2)", () => {
+  it("says before the code that the ids are the panel's, and right after the open shows the registry's address of each", async () => {
+    answers["/x/sessions"] = () => json(200, opened());
+    app();
+    expect(screen.getByTestId("preset-note")).toHaveTextContent("только ID устройств, которые запросила панель");
+    expect(document.body).not.toHaveTextContent("10.0.0.12");
+    await userEvent.type(screen.getByLabelText(ru.executor.confirm.code, { selector: "#ss-code" }), "123456");
+    await userEvent.click(screen.getByRole("button", { name: S.start.open }));
+    const on = await screen.findByTestId("opened-on");
+    expect(within(on).getByTestId("opened-12")).toHaveTextContent("№12 — 10.0.0.12:22, группа записи access, MES2324");
+    expect(within(on).getByTestId("opened-14")).toHaveTextContent("10.0.0.14:22");
+    expect(screen.getByTestId("tab-12")).toHaveTextContent("10.0.0.12:22");
+    /* a wrong device: end it from there */
+    await userEvent.click(within(on).getByRole("button", { name: S.actions.end }));
+    expect(await screen.findByTestId("end-dialog")).toBeInTheDocument();
+  });
+
+  it("the end of a session is gated like a confirm", async () => {
+    await openSession();
+    await userEvent.click(within(screen.getByTestId("session-view")).getAllByRole("button", { name: S.actions.end })[0]);
+    const dlg = await screen.findByTestId("end-dialog");
+    vis.unobscured = false;
+    sock(12).push({ type: "edit", text: "", cursor: 0, prompt: "#" });
+    await userEvent.click(screen.getByTestId("tab-14"));
+    expect(within(dlg).getByRole("button", { name: S.end.confirm })).toBeDisabled();
+  });
+
+  it("names the devices with their registry address in the compact strip", async () => {
+    render(<SessionView poster={poster()} opened={opened().result} token="tok-1" compact onExpand={vi.fn()} onUpdate={vi.fn()} onEnded={vi.fn()} open={factory} />);
+    expect(screen.getByTestId("compact-devices")).toHaveTextContent("№12 10.0.0.12:22, №14 10.0.0.14:22");
   });
 });
 
@@ -276,7 +310,9 @@ describe("session actions", () => {
     const dlg = await screen.findByTestId("rollback-dialog");
     expect(calls.at(-1)!.body).toEqual({ action: "session.rollback", params: { session_id: SID }, ticket: "ticket-2" });
     for (const f of fields) expect(await within(dlg).findByTestId(`field-${f.key}`)).toHaveTextContent(f.value);
-    expect(within(dlg).getByText("Адрес:порт устройства 14")).toBeInTheDocument();
+    /* one row per device: its registry address, state and full pre-session hash */
+    expect(within(dlg).getByTestId("rollback-row-14")).toHaveTextContent(`10.0.0.14:22commit_pending`);
+    expect(within(within(dlg).getByTestId("rollback-row-14")).getByTestId("field-pre_sha256_14")).toHaveTextContent(PRE);
     expect(within(dlg).getByTestId("field-state_14")).toHaveTextContent(S.rollback.state.commit_pending);
     expect(within(dlg).getByTestId("h")).toHaveTextContent(H);
     await userEvent.type(within(dlg).getByLabelText(ru.executor.confirm.code), "111222");
@@ -299,7 +335,7 @@ describe("session actions", () => {
     await userEvent.click(within(screen.getByTestId("extend-dialog")).getByRole("button", { name: S.extend.confirm }));
     await waitFor(() => expect(screen.getByTestId("timer")).toHaveTextContent(/Осталось (59:5\d|1:00:00)/));
     expect(calls.at(-1)!.body).toEqual({ totp: "777888", ticket: "ticket-2" });
-    await userEvent.click(screen.getByRole("button", { name: S.actions.end }));
+    await userEvent.click(within(screen.getByTestId("session-view")).getAllByRole("button", { name: S.actions.end })[0]);
     await userEvent.click(screen.getByRole("button", { name: S.end.confirm }));
     expect(await screen.findByTestId("session-ended")).toHaveTextContent(S.ended.closed);
     const close = calls.at(-1)!;
@@ -328,6 +364,16 @@ describe("ESR commit", () => {
       now={() => now} open={factory} />);
     await userEvent.click(screen.getByTestId("tab-14"));
     await userEvent.click(screen.getByRole("button", { name: S.actions.commit }));
+    /* the commit is gated like a confirm */
+    const commitDialog = await screen.findByTestId("commit-dialog");
+    vis.unobscured = false;
+    await userEvent.click(screen.getByTestId("tab-12"));
+    await userEvent.click(screen.getByTestId("tab-14"));
+    expect(within(commitDialog).getByRole("button", { name: S.commit.confirm })).toBeDisabled();
+    vis.unobscured = true;
+    await userEvent.click(screen.getByTestId("tab-12"));
+    await userEvent.click(screen.getByTestId("tab-14"));
+    await userEvent.click(within(screen.getByTestId("commit-dialog")).getByRole("button", { name: S.commit.confirm }));
     const banner = await screen.findByTestId("esr-banner-14");
     expect(banner).toHaveTextContent("Устройство 14: конфигурация не подтверждена, автооткат через 120 с");
     expect(within(banner).getByRole("button", { name: S.esr.confirm })).toBeInTheDocument();

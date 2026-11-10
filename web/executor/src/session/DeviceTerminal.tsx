@@ -4,7 +4,7 @@ import { Button } from "@nms/shared/ui/button";
 import type { Poster } from "../client";
 import { ConfirmPanel, type ShownField } from "../ConfirmPanel";
 import { failureMessage, type Message } from "../errors";
-import { useUnobscured } from "../useUnobscured";
+import { GateNotice, useConfirmGate } from "../frame";
 import { refusalKey, type DeviceDiff } from "./api";
 import { Alert, Dialog } from "./Dialog";
 import { connectTerminal, type SocketFactory, type TermSocket } from "./socket";
@@ -247,21 +247,16 @@ function DangerousDialog(p: {
 /* A paste with more lines than the policy lets through unasked: the executor holds it and shows it here first. */
 function PasteDialog({ text, lines, onAnswer }: { text: string; lines: number; onAnswer: (accept: boolean) => void }) {
   const { t } = useTranslation();
-  const { ref, unobscured, supported } = useUnobscured();
-  const seen = useRef(false);
-  useEffect(() => {
-    seen.current = unobscured;
-  }, [unobscured]);
+  const { ref: gateRef, ...gate } = useConfirmGate();
   return (
     <Dialog title={t("executor.session.paste.title", { count: lines })} onClose={() => onAnswer(false)} testId="paste-dialog">
-      <div ref={ref} className="space-y-3">
+      <div ref={gateRef} className="space-y-3">
         <p>{t("executor.session.paste.explain")}</p>
-        <pre className="max-h-[45vh] overflow-auto rounded-md border bg-muted/30 px-3 py-2 font-mono text-[12.5px] leading-5 whitespace-pre-wrap break-all" data-testid="paste-text">
+        <pre className="max-h-[40vh] overflow-auto rounded-md border bg-muted/30 px-3 py-2 font-mono text-[12.5px] leading-5 whitespace-pre-wrap break-all" data-testid="paste-text">
           {text}
         </pre>
-        {!unobscured && <Alert>{t(supported ? "executor.obscured" : "executor.visibilityUnsupported")}</Alert>}
         <div className="flex gap-2">
-          <Button type="button" disabled={!unobscured} onClick={() => seen.current && onAnswer(true)}>
+          <Button type="button" disabled={!gate.unobscured} onClick={() => gate.visibleNow() && onAnswer(true)}>
             {t("executor.session.paste.send", { count: lines })}
           </Button>
           <Button type="button" variant="outline" onClick={() => onAnswer(false)}>
@@ -269,6 +264,7 @@ function PasteDialog({ text, lines, onAnswer }: { text: string; lines: number; o
           </Button>
         </div>
       </div>
+      <GateNotice gate={gate} />
     </Dialog>
   );
 }

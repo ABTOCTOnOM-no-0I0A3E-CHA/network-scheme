@@ -133,6 +133,9 @@ export function SessionApp({ poster, preset, compact, onOpenChange, onExpand, on
           <input className={codeInput} id="ss-code" name="ss-code" inputMode="numeric" maxLength={6} autoComplete="off" value={code}
             onChange={(e) => setCode(e.target.value)} />
         </label>
+        <p className="rounded-md border border-amber-400/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-200" data-testid="preset-note">
+          {t("executor.session.start.presetNote")}
+        </p>
         <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
           <li>{t("executor.session.start.ruleTimer")}</li>
           <li>{t("executor.session.start.ruleRecord")}</li>

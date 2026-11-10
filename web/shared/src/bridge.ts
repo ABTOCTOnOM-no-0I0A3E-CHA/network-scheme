@@ -31,6 +31,8 @@ export const statusMessage = z.discriminatedUnion("state", [
   z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("ticket_needed"), id: ID }),
   z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("session"), open: z.boolean() }),
   z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("expand") }),
+  /* a dialog (a confirmation) is open: the panel gives the frame the whole viewport until it closes (review 4c.6 I1) */
+  z.strictObject({ v: z.literal(1), type: z.literal("status"), state: z.literal("dialog"), open: z.boolean() }),
 ]);
 
 export type TicketMessage = z.infer<typeof ticketMessage>;

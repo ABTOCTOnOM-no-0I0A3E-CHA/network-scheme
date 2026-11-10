@@ -14,7 +14,16 @@ const text = (n: number) => z.string().max(n);
 export const LINES = ["mes6", "mes10", "esr"] as const;
 export type Line = (typeof LINES)[number] | string;
 
-export const openedDevice = z.object({ device_id: z.number().int().positive(), line: text(16), pre_sha256: sha });
+/* address:port and write group from the executor's registry, model and firmware from the device (review 4c.6 I2) */
+export const openedDevice = z.object({
+  device_id: z.number().int().positive(),
+  line: text(16),
+  pre_sha256: sha,
+  address: text(64),
+  write_group: text(128),
+  model: text(128),
+  firmware: text(128),
+});
 export type OpenedDevice = z.infer<typeof openedDevice>;
 export const openedSchema = z.object({
   session_id: sessionId,

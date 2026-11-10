@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@nms/shared/ui/button";
 import type { Result } from "../client";
 import type { Message } from "../errors";
-import { useUnobscured } from "../useUnobscured";
+import { GateNotice, useConfirmGate } from "../frame";
 import { EMPTY_FORM, FORMS, formAppliedAnswer, formLinesAnswer, sessionMessage, type DeviceDiff, type FormField, type FormValues } from "./api";
 import { Alert } from "./Dialog";
 
@@ -25,11 +25,7 @@ export function FormPanel({ device, act, busy, onApplied }: { device: number; ac
   const [msg, setMsg] = useState<Message | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
-  const { ref, unobscured, supported } = useUnobscured();
-  const seen = useRef(false);
-  useEffect(() => {
-    seen.current = unobscured;
-  }, [unobscured]);
+  const { ref: gateRef, ...gate } = useConfirmGate();
 
   const set = (patch: Partial<FormValues>) => {
     setV((o) => ({ ...o, ...patch }));
@@ -48,7 +44,7 @@ export function FormPanel({ device, act, busy, onApplied }: { device: number; ac
   };
 
   const apply = async () => {
-    if (!lines || !seen.current) return;
+    if (!lines || !gate.visibleNow()) return;
     setMsg(null);
     setWorking(true);
     const r = await act("form-apply", { device_id: device, form: v, lines }, formAppliedAnswer);
@@ -109,20 +105,22 @@ export function FormPanel({ device, act, busy, onApplied }: { device: number; ac
         {t("executor.session.form.render")}
       </Button>
       {lines && (
-        <div ref={ref} className="space-y-2" data-testid="equivalent">
-          <p className="text-sm font-semibold">{t("executor.session.form.equivalent")}</p>
-          <pre className="overflow-auto rounded-md border bg-neutral-950 px-3 py-2 font-mono text-[12.5px] leading-5 text-neutral-100">
-            {lines.map((l, i) => (
-              <div key={i} className="whitespace-pre-wrap break-all" data-testid="equivalent-line">
-                {l}
-              </div>
-            ))}
-          </pre>
-          <p className="text-xs text-muted-foreground">{t("executor.session.form.exact")}</p>
-          {!unobscured && <Alert>{t(supported ? "executor.obscured" : "executor.visibilityUnsupported")}</Alert>}
-          <Button type="button" size="sm" disabled={busy || working || !unobscured} onClick={() => void apply()}>
-            {t("executor.session.form.apply", { count: lines.length })}
-          </Button>
+        <div className="space-y-2">
+          <div ref={gateRef} className="space-y-2" data-testid="equivalent">
+            <p className="text-sm font-semibold">{t("executor.session.form.equivalent")}</p>
+            <pre className="overflow-auto rounded-md border bg-neutral-950 px-3 py-2 font-mono text-[12.5px] leading-5 text-neutral-100">
+              {lines.map((l, i) => (
+                <div key={i} className="whitespace-pre-wrap break-all" data-testid="equivalent-line">
+                  {l}
+                </div>
+              ))}
+            </pre>
+            <p className="text-xs text-muted-foreground">{t("executor.session.form.exact")}</p>
+            <Button type="button" size="sm" disabled={busy || working || !gate.unobscured} onClick={() => void apply()}>
+              {t("executor.session.form.apply", { count: lines.length })}
+            </Button>
+          </div>
+          <GateNotice gate={gate} />
         </div>
       )}
       {note && <Alert tone="info">{note}</Alert>}
