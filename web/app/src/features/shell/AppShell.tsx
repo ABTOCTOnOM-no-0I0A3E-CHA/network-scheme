@@ -10,6 +10,7 @@ import { logout, useSession } from "@/features/auth/useSession";
 import { DeviceCard, DeviceStateBadge } from "@/features/devices/DeviceCard";
 import { DeviceWindowsProvider } from "@/features/devices/DeviceWindows";
 import { StepUpDialog } from "@/features/common/StepUpDialog";
+import { SessionHostProvider } from "@/features/executor/SessionHost";
 import { NotificationCenter } from "@/features/notify/NotificationCenter";
 import { getTheme, setTheme } from "@/lib/theme";
 import { CommandPalette } from "./CommandPalette";
@@ -65,33 +66,36 @@ export function AppShell() {
   );
 
   return (
-    <DeviceWindowsProvider renderBody={deviceBody} renderTitle={(id) => <DeviceStateBadge id={id} />} onOpenPage={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}>
-      <SidebarProvider>
-        <Sidebar />
-        <SidebarInset>
-          <header className="flex h-14 items-center gap-2 border-b px-4">
-            <SidebarTrigger />
-            <Separator orientation="vertical" className="h-6" />
-            <Button variant="outline" className="w-full max-w-xs justify-start text-muted-foreground" onClick={() => setPaletteOpen(true)}>
-              <Search />
-              <span className="flex-1 text-left">{t("shell.search")}</span>
-              <kbd className="text-xs">Ctrl K</kbd>
-            </Button>
-            <div className="ml-auto flex items-center gap-1">
-              <NotificationCenter onOpenProblems={() => void navigate({ to: "/problems" })} />
-              <Button variant="ghost" size="icon" aria-label={t("theme.toggle")} onClick={toggleTheme}>
-                {theme === "dark" ? <Sun /> : <Moon />}
+    /* the change session's frame lives here, above the routes: navigating never tears it down (FR-CHG-7) */
+    <SessionHostProvider>
+      <DeviceWindowsProvider renderBody={deviceBody} renderTitle={(id) => <DeviceStateBadge id={id} />} onOpenPage={(id) => void navigate({ to: "/devices/$id", params: { id: String(id) } })}>
+        <SidebarProvider>
+          <Sidebar />
+          <SidebarInset>
+            <header className="flex h-14 items-center gap-2 border-b px-4">
+              <SidebarTrigger />
+              <Separator orientation="vertical" className="h-6" />
+              <Button variant="outline" className="w-full max-w-xs justify-start text-muted-foreground" onClick={() => setPaletteOpen(true)}>
+                <Search />
+                <span className="flex-1 text-left">{t("shell.search")}</span>
+                <kbd className="text-xs">Ctrl K</kbd>
               </Button>
-              <UserMenu username={session?.username ?? ""} onLogout={() => void signOut()} />
-            </div>
-          </header>
-          <main className="flex-1 p-6">
-            <Outlet />
-          </main>
-        </SidebarInset>
-        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-        <StepUpDialog />
-      </SidebarProvider>
-    </DeviceWindowsProvider>
+              <div className="ml-auto flex items-center gap-1">
+                <NotificationCenter onOpenProblems={() => void navigate({ to: "/problems" })} />
+                <Button variant="ghost" size="icon" aria-label={t("theme.toggle")} onClick={toggleTheme}>
+                  {theme === "dark" ? <Sun /> : <Moon />}
+                </Button>
+                <UserMenu username={session?.username ?? ""} onLogout={() => void signOut()} />
+              </div>
+            </header>
+            <main className="flex-1 p-6">
+              <Outlet />
+            </main>
+          </SidebarInset>
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+          <StepUpDialog />
+        </SidebarProvider>
+      </DeviceWindowsProvider>
+    </SessionHostProvider>
   );
 }

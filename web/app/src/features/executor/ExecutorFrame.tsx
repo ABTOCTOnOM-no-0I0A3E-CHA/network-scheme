@@ -17,9 +17,21 @@ import { api } from "@/lib/api";
  * POST /api/executor/ticket with its own session and hands it over by postMessage to the executor origin only.
  * The panel keeps no ticket.
  */
-export function ExecutorFrame({ title, className }: { title: string; className?: string }) {
+export function ExecutorFrame({ title, className, hash, onSession, onExpand }: {
+  title: string;
+  className?: string;
+  /* what the executor page may preselect (device ids, a recording): its own fragment, which it only uses to prefill */
+  hash?: string;
+  /* the executor says whether a change session is open in it, or asks to be shown at full size */
+  onSession?: (open: boolean) => void;
+  onExpand?: () => void;
+}) {
   const { t } = useTranslation();
   const frame = useRef<HTMLIFrameElement>(null);
+  const cbs = useRef({ onSession, onExpand });
+  useEffect(() => {
+    cbs.current = { onSession, onExpand };
+  }, [onSession, onExpand]);
   const origins = useQuery({ queryKey: ["origins"], queryFn: loadOrigins, staleTime: 5 * 60_000 });
   /* the published panel origin must be the one this page runs on, else the configuration is not ours */
   const o = origins.data?.panel === window.location.origin ? origins.data : undefined;
@@ -34,6 +46,8 @@ export function ExecutorFrame({ title, className }: { title: string; className?:
       incoming: statusMessage,
       outgoing: ticketMessage,
       onMessage(m) {
+        if (m.state === "session") return cbs.current.onSession?.(m.open);
+        if (m.state === "expand") return cbs.current.onExpand?.();
         if (m.state !== "ticket_needed" || asking) return;
         asking = true;
         const id = m.id;
@@ -58,5 +72,5 @@ export function ExecutorFrame({ title, className }: { title: string; className?:
       </p>
     );
   }
-  return <iframe ref={frame} title={title} src={`${o.executor}/`} sandbox="allow-scripts allow-same-origin" referrerPolicy="no-referrer" allow="" className={className ?? "h-full w-full border-0"} />;
+  return <iframe ref={frame} title={title} src={`${o.executor}/${hash ? `#${hash}` : ""}`} sandbox="allow-scripts allow-same-origin" referrerPolicy="no-referrer" allow="" className={className ?? "h-full w-full border-0"} />;
 }

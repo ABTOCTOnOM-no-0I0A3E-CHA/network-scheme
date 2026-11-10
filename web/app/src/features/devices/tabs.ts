@@ -1,7 +1,7 @@
 import type { DeviceTable } from "./api";
 
-/** Tabs of the device window and page, in the order of FR-UI-DEV; "physical" is the default. */
-export const TABS = ["physical", "config", "cli", "data", "graphs", "backups", "journal", "access"] as const;
+/** Tabs of the device window and page, in the order of FR-UI-DEV, then the change session; "physical" is the default. */
+export const TABS = ["physical", "config", "cli", "data", "graphs", "backups", "journal", "access", "session"] as const;
 export type Tab = (typeof TABS)[number];
 
 /** Sub-tabs of "Данные": the inventory tables. */
