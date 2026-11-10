@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -289,7 +290,7 @@ func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease, left func(cont
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	raw, sum, via, drv, err := s.read(ctx, le.id, false)
+	raw, sum, via, drv, err := s.read(ctx, le.id, false, nil)
 	if err != nil {
 		return Pre{}, err
 	}
@@ -381,7 +382,7 @@ func (s *Scheduler) backup(ctx context.Context, id int64) error {
 }
 
 func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
-	raw, sum, _, drv, err := s.read(ctx, id, true)
+	raw, sum, _, drv, err := s.read(ctx, id, true, nil)
 	if err != nil {
 		return err
 	}
@@ -407,12 +408,59 @@ func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
 }
 
 /*
+Current is a device's configuration as read now over a ReadOnly connection
+(nothing stored): its text, its SHA-256 over the normalized text (as every
+version), the firmware line the device identified as, the executor's own
+address on the connection and the outputs of the extra reads, in order.
+*/
+type Current struct {
+	Text   string
+	SHA256 [32]byte
+	Line   strategy.Line
+	Local  netip.Addr
+	Out    []string
+}
+
+/*
+Current reads the device of le, which the caller (a changeset's dry-run)
+holds, without storing a version: the configuration read of the line's
+read driver, then extra, all from the read allowlist on one ReadOnly
+connection (transport refuses anything else).
+*/
+func (s *Scheduler) Current(ctx context.Context, le *Lease, extra ...ssh.ShowCommand) (Current, error) {
+	if !s.cfg.Locks.holds(le) {
+		return Current{}, errLease
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var cur Current
+	raw, sum, _, _, err := s.read(ctx, le.id, false, func(sh *transport.Shell) error {
+		cur.Line, cur.Local = sh.Line(), sh.LocalAddr()
+		for _, c := range extra {
+			out, err := sh.Run(ctx, c)
+			if err != nil {
+				return err
+			}
+			cur.Out = append(cur.Out, out.Text())
+		}
+		return nil
+	})
+	if err != nil {
+		return Current{}, err
+	}
+	cur.Text, cur.SHA256 = raw, sum
+	return cur, nil
+}
+
+/*
 read reads the running configuration of id over a ReadOnly connection with
 its write credential, from the verified registry; eligible: only a device
 with backup_via_executor (via reports the flag). sum is over the read
-driver's normalized text, drv is that read driver.
+driver's normalized text, drv is that read driver. then, if set, runs on
+the connection after the read, before it closes.
 */
-func (s *Scheduler) read(ctx context.Context, id int64, eligible bool) (raw string, sum [32]byte, via bool, drv drivers.Driver, err error) {
+func (s *Scheduler) read(ctx context.Context, id int64, eligible bool, then func(*transport.Shell) error) (raw string, sum [32]byte, via bool,
+	drv drivers.Driver, err error) {
 	if !s.cfg.Enabled() {
 		return "", sum, false, nil, errDisabled
 	}
@@ -444,6 +492,9 @@ func (s *Scheduler) read(ctx context.Context, id int64, eligible bool) (raw stri
 	}
 	drv = readDriver(sh.Line())
 	raw, err = drv.FetchConfig(ctx, shellRunner{sh})
+	if err == nil && then != nil {
+		err = then(sh)
+	}
 	_ = sh.Close()
 	if err != nil {
 		return "", sum, false, nil, err

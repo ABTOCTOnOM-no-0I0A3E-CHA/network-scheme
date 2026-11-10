@@ -3,6 +3,7 @@ package changeset_test
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,11 +21,13 @@ import (
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
+	"golang.org/x/crypto/nacl/box"
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/changeset"
 	_ "github.com/beekamai/network-scheme/cmd/executor/internal/drivers/esr" /* the write drivers register themselves */
 	_ "github.com/beekamai/network-scheme/cmd/executor/internal/drivers/mes10"
@@ -34,7 +37,9 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/pub"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
+	"github.com/beekamai/network-scheme/internal/creds"
 	"github.com/beekamai/network-scheme/internal/execadmin"
+	"github.com/beekamai/network-scheme/internal/secret"
 	"github.com/beekamai/network-scheme/internal/testdb"
 	"github.com/beekamai/network-scheme/internal/ticket"
 	"github.com/beekamai/network-scheme/test/sim/devemu"
@@ -88,6 +93,7 @@ type fx struct {
 	adm    *admin.Admin
 	pub    *pub.Publisher
 	store  *changeset.Store
+	locks  *backups.Locks
 	m      *changeset.Manager
 	cfg    changeset.Config
 	devs   []*dev
@@ -140,7 +146,17 @@ func newFx(t *testing.T, lines ...string) *fx {
 		f.device(t, line, 2200+i, "core")
 	}
 	f.store = &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: f.pub.Alert, Log: log, Now: f.now}
-	f.cfg = changeset.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Store: f.store, Pub: f.pub, Log: log, Now: f.now}
+	bpub, _, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.locks = &backups.Locks{}
+	sched := backups.New(backups.Config{Registry: f.guard, Net: dialer{f}, Pool: pool, BackupPub: bpub, Locks: f.locks, Alert: f.pub.Alert, Log: log,
+		Open: func(*registry.Snapshot, int64) (creds.Credential, error) {
+			return creds.Credential{Username: "admin", Password: secret.New(pw)}, nil
+		}})
+	f.cfg = changeset.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Store: f.store, Pub: f.pub, Log: log, Now: f.now,
+		Locks: f.locks, Reader: sched}
 	f.m = changeset.New(f.cfg)
 	return f
 }

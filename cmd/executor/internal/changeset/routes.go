@@ -17,7 +17,7 @@ import (
 )
 
 /* Ops are the workspace routes /x/changesets/{op} (web.Changesets). */
-var Ops = []string{"list", "get", "save", "discard", "progress"}
+var Ops = []string{"list", "get", "save", "discard", "dry-run", "progress"}
 
 /*
 Op runs one workspace route with the workspace's token: the token, the
@@ -43,6 +43,8 @@ func (m *Manager) Op(ctx context.Context, token, op string, params json.RawMessa
 		return m.save(ctx, ws, params)
 	case "discard":
 		return m.discard(ctx, ws, params)
+	case "dry-run":
+		return m.dryRunOp(ctx, ws, params)
 	}
 	return nil, refuse(CodeBadParams)
 }
@@ -99,6 +101,7 @@ type Detail struct {
 	Item
 	Content Content       `json:"content"`
 	Events  []EventDetail `json:"events"`
+	DryRun  *DryRunState  `json:"dry_run,omitempty"` /* this process's dry-run of the newest revision, with its preview */
 }
 
 /* EventDetail is one event as the UI shows it (the payload is the executor's own, as stored). */
@@ -121,7 +124,7 @@ func (m *Manager) get(ctx context.Context, ws workspace, params json.RawMessage,
 	if err != nil {
 		return nil, err
 	}
-	d := Detail{Item: item(cs), Content: cs.Content, Events: []EventDetail{}}
+	d := Detail{Item: item(cs), Content: cs.Content, Events: []EventDetail{}, DryRun: m.dryRunState(cs.ID, cs.Rev)}
 	for _, e := range cs.Events {
 		ed := EventDetail{Rev: e.Rev, At: e.At.UTC(), Kind: e.Kind, Device: e.Device, Payload: e.Payload}
 		if e.Session != nil {

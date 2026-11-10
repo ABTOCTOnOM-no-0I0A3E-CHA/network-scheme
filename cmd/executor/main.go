@@ -228,7 +228,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 			Action: unmask.ActionExport, File: unm.Export},
 	}
 	/* Changesets: authored, stored, dry-run and approved only here, under the executor's row MACs (Phase 5). */
-	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log,
+	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log, Locks: locks, Reader: sched,
 		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}})
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {

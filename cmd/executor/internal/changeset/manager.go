@@ -18,6 +18,7 @@ import (
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
@@ -67,6 +68,9 @@ type Config struct {
 	Policy func() policy.State
 	Store  *Store
 	Pub    Publisher
+	/* Locks and Reader read the devices for a dry-run (the backup scheduler's: one connection per device). */
+	Locks  *backups.Locks
+	Reader Reader
 	Log    *slog.Logger
 	Now    func() time.Time
 }
@@ -80,9 +84,11 @@ var (
 
 /* Manager holds the workspaces and the changesets' work in progress. */
 type Manager struct {
-	cfg    Config
-	mu     sync.Mutex
-	tokens map[[32]byte]*workspace
+	cfg     Config
+	mu      sync.Mutex
+	tokens  map[[32]byte]*workspace
+	dry     map[[16]byte]*dryState /* the last dry-run of each changeset in this process */
+	dryRuns map[int64][]time.Time  /* when each user started dry-runs, the last hour */
 }
 
 /* workspace is one open workspace token. */
@@ -106,7 +112,7 @@ func New(cfg Config) *Manager {
 	if cfg.Store.Alert == nil {
 		cfg.Store.Alert = cfg.Pub.Alert
 	}
-	return &Manager{cfg: cfg, tokens: map[[32]byte]*workspace{}}
+	return &Manager{cfg: cfg, tokens: map[[32]byte]*workspace{}, dry: map[[16]byte]*dryState{}, dryRuns: map[int64][]time.Time{}}
 }
 
 /* Refusal is a changeset refused by a rule: a code the UI has a text for (web: 422) and what it is about. */
