@@ -148,11 +148,14 @@ jobs:
       DEVICES_SUBNET: 172.30.1.0/24
       # A second management subnet: the veth of the off-host-like event sender (network namespace nms-ev-mgmt).
       MGMT_EXTRA: 172.31.250.0/24
+      # A third one: the write emulators of the session e2e, in network namespace nms-wr (the executor refuses
+      # addresses inside its own devices network, so they cannot live there).
+      WRITE_MGMT: 172.31.252.0/24
       SNMPSIM: nms-e2e-snmpsim
       INSTALL_ARGS: >-
         --non-interactive --public-host localhost --admin-user admin
         --admin-password-file /tmp/nms-e2e/admin-password --image-tag ci
-        --mgmt-subnet 172.30.1.0/24 --mgmt-subnet 172.31.250.0/24
+        --mgmt-subnet 172.30.1.0/24 --mgmt-subnet 172.31.250.0/24 --mgmt-subnet 172.31.252.0/24
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
@@ -385,7 +388,8 @@ jobs:
       - name: Register the write emulators with the executor (session e2e)
         run: |
           # The devices of session.spec.ts: one stateful emulator per write line (sshemud -profile: test/fixtures/devices/<line>,
-          # modes, candidate and commit timers) at a fixed address of the devices subnet, registered as an operator would:
+          # modes, candidate and commit timers) at a fixed address of WRITE_MGMT in network namespace nms-wr, reached
+          # by the executor through the host like a real device, and registered as an operator would:
           # the panel device, nmsctl executor device add with the host key fingerprint the emulator logs (its "console";
           # no TOFU), writes on, model-verify for the fixture's model, then the grants write (the devices' group),
           # audit-read and unmask. The write credential is entered by session.spec.ts through the executor's page
@@ -399,7 +403,17 @@ jobs:
           mac=a8:f9:4b:00:00:01
           devices=""
           mkdir -p test/e2e/.auth
-          for spec in mes6:172.30.1.221 esr:172.30.1.222; do
+          sudo ip netns add nms-wr
+          sudo ip link add vh-nms-wr type veth peer name vn-nms-wr
+          sudo ip link set vn-nms-wr netns nms-wr
+          sudo ip addr add 172.31.252.1/24 dev vh-nms-wr
+          sudo ip link set vh-nms-wr up
+          sudo ip netns exec nms-wr ip addr add 172.31.252.21/24 dev vn-nms-wr
+          sudo ip netns exec nms-wr ip addr add 172.31.252.22/24 dev vn-nms-wr
+          sudo ip netns exec nms-wr ip link set vn-nms-wr up
+          sudo ip netns exec nms-wr ip link set lo up
+          sudo ip netns exec nms-wr ip route add default via 172.31.252.1
+          for spec in mes6:172.31.252.21 esr:172.31.252.22; do
             line="${spec%%:*}" addr="${spec#*:}" name="nms-e2e-w${spec%%:*}"
             fx="test/e2e/.auth/devemu-$line" out="test/e2e/.auth/sshemu-w$line"
             rm -rf "$fx" "$out"; cp -r "test/fixtures/devices/$line" "$fx"; mkdir -p "$out"
@@ -418,12 +432,12 @@ jobs:
             esac
             [ "$(grep -c "ip address $addr" "$fx/config/running.cfg")" = 1 ]
             # test values of the write account, the same as in session.spec.ts
-            docker run -d --name "$name" --network nms_devices --ip "$addr" --entrypoint /sshemud \
-              -v "$PWD/$fx:/fx:ro" -v "$PWD/$out:/ssh:ro" -v /tmp/nms-e2e-sshemud:/sshemud:ro nms-snmpsim:ci \
-              -listen :22 -profile /fx -dir /ssh -user e2e-write -password e2e-write-session-pw
-            for _ in $(seq 1 60); do docker logs "$name" 2>&1 | grep -q 'sshemud listening' && break; sleep 1; done
-            fp="$(docker logs "$name" 2>&1 | sed -n 's/.*msg="sshemud listening".* hostkey=\(SHA256:[A-Za-z0-9+/]*\).*/\1/p')"
-            [ -n "$fp" ] || { docker logs "$name"; exit 1; }
+            log="/tmp/$name.log"
+            sudo setsid nohup ip netns exec nms-wr /tmp/nms-e2e-sshemud -listen "$addr:22" -profile "$PWD/$fx" \
+              -dir "$PWD/$out" -user e2e-write -password e2e-write-session-pw > "$log" 2>&1 &
+            for _ in $(seq 1 60); do grep -q 'sshemud listening' "$log" 2>/dev/null && break; sleep 1; done
+            fp="$(sed -n 's/.*msg="sshemud listening".* hostkey=\(SHA256:[A-Za-z0-9+/]*\).*/\1/p' "$log")"
+            [ -n "$fp" ] || { cat "$log"; exit 1; }
             id="$(psql "insert into core.device (name, address, group_id) values ('e2e-session-$line', '$addr', $group) returning id")"
             echo "$line at $addr: panel device $id, host key $fp"
             sudo /usr/local/bin/nmsctl executor device add --device "$id" --address "$addr" --group session-e2e --driver "$line" $sha1 --fingerprint "$fp"
@@ -487,7 +501,7 @@ jobs:
           # session.spec.ts must not have been skipped: each emulator received config-mode lines (the dangerous one
           # among them) from the executor; then the executor's chain (catalog, segments, anchor) after the whole run.
           for name in nms-e2e-wmes6 nms-e2e-wesr; do
-            cmds="$(docker logs "$name" 2>/dev/null | grep ' msg=command ' || true)"
+            cmds="$(grep ' msg=command ' "/tmp/$name.log" || true)"
             echo "$name: $(wc -l <<<"$cmds") lines"
             grep -q 'cmd="snmp-server community e2e-ro ro"' <<<"$cmds"
           done
@@ -500,7 +514,7 @@ jobs:
           echo "$out"
           grep -q "already installed" <<<"$out"
       - name: Zero egress
-        run: EGRESS_ALLOW="$MGMT_EXTRA" test/egress/capture.sh check
+        run: EGRESS_ALLOW="$MGMT_EXTRA $WRITE_MGMT" test/egress/capture.sh check
       - name: Devices network reaches only the management subnets
         run: |
           # NETSHOOT: nicolaka/netshoot v0.16 (as in test/egress/capture.sh)
@@ -555,6 +569,6 @@ jobs:
           docker logs --tail 100 nms-e2e-evprob || true
           docker logs --tail 100 nms-e2e-mes || true
           docker logs --tail 100 nms-e2e-esr || true
-          docker logs --tail 200 nms-e2e-wmes6 || true
-          docker logs --tail 200 nms-e2e-wesr || true
+          tail -n 200 /tmp/nms-e2e-wmes6.log || true
+          tail -n 200 /tmp/nms-e2e-wesr.log || true
           cat /tmp/nms-ev-mgmt.log /tmp/nms-ev-rogue.log || true
