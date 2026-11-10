@@ -27,7 +27,7 @@ jobs:
           # The packages of TestTraceability's index once more, as JSON: every traced test must report pass
           # (a skip or an absent test fails; a package missing here shows as absent tests).
           go test -json -count=1 -p 2 ./cmd/executor/... ./cmd/nmsctl ./internal/creds ./internal/httpapi ./internal/store \
-            ./internal/poller ./internal/ssh ./internal/install ./test/gateway > /tmp/nms-traced.json || true
+            ./internal/poller ./internal/ssh ./internal/install ./internal/drivers/mask ./test/gateway > /tmp/nms-traced.json || true
           NMS_TRACE_JSON=/tmp/nms-traced.json go test -count=1 -run '^TestTraceability$' -v ./cmd/executor/internal/attacktest
       - name: Race detector
         run: |
@@ -370,8 +370,9 @@ jobs:
           [ "$(x GET /x/status)" = 200 ]
           grep -qx '{"enabled":true,"frozen":false}' /tmp/nms-x.json
           code="$(x POST /x/sessions '{"ticket":"forged.ticket"}')"
-          echo "enabled: POST /x/sessions -> $code (no route in 4a)"
-          [ "$code" = 404 ]
+          echo "enabled: POST /x/sessions -> $code $(cat /tmp/nms-x.json)"
+          # the request now goes down the chain (the route exists since 4c): neither disabled (503) nor unknown (404)
+          [ "$code" != 503 ] && [ "$code" != 404 ]
           # the output holds the QR code and the secret: print only allowlisted lines, and prove they hold no secret
           sudo /usr/local/bin/nmsctl executor enroll admin --yes --totp-secret-out "$E2E_DIR/change-totp-secret" > "$E2E_DIR/enroll.log"
           shown="$(grep -E '^Panel user #' "$E2E_DIR/enroll.log" || true)"

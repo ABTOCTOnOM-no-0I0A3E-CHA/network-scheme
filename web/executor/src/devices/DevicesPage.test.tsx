@@ -58,7 +58,7 @@ const codeBox = () => screen.getAllByLabelText("Код TOTP изменений")
 const typeCode = async (u: U, c: string) => u.type(codeBox(), c);
 
 async function list(u: U, devices: unknown[]) {
-  reply(json(200, devices));
+  reply(json(200, { result: devices }));
   await typeCode(u, "111111");
   await u.click(screen.getByRole("button", { name: "Показать список" }));
   await screen.findByTestId("device-5").catch(() => undefined);
@@ -120,7 +120,7 @@ describe("register flow", () => {
     await u.click(screen.getByRole("button", { name: "Зарегистрировать устройство" }));
     await u.type(screen.getByLabelText("Устройство"), "5");
     await u.type(screen.getByLabelText("Группа записи"), "core");
-    reply(json(200, probed), json(200, issued));
+    reply(json(200, { result: probed }), json(200, issued));
     await typeCode(u, "222222");
     await u.click(screen.getByRole("button", { name: "Прочитать ключ хоста" }));
     return screen.findByTestId("confirm").catch(() => null);
@@ -189,7 +189,7 @@ describe("accept and writes", () => {
     await list(u, [row({ status: "writes_on", writes_enabled: true })]);
     await u.click(screen.getByRole("button", { name: "Принять ключ хоста" }));
     const f = { ...probed, address_source: "registry", hostkey_fp: "SHA256:newnewnewnewnewnewnewnewnewnewnewnewnewnewne", pinned_fp: FP, status: "writes_on", version: "3" };
-    reply(json(200, f), json(200, challenge("device.accept_hostkey", f)));
+    reply(json(200, { result: f }), json(200, challenge("device.accept_hostkey", f)));
     await typeCode(u, "222222");
     await u.click(screen.getByRole("button", { name: "Прочитать ключ хоста" }));
     await screen.findByTestId("confirm");

@@ -28,9 +28,12 @@ export const deviceSchema = z.object({
 });
 export type Device = z.infer<typeof deviceSchema>;
 export const deviceList = z.array(deviceSchema).max(10000);
+/* POST /x/devices answers {result: [...]}, like every authorized read (cmd/executor/internal/web/read.go). */
+export const deviceListAnswer = z.object({ result: deviceList });
 
 /* What the probe returned: the fields the confirmation will show (and H cover). */
 export const shownFields = z.record(text(64), text(512));
+export const probeAnswer = z.object({ result: shownFields });
 
 export const challengeSchema = z.object({
   challenge_id: text(64),

@@ -32,6 +32,7 @@ var trace = []struct {
 }{
 	{"C1", "executor disabled after install: every /x/* but the status 503 before any route, enable goes down the chain", []ref{
 		{"cmd/executor/internal/web", "TestC1DisabledAfterInstallUntilEnabled"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 		{"cmd/executor/internal/web", "TestDisabledAnswers503"},
 		{"cmd/executor/internal/authz", "TestPolicyAndFreezeGate"},
 		{"cmd/executor/internal/authz", "TestPolicyCheckedAgainInsideTheWrite"},
@@ -47,6 +48,7 @@ var trace = []struct {
 	{"C2b", "a ticket without the grant", []ref{
 		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
 		{"cmd/executor/internal/confirm", "TestChallengeBindsUserAndGrant"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 	}},
 	{"C2c", "the api changes a device's address or group: registration and connections use the registry's address only", []ref{
 		{"cmd/executor/internal/devices", "TestC2cAPIChangesAddressAndGroup"},
@@ -56,6 +58,7 @@ var trace = []struct {
 		{"cmd/executor/internal/netguard", "TestSSRFAddressesRefused"},
 		{"cmd/executor/internal/devices", "TestWithoutWriteAdminRefused"},
 		{"cmd/executor/internal/devices", "TestEveryChangeIsAudited"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
 	}},
 	{"C5", "a host key other than the pinned one: refused before any credential, high alert", []ref{
 		{"cmd/executor/internal/transport", "TestHostKeyStrategy"},
@@ -66,6 +69,7 @@ var trace = []struct {
 		{"cmd/executor/internal/devices", "TestForgedTicketMakesNoConnection"},
 		{"cmd/executor/internal/devices", "TestHostAcceptBindsThePreviewedRow"},
 		{"cmd/nmsctl", "TestDeviceAddConfirmsTheShownKey"},
+		{"cmd/executor/internal/session", "TestRefusals"},
 	}},
 	{"C2d", "the api freezes within 5 s and cannot lift the freeze", []ref{
 		{"cmd/executor/internal/pub", "TestPanelRequestFreezesWithinFiveSeconds"},
@@ -110,6 +114,7 @@ var trace = []struct {
 		{"cmd/executor/internal/confirm", "TestC2kChangedDescription"},
 		{"cmd/executor/internal/confirm", "TestConfirmOnce"},
 		{"cmd/executor/internal/web", "TestConfirmFlowWithRealAuthz"},
+		{"cmd/executor/internal/session", "TestRollbackOnlyAsConfirmed"},
 	}},
 	{"C3", "TOTP replay, growing locks, global freeze", []ref{
 		{"cmd/executor/internal/authz", "TestAcceptOnceAndAudit"},
@@ -132,6 +137,25 @@ var trace = []struct {
 		{"internal/ssh", "TestBusyHostKeySendsNoCredential"},
 		{"internal/ssh", "TestBusyDevicePinnedKeyOfAnotherTypeSendsNoCredential"},
 		{"internal/ssh", "TestBusyHostKeyCheckFailsClosed"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
+	}},
+	{"4c.2", "the session lifecycle: checks in order (policy, freeze, window/limit/two-person with alert, grants, writes, model, host key, credential, rules), pre-session snapshot, management context, timeouts, connection loss and restart end as interrupted with an alert and free device_busy", []ref{
+		{"cmd/executor/internal/session", "TestOpenAndClose"},
+		{"cmd/executor/internal/session", "TestRefusals"},
+		{"cmd/executor/internal/session", "TestMgmtTargets"},
+		{"cmd/executor/internal/session", "TestMgmtTargetsWidened"},
+		{"cmd/executor/internal/session", "TestNothingBeforeAuthz"},
+		{"cmd/executor/internal/session", "TestFreezeKeepsTheSafetyNet"},
+		{"cmd/executor/internal/session", "TestNoSessionAfterRun"},
+		{"cmd/executor/internal/session", "TestRecoverChecksEveryMAC"},
+		{"cmd/executor/internal/backups", "TestPreSessionKeepsDriftVisible"},
+		{"cmd/executor/internal/drivers/mes10", "TestFailedOpenDeletesItsSnapshot"},
+		{"cmd/executor/internal/session", "TestTimeouts"},
+		{"cmd/executor/internal/session", "TestAttach"},
+		{"cmd/executor/internal/session", "TestConnectionLoss"},
+		{"cmd/executor/internal/session", "TestRestartMidSession"},
+		{"cmd/executor/internal/session", "TestBusyDeviceSilencesThePoller"},
+		{"cmd/executor/internal/web", "TestSessionRoutes"},
 	}},
 	{"RF1", "tampering or rollback freezes; only nmsctl lifts it, after a verification that passes again", []ref{
 		{"cmd/executor/internal/freeze", "TestFreezeOffRefusedWhenVerifyFails"},
@@ -189,6 +213,17 @@ var trace = []struct {
 		{"cmd/executor/internal/drivers", "TestC4DangerousCommands"},
 		{"cmd/executor/internal/drivers", "TestManagementContextEverySpelling"},
 		{"cmd/executor/internal/drivers", "TestEverySaveAliasIsControl"},
+		{"cmd/executor/internal/terminal", "TestC4EveryDangerousSpellingIsHeld"},
+		{"cmd/executor/internal/terminal", "TestC4DangerousLineNeedsNameAndNewCode"},
+	}},
+	{"4c.3", "the line terminal: only whole classified lines reach the device; a paste over paste_confirm_lines waits for confirmation; a partial line at disconnect is dropped; device escapes (OSC 52 included) never reach the browser; Tab and ? never reach the device; Origin, first-frame token, control lines and the hourly limit", []ref{
+		{"cmd/executor/internal/terminal", "TestPasteOverTheLimitWaitsForConfirmation"},
+		{"cmd/executor/internal/terminal", "TestPartialLineNotSentAtDisconnect"},
+		{"cmd/executor/internal/terminal", "TestDeviceEscapesNeverReachTheBrowser"},
+		{"cmd/executor/internal/terminal", "TestTabAndHelpNeverReachTheDevice"},
+		{"cmd/executor/internal/terminal", "TestOriginTokenControlAndLimit"},
+		{"cmd/executor/internal/terminal", "TestEditorKeys"},
+		{"cmd/executor/internal/terminal", "TestCleanStripsEscapes"},
 	}},
 	{"C7", "roll back the whole session = pre-session, hash checked, high alert otherwise (emulator; real models: stand)", []ref{
 		{"cmd/executor/internal/drivers/mes6", "TestRollbackInverseJournal"},
@@ -197,6 +232,53 @@ var trace = []struct {
 		{"cmd/executor/internal/drivers/mes10", "TestReplaceMismatchAlerts"},
 		{"cmd/executor/internal/drivers/esr", "TestRollbackBeforeAndAfterConfirm"},
 		{"cmd/executor/internal/drivers/esr", "TestRollbackMismatchIsNotConfirmed"},
+		{"cmd/executor/internal/session", "TestC7RollbackRestoresThePreSessionSnapshot"},
+	}},
+	{"C2i", "rollback only to the snapshot of exec.session_device under its MAC: a tampered pre_ct/pre_sha256 or a foreign backup refuses with an alert; the poller's copy is never read", []ref{
+		{"cmd/executor/internal/session", "TestC2iRollbackOnlyToTheMACdSnapshot"},
+	}},
+	{"C6", "link loss mid-session: ESR reverts by its own timer and the executor sends nothing; MES alerts and rolls back from the snapshot (emulator; real models: stand)", []ref{
+		{"cmd/executor/internal/session", "TestC6ESRRevertsByItsTimer"},
+		{"cmd/executor/internal/session", "TestC6MESRollbackAfterLinkLoss"},
+	}},
+	{"4c.4", "session actions: diff, save of the shown configuration, typed control lines to their flows, forms only as shown and Safe, no rollback over a later session; 4c.3 review: H binds the registry device, dropped challenges discarded, pre-auth bound, recording before the browser's bounds", []ref{
+		{"cmd/executor/internal/session", "TestDiffSaveTypedAndForms"},
+		{"cmd/executor/internal/session", "TestRollbackSupersededByALaterSession"},
+		{"cmd/executor/internal/session", "TestESRExclusivityAndTimerBeforeConfirm"},
+		{"cmd/executor/internal/session", "TestESRHealthCheckRestoresOnlyThePendingCommit"},
+		{"cmd/executor/internal/terminal", "TestPreauthClientKey"},
+		{"cmd/executor/internal/web", "TestSessionRoutes"},
+		{"cmd/executor/internal/terminal", "TestDangerousLineBoundToTheRegistryDevice"},
+		{"cmd/executor/internal/terminal", "TestDroppedDangerousLineDiscardsItsChallenge"},
+		{"cmd/executor/internal/terminal", "TestPreauthConnectionsAreBounded"},
+		{"cmd/executor/internal/terminal", "TestRecordingBeforeTheBrowserBounds"},
+	}},
+	{"C8", "the recording is the fact without secrets: input and output masked before anything is stored (also split across answers, chunks and blocks); the replay equals the emulator's journal and the shown output but for the masks; no known test secret in chunks, ciphertext, logs, audit or alerts (as is, base64, hex)", []ref{
+		{"cmd/executor/internal/terminal", "TestC8ReplayIsTheFactWithoutSecrets"},
+		{"cmd/executor/internal/recording", "TestC8RecordingHoldsNoSecret"},
+		{"internal/drivers/mask", "TestStreamKeepsBlocksAcrossPieces"},
+		{"internal/drivers/mask", "TestStreamOpenerDoesNotHideLaterLines"},
+		{"cmd/executor/internal/recording", "TestOpenerHidesNoLaterLine"},
+		{"cmd/executor/internal/recording", "TestReplayCleansAgain"},
+	}},
+	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert (unmask: 4d.1)", []ref{
+		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP"},
+		{"cmd/executor/internal/recording", "TestReplayRefusesTampering"},
+	}},
+	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
+		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
+		{"cmd/executor/internal/recording", "TestRecorderFailureIsFailClosed"},
+		{"cmd/executor/internal/recording", "TestVolumeLimit"},
+		{"cmd/executor/internal/recording", "TestChunkSizeBound"},
+		{"cmd/executor/internal/recording", "TestRecover"},
+		{"cmd/executor/internal/session", "TestSessionIsRecorded"},
+		{"cmd/executor/internal/session", "TestFormRefusedWhenTheRecordingFails"},
+		{"cmd/executor/internal/session", "TestRestartMidSession"},
+		{"cmd/executor/internal/recording", "TestAnswerBoundAndEscaping"},
+		{"cmd/executor/internal/recording", "TestFailedLineIsNotRecorded"},
+		{"cmd/executor/internal/recording", "TestConcurrentReplaysBounded"},
+		{"cmd/executor/internal/terminal", "TestConfirmationMarkersFailClosed"},
+		{"cmd/executor/internal/session", "TestAbortedOpenLeavesAReplayableRecording"},
 	}},
 }
 
@@ -270,8 +352,8 @@ func TestTraceability(t *testing.T) {
 			traced[r.dir+"."+r.name] = true
 		}
 	}
-	/* The scenarios 4a and 4b must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2j", "C2k", "C3", "C4", "C5", "C7", "4a.7", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

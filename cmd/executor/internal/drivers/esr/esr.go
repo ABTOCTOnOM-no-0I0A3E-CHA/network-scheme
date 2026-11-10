@@ -151,6 +151,15 @@ func (d Driver) Open(ctx context.Context, sh *transport.Shell, o drivers.Options
 	return d.open(ctx, sh, o)
 }
 
+/* OpenShell opens a session on any drivers.Shell (the in-memory emulator of other packages' tests); the executor opens through Open. */
+func (d Driver) OpenShell(ctx context.Context, sh drivers.Shell, o drivers.Options) (drivers.Session, error) {
+	s, err := d.open(ctx, sh, o)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (*session, error) {
 	o, err := drivers.Prepare(d.L, d.S, o)
 	if err != nil {
@@ -225,6 +234,25 @@ func (s *session) drop(ctx context.Context, restore bool) error {
 	}
 	_, err := s.System(ctx, "rollback")
 	return err
+}
+
+/*
+Restore reverts only the pending (unconfirmed) commit [R §1]: what an
+earlier confirm made permanent stays, and nothing is confirmed. Without a
+pending commit it sends nothing.
+*/
+func (s *session) Restore(ctx context.Context) error {
+	if !s.pending {
+		return nil
+	}
+	if err := s.ToRoot(ctx); err != nil {
+		return err
+	}
+	if _, err := s.System(ctx, "restore"); err != nil {
+		return err
+	}
+	s.pending = false
+	return nil
 }
 
 /*

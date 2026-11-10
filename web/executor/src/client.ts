@@ -35,10 +35,16 @@ export function getStatus(signal?: AbortSignal): Promise<Result<ExecutorStatus>>
 export type Poster = {
   /*
    * POSTs body with a fresh ticket from the panel added (one per request, never reused). Never retries; refuses
-   * a second request while one is in flight; refuses a TOTP `code` already sent from this page before it asks the
-   * panel for a ticket: a replayed or parallel-submitted code is a counted failure on the server.
+   * a second request while one is in flight; refuses a TOTP code (`code`, or `totp` on the session routes) already
+   * sent from this page before it asks the panel for a ticket: a replayed or parallel-submitted code is a counted
+   * failure on the server.
    */
-  post<T>(path: string, body: { code?: string; ticket?: never } & Record<string, unknown>, schema: z.ZodType<T>): Promise<Result<T>>;
+  post<T>(path: string, body: { code?: string; totp?: string; ticket?: never } & Record<string, unknown>, schema: z.ZodType<T>): Promise<Result<T>>;
+  /*
+   * One fresh ticket for a terminal frame (dangerous_issue, dangerous_confirm), under the same guards as post: one
+   * request at a time, and a code given here counts as sent from now on (the frame carrying it is sent next).
+   */
+  ticket(code?: string): Promise<Result<string>>;
 };
 
 const REMEMBERED_CODES = 16;
@@ -46,28 +52,51 @@ const REMEMBERED_CODES = 16;
 export function createPoster(bridge: Pick<ExecutorBridge, "requestTicket">): Poster {
   let inFlight = false;
   const sent: string[] = [];
+  /* the ticket for a request carrying code, or why there is none; the code is remembered once a ticket is in hand */
+  const take = async (code: string | undefined): Promise<Result<string>> => {
+    if (code !== undefined && sent.includes(code)) return { ok: false, failure: { kind: "local", code: "code_reused" } };
+    let ticket: string;
+    try {
+      ticket = await bridge.requestTicket();
+    } catch (e) {
+      return { ok: false, failure: { kind: "local", code: e instanceof BridgeError ? e.code : "no_ticket" } };
+    }
+    if (code !== undefined) {
+      sent.push(code);
+      if (sent.length > REMEMBERED_CODES) sent.shift();
+    }
+    return { ok: true, value: ticket };
+  };
   return {
     async post(path, body, schema) {
       if (inFlight) return { ok: false, failure: { kind: "local", code: "busy" } };
-      if (body.code !== undefined && sent.includes(body.code)) return { ok: false, failure: { kind: "local", code: "code_reused" } };
       inFlight = true;
       try {
-        let ticket: string;
-        try {
-          ticket = await bridge.requestTicket();
-        } catch (e) {
-          return { ok: false, failure: { kind: "local", code: e instanceof BridgeError ? e.code : "no_ticket" } };
-        }
-        if (body.code !== undefined) {
-          sent.push(body.code);
-          if (sent.length > REMEMBERED_CODES) sent.shift();
-        }
-        return await run(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ticket }) }, schema);
+        const t = await take(body.code ?? body.totp);
+        if (!t.ok) return t;
+        return await run(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ticket: t.value }) }, schema);
+      } finally {
+        inFlight = false;
+      }
+    },
+    async ticket(code) {
+      if (inFlight) return { ok: false, failure: { kind: "local", code: "busy" } };
+      inFlight = true;
+      try {
+        return await take(code);
       } finally {
         inFlight = false;
       }
     },
   };
+}
+
+/*
+ * POSTs to a route of an open change session with its bearer token (never in the URL, no cookie, no ticket, no
+ * code: the token is the session's, held in memory only). The executor locks the session per action.
+ */
+export function sessionPost<T>(path: string, token: string, body: Record<string, unknown>, schema: z.ZodType<T>): Promise<Result<T>> {
+  return run(path, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }, schema);
 }
 
 /* GET /keys.json of the executor origin (the gateway's own file, not /x): the domain public keys, parsed by the caller. */

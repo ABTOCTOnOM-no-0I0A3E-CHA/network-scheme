@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { BridgeError } from "./bridge";
-import { createPoster, getStatus } from "./client";
+import { createPoster, getStatus, sessionPost } from "./client";
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -93,5 +93,40 @@ describe("poster", () => {
     await expect(p.post("/x/confirm", { code: "123456" }, ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "no_ticket" } });
     expect(fetchMock).not.toHaveBeenCalled();
     await expect(p.post("/x/confirm", { code: "123456" }, ok)).resolves.toMatchObject({ ok: true });
+  });
+
+  it("guards the session routes' totp like a code, and a terminal frame's code shares the same memory", async () => {
+    const b = bridge();
+    fetchMock.mockResolvedValue(json(422, { error: { code: "device_busy" } }));
+    const p = createPoster(b);
+    await p.post("/x/sessions", { totp: "123456", device_ids: [1] }, ok);
+    await expect(p.post("/x/sessions", { totp: "123456", device_ids: [1] }, ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "code_reused" } });
+    await expect(p.ticket("123456")).resolves.toEqual({ ok: false, failure: { kind: "local", code: "code_reused" } });
+    await expect(p.ticket("654321")).resolves.toEqual({ ok: true, value: "ticket-2" });
+    await expect(p.post("/x/confirm", { code: "654321" }, ok)).resolves.toEqual({ ok: false, failure: { kind: "local", code: "code_reused" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands one fresh ticket per terminal frame, one at a time", async () => {
+    let release!: (t: string) => void;
+    const b = { requestTicket: vi.fn().mockReturnValueOnce(new Promise<string>((r) => (release = r))).mockResolvedValue("t-2") };
+    const p = createPoster(b);
+    const first = p.ticket();
+    await expect(p.ticket()).resolves.toEqual({ ok: false, failure: { kind: "local", code: "busy" } });
+    release("t-1");
+    await expect(first).resolves.toEqual({ ok: true, value: "t-1" });
+    await expect(p.ticket()).resolves.toEqual({ ok: true, value: "t-2" });
+    expect(b.requestTicket).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("sessionPost", () => {
+  it("sends the bearer token in the header only: no ticket, no cookie", async () => {
+    fetchMock.mockResolvedValue(json(200, { ok: true }));
+    await expect(sessionPost("/x/sessions/s/diff", "tok", {}, ok)).resolves.toEqual({ ok: true, value: { ok: true } });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/x/sessions/s/diff");
+    expect(init).toMatchObject({ method: "POST", credentials: "omit", body: "{}" });
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer tok");
   });
 });

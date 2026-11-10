@@ -58,8 +58,11 @@ import (
 	"github.com/beekamai/network-scheme/internal/ssh"
 )
 
-/* Source is the config_version.source of the scheduler's versions (executor-only by trigger). */
-const Source = "executor"
+/* Source is the config_version.source of the scheduler's versions, SourcePreSession of a session's snapshot (both executor-only by trigger). */
+const (
+	Source           = "executor"
+	SourcePreSession = "pre_session"
+)
 
 /* ErrFailed is the fixed backup_state.last_error of a failed executor backup (the UI maps it). */
 const ErrFailed = "the executor could not back up the configuration"
@@ -260,19 +263,51 @@ func (s *Scheduler) plan(id int64, err error) {
 }
 
 /*
-BeforeSession backs up the device of le, which the caller (a change session)
-holds, before the session sends anything: the backup uses the caller's
-lease, so the session's connection and the backup's never overlap.
+Pre is the pre-session snapshot of a device: the configuration as read
+(ReadOnly), its SHA-256 over the normalized text (as every version) and its
+envelope sealed to the backup domain under backup.AAD(device, hex(SHA256)),
+the same as its config_version row.
 */
-func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease) error {
+type Pre struct {
+	Text      string
+	SHA256    [32]byte
+	CT, DEKCT []byte
+}
+
+/*
+BeforeSession reads the device of le, which the caller (a change session)
+holds, before the session sends anything, and stores the configuration as a
+'pre_session' version: always, whatever the device's backup_via_executor
+(backup_state and the poller's stamp only for a device the executor backs
+up); the version is drift when it differs from the newest one and left does
+not report it as a session's result (drifted). The read uses the caller's lease, so the session's connection and the
+backup's never overlap.
+*/
+func (s *Scheduler) BeforeSession(ctx context.Context, le *Lease, left func(context.Context, [32]byte) (bool, error)) (Pre, error) {
 	if !s.cfg.Locks.holds(le) {
-		return errLease
+		return Pre{}, errLease
 	}
-	err := s.backup(ctx, le.id)
-	if err == nil {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	raw, sum, via, drv, err := s.read(ctx, le.id, false)
+	if err != nil {
+		return Pre{}, err
+	}
+	drift, err := s.drifted(ctx, le.id, sum, left)
+	if err != nil {
+		return Pre{}, err
+	}
+	v, err := s.version(drv, le.id, raw, sum, drift)
+	if err != nil {
+		return Pre{}, err
+	}
+	if err := s.store(ctx, le.id, sum, v, SourcePreSession, via); err != nil {
+		return Pre{}, err
+	}
+	if via {
 		s.plan(le.id, nil)
 	}
-	return err
+	return Pre{Text: raw, SHA256: sum, CT: v.ct, DEKCT: v.dekCT}, nil
 }
 
 /* eligible lists the write_device rows with backup_via_executor of a verified snapshot. */
@@ -346,45 +381,10 @@ func (s *Scheduler) backup(ctx context.Context, id int64) error {
 }
 
 func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
-	if !s.cfg.Enabled() {
-		return errDisabled
-	}
-	if s.cfg.BackupPub == nil {
-		return errors.New("backups: no backup-domain key")
-	}
-	var c creds.Credential
-	err := s.cfg.Registry.View(ctx, func(snap *registry.Snapshot) error {
-		r, ok := snap.Get("write_device", id)
-		if !ok {
-			return errNotEligible
-		}
-		if via, _ := r.Get("backup_via_executor").(bool); !via {
-			return errNotEligible
-		}
-		var err error
-		c, err = s.cfg.Open(snap, id)
-		return err
-	})
+	raw, sum, _, drv, err := s.read(ctx, id, true)
 	if err != nil {
 		return err
 	}
-	sh, err := transport.Dial(ctx, transport.Config{DeviceID: id, Access: transport.ReadOnly, Registry: s.cfg.Registry,
-		Net: s.cfg.Net, Alert: s.cfg.Alert,
-		Credential: transport.Credential{Username: c.Username, Password: c.Password, PrivateKey: c.PrivateKey}})
-	c.Wipe()
-	if err != nil {
-		return err
-	}
-	drv := readDriver(sh.Line())
-	raw, err := drv.FetchConfig(ctx, shellRunner{sh})
-	_ = sh.Close()
-	if err != nil {
-		return err
-	}
-	if len(raw) > drivers.MaxConfigSize {
-		return drivers.ErrConfigTooLarge
-	}
-	sum := sha256.Sum256([]byte(drv.NormalizeConfig(raw))) /* the normalized text is for the hash only */
 	last, err := s.lastOwn(ctx, id)
 	if err != nil {
 		return err
@@ -395,19 +395,76 @@ func (s *Scheduler) doBackup(ctx context.Context, id int64) error {
 			return err
 		}
 		if newest != nil && *newest == sum {
-			return s.store(ctx, id, sum, nil)
+			return s.store(ctx, id, sum, nil, Source, true)
 		}
 		/* another source (the poller) stored a different configuration since: the newest version must be this one again */
 	}
-	masked := strings.ToValidUTF8(drv.MaskSecrets(raw), "?")
-	if len(masked) > drivers.MaxConfigSize {
-		return drivers.ErrConfigTooLarge
-	}
-	ct, dekCT, err := backup.Seal(s.cfg.BackupPub, []byte(raw), backup.AAD(id, hex.EncodeToString(sum[:])))
+	v, err := s.version(drv, id, raw, sum, last != nil)
 	if err != nil {
 		return err
 	}
-	return s.store(ctx, id, sum, &version{size: len(raw), masked: masked, ct: ct, dekCT: dekCT, drift: last != nil})
+	return s.store(ctx, id, sum, v, Source, true)
+}
+
+/*
+read reads the running configuration of id over a ReadOnly connection with
+its write credential, from the verified registry; eligible: only a device
+with backup_via_executor (via reports the flag). sum is over the read
+driver's normalized text, drv is that read driver.
+*/
+func (s *Scheduler) read(ctx context.Context, id int64, eligible bool) (raw string, sum [32]byte, via bool, drv drivers.Driver, err error) {
+	if !s.cfg.Enabled() {
+		return "", sum, false, nil, errDisabled
+	}
+	if s.cfg.BackupPub == nil {
+		return "", sum, false, nil, errors.New("backups: no backup-domain key")
+	}
+	var c creds.Credential
+	err = s.cfg.Registry.View(ctx, func(snap *registry.Snapshot) error {
+		r, ok := snap.Get("write_device", id)
+		if !ok {
+			return errNotEligible
+		}
+		if via, _ = r.Get("backup_via_executor").(bool); eligible && !via {
+			return errNotEligible
+		}
+		var err error
+		c, err = s.cfg.Open(snap, id)
+		return err
+	})
+	if err != nil {
+		return "", sum, false, nil, err
+	}
+	sh, err := transport.Dial(ctx, transport.Config{DeviceID: id, Access: transport.ReadOnly, Registry: s.cfg.Registry,
+		Net: s.cfg.Net, Alert: s.cfg.Alert,
+		Credential: transport.Credential{Username: c.Username, Password: c.Password, PrivateKey: c.PrivateKey}})
+	c.Wipe()
+	if err != nil {
+		return "", sum, false, nil, err
+	}
+	drv = readDriver(sh.Line())
+	raw, err = drv.FetchConfig(ctx, shellRunner{sh})
+	_ = sh.Close()
+	if err != nil {
+		return "", sum, false, nil, err
+	}
+	if len(raw) > drivers.MaxConfigSize {
+		return "", sum, false, nil, drivers.ErrConfigTooLarge
+	}
+	return raw, sha256.Sum256([]byte(drv.NormalizeConfig(raw))), via, drv, nil /* the normalized text is for the hash only */
+}
+
+/* version masks raw with the read driver and seals a copy of it (Seal wipes its input) as a new version of id. */
+func (s *Scheduler) version(drv drivers.Driver, id int64, raw string, sum [32]byte, drift bool) (*version, error) {
+	masked := strings.ToValidUTF8(drv.MaskSecrets(raw), "?")
+	if len(masked) > drivers.MaxConfigSize {
+		return nil, drivers.ErrConfigTooLarge
+	}
+	ct, dekCT, err := backup.Seal(s.cfg.BackupPub, []byte(raw), backup.AAD(id, hex.EncodeToString(sum[:])))
+	if err != nil {
+		return nil, err
+	}
+	return &version{size: len(raw), masked: masked, ct: ct, dekCT: dekCT, drift: drift}, nil
 }
 
 /* lastOwn is the hash of the newest version the executor stored for id (sources only its role can insert); nil when none. */
@@ -450,14 +507,21 @@ type version struct {
 	drift     bool
 }
 
-/* store records a successful backup (with v: a new version) in one transaction: the version, backup_state and the poller's stamp. */
-func (s *Scheduler) store(ctx context.Context, id int64, sum [32]byte, v *version) error {
+/*
+store records a successful backup in one transaction: with v a new version
+of source, and for a device the executor backs up (via) backup_state and
+the poller's stamp.
+*/
+func (s *Scheduler) store(ctx context.Context, id int64, sum [32]byte, v *version, source string, via bool) error {
 	return pgx.BeginFunc(ctx, s.cfg.Pool, func(tx pgx.Tx) error {
 		if v != nil {
 			if _, err := tx.Exec(ctx, `INSERT INTO backups.config_version (device_id, source, sha256, size, masked, full_ct, full_dek_ct, drift)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, id, Source, sum[:], v.size, v.masked, v.ct, v.dekCT, v.drift); err != nil {
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, id, source, sum[:], v.size, v.masked, v.ct, v.dekCT, v.drift); err != nil {
 				return err
 			}
+		}
+		if !via {
+			return nil
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO backups.backup_state (device_id, last_ok_at, last_sha256) VALUES ($1, now(), $2)
 			ON CONFLICT (device_id) DO UPDATE SET last_ok_at = now(), last_error = NULL, last_sha256 = $2, needs_write = false`, id, sum[:]); err != nil {
@@ -467,4 +531,24 @@ func (s *Scheduler) store(ctx context.Context, id int64, sum [32]byte, v *versio
 			ON CONFLICT (device_id) DO UPDATE SET at = now()`, id)
 		return err
 	})
+}
+
+/*
+drifted reports whether sum, a configuration read before a session, is
+drift: it differs from the newest version of any source and left does not
+say it is what a change session left since (the session package reads
+its own summaries; nil: drift). A change made outside every session thus
+stays visible as drift although the pre-session version, not the
+poller's, records it first.
+*/
+func (s *Scheduler) drifted(ctx context.Context, id int64, sum [32]byte, left func(context.Context, [32]byte) (bool, error)) (bool, error) {
+	newest, err := s.newest(ctx, id)
+	if err != nil || newest == nil || *newest == sum {
+		return false, err
+	}
+	if left == nil {
+		return true, nil
+	}
+	session, err := left(ctx, sum)
+	return !session, err
 }

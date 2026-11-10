@@ -1,9 +1,8 @@
 import { useEffect, useId, useState } from "react";
-import { History, RefreshCw, Pencil, TriangleAlert } from "lucide-react";
+import { RefreshCw, Pencil, TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey, thrownKey } from "@/features/auth/errors";
-import { EmptyState } from "@/features/common/EmptyState";
 import { StateBadge } from "@/features/common/StateBadge";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
 import { roleIcon } from "@/features/map/icons";
@@ -11,6 +10,7 @@ import { safeText } from "@/lib/text";
 import type { CredKind } from "@nms/shared/seal";
 import { cn } from "@/lib/utils";
 import { ProblemList } from "@/features/problems/ProblemList";
+import { SessionHistory, SessionTab } from "@/features/executor/SessionTab";
 import { useDevice, useDevices, useGroups, usePollDevice, type DeviceDetail, type DeviceTable } from "./api";
 import { ChartsTab } from "@/features/charts/ChartsTab";
 import { EventFeed } from "@/features/events/EventFeed";
@@ -322,6 +322,8 @@ function TabBody({ tab, device, dataTab, onDataTab, canManage, canAck, canBackup
       return <JournalTab deviceId={deviceId} canAck={canAck} />;
     case "access":
       return <AccessTab deviceId={deviceId} canManage={canManage} />;
+    case "session":
+      return <SessionTab deviceId={deviceId} />;
   }
 }
 
@@ -340,7 +342,7 @@ function JournalTab({ deviceId, canAck }: { deviceId: number; canAck: boolean })
       </section>
       <section className="grid gap-2" aria-label={t("journal.sessions")}>
         <h3 className="text-sm font-semibold">{t("journal.sessions")}</h3>
-        <EmptyState icon={History} title={t("journal.sessionsEmpty")} hint={t("journal.sessionsHint")} />
+        <SessionHistory deviceId={deviceId} />
       </section>
     </div>
   );

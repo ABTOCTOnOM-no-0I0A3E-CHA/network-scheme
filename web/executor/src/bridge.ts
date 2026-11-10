@@ -17,6 +17,12 @@ export type ExecutorBridge = {
   requestTicket(): Promise<string>;
   /* Tells the panel the page is loaded. */
   ready(): void;
+  /* Tells the panel whether a change session is open here (it keeps this frame mounted and shown while one is). */
+  session(open: boolean): void;
+  /* Asks the panel to show this frame at full size. */
+  expand(): void;
+  /* Tells the panel a dialog opened or closed (it gives the frame the whole viewport meanwhile). */
+  dialog(open: boolean): void;
   readonly dropped: number;
   close(): void;
 };
@@ -63,6 +69,15 @@ export function createExecutorBridge(o: { panelOrigin: string; self?: Window; ti
     },
     ready() {
       ch.send({ v: 1, type: "status", state: "ready" });
+    },
+    session(open) {
+      ch.send({ v: 1, type: "status", state: "session", open });
+    },
+    expand() {
+      ch.send({ v: 1, type: "status", state: "expand" });
+    },
+    dialog(open) {
+      ch.send({ v: 1, type: "status", state: "dialog", open });
     },
     get dropped() {
       return ch.dropped;

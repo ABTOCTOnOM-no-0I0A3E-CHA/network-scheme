@@ -45,6 +45,7 @@ let metricsQuery: Record<string, string | null> | undefined;
 let eventQuery: URLSearchParams | undefined;
 let problemQuery: URLSearchParams | undefined;
 const seen = "2026-10-02T10:00:00Z";
+let sessions: unknown[] = [];
 const server = setupServer(
   http.get("*/api/devices/7", () => deviceFn()),
   http.get("*/api/devices/7/interfaces", ({ request }) => {
@@ -75,6 +76,7 @@ const server = setupServer(
   }),
   http.get("*/api/groups", () => err(403, "forbidden")),
   http.get("*/api/devices", () => HttpResponse.json([{ ...detail({ id: 3, name: "core-parent" }) }, { ...detail() }])),
+  http.get("*/api/devices/7/sessions", () => HttpResponse.json({ items: sessions })),
   http.get("*/api/problems", ({ request }) => {
     problemQuery = new URL(request.url).searchParams;
     return HttpResponse.json({ items: [], next_cursor: null });
@@ -319,11 +321,25 @@ describe("DeviceCard", () => {
     expect(await within(form).findByRole("alert")).toHaveTextContent("от 60 до 86400");
   });
 
+  it("journal lists the change sessions of the device as text", async () => {
+    deviceFn = () => HttpResponse.json(detail());
+    sessions = [{ session_id: "3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c", user_id: 4, username: HOSTILE, opened_at: seen, closed_at: null, status: "interrupted", post_sha256: null }];
+    setup(false);
+    await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.journal }));
+    const row = await screen.findByTestId("session-3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c");
+    expect(row).toHaveTextContent(ru.journal.status.interrupted);
+    expect(row).toHaveTextContent("<script>alert(1)</script>");
+    expect(row.querySelector("script")).toBeNull();
+    /* outside the panel shell there is no executor dock to play it in */
+    expect(within(row).queryByRole("button")).toBeNull();
+    sessions = [];
+  });
+
   it("journal lists the problems of this device only and has no backup list", async () => {
     deviceFn = () => HttpResponse.json(detail());
     setup(false);
     await userEvent.click(await screen.findByRole("tab", { name: ru.card.tab.journal }));
-    expect(screen.getByRole("region", { name: ru.journal.sessions })).toHaveTextContent(ru.journal.sessionsEmpty);
+    expect(await within(screen.getByRole("region", { name: ru.journal.sessions })).findByText(ru.journal.sessionsEmpty)).toBeInTheDocument();
     expect(screen.queryByText(ru.backup.versions)).not.toBeInTheDocument();
     expect(await screen.findByText(ru.problems.empty)).toBeInTheDocument();
     expect(problemQuery?.get("device_id")).toBe("7");
@@ -388,7 +404,7 @@ describe("DeviceCard", () => {
     const bar = screen.getAllByRole("tablist")[0];
     const tabs = within(bar).getAllByRole("tab");
     /* CLI is hidden without devices.show */
-    expect(tabs.map((t) => t.textContent)).toEqual([ru.card.tab.physical, ru.card.tab.config, ru.card.tab.data, ru.card.tab.graphs, ru.card.tab.backups, ru.card.tab.journal, ru.card.tab.access]);
+    expect(tabs.map((t) => t.textContent)).toEqual([ru.card.tab.physical, ru.card.tab.config, ru.card.tab.data, ru.card.tab.graphs, ru.card.tab.backups, ru.card.tab.journal, ru.card.tab.access, ru.card.tab.session]);
     expect(tabs[0]).toHaveAttribute("aria-selected", "true");
     expect(bar).not.toHaveClass("flex-wrap");
     await userEvent.click(screen.getByRole("tab", { name: ru.card.tab.data }));
