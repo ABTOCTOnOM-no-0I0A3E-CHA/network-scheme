@@ -172,7 +172,7 @@ func TestLockedAnswerIgnoresGrants(t *testing.T) {
 	f := newFixture(t)
 	u := f.enrolled(t, "alice")
 	f.fail5(t, u)
-	for _, need := range []authz.Need{writeCore, {Kind: "write", Groups: []string{"edge"}}, {Kind: "unmask"}} {
+	for _, need := range []authz.Need{writeCore, {Kind: "write", Groups: []string{"edge"}}, {Kind: "unmask", Groups: []string{"core"}}} {
 		f.oneAudit(t, "denied", "locked", func() {
 			if err := f.ask(f.ticketFor(t, u), f.code(t, u), need); !errors.Is(err, authz.ErrLocked) {
 				t.Fatalf("%+v: %v", need, err)
@@ -382,7 +382,7 @@ func TestUnwritableGuardsRefuseWithoutEvaluating(t *testing.T) {
 	}
 	/* Every decision is refused while the latch holds, also one that would have been refused before its code. */
 	f.oneAudit(t, "denied", "guards_unwritable", func() {
-		if err := f.ask(f.ticketFor(t, u), code, authz.Need{Kind: "unmask"}); err != authz.ErrUnavailable {
+		if err := f.ask(f.ticketFor(t, u), code, authz.Need{Kind: "unmask", Groups: []string{"core"}}); err != authz.ErrUnavailable {
 			t.Fatalf("no grant while unwritable: %v", err)
 		}
 	})

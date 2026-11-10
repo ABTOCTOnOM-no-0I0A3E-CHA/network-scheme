@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/terminal"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/unmask"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/wcreds"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/web"
 	nmsconfig "github.com/beekamai/network-scheme/internal/config"
@@ -195,9 +197,27 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	reads := map[string]web.Read{"/x/devices": web.Read(devs.List()), "/x/devices/probe": web.Read(devs.ProbeRead())}
+	reads := map[string]web.Read{}
+	for p, r := range map[string]devices.Read{"/x/devices": devs.List(), "/x/devices/probe": devs.ProbeRead()} {
+		reads[p] = web.Read{Action: r.Action, Need: r.Need, Run: r.Run}
+	}
 	for p, r := range recs.Reads() {
-		reads[p] = web.Read(r)
+		reads[p] = web.Read{Action: r.Action, Need: r.Need, Run: r.Run}
+	}
+	/* Unmasked configurations: only here, by unmask on the device's write group + confirm(H) + TOTP (4d.1). */
+	unm, err := unmask.New(unmask.Config{Pool: pool, Gate: guard, Priv: bpriv, Pub: bpub, Clean: terminal.Clean, Policy: pol.Current,
+		Alert: publisher.Alert, Audit: az.Record, Log: log})
+	if err != nil {
+		return err
+	}
+	reads["/x/configs"] = web.Read{Action: unmask.ActionList, NeedFor: unm.ListNeed, Run: unm.List}
+	actions[unmask.ActionView] = web.Action{Describe: unm.Describe(unmask.ActionView)}
+	actions[unmask.ActionExport] = web.Action{Describe: unm.Describe(unmask.ActionExport)}
+	confirmed := []web.Confirmed{
+		{Path: "/x/configs/{device}/{version}", Re: regexp.MustCompile(`^/x/configs/([1-9][0-9]{0,17})/([1-9][0-9]{0,17})$`),
+			Action: unmask.ActionView, Run: unm.View},
+		{Path: "/x/download/configs/{device}/{version}", Re: regexp.MustCompile(`^/x/download/configs/([1-9][0-9]{0,17})/([1-9][0-9]{0,17})$`),
+			Action: unmask.ActionExport, File: unm.Export},
 	}
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
@@ -205,7 +225,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 	x, err := web.New(web.Config{CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, ClientCAFile: cfg.ClientCAFile, GatewaySPKI: pin,
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirms, Log: log, Terminal: term.Serve,
-		Actions: actions, Reads: reads,
+		Actions: actions, Reads: reads, Confirmed: confirmed,
 		Sessions: &web.Sessions{
 			Open: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {
 				return sessions.Open(ctx, req, ids)

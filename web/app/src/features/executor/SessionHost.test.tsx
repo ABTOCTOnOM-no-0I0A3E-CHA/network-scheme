@@ -54,7 +54,7 @@ describe("the change session dock", () => {
     await userEvent.click(screen.getByRole("button", { name: ru.session.open }));
     const frame = (await screen.findByTitle(ru.executor.dock.title)) as HTMLIFrameElement;
     expect(frame).toHaveAttribute("src", `${EXECUTOR}/#device=7`);
-    expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
 
     fromExecutor(frame, { v: 1, type: "status", state: "session", open: true });
     expect(await screen.findByRole("button", { name: ru.session.show })).toBeInTheDocument();

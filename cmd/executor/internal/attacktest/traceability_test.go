@@ -261,9 +261,23 @@ var trace = []struct {
 		{"cmd/executor/internal/recording", "TestOpenerHidesNoLaterLine"},
 		{"cmd/executor/internal/recording", "TestReplayCleansAgain"},
 	}},
-	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert (unmask: 4d.1)", []ref{
+	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert; configurations only with unmask (C9)", []ref{
 		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP"},
 		{"cmd/executor/internal/recording", "TestReplayRefusesTampering"},
+		{"cmd/executor/internal/unmask", "TestC9UnmaskNeedsGrantGroupAndTOTP"},
+	}},
+	{"C9", "unmasked configurations only through the executor: unmask + write on the registry's group of the device + confirm(H) over (device, version) + the user's own change TOTP code (no grant, other group, no/wrong/other's code, forged or other's ticket, a device moved after the challenge: refused); /x/confirm and the other route leave the challenge unspent; sha256(normalize(Open)) checked against the version row before anything is shown (mismatch: refused, high alert); per-user hourly limit (refused, alert) and mass alert; every view and export audited, refusals too; text only, cleaned; the download a plain-text attachment forced by the gateway; the api never reads the envelope", []ref{
+		{"cmd/executor/internal/unmask", "TestC9UnmaskNeedsGrantGroupAndTOTP"},
+		{"cmd/executor/internal/unmask", "TestUnmaskLimitAndMassAlert"},
+		{"cmd/executor/internal/unmask", "TestUnmaskRefusesTamperedVersions"},
+		{"cmd/executor/internal/unmask", "TestUnmaskedTextIsCleaned"},
+		{"cmd/executor/internal/unmask", "TestDescribeFromTheExecutorsData"},
+		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
+		{"cmd/executor/internal/web", "TestConfirmedRoutes"},
+		{"cmd/executor/internal/web", "TestReadNeedFor"},
+		{"internal/install", "TestCaddyExecutorSite"},
+		{"internal/store", "TestAPIRoleHasNoExecRights"},
+		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("exports through a fetch with the code in the body and saves the executor's text"`},
 	}},
 	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
 		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
@@ -353,7 +367,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

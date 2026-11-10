@@ -181,6 +181,17 @@ func (f *fakeConfirm) call(i int) authz.Request {
 	return f.calls[i]
 }
 
+func (f *fakeConfirm) Action(id string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.issued {
+		if c.ID == id {
+			return c.Action, true
+		}
+	}
+	return "", false
+}
+
 func (f *fakeConfirm) Confirm(_ context.Context, id string, h []byte, req authz.Request) (confirm.Challenge, authz.Decision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
