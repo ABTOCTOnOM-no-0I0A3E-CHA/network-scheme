@@ -46,6 +46,8 @@ const (
 	SystemRecordingFailed       = "executor_recording_failed"
 	SystemRecordingFull         = "executor_recording_full"
 	SystemRecordingViews        = "executor_recording_views"
+	SystemSessionTamper         = "executor_session_tamper"
+	SystemRecordingTamper       = "executor_recording_tamper"
 	SystemExecutorAlert         = "executor_alert"
 	SystemExecutorUnreachable   = "executor_unreachable"
 	executorUnfrozen            = "executor_unfrozen"
@@ -58,6 +60,7 @@ var executorSeverity = map[string]string{
 	SystemSessionOutsideWindow: "warning",
 	SystemExecutorPassword:     "high", SystemExecutorLineMismatch: "high", SystemExecutorRollback: "high",
 	SystemRecordingFailed: "high", SystemRecordingFull: "warning", SystemRecordingViews: "high",
+	SystemSessionTamper: "high", SystemRecordingTamper: "high",
 }
 
 /*
@@ -165,6 +168,10 @@ func systemName(kind string) string {
 		return "Change session recording reached its size limit"
 	case SystemRecordingViews:
 		return "Too many change session recordings viewed"
+	case SystemSessionTamper:
+		return "Change session row fails its integrity check"
+	case SystemRecordingTamper:
+		return "Change session recording fails its integrity check"
 	case SystemExecutorAlert:
 		return "Executor alert"
 	case SystemExecutorUnreachable:

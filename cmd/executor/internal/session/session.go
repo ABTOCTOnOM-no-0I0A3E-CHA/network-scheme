@@ -75,7 +75,7 @@ const (
 	KindInterrupted   = "session_interrupted"     /* high: a device's connection dropped, or the executor restarted */
 	KindOutsideWindow = "session_outside_window"  /* warning */
 	KindPolicyInvalid = "executor_policy_invalid" /* high: the policy's rules do not fit a line's grammar */
-	KindTamper        = "executor_tamper"         /* a session row fails its MAC (raised high: the registry is not involved) */
+	KindTamper        = "executor_session_tamper" /* high: a session row fails its MAC (no freeze: the registry is not involved) */
 )
 
 /* Statuses of execpub.session_summary. */
@@ -233,6 +233,12 @@ type Device struct {
 	Driver  drivers.WriteDriver
 	Session drivers.Session /* Session.Pre() is the only rollback target (4c.4) */
 	Pre     [32]byte        /* exec.session_device.pre_sha256 */
+	/*
+		Shown, as the registry and the device itself named them at open (the
+		panel only asked for the id): the verified write_device row's
+		address:port and write group, and the model and firmware of show version.
+	*/
+	Address, Group, Model, Firmware string
 
 	sh      *transport.Shell
 	rec     *recording.Stream /* the device's recording, from its open to its end */
@@ -260,11 +266,20 @@ type Opened struct {
 	Devices     []OpenedDevice `json:"devices"`
 }
 
-/* OpenedDevice is a device of an open session. */
+/*
+OpenedDevice is a device of an open session: what the user checks against
+the device they meant (the panel chose only the id). Address and group come
+from the verified write_device row, model and firmware from the device's
+own show version; nothing comes from core.device.
+*/
 type OpenedDevice struct {
 	ID        int64  `json:"device_id"`
 	Line      string `json:"line"`
 	PreSHA256 string `json:"pre_sha256"`
+	Address   string `json:"address"`
+	Group     string `json:"write_group"`
+	Model     string `json:"model"`
+	Firmware  string `json:"firmware"`
 }
 
 /* IDString is a session id as a UUID. */
@@ -553,7 +568,8 @@ func (m *Manager) opened(s *Session, token string) Opened {
 	o := Opened{ID: IDString(s.ID), Token: token, Expires: s.expires.UTC(), IdleSeconds: int(s.idle / time.Second)}
 	m.mu.Unlock()
 	for _, d := range s.Devices {
-		o.Devices = append(o.Devices, OpenedDevice{ID: d.ID, Line: string(d.Line), PreSHA256: hex.EncodeToString(d.Pre[:])})
+		o.Devices = append(o.Devices, OpenedDevice{ID: d.ID, Line: string(d.Line), PreSHA256: hex.EncodeToString(d.Pre[:]),
+			Address: d.Address, Group: d.Group, Model: d.Model, Firmware: d.Firmware})
 	}
 	return o
 }
@@ -583,6 +599,12 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		}
 		row, _ = snap.Get("write_device", id)
 		address, _ = row.Get("address").(netip.Addr)
+		port, _ := row.Get("port").(int64)
+		if !address.IsValid() || port < 1 || port > 65535 {
+			return authz.ErrDenied
+		}
+		d.Address = netip.AddrPortFrom(address, uint16(port)).String() // #nosec G115 -- checked above
+		d.Group, _ = row.Get("write_group").(string)
 		return nil
 	})
 	if err != nil {
@@ -620,6 +642,7 @@ func (m *Manager) openDevice(ctx context.Context, s *Session, id int64, p execpo
 		return d, err
 	}
 	d.Line = d.sh.Line()
+	d.Model, d.Firmware = d.sh.Identity().Model, d.sh.Identity().Firmware
 	drv, ok := drivers.For(d.Line)
 	if !ok {
 		return d, ErrLineMismatch

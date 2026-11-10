@@ -377,6 +377,43 @@ func (f *fx) free(t *testing.T, what string) {
 }
 
 /*
+Review 4c.6 I2: the panel chooses only the device id, so the open answer
+shows what the session really is on: the registry's address:port and write
+group (from the verified write_device row, never core.device) and the
+device's own model and firmware. core.device is moved to another address and
+renamed first: none of it may show.
+*/
+func TestOpenedShowsTheRegistryDevice(t *testing.T) {
+	f := newFx(t)
+	u := f.user(t, "core")
+	if _, err := f.env.Pool("postgres").Exec(context.Background(), `UPDATE core.device SET address = '198.51.100.77', name = 'panel-says-so' WHERE id = $1`,
+		f.id); err != nil {
+		t.Fatal(err)
+	}
+	o := f.open(t, u)
+	got := o.Devices[0]
+	want := netip.AddrPortFrom(f.row["address"].(netip.Addr), 22).String()
+	if got.Address != want || got.Group != "core" || got.Model == "" || got.Firmware == "" {
+		t.Fatalf("opened device %+v, want address %s, group core and the device's identity", got, want)
+	}
+	b, err := json.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "198.51.100.77") || strings.Contains(string(b), "panel-says-so") {
+		t.Fatalf("the answer carries core.device data: %s", b)
+	}
+	for _, k := range []string{`"address":`, `"write_group":`, `"model":`, `"firmware":`} {
+		if !strings.Contains(string(b), k) {
+			t.Fatalf("%s missing from %s", k, b)
+		}
+	}
+	if err := f.m.Close(context.Background(), o.ID, o.Token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+/*
 A session opens on the verified registry and closes cleanly: the
 pre-session snapshot (a 'pre_session' version and exec.session_device, its
 hash the driver session's Pre), device_busy from the write_device row, an

@@ -39,7 +39,7 @@ recording_views_per_hour per user, more refused with a high alert; at most
 maxReplays at once, more refused with 503: the answer is built in memory) verifies
 the manifest's MAC, then every chunk's number (0, 1, ... in order), MAC and
 AAD, their count and the total hash before anything is returned; any
-failure refuses the replay with a high executor_tamper alert. The events go
+failure refuses the replay with a high executor_recording_tamper alert. The events go
 to the browser as JSON text, cleaned again.
 */
 package recording
@@ -74,7 +74,7 @@ const (
 	KindFailed = "executor_recording_failed" /* high: a recording could not be stored; the session sends no further line */
 	KindFull   = "executor_recording_full"   /* warning: a recording reached recording_max_mib; the session sends no further line */
 	KindViews  = "executor_recording_views"  /* high: a user asked for more replays than recording_views_per_hour */
-	KindTamper = "executor_tamper"           /* high: a recording fails its MAC, AAD, order, count or hash */
+	KindTamper = "executor_recording_tamper" /* high: a recording fails its MAC, AAD, order, count or hash (no freeze) */
 )
 
 /* Refusal is a refusal with the code the UI has a text for (web: 422). */

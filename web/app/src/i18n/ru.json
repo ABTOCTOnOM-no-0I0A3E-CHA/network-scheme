@@ -602,6 +602,8 @@
       "executor_recording_failed": "Запись сессии изменений не удалась; сессия больше ничего не отправляет",
       "executor_recording_full": "Запись сессии изменений достигла лимита объёма",
       "executor_recording_views": "Слишком много просмотров записей сессий изменений",
+      "executor_session_tamper": "Строка сессии изменений не прошла проверку целостности",
+      "executor_recording_tamper": "Запись сессии изменений не прошла проверку целостности",
       "executor_alert": "Сообщение executor'а",
       "executor_unreachable": "Executor не публикует своё состояние"
     },
