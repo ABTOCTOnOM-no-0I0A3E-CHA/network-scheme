@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { StatusWidget } from "./StatusWidget";
 import type { ExecutorBridge } from "./bridge";
@@ -37,9 +37,13 @@ export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<Exec
   const [sessionOpen, setSessionOpen] = useState(false);
   const compact = useCompact();
 
+  /* the panel hears only changes: nothing until a session opens (a page without one says only "ready") */
+  const told = useRef(false);
   const onOpenChange = useCallback(
     (open: boolean) => {
       setSessionOpen(open);
+      if (open === told.current) return;
+      told.current = open;
       void bridge?.then((b) => b?.session(open));
     },
     [bridge],
