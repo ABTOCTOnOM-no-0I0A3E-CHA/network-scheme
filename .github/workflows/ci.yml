@@ -27,7 +27,7 @@ jobs:
           # The packages of TestTraceability's index once more, as JSON: every traced test must report pass
           # (a skip or an absent test fails; a package missing here shows as absent tests).
           go test -json -count=1 -p 2 ./cmd/executor/... ./cmd/nmsctl ./internal/creds ./internal/httpapi ./internal/store \
-            ./internal/poller ./internal/ssh ./internal/install ./internal/drivers/mask ./test/gateway > /tmp/nms-traced.json || true
+            ./internal/poller ./internal/ssh ./internal/install ./internal/drivers/mask ./internal/triggers ./test/gateway > /tmp/nms-traced.json || true
           NMS_TRACE_JSON=/tmp/nms-traced.json go test -count=1 -run '^TestTraceability$' -v ./cmd/executor/internal/attacktest
       - name: Race detector
         run: |

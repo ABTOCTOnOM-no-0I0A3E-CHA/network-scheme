@@ -277,6 +277,8 @@ var trace = []struct {
 		{"cmd/executor/internal/web", "TestReadNeedFor"},
 		{"internal/install", "TestCaddyExecutorSite"},
 		{"internal/store", "TestAPIRoleHasNoExecRights"},
+		{"internal/triggers", "TestEveryExecutorAlertKindIsKnown"},
+		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("lists with one code, confirms the view with the next one and shows the configuration as text only"`},
 		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("exports through a fetch with the code in the body and saves the executor's text"`},
 	}},
 	{"4d.2", "the executor's audit: viewed only with audit-read + a change TOTP code, every view itself audited and bounded per hour, filters and pages bounded, text cleaned; the whole chain (catalog of the audit tables, sealed segments, anchor) verified in the background, a break or truncation freezes with the executor_tamper disaster alert; every event of security.md 10 has its row (coverage table)", []ref{
@@ -290,6 +292,8 @@ var trace = []struct {
 		{"cmd/executor/internal/session", "TestAuditCoversTheSessionLifecycle"},
 		{"cmd/executor/internal/terminal", "TestEveryLineIsAudited"},
 		{"cmd/executor/internal/wcreds", "TestStoredCredentialIsBoundInside"},
+		{"web/executor/src/audit/AuditPage.test.tsx", `it("reads a page with the filters and one code, shows it as text only and continues by the cursor"`},
+		{"web/executor/src/audit/AuditPage.test.tsx", `it("sends nothing for a malformed filter and names the executor's refusals"`},
 	}},
 	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
 		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
