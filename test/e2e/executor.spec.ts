@@ -29,6 +29,9 @@ async function embed(page: Page, name = "exec"): Promise<void> {
     f.title = "executor";
     f.setAttribute("sandbox", "allow-scripts allow-same-origin");
     f.referrerPolicy = "no-referrer";
+    /* a frame this small would be the dock's compact strip (header and status hidden); the panel gives it a full page */
+    f.width = "1100";
+    f.height = "700";
     f.src = `${src}/`;
     document.body.append(f);
   }, { src: EXECUTOR, name });
