@@ -2,6 +2,7 @@ package execpolicy
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,12 +57,19 @@ unmask_per_hour: 1
 mass_unmask_alert: 10000
 recording_max_mib: 64
 recording_views_per_hour: 1
+second_person_minutes: 240
+changeset_max_devices: 200
+changeset_max_batch: 1
+changeset_max_lines: 1000
+changeset_dry_runs_per_hour: 1
 `
 	p, err = Parse([]byte(full))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.Enabled || p.ConfirmMode != ConfirmFIDO2 || len(p.Windows) != 1 || p.Windows[0].End != "24:00" || len(p.ClassOverrides) != 2 {
+	if !p.Enabled || p.ConfirmMode != ConfirmFIDO2 || len(p.Windows) != 1 || p.Windows[0].End != "24:00" || len(p.ClassOverrides) != 2 ||
+		p.SecondPersonMinutes != 240 || p.ChangesetMaxDevices != 200 || p.ChangesetMaxBatch != 1 || p.ChangesetMaxLines != 1000 ||
+		p.ChangesetDryRunsPerHour != 1 {
 		t.Fatalf("%+v", p)
 	}
 	out, err := Marshal(p)
@@ -122,6 +130,27 @@ func TestParseRefuses(t *testing.T) {
 		if p, err := Parse([]byte(src)); err == nil {
 			t.Errorf("%s: accepted %+v", name, p)
 		}
+	}
+}
+
+/*
+The Phase 5 keys default to security.md 5.4 D7, and leave a policy snapshot
+stored before they existed encoding as it did (omitempty: zero only there).
+*/
+func TestPhase5Defaults(t *testing.T) {
+	d := Default()
+	if d.SecondPersonMinutes != 30 || d.ChangesetMaxDevices != 50 || d.ChangesetMaxBatch != 10 || d.ChangesetMaxLines != 200 ||
+		d.ChangesetDryRunsPerHour != 20 {
+		t.Fatalf("%+v", d)
+	}
+	old := d
+	old.SecondPersonMinutes, old.ChangesetMaxDevices, old.ChangesetMaxBatch, old.ChangesetMaxLines, old.ChangesetDryRunsPerHour = 0, 0, 0, 0, 0
+	b, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "second_person_minutes") || strings.Contains(string(b), "changeset_") {
+		t.Fatalf("an old snapshot encodes the new keys: %s", b)
 	}
 }
 

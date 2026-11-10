@@ -105,7 +105,13 @@ func Reset(t testing.TB, env *testdb.Env) {
 	Tamper(t, env, `DELETE FROM exec.write_device; DELETE FROM exec.write_grant; DELETE FROM exec.change_totp;
 		DELETE FROM exec.model_profile; DELETE FROM exec.write_credential; DELETE FROM exec.exec_state;
 		DELETE FROM exec.registry_counter; DELETE FROM execpub.alert; DELETE FROM execpub.freeze_request;
-		DELETE FROM execpub.device_busy; DELETE FROM execpub.session_summary;
+		DELETE FROM execpub.device_busy; DELETE FROM execpub.session_summary; DELETE FROM execpub.changeset_summary;
+		ALTER TABLE exec.changeset_event DISABLE TRIGGER changeset_event_append_only; DELETE FROM exec.changeset_event;
+		ALTER TABLE exec.changeset_event ENABLE TRIGGER changeset_event_append_only;
+		ALTER TABLE exec.changeset_revision DISABLE TRIGGER changeset_revision_append_only; DELETE FROM exec.changeset_revision;
+		ALTER TABLE exec.changeset_revision ENABLE TRIGGER changeset_revision_append_only;
+		ALTER TABLE exec.changeset DISABLE TRIGGER changeset_append_only; DELETE FROM exec.changeset;
+		ALTER TABLE exec.changeset ENABLE TRIGGER changeset_append_only;
 		ALTER TABLE exec.recording_chunk DISABLE TRIGGER recording_chunk_append_only; DELETE FROM exec.recording_chunk;
 		ALTER TABLE exec.recording_chunk ENABLE TRIGGER recording_chunk_append_only;
 		ALTER TABLE exec.recording_manifest DISABLE TRIGGER recording_manifest_append_only; DELETE FROM exec.recording_manifest;

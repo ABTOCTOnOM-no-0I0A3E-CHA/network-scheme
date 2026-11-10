@@ -18,7 +18,8 @@ import (
 const mac32 = `decode(repeat('00', 32), 'hex')`
 
 var execImmutable = []string{"exec.session", "exec.session_device", "exec.session_event",
-	"exec.recording_chunk", "exec.recording_manifest", "exec.audit_event"}
+	"exec.recording_chunk", "exec.recording_manifest", "exec.audit_event",
+	"exec.changeset", "exec.changeset_revision", "exec.changeset_event"}
 
 /*
 grantsOf describes the rights of role on table: table-level privileges by name,
@@ -89,12 +90,12 @@ func TestAPIRoleHasNoExecRights(t *testing.T) {
 		}
 		return n
 	}
-	/* Guard the enumeration below: 14 tables, 3 sequences, 1 function. */
-	if n := count(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'exec' AND c.relkind = 'r'`); n != 14 {
-		t.Fatalf("exec tables = %d, want 14", n)
+	/* Guard the enumeration below: 17 tables, 4 sequences, 1 function. */
+	if n := count(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'exec' AND c.relkind = 'r'`); n != 17 {
+		t.Fatalf("exec tables = %d, want 17", n)
 	}
-	if n := count(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'exec' AND c.relkind = 'S'`); n != 3 {
-		t.Fatalf("exec sequences = %d, want 3", n)
+	if n := count(`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'exec' AND c.relkind = 'S'`); n != 4 {
+		t.Fatalf("exec sequences = %d, want 4", n)
 	}
 	if n := count(`SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'exec'`); n != 1 {
 		t.Fatalf("exec functions = %d, want 1", n)
@@ -129,6 +130,8 @@ func TestAPIRoleHasNoExecRights(t *testing.T) {
 		requireDenied(t, role, `UPDATE exec.write_device SET writes_enabled = true`)
 		requireDenied(t, role, `DELETE FROM exec.write_grant`)
 		requireDenied(t, role, `SELECT exec.reject_modification()`)
+		requireDenied(t, role, `SELECT 1 FROM exec.changeset_revision`)
+		requireDenied(t, role, `INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, payload, mac) VALUES (gen_random_uuid(), 1, now(), 'x', '{}', '\x00')`)
 	}
 	/* eventd and the CLI do not even see execpub. */
 	for _, role := range []string{"nms_eventd", "nms_cli"} {
@@ -150,7 +153,7 @@ func TestExecutorRoleGrants(t *testing.T) {
 		"exec.audit_head":        "SELECT UPDATE",
 		"execpub.freeze_request": "SELECT DELETE",
 		"execpub.alert":          dml, "execpub.device_busy": dml, "execpub.session_summary": dml, "execpub.status": dml,
-		"execpub.backup_taken":   dml,
+		"execpub.backup_taken": dml, "execpub.changeset_summary": dml,
 		"core.device":            "SELECT(address,driver,firmware,group_id,id,model,name)",
 		`core."user"`:            "SELECT(created_at,disabled,id,username)",
 		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
@@ -204,7 +207,7 @@ func TestExecutorRoleGrants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(seqs, " "); got != "backups.config_version_id_seq exec.audit_event_id_seq exec.model_profile_id_seq exec.session_event_id_seq execpub.alert_id_seq" {
+	if got := strings.Join(seqs, " "); got != "backups.config_version_id_seq exec.audit_event_id_seq exec.changeset_event_id_seq exec.model_profile_id_seq exec.session_event_id_seq execpub.alert_id_seq" {
 		t.Errorf("nms_executor sequences: %s", got)
 	}
 
@@ -248,6 +251,7 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 		"execpub.freeze_request": "INSERT(requested_by)",
 		"execpub.alert":          "SELECT", "execpub.device_busy": "SELECT",
 		"execpub.session_summary": "SELECT", "execpub.status": "SELECT", "execpub.backup_taken": "SELECT",
+		"execpub.changeset_summary": "SELECT",
 	}, "execpub")
 	requireGrants(t, "nms_poller", map[string]string{
 		"execpub.device_busy": "SELECT", "execpub.session_summary": "SELECT", "execpub.backup_taken": "SELECT",
@@ -279,12 +283,14 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 		`INSERT INTO execpub.device_busy (device_id, session_id) VALUES (1, gen_random_uuid())`,
 		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`,
 		`INSERT INTO execpub.backup_taken (device_id) VALUES (1)`,
+		`INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids, created_at, updated_at)
+			VALUES (gen_random_uuid(), 1, 'lines', 't', 'draft', 0, '{}', now(), now())`,
 	} {
 		requireDenied(t, "nms_api", sql)
 	}
 	set := map[string]string{"execpub.freeze_request": "requested_by = 1", "execpub.alert": "text = ''",
 		"execpub.device_busy": "since = now()", "execpub.session_summary": "closed_at = now()",
-		"execpub.status": "frozen = false", "execpub.backup_taken": "at = now()"}
+		"execpub.status": "frozen = false", "execpub.backup_taken": "at = now()", "execpub.changeset_summary": "status = 'done'"}
 	for _, rel := range relations(t, "execpub") {
 		for _, sql := range []string{"UPDATE " + rel + " SET " + set[rel], "DELETE FROM " + rel, "TRUNCATE " + rel} {
 			for _, role := range []string{"nms_api", "nms_poller", "nms_eventd", "nms_cli"} {
@@ -298,7 +304,7 @@ func TestExecpubGrantsForAPIAndPoller(t *testing.T) {
 		`INSERT INTO execpub.status (enabled, frozen) VALUES (false, false)`,
 		`INSERT INTO execpub.device_busy (device_id, session_id) VALUES (1, gen_random_uuid())`,
 		`INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status) VALUES (gen_random_uuid(), 1, 1, now(), 'open')`,
-		`INSERT INTO execpub.backup_taken (device_id) VALUES (1)`} {
+		`INSERT INTO execpub.backup_taken (device_id) VALUES (1)`, `SELECT 1 FROM execpub.changeset_summary`} {
 		requireDenied(t, "nms_poller", sql)
 	}
 	for _, sql := range []string{`SELECT 1 FROM execpub.device_busy`, `SELECT 1 FROM execpub.session_summary`, `SELECT 1 FROM execpub.backup_taken`} {
@@ -406,6 +412,10 @@ func insertSession(t *testing.T, id string, dev int64) {
 		{`INSERT INTO exec.recording_manifest (session_id, device_id, chunks, sha256, mac) VALUES ($1, $2, 1, ` + mac32 + `, ` + mac32 + `)`, []any{id, dev}},
 		{`INSERT INTO exec.audit_event (ts, user_id, ip, ua, action, object, result, payload, prev_hash, hash)
 			VALUES (now(), 1, '192.0.2.1', 'ua', 'session.open', 'session:' || $1::text, 'ok', '\x00', ` + mac32 + `, ` + mac32 + `)`, []any{id}},
+		{`INSERT INTO exec.changeset (id, author, author_username, kind, created_at, mac) VALUES ($1, 1, 'alice', 'lines', now(), ` + mac32 + `)`, []any{id}},
+		{`INSERT INTO exec.changeset_revision (changeset_id, rev, created_at, content, content_sha256, mac)
+			VALUES ($1, 1, now(), '\x01', ` + mac32 + `, ` + mac32 + `)`, []any{id}},
+		{`INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, payload, mac) VALUES ($1, 1, now(), 'dry_run', '{}', ` + mac32 + `)`, []any{id}},
 	} {
 		if _, err := exe.Exec(context.Background(), st.sql, st.args...); err != nil {
 			t.Fatalf("%s: %v", st.sql, err)
@@ -593,6 +603,21 @@ func TestExecChecks(t *testing.T) {
 		"summary post sha 31":    `INSERT INTO execpub.session_summary (session_id, user_id, device_id, opened_at, status, post_sha256) VALUES (gen_random_uuid(), 1, 1, now(), 'closed', decode(repeat('00', 31), 'hex'))`,
 		"status not singleton":   `INSERT INTO execpub.status (singleton, enabled, frozen) VALUES (false, false, false)`,
 		"busy device 0":          `INSERT INTO execpub.device_busy (device_id, session_id) VALUES (0, gen_random_uuid())`,
+		"changeset kind":         `INSERT INTO exec.changeset (id, author, author_username, kind, created_at, mac) VALUES (gen_random_uuid(), 1, 'a', 'script', now(), M)`,
+		"changeset author 0":     `INSERT INTO exec.changeset (id, author, author_username, kind, created_at, mac) VALUES (gen_random_uuid(), 0, 'a', 'lines', now(), M)`,
+		"changeset no username":  `INSERT INTO exec.changeset (id, author, author_username, kind, created_at, mac) VALUES (gen_random_uuid(), 1, '', 'lines', now(), M)`,
+		"revision 0":             `INSERT INTO exec.changeset_revision (changeset_id, rev, created_at, content, content_sha256, mac) VALUES ('` + sid + `', 0, now(), '\x01', M, M)`,
+		"revision over cap":      `INSERT INTO exec.changeset_revision (changeset_id, rev, created_at, content, content_sha256, mac) VALUES ('` + sid + `', 2, now(), repeat('x', 960 * 1024 + 1)::bytea, M, M)`,
+		"revision sha 31":        `INSERT INTO exec.changeset_revision (changeset_id, rev, created_at, content, content_sha256, mac) VALUES ('` + sid + `', 2, now(), '\x01', decode(repeat('00', 31), 'hex'), M)`,
+		"changeset event kind":   `INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, payload, mac) VALUES ('` + sid + `', 1, now(), 'Dry Run', '{}', M)`,
+		"changeset event array":  `INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, payload, mac) VALUES ('` + sid + `', 1, now(), 'x', '[]', M)`,
+		"changeset event device": `INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, device_id, payload, mac) VALUES ('` + sid + `', 1, now(), 'x', 0, '{}', M)`,
+		"changeset summary status": `INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids, created_at, updated_at)
+			VALUES (gen_random_uuid(), 1, 'lines', 't', 'open', 0, '{}', now(), now())`,
+		"changeset summary title": `INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids, created_at, updated_at)
+			VALUES (gen_random_uuid(), 1, 'lines', repeat('t', 121), 'draft', 0, '{}', now(), now())`,
+		"changeset summary devices": `INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids, created_at, updated_at)
+			VALUES (gen_random_uuid(), 1, 'lines', 't', 'draft', 201, array_fill(1::bigint, ARRAY[201]), now(), now())`,
 	}
 	for name, sql := range bad {
 		_, err := exe.Exec(ctx, strings.ReplaceAll(strings.ReplaceAll(sql, " M)", " "+mac32+")"), " M,", " "+mac32+","))
@@ -766,6 +791,94 @@ func TestExecMigrationOnPhase3Database(t *testing.T) {
 	var usage bool
 	if err := root.QueryRow(ctx, `SELECT has_schema_privilege('nms_api', 'exec', 'USAGE')`).Scan(&usage); err != nil || usage {
 		t.Errorf("api USAGE on exec after upgrade: %v %v", usage, err)
+	}
+}
+
+/*
+TestChangesetMigrationOnPhase4Database applies 00030 to a database at the
+end of Phase 4 (00029) that holds a change session: the session rows stay,
+the changeset tables take rows only as the executor, and they are as
+append-only as the session's.
+*/
+func TestChangesetMigrationOnPhase4Database(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	const db = "nms_phase4"
+	if _, err := env.Pool("postgres").Exec(ctx, `CREATE DATABASE `+db); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = env.Pool("postgres").Exec(context.Background(), `DROP DATABASE IF EXISTS `+db+` WITH (FORCE)`)
+	})
+	open := func(role string) *pgxpool.Pool {
+		c, pw := env.Config(role)
+		c.Name = db
+		p, err := store.Open(ctx, c, pw)
+		if err != nil {
+			t.Fatalf("open %s: %v", role, err)
+		}
+		t.Cleanup(p.Close)
+		return p
+	}
+	root := open("postgres")
+	for _, sql := range []string{
+		`REVOKE ALL ON DATABASE ` + db + ` FROM PUBLIC`,
+		`GRANT CONNECT ON DATABASE ` + db + ` TO nms_migrator, nms_api, nms_cli, nms_poller, nms_eventd, nms_executor`,
+		`GRANT CREATE ON DATABASE ` + db + ` TO nms_migrator`,
+		`REVOKE ALL ON SCHEMA public FROM PUBLIC`,
+		`GRANT USAGE ON SCHEMA public TO nms_migrator`,
+		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
+		`CREATE SCHEMA core AUTHORIZATION nms_migrator`,
+		`CREATE SCHEMA audit AUTHORIZATION nms_migrator`,
+	} {
+		if _, err := root.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	mc, mpw := env.Config("nms_migrator")
+	mc.Name = db
+	if err := store.MigrateUpTo(ctx, mc, mpw, 29); err != nil {
+		t.Fatalf("migrate to Phase 4: %v", err)
+	}
+	exe := open("nms_executor")
+	const sid = "6f1d0000-0000-4000-8000-000000000444"
+	if _, err := exe.Exec(ctx, `INSERT INTO exec.session (id, user_id, opened_at, policy_snapshot, mac) VALUES ($1, 1, now(), '{}', `+mac32+`)`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx, mc, mpw); err != nil {
+		t.Fatalf("migrate Phase 4 database: %v", err)
+	}
+	var n int
+	if err := root.QueryRow(ctx, `SELECT count(*) FROM exec.session WHERE id = $1`, sid).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("Phase 4 session rows = %d, err %v", n, err)
+	}
+	for _, sql := range []string{
+		`INSERT INTO exec.changeset (id, author, author_username, kind, created_at, mac) VALUES ('` + sid + `', 1, 'alice', 'lines', now(), ` + mac32 + `)`,
+		`INSERT INTO exec.changeset_revision (changeset_id, rev, created_at, content, content_sha256, mac) VALUES ('` + sid + `', 1, now(), '\x01', ` + mac32 + `, ` + mac32 + `)`,
+		`INSERT INTO exec.changeset_event (id, changeset_id, rev, at, kind, payload, mac) VALUES (nextval('exec.changeset_event_id_seq'), '` + sid + `', 1, now(), 'dry_run', '{}', ` + mac32 + `)`,
+		`INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids, created_at, updated_at)
+			VALUES ('` + sid + `', 1, 'lines', 't', 'draft', 1, '{7}', now(), now())`,
+	} {
+		if _, err := exe.Exec(ctx, sql); err != nil {
+			t.Fatalf("executor %s: %v", sql, err)
+		}
+	}
+	for _, role := range []string{"postgres", "nms_migrator", "nms_executor"} {
+		c, pw := env.Config(role)
+		c.Name = db
+		p, err := store.Open(ctx, c, pw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sql := range []string{`UPDATE exec.changeset_revision SET mac = mac`, `DELETE FROM exec.changeset_event`, `TRUNCATE exec.changeset CASCADE`} {
+			_, err := p.Exec(ctx, sql)
+			requireCode(t, err, "42501", role+": "+sql)
+		}
+		p.Close()
+	}
+	var rows int
+	if err := open("nms_api").QueryRow(ctx, `SELECT count(*) FROM execpub.changeset_summary`).Scan(&rows); err != nil || rows != 1 {
+		t.Errorf("api reads changeset_summary: %d rows, err %v", rows, err)
 	}
 }
 
