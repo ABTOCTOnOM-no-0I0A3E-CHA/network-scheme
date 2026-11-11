@@ -26,10 +26,11 @@ close takes only the bearer token (no token: 401); any other path under
 func TestSessionRoutes(t *testing.T) {
 	var gotID, gotToken, gotOp, gotParams string
 	var gotIDs []int64
+	var gotApproval string
 	h := start(t, func(c *Config) {
 		c.Sessions = &Sessions{
-			Open: func(_ context.Context, req authz.Request, ids []int64) (any, error) {
-				gotIDs = ids
+			Open: func(_ context.Context, req authz.Request, ids []int64, approval string) (any, error) {
+				gotIDs, gotApproval = ids, approval
 				switch req.Code {
 				case "422":
 					return nil, refusalCode("outside_window")
@@ -37,6 +38,10 @@ func TestSessionRoutes(t *testing.T) {
 					return nil, authz.ErrDenied
 				}
 				return map[string]string{"session_id": "s"}, nil
+			},
+			Request: func(_ context.Context, _ authz.Request, ids []int64) (any, error) {
+				gotIDs = ids
+				return map[string]string{"request_id": "r"}, nil
 			},
 			Attach: func(_ context.Context, id string, _ authz.Request) (any, error) { gotID = id; return "a", nil },
 			Extend: func(_ context.Context, id string, _ authz.Request) (any, error) { gotID = id; return "e", nil },
@@ -57,7 +62,7 @@ func TestSessionRoutes(t *testing.T) {
 		}
 	})
 	h.setEnabled(true)
-	want := []string{"POST /x/sessions", "POST /x/sessions/{id}/attach", "POST /x/sessions/{id}/extend", "POST /x/sessions/{id}/close",
+	want := []string{"POST /x/sessions", "POST /x/sessions/request", "POST /x/sessions/{id}/attach", "POST /x/sessions/{id}/extend", "POST /x/sessions/{id}/close",
 		"POST /x/sessions/{id}/diff", "POST /x/sessions/{id}/save", "POST /x/sessions/{id}/commit", "POST /x/sessions/{id}/form",
 		"POST /x/sessions/{id}/form-apply"}
 	for _, r := range want {
@@ -73,6 +78,15 @@ func TestSessionRoutes(t *testing.T) {
 	}
 	if a := do("/x/sessions", `{"ticket":"t","totp":"1","device_ids":[3,4]}`); a.status != 200 || !slices.Equal(gotIDs, []int64{3, 4}) {
 		t.Errorf("open: %d %v", a.status, gotIDs)
+	}
+	if a := do("/x/sessions", `{"ticket":"t","totp":"1","device_ids":[3],"approval":"ap1"}`); a.status != 200 || gotApproval != "ap1" {
+		t.Errorf("open with an approval: %d %q", a.status, gotApproval)
+	}
+	if a := do("/x/sessions/request", `{"ticket":"t","totp":"1","device_ids":[5,6]}`); a.status != 200 || !slices.Equal(gotIDs, []int64{5, 6}) {
+		t.Errorf("request: %d %v", a.status, gotIDs)
+	}
+	if a := do("/x/sessions/request", `{"ticket":"t","totp":"1","device_ids":[5],"approval":"x"}`); a.status != 400 {
+		t.Errorf("request with an approval: %d", a.status)
 	}
 	if a := do("/x/sessions", `{"ticket":"t","totp":"422","device_ids":[3]}`); a.status != 422 || a.code != "outside_window" {
 		t.Errorf("refusal: %d %s", a.status, a.code)

@@ -25,6 +25,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/approval"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/attacktest"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
@@ -85,21 +86,23 @@ type dev struct {
 
 /* fx is one executor (registry, guard, policy, authz, publisher, changesets) and its emulated devices. */
 type fx struct {
-	env    *testdb.Env
-	guard  *freeze.Guard
-	pol    *policy.Holder
-	polF   string
-	az     *authz.Authorizer
-	adm    *admin.Admin
-	pub    *pub.Publisher
-	store  *changeset.Store
-	locks  *backups.Locks
-	m      *changeset.Manager
-	cfg    changeset.Config
-	devs   []*dev
-	byPort sync.Map /* registry port -> emulator address */
-	offset atomic.Int64
-	start  time.Time
+	env     *testdb.Env
+	guard   *freeze.Guard
+	pol     *policy.Holder
+	polF    string
+	az      *authz.Authorizer
+	adm     *admin.Admin
+	pub     *pub.Publisher
+	store   *changeset.Store
+	locks   *backups.Locks
+	m       *changeset.Manager
+	cfg     changeset.Config
+	devs    []*dev
+	byPort  sync.Map /* registry port -> emulator address */
+	mu      sync.Mutex
+	started []changeset.Started /* the runs Config.Start was given */
+	offset  atomic.Int64
+	start   time.Time
 }
 
 func (f *fx) now() time.Time { return f.start.Add(time.Duration(f.offset.Load())) }
@@ -156,7 +159,12 @@ func newFx(t *testing.T, lines ...string) *fx {
 			return creds.Credential{Username: "admin", Password: secret.New(pw)}, nil
 		}})
 	f.cfg = changeset.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Store: f.store, Pub: f.pub, Log: log, Now: f.now,
-		Locks: f.locks, Reader: sched}
+		Locks: f.locks, Reader: sched, Approvals: approval.New(f.now), Start: func(_ context.Context, s changeset.Started) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.started = append(f.started, s)
+			return nil
+		}}
 	f.m = changeset.New(f.cfg)
 	return f
 }

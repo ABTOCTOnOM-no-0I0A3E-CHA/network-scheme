@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/admin"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/approval"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/auditview"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
@@ -182,14 +183,18 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	/* Second persons' approvals of sessions and changesets: in memory only (a restart forgets them). */
+	approvals := approval.New(nil)
 	sessions = session.New(session.Config{Gate: guard, Auth: az, Policy: pol.Current, Pool: pool, MAC: keys.MAC(), Net: ng,
-		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, BackupPriv: bpriv, BackupPub: bpub, Recordings: recs, Log: log})
+		Open: wc.Open, Backups: sched, Locks: locks, Pub: publisher, BackupPriv: bpriv, BackupPub: bpub, Recordings: recs,
+		Approvals: approvals, Log: log})
 	actions := map[string]web.Action{}
 	for name, a := range devs.Actions() {
 		actions[name] = web.Action(a)
 	}
 	actions[wcreds.Action] = web.Action{Describe: wc.Describe, Run: wc.Run}
 	actions[session.RollbackAction] = web.Action{Describe: sessions.DescribeRollback, Run: sessions.RunRollback}
+	actions[session.ApproveAction] = web.Action{Describe: sessions.DescribeApprove, Run: sessions.RunApprove}
 	confirms := confirm.New(az, nil)
 	term, err := terminal.New(terminal.Config{Sessions: sessions, Gate: guard, Auth: az, Confirm: confirms, Policy: pol.Current,
 		Origin: cfg.ExecutorOrigin, Log: log, Typed: sessions.Typed, Record: sessions, Name: func(ctx context.Context, id int64) (string, error) {
@@ -227,9 +232,17 @@ func serve(ctx context.Context, cfg config.Config) error {
 		{Path: "/x/download/configs/{device}/{version}", Re: regexp.MustCompile(`^/x/download/configs/([1-9][0-9]{0,17})/([1-9][0-9]{0,17})$`),
 			Action: unmask.ActionExport, File: unm.Export},
 	}
-	/* Changesets: authored, stored, dry-run and approved only here, under the executor's row MACs (Phase 5). */
+	/*
+		Changesets: authored, stored, dry-run and approved only here, under the
+		executor's row MACs (Phase 5). The run comes with task 5.5: until then
+		Start is nil and no approval starts anything.
+	*/
 	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log, Locks: locks, Reader: sched,
-		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}})
+		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}, Approvals: approvals})
+	actions[changeset.ApproveAction] = web.Action{Describe: changes.Describe}
+	confirmed = append(confirmed, web.Confirmed{Path: "/x/changesets/{id}/approve/{count}",
+		Re:     regexp.MustCompile(`^/x/changesets/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/approve/([0-9]{1,3})$`),
+		Action: changeset.ApproveAction, Run: changes.RunApprove})
 	pin, _ := hex.DecodeString(cfg.GatewaySPKI) /* validated by config: 64 hex digits or empty */
 	if len(pin) == 0 {
 		pin = nil
@@ -238,8 +251,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		ExecutorOrigin: cfg.ExecutorOrigin, PanelOrigin: cfg.PanelOrigin, Auth: az, Confirm: confirms, Log: log, Terminal: term.Serve,
 		Actions: actions, Reads: reads, Confirmed: confirmed,
 		Sessions: &web.Sessions{
-			Open: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {
-				return sessions.Open(ctx, req, ids)
+			Open: func(ctx context.Context, req authz.Request, ids []int64, approval string) (any, error) {
+				return sessions.OpenApproved(ctx, req, ids, approval)
+			},
+			Request: func(ctx context.Context, req authz.Request, ids []int64) (any, error) {
+				return sessions.Request(ctx, req, ids)
 			},
 			Attach: func(ctx context.Context, id string, req authz.Request) (any, error) {
 				return sessions.Attach(ctx, id, req)

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/approval"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
@@ -71,8 +72,12 @@ type Config struct {
 	/* Locks and Reader read the devices for a dry-run (the backup scheduler's: one connection per device). */
 	Locks  *backups.Locks
 	Reader Reader
-	Log    *slog.Logger
-	Now    func() time.Time
+	/* Approvals holds the authors' approvals waiting for a second person (shared with the sessions), in memory only. */
+	Approvals *approval.Store
+	/* Start runs an approved changeset (task 5.5); nil: no changeset is approved (fail closed). */
+	Start func(ctx context.Context, s Started) error
+	Log   *slog.Logger
+	Now   func() time.Time
 }
 
 /* Bounds of the workspaces (variables for the tests). */

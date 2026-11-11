@@ -212,8 +212,12 @@ func (m *Manager) save(ctx context.Context, ws workspace, params json.RawMessage
 	return Saved{ID: p.ID, Rev: rev}, nil
 }
 
-/* dropApprovals forgets the approvals of a changeset's earlier revisions (5.4). */
-func (m *Manager) dropApprovals([16]byte) {}
+/* dropApprovals forgets the approvals of a changeset's earlier revisions (their H named another revision anyway). */
+func (m *Manager) dropApprovals(id [16]byte) {
+	if m.cfg.Approvals != nil {
+		m.cfg.Approvals.Drop(approvalKind, "changeset:"+IDString(id))
+	}
+}
 
 /*
 checkDevices refuses a content whose device is not writable now (the
