@@ -8,14 +8,16 @@
 #   --listen A:P     where the panel is published on this server (default 0.0.0.0:443); use 127.0.0.1:9443 when a
 #                    reverse proxy with a real certificate of your own terminates TLS in front (see SERVER.md)
 #   --memory M       memory limit of the whole stand (default 4g; also its swap); --cpus N (default 2)
-#   --min-free-gb G  refuse to start with less free space on Docker's disk (default 30): images, the stand's own
-#                    Docker and its database together take about 25 GB and a full disk stops every other service too
+#   --min-free-gb G  refuse to start with less free space on Docker's disk (default 18): the build needs room for
+#                    the images and the build cache before they are removed again; the running stand keeps about
+#                    10–13 GB (its own Docker with the loaded images, and its database). A full disk stops every other
+#                    service of the server too
 #   --down           remove the stand (the image cache volumes stay); --down --purge removes them too
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 DEMO=test/demo RUN=test/demo/.run HOST=nms-demo TAG=demo
-DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up PURGE="" MEMORY=4g CPUS=2 MIN_FREE_GB=30
+DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up PURGE="" MEMORY=4g CPUS=2 MIN_FREE_GB=18
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
@@ -68,7 +70,7 @@ case "$(docker info -f '{{.Architecture}}')" in aarch64 | arm64) ARCH=arm64 ;; *
 ROOT="$(docker info -f '{{.DockerRootDir}}')"
 free_gb="$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9)"
 if [ "${free_gb:-0}" -lt "$MIN_FREE_GB" ]; then
-  echo "only ${free_gb} GB free on $ROOT, the stand needs about 25 GB (--min-free-gb $MIN_FREE_GB): a full disk stops every service of this server"
+  echo "only ${free_gb} GB free on $ROOT, the build needs about 18 GB (--min-free-gb $MIN_FREE_GB): a full disk stops every service of this server"
   exit 1
 fi
 GO_IMAGE="$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' deploy/docker/api.Dockerfile | head -1)"
@@ -149,6 +151,15 @@ BASE="https://$DOMAIN"; [ "$PORT" = 443 ] || BASE="$BASE:$PORT"
 # the seed talks to the published port from this server; the name resolves to the loopback so no DNS or firewall is involved
 docker run --rm --network host --add-host "$DOMAIN:127.0.0.1" -e "DEMO_BASE=$BASE" -v "$PWD/$DEMO:/app" -w /app "$BUN_IMAGE" \
   sh -c 'bun install --frozen-lockfile --silent && bun seed.ts'
+
+step "Freeing the disk: outside copies of the images and the build cache (the stand keeps its own copies)"
+# the stand's Docker holds the loaded images; the copies here, the base images and the build cache only made them
+for img in "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" "$DB_IMAGE" "${DB_IMAGE%@*}"   "$GO_IMAGE" "$BUN_IMAGE" ubuntu:24.04; do
+  docker image rm "$img" > /dev/null 2>&1 || true
+done
+docker volume rm nms-demo-gocache nms-demo-gobuild > /dev/null 2>&1 || true
+docker builder prune -af > /dev/null 2>&1 || true
+df -h "$ROOT" | tail -1
 
 SECRET="$(cat "$RUN/creds/totp-secret")"
 cat <<EOF
