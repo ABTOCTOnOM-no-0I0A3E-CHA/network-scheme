@@ -31,4 +31,5 @@ web/executor/dist/
 
 # demo stand (test/demo): generated credentials and binaries
 test/demo/.run/
+test/demo/.bundle/
 test/demo/node_modules/

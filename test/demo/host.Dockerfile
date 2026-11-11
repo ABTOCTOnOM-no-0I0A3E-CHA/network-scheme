@@ -3,7 +3,7 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus docker.io docker-compose-v2 \
-      iproute2 ca-certificates curl sudo && apt-get clean && rm -rf /var/lib/apt/lists/*
+      iproute2 ca-certificates curl sudo e2fsprogs && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN systemctl enable docker && systemctl mask systemd-resolved systemd-networkd getty@tty1 console-getty
 # the install preflight requires published ports to keep the source address (as the CI job sets it)
 RUN mkdir -p /etc/docker && echo '{"userland-proxy": false}' > /etc/docker/daemon.json

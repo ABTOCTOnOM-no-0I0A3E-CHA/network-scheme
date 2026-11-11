@@ -1,32 +1,29 @@
 #!/usr/bin/env bash
-# Demo only: the same stand as up.sh, for a Linux server with a domain. The server needs only Docker (24+) and access
-# to Docker Hub: nmsctl and the simulator tools are built and seeded in throwaway containers, so Go and Bun are not
-# needed. Run it from the root of the source tree: test/demo/server.sh --domain demo.example.com
-#
-#   --domain D       DNS name of the panel (required); it must resolve to this server and is checked by the panel
-#                    as the exact Origin, so open the demo by this name only
-#   --listen A:P     where the panel is published on this server (default 0.0.0.0:443); use 127.0.0.1:9443 when a
-#                    reverse proxy with a real certificate of your own terminates TLS in front (see SERVER.md)
-#   --memory M       memory limit of the whole stand (default 4g; also its swap); --cpus N (default 2)
-#   --min-free-gb G  refuse to start with less free space on Docker's disk (default 18): the build needs room for
-#                    the images and the build cache before they are removed again; the running stand keeps about
-#                    10–13 GB (its own Docker with the loaded images, and its database). A full disk stops every other
-#                    service of the server too
-#   --down           remove the stand (the image cache volumes stay); --down --purge removes them too
+# Demo only: starts the demo stand on a Linux server from the archive test/demo/bundle.sh built elsewhere. The server
+# needs only Docker (24+, cgroup v2); it compiles nothing and keeps no images or build cache besides the stand's host
+# image. Hard limits keep the stand away from the server's other services:
+#   - disk: the stand's own Docker and database live in ONE preallocated file of --disk-gb (default 10) mounted inside
+#     the stand; when it is full the stand fails, the server's disk does not fill up;
+#   - memory and CPU: --memory (default 2560m, also the swap) and --cpus (default 2) on the stand's container;
+#   - its own cgroup namespace (not the host's tree), and no restart on its own after a reboot of the server.
+# Run it in the unpacked bundle:  bash server.sh --domain demo.example.com [--listen 0.0.0.0:443]
+#   --domain D        DNS name of the panel (required), the exact Origin the panel accepts: open the demo by this name
+#   --listen A:P      where the panel is published here (default 0.0.0.0:443; 127.0.0.1:9443 behind a reverse proxy)
+#   --disk-gb G       size of the stand's disk file (default 10); --memory M; --cpus N
+#   --keep-free-gb G  refuse to start if less than G GB would stay free on Docker's disk (default 5)
+#   --down            remove the stand, its disk file and its host image
 set -euo pipefail
-cd "$(dirname "$0")/../.."
-export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-DEMO=test/demo RUN=test/demo/.run HOST=nms-demo TAG=demo
-DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up PURGE="" MEMORY=4g CPUS=2 MIN_FREE_GB=18
+cd "$(dirname "$0")"
+HOST=nms-demo RUN=.run DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up DISK_GB=10 MEMORY=2560m CPUS=2 KEEP_FREE_GB=5
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --listen) LISTEN="${2:-}"; shift 2 ;;
-    --down) ACTION=down; shift ;;
-    --purge) PURGE=1; shift ;;
+    --disk-gb) DISK_GB="${2:-}"; shift 2 ;;
     --memory) MEMORY="${2:-}"; shift 2 ;;
     --cpus) CPUS="${2:-}"; shift 2 ;;
-    --min-free-gb) MIN_FREE_GB="${2:-}"; shift 2 ;;
+    --keep-free-gb) KEEP_FREE_GB="${2:-}"; shift 2 ;;
+    --down) ACTION=down; shift ;;
     *) echo "unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -36,130 +33,94 @@ command -v docker > /dev/null || { echo "docker is required"; exit 1; }
 
 if [ "$ACTION" = down ]; then
   if docker container inspect "$HOST" > /dev/null 2>&1; then
-    docker exec "$HOST" sh -c 'docker rm -f $(docker ps -aq) > /dev/null 2>&1; docker volume prune -af > /dev/null; docker network prune -f > /dev/null' || true
+    docker exec "$HOST" sh -c 'systemctl stop docker docker.socket containerd; umount /var/lib/docker /var/lib/containerd /mnt/disk' > /dev/null 2>&1 || true
     docker rm -f "$HOST" > /dev/null
     echo "removed container $HOST"
   fi
+  docker volume rm -f nms-demo-disk > /dev/null 2>&1 && echo "removed the stand's disk file" || true
+  docker image rm nms-demo-host > /dev/null 2>&1 && echo "removed the host image" || true
   rm -rf "$RUN"
-  if [ -n "$PURGE" ]; then
-    docker volume rm -f nms-demo-docker nms-demo-containerd nms-demo-gocache nms-demo-gobuild > /dev/null
-    docker image rm -f nms-demo-host "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" > /dev/null 2>&1 || true
-    # the base images this script pulled, when nothing else uses them (docker refuses to remove an image in use)
-    for img in ubuntu:24.04 \
-      "$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' deploy/docker/api.Dockerfile | head -1)" \
-      "$(sed -n 's/^FROM \(oven\/bun:[^ ]*\) AS web$/\1/p' deploy/docker/gateway.Dockerfile | head -1)" \
-      "$(sed -n 's/^const DefaultDBImage = "\(.*\)"/\1/p' internal/install/render.go)"; do
-      [ -n "$img" ] && docker image rm "$img" "${img%@*}" > /dev/null 2>&1 || true
-    done
-    echo "removed the cache volumes and the demo images; the build cache stays (docker builder prune removes it)"
-  fi
   exit 0
 fi
 
-[ -n "$DOMAIN" ] || { echo "--domain is required, for example: $0 --domain demo.example.com"; exit 2; }
+[ -n "$DOMAIN" ] || { echo "--domain is required, for example: bash server.sh --domain demo.example.com"; exit 2; }
 [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "--domain must be a DNS name"; exit 2; }
 [[ "$LISTEN" =~ ^[0-9.]+:[0-9]+$ ]] || { echo "--listen must look like ADDRESS:PORT"; exit 2; }
-PORT="${LISTEN##*:}"
-if docker container inspect "$HOST" > /dev/null 2>&1; then
-  echo "The stand is already there (container $HOST). Run: $0 --down"; exit 1
-fi
-case "$(docker info -f '{{.Architecture}}')" in aarch64 | arm64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
-# the stand's systemd gets a cgroup namespace of its own: on cgroup v1 that is impossible, and sharing the host's
-# tree would let it touch the host's services, so refuse
-[ "$(docker info -f '{{.CgroupVersion}}')" = 2 ] || { echo "cgroup v2 is required (the stand's systemd must not share the host's cgroup tree)"; exit 1; }
+[[ "$DISK_GB" =~ ^[0-9]+$ && "$KEEP_FREE_GB" =~ ^[0-9]+$ ]] || { echo "--disk-gb and --keep-free-gb are whole GB"; exit 2; }
+for f in host.tar.gz stack.tar.gz bin/nmsctl bin/sshemud files/devices.sh seed/seed.ts; do
+  [ -e "$f" ] || { echo "$f is missing: run server.sh inside the unpacked bundle of test/demo/bundle.sh"; exit 1; }
+done
+if docker container inspect "$HOST" > /dev/null 2>&1; then echo "The stand is already there. Run: bash server.sh --down"; exit 1; fi
+# the stand's systemd gets a cgroup namespace of its own; on cgroup v1 that is impossible: refuse rather than share the host's
+[ "$(docker info -f '{{.CgroupVersion}}')" = 2 ] || { echo "cgroup v2 is required"; exit 1; }
 ROOT="$(docker info -f '{{.DockerRootDir}}')"
 free_gb="$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9)"
-if [ "${free_gb:-0}" -lt "$MIN_FREE_GB" ]; then
-  echo "only ${free_gb} GB free on $ROOT, the build needs about 18 GB (--min-free-gb $MIN_FREE_GB): a full disk stops every service of this server"
+need=$((DISK_GB + 2 + KEEP_FREE_GB)) # the disk file, the host image (~1 GB) with room, and what must stay free
+if [ "${free_gb:-0}" -lt "$need" ]; then
+  echo "$free_gb GB free on $ROOT; the stand needs $((DISK_GB + 2)) GB and $KEEP_FREE_GB GB must stay free for the other services"
+  echo "(use a smaller --disk-gb, at least 6, or free some space)"
   exit 1
 fi
-GO_IMAGE="$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' deploy/docker/api.Dockerfile | head -1)"
-BUN_IMAGE="$(sed -n 's/^FROM \(oven\/bun:[^ ]*\) AS web$/\1/p' deploy/docker/gateway.Dockerfile | head -1)"
-DB_IMAGE="$(sed -n 's/^const DefaultDBImage = "\(.*\)"/\1/p' internal/install/render.go)"
-[ -n "$GO_IMAGE" ] && [ -n "$BUN_IMAGE" ] && [ -n "$DB_IMAGE" ] || { echo "cannot read the pinned base images from the Dockerfiles"; exit 1; }
 
-step "Building images (product images with tag $TAG, the host, the simulator); a few minutes the first time"
-docker build -q -t nms-demo-host -f "$DEMO/host.Dockerfile" "$DEMO" > /dev/null
-docker build -q -t "nms/api:$TAG" -f deploy/docker/api.Dockerfile . > /dev/null
-docker build -q -t "nms/gateway:$TAG" -f deploy/docker/gateway.Dockerfile . > /dev/null
-docker build -q -t "nms/executor:$TAG" -f deploy/docker/executor.Dockerfile . > /dev/null
-docker build -q -t "nms-snmpsim:$TAG" test/sim/snmpsim > /dev/null
-docker image inspect "$DB_IMAGE" > /dev/null 2>&1 || docker pull "$DB_IMAGE"
-# an image pulled by digest has no tag, and docker save below goes by the tag: give it one (harmless if it exists)
-docker tag "$DB_IMAGE" "${DB_IMAGE%@*}"
+step "Loading the host image"
+gunzip -c host.tar.gz | docker load -q
 
-step "Building nmsctl and sshemud (in a Go container)"
-mkdir -p "$RUN/bin" "$RUN/creds"
-for target in ./cmd/nmsctl:nmsctl ./test/sim/sshemu/sshemud:sshemud; do
-  docker run --rm -v "$PWD:/src" -v nms-demo-gocache:/go/pkg/mod -v nms-demo-gobuild:/root/.cache/go-build -w /src \
-    -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=$ARCH -e GOFLAGS=-buildvcs=false "$GO_IMAGE" \
-    go build -trimpath -o "/src/$RUN/bin/${target##*:}" "${target%%:*}"
-done
-
-step "Starting the host container $HOST (systemd + Docker), panel published on $LISTEN"
-# /var/lib/docker and /var/lib/containerd are volumes: overlayfs cannot nest, and they keep the loaded images between runs
-# privileged for its own Docker, but in its own cgroup namespace and with hard memory/CPU limits, so the stand cannot
-# reach or starve the other services of this server
-docker run -d --name "$HOST" --hostname "$HOST" --restart unless-stopped --privileged --cgroupns=private \
+step "Starting the stand ($MEMORY memory, $CPUS CPUs, a $DISK_GB GB disk file), panel on $LISTEN"
+docker volume create nms-demo-disk > /dev/null
+docker run -d --name "$HOST" --hostname "$HOST" --restart no --privileged --cgroupns=private \
   --memory "$MEMORY" --memory-swap "$MEMORY" --cpus "$CPUS" --tmpfs /run --tmpfs /run/lock \
-  -v nms-demo-docker:/var/lib/docker -v nms-demo-containerd:/var/lib/containerd \
-  -p "$LISTEN:443" nms-demo-host > /dev/null
+  -v nms-demo-disk:/data -p "$LISTEN:443" nms-demo-host > /dev/null
+for _ in $(seq 1 60); do in_host docker info > /dev/null 2>&1 && break; sleep 2; done
+# the stand's Docker and containerd move onto the fixed-size file before anything is loaded: they can never grow past it
+in_host sh -euc "
+  systemctl stop docker docker.socket containerd
+  if [ ! -f /data/disk.img ]; then fallocate -l ${DISK_GB}G /data/disk.img; mkfs.ext4 -q -F /data/disk.img; fi
+  mkdir -p /mnt/disk && mount -o loop /data/disk.img /mnt/disk
+  mkdir -p /mnt/disk/docker /mnt/disk/containerd
+  rm -rf /var/lib/docker/* /var/lib/containerd/*
+  mount --bind /mnt/disk/docker /var/lib/docker && mount --bind /mnt/disk/containerd /var/lib/containerd
+  systemctl start containerd docker
+"
 for _ in $(seq 1 60); do in_host docker info > /dev/null 2>&1 && break; sleep 2; done
 in_host docker info > /dev/null
-# leftovers of an earlier stand in the cached volume: its containers restart by themselves when the daemon starts and a
-# bind mount of a missing file makes Docker create a directory (e.g. /var/lib/nms/gateway/keys.json), which fails the
-# install; so remove the containers first, then the directories, then the unused volumes and networks (the images stay)
-in_host sh -c 'docker rm -f $(docker ps -aq) > /dev/null 2>&1; rm -rf /var/lib/nms /etc/nms; docker volume prune -af > /dev/null; docker network prune -f > /dev/null'
+in_host df -h /var/lib/docker | tail -1
 
-step "Loading images into the host (only the changed ones)"
-for img in "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" "$DB_IMAGE"; do
-  want="$(docker image inspect -f '{{.Id}}' "$img")"
-  if [ "$(in_host docker image inspect -f '{{.Id}}' "$img" 2>/dev/null)" != "$want" ]; then
-    echo "  $img"
-    docker save "${img%@*}" | docker exec -i "$HOST" docker load > /dev/null
-  fi
-done
+step "Loading the stack images into the stand (straight onto its disk file)"
+gunzip -c stack.tar.gz | docker exec -i "$HOST" docker load -q
 
 step "Copying the simulator files"
-in_host mkdir -p /opt/demo
-docker cp "$RUN/bin/." "$HOST:/opt/demo/bin/"
-docker cp test/fixtures/snmp "$HOST:/opt/demo/snmp"
-docker cp test/fixtures/configs "$HOST:/opt/demo/configs"
-docker cp test/e2e/send_events.py "$HOST:/opt/demo/send_events.py"
-for f in devices.sh devices.txt enrich.py; do sed 's/\r$//' "$DEMO/$f" | docker exec -i "$HOST" sh -c "cat > /opt/demo/$f"; done
+in_host mkdir -p /opt/demo/seed/.run/creds
+docker cp bin/. "$HOST:/opt/demo/bin/"
+docker cp files/. "$HOST:/opt/demo/"
+docker cp seed/. "$HOST:/opt/demo/seed/"
 in_host install -m 0755 /opt/demo/bin/nmsctl /usr/local/bin/nmsctl
-# nmsctl install refuses to run in a container (it looks for /.dockerenv); this container plays the server, so drop the marker
+# nmsctl install refuses to run in a container (it looks for /.dockerenv); this container plays the server
 in_host rm -f /.dockerenv
 
 step "nmsctl install for $DOMAIN (a few minutes)"
+mkdir -p "$RUN/creds"
 head -c 24 /dev/urandom | base64 | tr -d '/+=\n' > "$RUN/creds/admin-password"
 docker cp "$RUN/creds/admin-password" "$HOST:/root/admin-password"
 if ! in_host nmsctl install --non-interactive --public-host "$DOMAIN" --admin-user admin \
-  --admin-password-file /root/admin-password --totp-secret-out /root/totp-secret --image-tag "$TAG" \
+  --admin-password-file /root/admin-password --totp-secret-out /root/totp-secret --image-tag demo \
   --mgmt-subnet 172.30.1.0/24 > "$RUN/creds/install.log" 2>&1; then
   grep -vE 'TOTP secret|[█▀▄]|^  [A-Z2-7]{16}$' "$RUN/creds/install.log"; exit 1
 fi
 docker cp "$HOST:/root/totp-secret" "$RUN/creds/totp-secret"
-docker cp "$HOST:/etc/nms/secrets/ca.crt" "$RUN/ca.crt"
-in_host rm -f /root/admin-password
+in_host sh -c 'cp /root/totp-secret /root/admin-password /opt/demo/seed/.run/creds/ && cp /etc/nms/secrets/ca.crt /opt/demo/seed/.run/ && rm -f /root/admin-password'
 
 step "Starting the simulated devices and event senders"
 in_host bash /opt/demo/devices.sh
 
-step "Seeding the demo data through the API (in a Bun container)"
-BASE="https://$DOMAIN"; [ "$PORT" = 443 ] || BASE="$BASE:$PORT"
-# the seed talks to the published port from this server; the name resolves to the loopback so no DNS or firewall is involved
-docker run --rm --network host --add-host "$DOMAIN:127.0.0.1" -e "DEMO_BASE=$BASE" -v "$PWD/$DEMO:/app" -w /app "$BUN_IMAGE" \
-  sh -c 'bun install --frozen-lockfile --silent && bun seed.ts'
+step "Seeding the demo data through the API (inside the stand)"
+# the stand's own port 443, reached inside it under the panel's name (the Origin the panel accepts)
+in_host docker run --rm --network host --add-host "$DOMAIN:127.0.0.1" -e "DEMO_BASE=https://$DOMAIN" \
+  -v /opt/demo/seed:/app -w /app nms-demo-bun:1 bun seed.ts
+in_host rm -rf /opt/demo/seed/.run
 
-step "Freeing the disk: outside copies of the images and the build cache (the stand keeps its own copies)"
-# the stand's Docker holds the loaded images; the copies here, the base images and the build cache only made them
-for img in "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" "$DB_IMAGE" "${DB_IMAGE%@*}"   "$GO_IMAGE" "$BUN_IMAGE" ubuntu:24.04; do
-  docker image rm "$img" > /dev/null 2>&1 || true
-done
-docker volume rm nms-demo-gocache nms-demo-gobuild > /dev/null 2>&1 || true
-docker builder prune -af > /dev/null 2>&1 || true
-df -h "$ROOT" | tail -1
+step "Disk use"
+echo "stand's disk file: $(in_host df -h /var/lib/docker | tail -1)"
+echo "server:            $(df -h "$ROOT" | tail -1)"
 
 SECRET="$(cat "$RUN/creds/totp-secret")"
 cat <<EOF
@@ -169,6 +130,5 @@ The demo is up.
   Login:     admin
   Password:  $PWD/$RUN/creds/admin-password
   TOTP:      key $SECRET (time-based, 6 digits, 30 s, account "admin"); the QR code is in $PWD/$RUN/creds/install.log
-  CA:        $PWD/$RUN/ca.crt  (the panel's certificate is signed by it; see SERVER.md for a trusted certificate)
-  Stop:      $0 --down
+  Stop:      bash server.sh --down
 EOF
