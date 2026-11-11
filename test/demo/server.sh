@@ -51,23 +51,36 @@ for f in host.tar.gz stack.tar.gz bin/nmsctl bin/sshemud files/devices.sh seed/s
   [ -e "$f" ] || { echo "$f is missing: run server.sh inside the unpacked bundle of test/demo/bundle.sh"; exit 1; }
 done
 if docker container inspect "$HOST" > /dev/null 2>&1; then echo "The stand is already there. Run: bash server.sh --down"; exit 1; fi
-# the stand's systemd gets a cgroup namespace of its own; on cgroup v1 that is impossible: refuse rather than share the host's
-[ "$(docker info -f '{{.CgroupVersion}}')" = 2 ] || { echo "cgroup v2 is required"; exit 1; }
-ROOT="$(docker info -f '{{.DockerRootDir}}')"
-free_gb="$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9)"
-need=$((DISK_GB + 2 + KEEP_FREE_GB)) # the disk file, the host image (~1 GB) with room, and what must stay free
-if [ "${free_gb:-0}" -lt "$need" ]; then
-  echo "$free_gb GB free on $ROOT; the stand needs $((DISK_GB + 2)) GB and $KEEP_FREE_GB GB must stay free for the other services"
-  echo "(use a smaller --disk-gb, at least 6, or free some space)"
-  exit 1
+# the stand's systemd gets a cgroup namespace of its own; on cgroup v1 that is impossible: refuse rather than share the
+# host's tree. NMS_DEMO_TEST_CGROUP_V1=1 is for a throwaway test VM only (Docker Desktop), never for a real server.
+CGROUP=(--cgroupns=private)
+if [ "$(docker info -f '{{.CgroupVersion}}')" != 2 ]; then
+  [ "${NMS_DEMO_TEST_CGROUP_V1:-}" = 1 ] || { echo "cgroup v2 is required"; exit 1; }
+  echo "TEST ONLY: cgroup v1, the stand shares the host's cgroup tree"
+  CGROUP=(--cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw)
 fi
+ROOT="$(docker info -f '{{.DockerRootDir}}')"
+# free GB on Docker's disk: on the server itself; in a VM (Docker Desktop) through a container of the host image
+free_on_root() {
+  if [ -d "$ROOT" ]; then df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9
+  else docker run --rm --entrypoint df -v "$ROOT:/r:ro" nms-demo-host -BG --output=avail /r | tail -1 | tr -dc 0-9; fi
+}
 
 step "Loading the host image"
 gunzip -c host.tar.gz | docker load -q
 
+free_gb="$(free_on_root)"
+need=$((DISK_GB + 1 + KEEP_FREE_GB)) # the disk file, room for the stand's container, and what must stay free
+if [ "${free_gb:-0}" -lt "$need" ]; then
+  echo "$free_gb GB free on Docker's disk; the stand needs about $((DISK_GB + 1)) GB more and $KEEP_FREE_GB GB must stay free"
+  echo "for the other services (use a smaller --disk-gb, at least 6, or free some space; bash server.sh --down removes the host image)"
+  exit 1
+fi
+echo "$free_gb GB free on Docker's disk, $((free_gb - DISK_GB - 1)) GB will stay free"
+
 step "Starting the stand ($MEMORY memory, $CPUS CPUs, a $DISK_GB GB disk file), panel on $LISTEN"
 docker volume create nms-demo-disk > /dev/null
-docker run -d --name "$HOST" --hostname "$HOST" --restart no --privileged --cgroupns=private \
+docker run -d --name "$HOST" --hostname "$HOST" --restart no --privileged "${CGROUP[@]}" \
   --memory "$MEMORY" --memory-swap "$MEMORY" --cpus "$CPUS" --tmpfs /run --tmpfs /run/lock \
   -v nms-demo-disk:/data -p "$LISTEN:443" nms-demo-host > /dev/null
 for _ in $(seq 1 60); do in_host docker info > /dev/null 2>&1 && break; sleep 2; done

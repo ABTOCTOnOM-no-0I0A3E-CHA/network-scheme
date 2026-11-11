@@ -46,7 +46,7 @@ cp -r test/fixtures/configs "$STAGE/files/configs"
 cp test/e2e/send_events.py "$STAGE/files/"
 for f in devices.sh devices.txt enrich.py; do sed 's/\r$//' "$DEMO/$f" > "$STAGE/files/$f"; done
 mkdir -p "$STAGE/seed"
-cp "$DEMO/seed.ts" "$DEMO/package.json" "$DEMO/bun.lock" "$STAGE/seed/"
+cp "$DEMO/seed.ts" "$DEMO/package.json" "$DEMO/bun.lock" "$DEMO/devices.txt" "$STAGE/seed/"
 (cd "$STAGE/seed" && bun install --frozen-lockfile --silent)
 sed 's/\r$//' "$DEMO/server.sh" > "$STAGE/server.sh"
 cp "$DEMO/SERVER.md" "$STAGE/"
