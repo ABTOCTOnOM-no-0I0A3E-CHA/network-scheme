@@ -32,6 +32,7 @@ type RunDevice struct {
 	ID                   int64
 	Address, Group, Line string
 	Pre                  [32]byte
+	PreText              string /* the pre-session configuration (a restore plans from it) */
 	Session              [16]byte
 }
 
@@ -69,7 +70,8 @@ func (m *Manager) RunOpen(ctx context.Context, user int64, username string, devi
 		return nil, RunDevice{}, deviceRefusal(err)
 	}
 	m.event(ctx, s.ID, "run", map[string]any{"device_id": device})
-	return s, RunDevice{ID: d.ID, Address: d.Address, Group: d.Group, Line: string(d.Line), Pre: d.Pre, Session: s.ID}, nil
+	return s, RunDevice{ID: d.ID, Address: d.Address, Group: d.Group, Line: string(d.Line), Pre: d.Pre,
+		PreText: d.Session.Pre().Text, Session: s.ID}, nil
 }
 
 /* randID gives s a random UUID v4. */
@@ -114,6 +116,14 @@ func (m *Manager) RunHealth(ctx context.Context, s *Session) error {
 		return ErrHealth
 	}
 	return nil
+}
+
+/* RunSnapshot is the hash of the run's device's running configuration now (a restore's postcondition). */
+func (m *Manager) RunSnapshot(ctx context.Context, s *Session) ([32]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, actionTime)
+	defer cancel()
+	c, err := s.Devices[0].Session.Snapshot(ctx)
+	return c.SHA256, err
 }
 
 /* RunCommit commits an ESR device's candidate with the policy's confirm timer, then the health check (a failure restores the commit). */

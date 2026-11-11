@@ -163,7 +163,7 @@ func newFx(t *testing.T, lines ...string) *fx {
 			return creds.Credential{Username: "admin", Password: secret.New(pw)}, nil
 		}})
 	f.cfg = changeset.Config{Gate: f.guard, Auth: f.az, Policy: f.pol.Current, Store: f.store, Pub: f.pub, Log: log, Now: f.now,
-		Locks: f.locks, Reader: sched, Approvals: approval.New(f.now), Start: func(_ context.Context, s changeset.Started) error {
+		Locks: f.locks, Reader: sched, BackupPriv: bpriv, BackupPub: bpub, Approvals: approval.New(f.now), Start: func(_ context.Context, s changeset.Started) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.started = append(f.started, s)

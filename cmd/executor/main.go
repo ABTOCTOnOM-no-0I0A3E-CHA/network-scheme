@@ -238,7 +238,8 @@ func serve(ctx context.Context, cfg config.Config) error {
 		session of the session manager.
 	*/
 	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log, Locks: locks, Reader: sched,
-		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}, Approvals: approvals, Runner: sessions})
+		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}, Approvals: approvals, Runner: sessions,
+		BackupPriv: bpriv, BackupPub: bpub})
 	actions[changeset.ApproveAction] = web.Action{Describe: changes.Describe}
 	confirmed = append(confirmed, web.Confirmed{Path: "/x/changesets/{id}/approve/{count}",
 		Re:     regexp.MustCompile(`^/x/changesets/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/approve/([0-9]{1,3})$`),

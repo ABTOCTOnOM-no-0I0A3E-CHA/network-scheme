@@ -65,12 +65,14 @@ type Started struct {
 
 /* PlanDevice is a device of the dry-run's plan as the run checks it (drift: Pre; lines: the hash of the normalized lines). */
 type PlanDevice struct {
-	ID      int64
-	Address string
-	Group   string
-	Line    string
-	Pre     string
-	Lines   string
+	ID         int64
+	Address    string
+	Group      string
+	Line       string
+	Pre        string
+	Lines      string
+	Version    int64 /* restore: the version and its hash */
+	VersionSHA string
 }
 
 /* described is a changeset's approval description and what it was built from. */
@@ -303,7 +305,8 @@ func (m *Manager) needSecond(ctx context.Context, p execpolicy.Policy, x describ
 func (m *Manager) start(ctx context.Context, ws workspace, x described, c confirm.Challenge, a *approval.Approval) (any, error) {
 	st := Started{ID: x.cs.ID, Rev: x.cs.Rev, Content: x.cs.Content, PlanHash: x.hash, H: c.H, Author: x.cs.Author, AuthorName: x.cs.AuthorName}
 	for _, d := range x.plan {
-		st.Plan = append(st.Plan, PlanDevice{ID: d.ID, Address: d.Address, Group: d.Group, Line: d.Line, Pre: d.Pre, Lines: d.Lines})
+		st.Plan = append(st.Plan, PlanDevice{ID: d.ID, Address: d.Address, Group: d.Group, Line: d.Line, Pre: d.Pre, Lines: d.Lines,
+			Version: d.V, VersionSHA: d.VS})
 	}
 	payload := map[string]any{"author": x.cs.Author, "h": hex.EncodeToString(c.H[:]), "plan_sha256": x.hash, "challenge": c.ID}
 	if a != nil {

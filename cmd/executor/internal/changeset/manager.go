@@ -74,6 +74,8 @@ type Config struct {
 	Reader Reader
 	/* Approvals holds the authors' approvals waiting for a second person (shared with the sessions), in memory only. */
 	Approvals *approval.Store
+	/* BackupPriv and BackupPub open configuration versions for a restore (backup_key_file); nil: no restore. */
+	BackupPriv, BackupPub *[32]byte
 	/* Runner opens the service sessions of a run (*session.Manager): with it, Start is the run of run.go. */
 	Runner Runner
 	/* Start runs an approved changeset; nil (and no Runner): no changeset is approved (fail closed). */

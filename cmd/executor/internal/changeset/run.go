@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/strategy"
@@ -45,6 +46,7 @@ type Runner interface {
 	RunOpen(ctx context.Context, user int64, username string, device int64) (*session.Session, session.RunDevice, error)
 	RunSend(ctx context.Context, s *session.Session, line, want string) error
 	RunHealth(ctx context.Context, s *session.Session) error
+	RunSnapshot(ctx context.Context, s *session.Session) ([32]byte, error)
 	RunCommit(ctx context.Context, s *session.Session) error
 	RunSave(ctx context.Context, s *session.Session) error
 	RollbackRun(ctx context.Context, s *session.Session) session.RolledBack
@@ -87,6 +89,7 @@ const (
 /* runDevice is one device of a run. */
 type runDevice struct {
 	plan  PlanDevice
+	ver   *backups.Version /* restore: the version, opened and checked at the start */
 	lines []Rendered
 	want  []string
 	s     *session.Session
@@ -184,12 +187,25 @@ func (m *Manager) fail(ctx context.Context, r *run, d *runDevice, why string) {
 	}
 }
 
-/* prepare renders every device's plan and normalizes it as the dry-run did: its hash must be the plan's (else nothing is sent). */
-func (m *Manager) prepare(_ context.Context, r *run) (*runDevice, string) {
+/*
+prepare renders every device's plan and normalizes it as the dry-run did:
+its hash must be the plan's (else nothing is sent). A restore opens every
+version first (its hash must be the dry-run's); its lines are planned per
+device from the pre-session snapshot (device).
+*/
+func (m *Manager) prepare(ctx context.Context, r *run) (*runDevice, string) {
 	for _, d := range r.devs {
 		drv, ok := drivers.For(strategy.Line(d.plan.Line))
 		if !ok {
 			return d, "plan_changed"
+		}
+		if r.st.Content.Kind() == KindRestore {
+			v, code := m.openVersion(ctx, r.st.ID, d.plan.ID, d.plan.Version, d.plan.VersionSHA)
+			if code != "" {
+				return d, code
+			}
+			d.ver = &v
+			continue
 		}
 		lines, err := r.st.Content.Render(d.plan.ID, drv)
 		if err != nil || setLines(drv, d, lines) != nil {
@@ -295,6 +311,14 @@ func (m *Manager) device(ctx context.Context, r *run, d *runDevice) {
 		m.fail(ctx, r, d, "registry_changed")
 		return
 	}
+	if d.ver != nil {
+		drv, _ := drivers.For(strategy.Line(d.plan.Line))
+		lines, err := restorePlan(drv, rd.PreText, d.ver.Text)
+		if err != nil || setLines(drv, d, lines) != nil {
+			m.fail(ctx, r, d, "plan_changed")
+			return
+		}
+	}
 	for i, l := range d.lines {
 		if r.halted() {
 			return
@@ -311,6 +335,12 @@ func (m *Manager) device(ctx context.Context, r *run, d *runDevice) {
 	if esr {
 		if err := m.cfg.Runner.RunCommit(ctx, s); err != nil {
 			m.fail(ctx, r, d, "commit: "+classOf(err))
+			return
+		}
+	}
+	if d.ver != nil { /* a restore ends where the version is, or not at all */
+		if sum, err := m.cfg.Runner.RunSnapshot(ctx, s); err != nil || sum != d.ver.SHA256 {
+			m.fail(ctx, r, d, "restore_mismatch")
 			return
 		}
 	}

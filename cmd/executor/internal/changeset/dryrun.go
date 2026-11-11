@@ -68,15 +68,17 @@ const kindPolicyInvalid = "executor_policy_invalid"
 
 /* DeviceResult is one device's outcome of a dry-run. */
 type DeviceResult struct {
-	ID      int64          `json:"device_id"`
-	Address string         `json:"address"`
-	Group   string         `json:"write_group"`
-	Line    string         `json:"line"`
-	Pre     string         `json:"pre_sha256,omitempty"`
-	OK      bool           `json:"ok"`
-	Refused *DeviceRefusal `json:"refused,omitempty"`
-	Preview *Preview       `json:"-"`
-	lines   [32]byte
+	ID         int64          `json:"device_id"`
+	Address    string         `json:"address"`
+	Group      string         `json:"write_group"`
+	Line       string         `json:"line"`
+	Pre        string         `json:"pre_sha256,omitempty"`
+	OK         bool           `json:"ok"`
+	Refused    *DeviceRefusal `json:"refused,omitempty"`
+	Version    int64          `json:"version_id,omitempty"` /* restore: the version and its hash */
+	VersionSHA string         `json:"version_sha256,omitempty"`
+	Preview    *Preview       `json:"-"`
+	lines      [32]byte
 }
 
 /* DeviceRefusal is why a device fails the dry-run: a code, and for a line its step, place in the plan, class and reason. */
@@ -92,6 +94,7 @@ type DeviceRefusal struct {
 type Preview struct {
 	Lines    []string       `json:"lines"`
 	Contexts []ContextBlock `json:"contexts"`
+	Diff     string         `json:"diff,omitempty"` /* restore: running against the version, masked */
 }
 
 /* ContextBlock is a context the plan enters and its current lines on the device. */
@@ -133,6 +136,8 @@ type planDevice struct {
 	Lines   string         `json:"sha,omitempty"`
 	OK      bool           `json:"ok"`
 	Refused *DeviceRefusal `json:"r,omitempty"`
+	V       int64          `json:"v,omitempty"`  /* restore: the version */
+	VS      string         `json:"vs,omitempty"` /* restore: its hash */
 }
 
 /* dryRunEvent is the payload of the dry_run event. */
@@ -174,6 +179,10 @@ func planHash(devs []planDevice) string {
 		str(d.Line)
 		str(d.Pre)
 		str(d.Lines)
+		if d.V != 0 { /* restore (D3): the version's id and hash */
+			h.Write(i64(d.V))
+			str(d.VS)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -199,8 +208,8 @@ func (m *Manager) dryRunOp(ctx context.Context, ws workspace, params json.RawMes
 		return nil, refuse(CodeState)
 	case p.Rev != cs.Rev:
 		return nil, refuse(CodeConflict)
-	case cs.Kind != KindLines:
-		return nil, refuse("restore_unavailable") /* task 5.6 */
+	case cs.Kind == KindRestore && (m.cfg.BackupPriv == nil || m.cfg.BackupPub == nil):
+		return nil, refuse("restore_unavailable")
 	case m.cfg.Reader == nil || m.cfg.Locks == nil:
 		return nil, refuse("dry_run_unavailable")
 	}
@@ -262,7 +271,7 @@ func (m *Manager) dryRun(ctx context.Context, ws workspace, cs Changeset, pol ex
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = m.dryDevice(ctx, ws, cs.Content, id, run, pol)
+			results[i] = m.dryDevice(ctx, ws, cs.ID, cs.Content, id, run, pol)
 		}()
 	}
 	wg.Wait()
@@ -270,7 +279,8 @@ func (m *Manager) dryRun(ctx context.Context, ws workspace, cs Changeset, pol ex
 	plan := make([]planDevice, len(results))
 	for i, r := range results {
 		out.OK = out.OK && r.OK
-		plan[i] = planDevice{ID: r.ID, Address: r.Address, Group: r.Group, Line: r.Line, Pre: r.Pre, OK: r.OK, Refused: r.Refused}
+		plan[i] = planDevice{ID: r.ID, Address: r.Address, Group: r.Group, Line: r.Line, Pre: r.Pre, OK: r.OK, Refused: r.Refused,
+			V: r.Version, VS: r.VersionSHA}
 		if r.OK {
 			plan[i].Lines = hex.EncodeToString(r.lines[:])
 		}
@@ -314,7 +324,7 @@ func refusalOf(r DeviceResult, code, reason string) DeviceResult {
 }
 
 /* dryDevice dry-runs one device (see the comment above). */
-func (m *Manager) dryDevice(ctx context.Context, ws workspace, c Content, id int64, run [16]byte, pol execpolicy.Policy) DeviceResult {
+func (m *Manager) dryDevice(ctx context.Context, ws workspace, cs [16]byte, c Content, id int64, run [16]byte, pol execpolicy.Policy) DeviceResult {
 	res := DeviceResult{ID: id}
 	var (
 		row     registry.Row
@@ -390,11 +400,26 @@ func (m *Manager) dryDevice(ctx context.Context, ws workspace, c Content, id int
 		return refusalOf(res, "mgmt_unknown", "the management interface of the device cannot be determined")
 	}
 	cctx := core.Context{Mgmt: mgmt, Rules: rules}
-	plan, err := c.Render(id, drv)
-	if err != nil {
+	var plan []Rendered
+	diff := ""
+	if c.Kind() == KindRestore {
+		item, _ := restoreItem(c, id)
+		v, code := m.openVersion(ctx, cs, id, item.Version, "")
+		if code != "" {
+			return refusalOf(res, code, "")
+		}
+		res.Version, res.VersionSHA = item.Version, hex.EncodeToString(v.SHA256[:])
+		if plan, err = restorePlan(drv, cur.Text, v.Text); err != nil {
+			return refusalOf(res, "no_plan", err.Error())
+		}
+		diff = restoreDiff(ctx, drv, cur.Text, v.Text, item.Version)
+	} else if plan, err = c.Render(id, drv); err != nil {
 		return refusalOf(res, CodeBadLine, err.Error())
 	}
 	lines, pv, ref := walk(drv, plan, cctx, cur.Text)
+	if pv != nil {
+		pv.Diff = diff
+	}
 	if ref != nil {
 		res.Refused = ref
 		return res
