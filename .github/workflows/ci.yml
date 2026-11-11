@@ -401,6 +401,9 @@ jobs:
           psql() { sudo docker compose -f "$COMPOSE" exec -T postgres psql -U postgres -d nms -v ON_ERROR_STOP=1 -qtAX -c "$1" | tr -d '[:space:]'; }
           group="$(psql "insert into core.device_group (name) values ('session-e2e') returning id")"
           mac=a8:f9:4b:00:00:01
+          # the emulators sit behind the host (the router of WRITE_MGMT): the executor is not in their subnet, so its next
+          # hop is the configured default gateway, and that gateway is what their ARP table holds on the uplink
+          gw=172.31.252.1
           devices=""
           mkdir -p test/e2e/.auth
           sudo ip netns add nms-wr
@@ -420,12 +423,14 @@ jobs:
             case "$line" in
               mes6)
                 sed -i "s/^ ip address 192\.0\.2\.10 255\.255\.255\.0\$/ ip address $addr 255.255.255.0/" "$fx/config/running.cfg"
-                printf '  VLAN    Interface     IP address        HW address          status\n--------------------- --------------- ------------------- -----------\n vlan 99  gi1/0/1      %s        %s   dynamic\n' "$exec_ip" "$mac" > "$out/show arp"
+                printf 'ip default-gateway %s\n' "$gw" >> "$fx/config/running.cfg"
+                printf '  VLAN    Interface     IP address        HW address          status\n--------------------- --------------- ------------------- -----------\n vlan 99  gi1/0/1      %s        %s   dynamic\n' "$gw" "$mac" > "$out/show arp"
                 printf '  Vlan        Mac Address         Port       Type\n-------- --------------------- ---------- ----------\n   99     %s     gi1/0/1    dynamic\n' "$mac" > "$out/show mac address-table"
                 sha1=--allow-ssh-rsa-sha1 model=MES2324 firmware='6\.6\..*' ;;
               esr)
                 sed -i "s#^  ip address 192\.0\.2\.1/24\$#  ip address $addr/24#" "$fx/config/running.cfg"
-                printf 'Interface   IP address     MAC address        State\ngi1/0/1     %s    %s  reachable\n' "$exec_ip" "$mac" > "$out/show arp"
+                printf 'ip route 0.0.0.0/0 %s\n' "$gw" >> "$fx/config/running.cfg"
+                printf 'Interface   IP address     MAC address        State\ngi1/0/1     %s    %s  reachable\n' "$gw" "$mac" > "$out/show arp"
                 printf 'Vlan  MAC address        Interface  Type\n1     %s  gi1/0/1    dynamic\n' "$mac" > "$out/show mac address-table"
                 printf 'SID  User  Timeout  Level  Protocol  Host\n*  1  e2e-write  00:29:59  15  ssh  %s\n' "$exec_ip" > "$out/show users"
                 sha1= model='.*' firmware='.*' ;;
