@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/beekamai/network-scheme/internal/execadmin"
+	"syscall"
 )
 
 /* serveOn starts a server on a fresh short socket path that accepts uid and returns the path. */
@@ -77,7 +79,26 @@ func TestSocketServesItsOwnUID(t *testing.T) {
 func TestSocketRefusesAnotherUID(t *testing.T) {
 	var handled, refused atomic.Int32
 	path := serveOn(t, os.Getuid()+1, &handled, &refused)
-	if resp := call(t, path); resp.OK || handled.Load() != 0 || refused.Load() != 1 {
-		t.Fatalf("resp %+v handled %d refused %d", resp, handled.Load(), refused.Load())
+	/*
+		The server closes a foreign peer's connection without reading: the client may see the refusal answer, or the
+		closed socket while it still writes its request (broken pipe, reset) or reads (EOF). All of them are a refusal.
+	*/
+	line, err := Call(context.Background(), path, []byte(`{"v":1,"cmd":"registry-verify"}`+"\n"))
+	switch {
+	case err == nil:
+		var resp execadmin.Response
+		if jerr := json.Unmarshal(line, &resp); jerr != nil || resp.OK {
+			t.Fatalf("answer %q (%v)", line, jerr)
+		}
+	case errors.Is(err, syscall.EPIPE), errors.Is(err, syscall.ECONNRESET), errors.Is(err, io.EOF):
+	default:
+		t.Fatalf("call: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for refused.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if handled.Load() != 0 || refused.Load() != 1 {
+		t.Fatalf("handled %d refused %d", handled.Load(), refused.Load())
 	}
 }

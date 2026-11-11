@@ -107,6 +107,7 @@ ${(await f.locator("body").innerText()).slice(0, 2000)}`, { cause: e });
 }
 
 async function typeLine(page: Page, f: FrameLocator, device: number, line: string) {
+  mark(`typing ${JSON.stringify(line)} into device ${device}`);
   await term(f, device).click();
   await page.keyboard.type(line);
   await page.keyboard.press("Enter");
@@ -134,18 +135,23 @@ async function openSession(page: Page, device: number): Promise<FrameLocator> {
   return f;
 }
 
+const t0 = Date.now();
+const at = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;
+/* where the scenario is, in the same list (typing, waiting) */
+let mark: (s: string) => void = () => {};
 function watch(page: Page, diag: string[]) {
+  mark = (s) => diag.push(`${at()} -- ${s}`);
   page.on("websocket", (ws) => {
-    diag.push(`ws open ${ws.url()}`);
-    ws.on("framereceived", (f) => diag.push(`ws <- ${String(f.payload).slice(0, 160)}`));
-    ws.on("framesent", (f) => diag.push(`ws -> ${String(f.payload).slice(0, 80)}`));
-    ws.on("socketerror", (e) => diag.push(`ws error ${e}`));
-    ws.on("close", () => diag.push(`ws closed ${ws.url()}`));
+    diag.push(`${at()} ws open ${ws.url()}`);
+    ws.on("framereceived", (f) => diag.push(`${at()} ws <- ${String(f.payload).slice(0, 160)}`));
+    ws.on("framesent", (f) => diag.push(`${at()} ws -> ${String(f.payload).slice(0, 80)}`));
+    ws.on("socketerror", (e) => diag.push(`${at()} ws error ${e}`));
+    ws.on("close", () => diag.push(`${at()} ws closed ${ws.url()}`));
   });
   page.on("console", (m) => {
-    if (m.type() === "error" || m.type() === "warning") diag.push(`console.${m.type()}: ${m.text().slice(0, 300)}`);
+    if (m.type() === "error" || m.type() === "warning") diag.push(`${at()} console.${m.type()}: ${m.text().slice(0, 300)}`);
   });
-  page.on("pageerror", (e) => diag.push(`pageerror: ${String(e).slice(0, 300)}`));
+  page.on("pageerror", (e) => diag.push(`${at()} pageerror: ${String(e).slice(0, 300)}`));
   page.on("response", (r) => {
     if (r.url().includes("/x/") && r.status() >= 400) diag.push(`${r.status()} ${new URL(r.url()).pathname}`);
   });
