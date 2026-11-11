@@ -7,18 +7,24 @@
 #                    as the exact Origin, so open the demo by this name only
 #   --listen A:P     where the panel is published on this server (default 0.0.0.0:443); use 127.0.0.1:9443 when a
 #                    reverse proxy with a real certificate of your own terminates TLS in front (see SERVER.md)
+#   --memory M       memory limit of the whole stand (default 4g; also its swap); --cpus N (default 2)
+#   --min-free-gb G  refuse to start with less free space on Docker's disk (default 30): images, the stand's own
+#                    Docker and its database together take about 25 GB and a full disk stops every other service too
 #   --down           remove the stand (the image cache volumes stay); --down --purge removes them too
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 DEMO=test/demo RUN=test/demo/.run HOST=nms-demo TAG=demo
-DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up PURGE=""
+DOMAIN="" LISTEN="0.0.0.0:443" ACTION=up PURGE="" MEMORY=4g CPUS=2 MIN_FREE_GB=30
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --listen) LISTEN="${2:-}"; shift 2 ;;
     --down) ACTION=down; shift ;;
     --purge) PURGE=1; shift ;;
+    --memory) MEMORY="${2:-}"; shift 2 ;;
+    --cpus) CPUS="${2:-}"; shift 2 ;;
+    --min-free-gb) MIN_FREE_GB="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1"; exit 2 ;;
   esac
 done
@@ -36,7 +42,14 @@ if [ "$ACTION" = down ]; then
   if [ -n "$PURGE" ]; then
     docker volume rm -f nms-demo-docker nms-demo-containerd nms-demo-gocache nms-demo-gobuild > /dev/null
     docker image rm -f nms-demo-host "nms/api:$TAG" "nms/gateway:$TAG" "nms/executor:$TAG" "nms-snmpsim:$TAG" > /dev/null 2>&1 || true
-    echo "removed the cache volumes and the demo images"
+    # the base images this script pulled, when nothing else uses them (docker refuses to remove an image in use)
+    for img in ubuntu:24.04 \
+      "$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' deploy/docker/api.Dockerfile | head -1)" \
+      "$(sed -n 's/^FROM \(oven\/bun:[^ ]*\) AS web$/\1/p' deploy/docker/gateway.Dockerfile | head -1)" \
+      "$(sed -n 's/^const DefaultDBImage = "\(.*\)"/\1/p' internal/install/render.go)"; do
+      [ -n "$img" ] && docker image rm "$img" "${img%@*}" > /dev/null 2>&1 || true
+    done
+    echo "removed the cache volumes and the demo images; the build cache stays (docker builder prune removes it)"
   fi
   exit 0
 fi
@@ -49,6 +62,15 @@ if docker container inspect "$HOST" > /dev/null 2>&1; then
   echo "The stand is already there (container $HOST). Run: $0 --down"; exit 1
 fi
 case "$(docker info -f '{{.Architecture}}')" in aarch64 | arm64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
+# the stand's systemd gets a cgroup namespace of its own: on cgroup v1 that is impossible, and sharing the host's
+# tree would let it touch the host's services, so refuse
+[ "$(docker info -f '{{.CgroupVersion}}')" = 2 ] || { echo "cgroup v2 is required (the stand's systemd must not share the host's cgroup tree)"; exit 1; }
+ROOT="$(docker info -f '{{.DockerRootDir}}')"
+free_gb="$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9)"
+if [ "${free_gb:-0}" -lt "$MIN_FREE_GB" ]; then
+  echo "only ${free_gb} GB free on $ROOT, the stand needs about 25 GB (--min-free-gb $MIN_FREE_GB): a full disk stops every service of this server"
+  exit 1
+fi
 GO_IMAGE="$(sed -n 's/^FROM \(golang:[^ ]*\) AS build$/\1/p' deploy/docker/api.Dockerfile | head -1)"
 BUN_IMAGE="$(sed -n 's/^FROM \(oven\/bun:[^ ]*\) AS web$/\1/p' deploy/docker/gateway.Dockerfile | head -1)"
 DB_IMAGE="$(sed -n 's/^const DefaultDBImage = "\(.*\)"/\1/p' internal/install/render.go)"
@@ -74,8 +96,10 @@ done
 
 step "Starting the host container $HOST (systemd + Docker), panel published on $LISTEN"
 # /var/lib/docker and /var/lib/containerd are volumes: overlayfs cannot nest, and they keep the loaded images between runs
-docker run -d --name "$HOST" --hostname "$HOST" --restart unless-stopped --privileged --cgroupns=host \
-  -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+# privileged for its own Docker, but in its own cgroup namespace and with hard memory/CPU limits, so the stand cannot
+# reach or starve the other services of this server
+docker run -d --name "$HOST" --hostname "$HOST" --restart unless-stopped --privileged --cgroupns=private \
+  --memory "$MEMORY" --memory-swap "$MEMORY" --cpus "$CPUS" --tmpfs /run --tmpfs /run/lock \
   -v nms-demo-docker:/var/lib/docker -v nms-demo-containerd:/var/lib/containerd \
   -p "$LISTEN:443" nms-demo-host > /dev/null
 for _ in $(seq 1 60); do in_host docker info > /dev/null 2>&1 && break; sleep 2; done
