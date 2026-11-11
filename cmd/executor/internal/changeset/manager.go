@@ -74,7 +74,9 @@ type Config struct {
 	Reader Reader
 	/* Approvals holds the authors' approvals waiting for a second person (shared with the sessions), in memory only. */
 	Approvals *approval.Store
-	/* Start runs an approved changeset (task 5.5); nil: no changeset is approved (fail closed). */
+	/* Runner opens the service sessions of a run (*session.Manager): with it, Start is the run of run.go. */
+	Runner Runner
+	/* Start runs an approved changeset; nil (and no Runner): no changeset is approved (fail closed). */
 	Start func(ctx context.Context, s Started) error
 	Log   *slog.Logger
 	Now   func() time.Time
@@ -94,6 +96,7 @@ type Manager struct {
 	tokens  map[[32]byte]*workspace
 	dry     map[[16]byte]*dryState /* the last dry-run of each changeset in this process */
 	dryRuns map[int64][]time.Time  /* when each user started dry-runs, the last hour */
+	runs    map[[16]byte]*run      /* the runs of this process */
 }
 
 /* workspace is one open workspace token. */
@@ -117,7 +120,12 @@ func New(cfg Config) *Manager {
 	if cfg.Store.Alert == nil {
 		cfg.Store.Alert = cfg.Pub.Alert
 	}
-	return &Manager{cfg: cfg, tokens: map[[32]byte]*workspace{}, dry: map[[16]byte]*dryState{}, dryRuns: map[int64][]time.Time{}}
+	m := &Manager{cfg: cfg, tokens: map[[32]byte]*workspace{}, dry: map[[16]byte]*dryState{}, dryRuns: map[int64][]time.Time{},
+		runs: map[[16]byte]*run{}}
+	if m.cfg.Start == nil && m.cfg.Runner != nil {
+		m.cfg.Start = m.startRun
+	}
+	return m
 }
 
 /* Refusal is a changeset refused by a rule: a code the UI has a text for (web: 422) and what it is about. */

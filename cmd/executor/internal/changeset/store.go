@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -357,6 +358,38 @@ func (s *Store) events(ctx context.Context, id [16]byte, newest int) ([]Event, e
 			return nil, s.tampered(ctx, id, fmt.Sprintf("event %d fails its MAC", e.ID))
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+/* Started lists the changesets that have a run_started event (Recover reads and verifies each). */
+func (s *Store) Started(ctx context.Context) ([][16]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, opTime)
+	defer cancel()
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT changeset_id FROM exec.changeset_event WHERE kind = 'run_started'`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[[16]byte])
+}
+
+/* PreSessionVersions is, per device, the newest 'pre_session' configuration version taken since (what a restore changeset goes back to). */
+func (s *Store) PreSessionVersions(ctx context.Context, devices []int64, since time.Time) (map[string]int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, opTime)
+	defer cancel()
+	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT ON (device_id) device_id, id FROM backups.config_version
+		WHERE device_id = ANY($1) AND source = 'pre_session' AND taken_at >= $2 ORDER BY device_id, taken_at DESC, id DESC`, devices, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var dev, id int64
+		if err := rows.Scan(&dev, &id); err != nil {
+			return nil, err
+		}
+		out[strconv.FormatInt(dev, 10)] = id
 	}
 	return out, rows.Err()
 }

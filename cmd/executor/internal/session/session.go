@@ -189,6 +189,8 @@ type Manager struct {
 	stopped     bool /* Run has ended: no session registers any more */
 	/* lastOpen is when a session last began opening each device, in this process: the superseded check's second source beside exec */
 	lastOpen map[int64]time.Time
+	/* runs are the service sessions of changeset runs (run.go): no token, ended by their run */
+	runs map[[16]byte]*Session
 }
 
 /* openedAfter reports whether a session of this process began opening device after t. */
@@ -206,7 +208,8 @@ func New(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}, lastOpen: map[int64]time.Time{}}
+	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}, lastOpen: map[int64]time.Time{},
+		runs: map[[16]byte]*Session{}}
 }
 
 /*

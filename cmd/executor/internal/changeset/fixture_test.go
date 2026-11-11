@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,14 +65,14 @@ var lineOf = map[string]struct {
 }{
 	"mes6": {netip.MustParseAddr("192.0.2.10"), "ip default-gateway 192.0.2.1\n",
 		" vlan 99  gi1/0/1      192.0.2.1        a8:f9:4b:00:00:01   dynamic\n",
-		"   99     a8:f9:4b:00:00:01     gi1/0/1    dynamic\n", "", "gi1/0/2", "configure"},
+		"   99     a8:f9:4b:00:00:01     gi1/0/1    dynamic\n", "", "gigabitethernet1/0/2", "configure"},
 	"mes10": {netip.MustParseAddr("192.0.2.20"), "ip default-gateway 192.0.2.1\n",
 		" vlan 99  gi0/1      192.0.2.1        a8:f9:4b:00:00:01   dynamic\n",
-		"   99     a8:f9:4b:00:00:01     gi0/1    dynamic\n", "", "gi0/2", "configure terminal"},
+		"   99     a8:f9:4b:00:00:01     gi0/1    dynamic\n", "", "gigabitethernet 0/2", "configure terminal"},
 	"esr": {netip.MustParseAddr("192.0.2.1"), "ip route 0.0.0.0/0 192.0.2.254\n",
 		"gi1/0/1     192.0.2.254    a8:f9:4b:00:00:01  reachable\n",
 		"1     a8:f9:4b:00:00:01  gi1/0/1    dynamic\n",
-		"SID  User  Timeout  Level  Protocol  Host\n*  1  admin  00:29:59  15  ssh  192.0.2.200", "gi1/0/2", "configure"},
+		"SID  User  Timeout  Level  Protocol  Host\n*  1  admin  00:29:59  15  ssh  192.0.2.200", "gigabitethernet 1/0/2", "configure"},
 }
 
 /* dev is one registered, emulated device. */
@@ -95,6 +96,8 @@ type fx struct {
 	pub     *pub.Publisher
 	store   *changeset.Store
 	locks   *backups.Locks
+	bpub    *[32]byte /* the backup domain */
+	bpriv   *[32]byte
 	m       *changeset.Manager
 	cfg     changeset.Config
 	devs    []*dev
@@ -149,10 +152,11 @@ func newFx(t *testing.T, lines ...string) *fx {
 		f.device(t, line, 2200+i, "core")
 	}
 	f.store = &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: f.pub.Alert, Log: log, Now: f.now}
-	bpub, _, err := box.GenerateKey(rand.Reader)
+	bpub, bpriv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.bpub, f.bpriv = bpub, bpriv
 	f.locks = &backups.Locks{}
 	sched := backups.New(backups.Config{Registry: f.guard, Net: dialer{f}, Pool: pool, BackupPub: bpub, Locks: f.locks, Alert: f.pub.Alert, Log: log,
 		Open: func(*registry.Snapshot, int64) (creds.Credential, error) {
@@ -200,7 +204,9 @@ func (f *fx) device(t *testing.T, line string, port int, group string) *dev {
 	f.put(t, "write_device", d.row)
 	mp := map[string]any{"id": int64(len(f.devs) + 1), "write_driver": line, "model_re": "^(?:.*)$", "firmware_re": "^(?:.*)$",
 		"strategies": json.RawMessage(`{}`), "note": "stand"}
-	f.put(t, "model_profile", mp)
+	if !slices.ContainsFunc(f.devs, func(o *dev) bool { return o.line == line }) { /* one profile per line */
+		f.put(t, "model_profile", mp)
+	}
 	f.put(t, "write_credential", map[string]any{"device_id": d.id, "kind": "ssh_write", "ciphertext": []byte{1},
 		"created_at": time.Now(), "nonce": make([]byte, 16)})
 	f.devs = append(f.devs, d)

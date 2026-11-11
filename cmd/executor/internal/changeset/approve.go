@@ -40,8 +40,8 @@ checks the count, the policy, the freeze and the change window, and:
   - anyone else: a live approval of the author with the same H is needed,
     the confirming user neither the author's id nor name; the run starts.
 
-The run itself is task 5.5 (Config.Start); without it nothing starts and
-the approval is refused before anything is recorded (fail closed).
+The run is run.go's (Config.Start); without one nothing starts and the
+approval is refused before anything is recorded (fail closed).
 */
 
 /* ApproveAction is the confirm(H) action of approving a changeset (web.Confirmed). */
@@ -52,14 +52,15 @@ const approvalKind = "changeset"
 
 /* Started is what a run starts with: the approved revision, its plan and who approved it. */
 type Started struct {
-	ID       [16]byte
-	Rev      int
-	Content  Content
-	Plan     []PlanDevice
-	PlanHash string
-	H        [32]byte
-	Author   int64
-	Second   int64 /* the second person (0: none needed) */
+	ID         [16]byte
+	Rev        int
+	Content    Content
+	Plan       []PlanDevice
+	PlanHash   string
+	H          [32]byte
+	Author     int64
+	AuthorName string
+	Second     int64 /* the second person (0: none needed) */
 }
 
 /* PlanDevice is a device of the dry-run's plan as the run checks it (drift: Pre; lines: the hash of the normalized lines). */
@@ -300,7 +301,7 @@ func (m *Manager) needSecond(ctx context.Context, p execpolicy.Policy, x describ
 
 /* start records run_started (the author, the second person, H and both challenges) and hands the run to Config.Start. */
 func (m *Manager) start(ctx context.Context, ws workspace, x described, c confirm.Challenge, a *approval.Approval) (any, error) {
-	st := Started{ID: x.cs.ID, Rev: x.cs.Rev, Content: x.cs.Content, PlanHash: x.hash, H: c.H, Author: x.cs.Author}
+	st := Started{ID: x.cs.ID, Rev: x.cs.Rev, Content: x.cs.Content, PlanHash: x.hash, H: c.H, Author: x.cs.Author, AuthorName: x.cs.AuthorName}
 	for _, d := range x.plan {
 		st.Plan = append(st.Plan, PlanDevice{ID: d.ID, Address: d.Address, Group: d.Group, Line: d.Line, Pre: d.Pre, Lines: d.Lines})
 	}

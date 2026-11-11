@@ -233,12 +233,12 @@ func serve(ctx context.Context, cfg config.Config) error {
 			Action: unmask.ActionExport, File: unm.Export},
 	}
 	/*
-		Changesets: authored, stored, dry-run and approved only here, under the
-		executor's row MACs (Phase 5). The run comes with task 5.5: until then
-		Start is nil and no approval starts anything.
+		Changesets: authored, stored, dry-run, approved and run only here, under
+		the executor's row MACs (Phase 5); every device of a run is a service
+		session of the session manager.
 	*/
 	changes := changeset.New(changeset.Config{Gate: guard, Auth: az, Policy: pol.Current, Pub: publisher, Log: log, Locks: locks, Reader: sched,
-		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}, Approvals: approvals})
+		Store: &changeset.Store{Pool: pool, MAC: keys.MAC(), Alert: publisher.Alert, Log: log}, Approvals: approvals, Runner: sessions})
 	actions[changeset.ApproveAction] = web.Action{Describe: changes.Describe}
 	confirmed = append(confirmed, web.Confirmed{Path: "/x/changesets/{id}/approve/{count}",
 		Re:     regexp.MustCompile(`^/x/changesets/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/approve/([0-9]{1,3})$`),
@@ -288,6 +288,10 @@ func serve(ctx context.Context, cfg config.Config) error {
 	/* Sessions of a previous process end as interrupted, its device_busy rows go: before /x serves. */
 	if err := sessions.Recover(ctx); err != nil {
 		return fmt.Errorf("recover change sessions: %w", err)
+	}
+	/* Runs of a previous process end as interrupted (alerted, nothing rolled back automatically). */
+	if err := changes.Recover(ctx); err != nil {
+		return fmt.Errorf("recover changesets: %w", err)
 	}
 	frozen, _ := guard.Frozen()
 	log.Info("executor started", slog.String("xnet", cfg.ListenXnet.String()), slog.Bool("frozen", frozen),

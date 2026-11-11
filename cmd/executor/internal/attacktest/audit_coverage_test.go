@@ -15,8 +15,8 @@ coverage is the table of the executor's audit events (security.md 10, plan
 4d.2): each event and the scripted tests that prove its executor audit row
 is written, each with a needle that the test's own body must contain (the
 audit action or class it counts rows of). Changesets (Phase 5): authoring,
-dry-run and approval so far, the run with task 5.5; automatic freezes are
-alerts, not rows: the chain that would hold them may be what was tampered
+dry-run, approval, the run and its stop; automatic freezes are alerts, not
+rows: the chain that would hold them may be what was tampered
 with.
 */
 var coverage = []struct {
@@ -75,6 +75,9 @@ var coverage = []struct {
 	{"changeset approvals, second persons and wrong device counts", []struct{ dir, test, needle string }{
 		{"cmd/executor/internal/changeset", "TestApproveDeviceCountAndStart", `f.audits(t, changeset.ApproveAction, "denied")`},
 		{"cmd/executor/internal/changeset", "TestTwoPersonAuthorCannotApprove", `f.audits(t, changeset.ApproveAction, "ok")`}}},
+	{"changeset runs and their stop", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/changeset", "TestRunCanaryThenBatches", `"changeset.run", "ok"`},
+		{"cmd/executor/internal/changeset", "TestRunStop", `"changeset.stop", "ok"`}}},
 	{"two-person session requests and approvals", []struct{ dir, test, needle string }{
 		{"cmd/executor/internal/session", "TestTwoPersonSessionNeedsApproval", `{"session.request", "ok"}, {"session.approve", "ok"}, {"confirm.session.approve", "ok"}`}}},
 	{"executor audit viewed", []struct{ dir, test, needle string }{
