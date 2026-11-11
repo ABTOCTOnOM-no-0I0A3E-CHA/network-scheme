@@ -107,6 +107,8 @@ docker cp bin/. "$HOST:/opt/demo/bin/"
 docker cp files/. "$HOST:/opt/demo/"
 docker cp seed/. "$HOST:/opt/demo/seed/"
 in_host install -m 0755 /opt/demo/bin/nmsctl /usr/local/bin/nmsctl
+# a bundle packed on Windows loses the execute bits
+in_host chmod 0755 /opt/demo/bin/sshemud
 # nmsctl install refuses to run in a container (it looks for /.dockerenv); this container plays the server
 in_host rm -f /.dockerenv
 
