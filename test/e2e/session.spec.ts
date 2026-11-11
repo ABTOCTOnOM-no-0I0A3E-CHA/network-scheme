@@ -134,11 +134,39 @@ async function openSession(page: Page, device: number): Promise<FrameLocator> {
   return f;
 }
 
+function watch(page: Page, diag: string[]) {
+  page.on("websocket", (ws) => {
+    diag.push(`ws open ${ws.url()}`);
+    ws.on("framereceived", (f) => diag.push(`ws <- ${String(f.payload).slice(0, 160)}`));
+    ws.on("framesent", (f) => diag.push(`ws -> ${String(f.payload).slice(0, 80)}`));
+    ws.on("socketerror", (e) => diag.push(`ws error ${e}`));
+    ws.on("close", () => diag.push(`ws closed ${ws.url()}`));
+  });
+  page.on("console", (m) => {
+    if (m.type() === "error" || m.type() === "warning") diag.push(`console.${m.type()}: ${m.text().slice(0, 300)}`);
+  });
+  page.on("pageerror", (e) => diag.push(`pageerror: ${String(e).slice(0, 300)}`));
+  page.on("response", (r) => {
+    if (r.url().includes("/x/") && r.status() >= 400) diag.push(`${r.status()} ${new URL(r.url()).pathname}`);
+  });
+}
+
 for (const line of ["mes6", "esr"] as const) {
   test.describe(`change session on ${line}`, () => {
     test.skip(!DEVICES[line], `NMS_E2E_SESSION_DEVICES names no ${line} device (the write emulators are not wired into this run)`);
     /* nine change TOTP codes, each waiting for a new 30 s step */
     test.setTimeout(15 * 60_000);
+    /* the terminal's WebSocket and the page's errors, printed when the test fails (CI keeps no browser trace) */
+    const diag: string[] = [];
+    test.beforeEach(({ page }) => {
+      diag.length = 0;
+      watch(page, diag);
+    });
+    test.afterEach(({}, info) => {
+      if (info.status !== info.expectedStatus) {
+        console.log(`--- ${line} diagnostics (last 120 of ${diag.length}) ---${String.fromCharCode(10)}${diag.slice(-120).join(String.fromCharCode(10))}`);
+      }
+    });
 
     test("credential, open, dangerous line, form, diff, save, rollback, end, replay, unmasked config and audit; navigation keeps the session", async ({ page }) => {
       const id = DEVICES[line];
