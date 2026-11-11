@@ -73,7 +73,13 @@ async function storeCredential(page: Page, device: number) {
   await f.locator("#cp-code").fill(await changeCode());
   await f.getByRole("button", { name: "Сохранить", exact: true }).click();
   /* either outcome is shown; a refusal fails with the executor's own words instead of a bare timeout */
-  await expect(f.getByTestId("done").or(f.getByTestId("failure"))).toBeVisible({ timeout: 20_000 });
+  try {
+    await expect(f.getByTestId("done").or(f.getByTestId("failure"))).toBeVisible({ timeout: 20_000 });
+  } catch (e) {
+    /* neither outcome: show what the executor page says instead (the step it is waiting on) */
+    throw new Error(`write credential of device ${device}: no outcome; the page shows:
+${(await f.locator("body").innerText()).slice(0, 3000)}`, { cause: e });
+  }
   const failure = f.getByTestId("failure");
   if (await failure.isVisible()) throw new Error(`write credential of device ${device}: ${await failure.innerText()}`);
   await expect(f.getByTestId("done")).toContainText(`Учётка устройства ${device} сохранена`);
