@@ -88,8 +88,7 @@ async function storeCredential(page: Page, device: number) {
   } catch (e) {
     /* neither outcome: show what the executor page says instead (the step it is waiting on) */
     throw new Error(`write credential of device ${device}: no outcome; requests:
-${net.join("
-")}
+${net.join(String.fromCharCode(10))}
 the page shows:
 ${(await f.locator("body").innerText()).slice(0, 2000)}`, { cause: e });
   }
