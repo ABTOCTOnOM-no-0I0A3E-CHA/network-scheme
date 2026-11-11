@@ -28,8 +28,8 @@ import (
 
 /* Kinds of changesets (exec.changeset.kind). */
 const (
-	KindLines   = "lines"
-	KindRestore = "restore"
+	ContentLines   = "lines"
+	ContentRestore = "restore"
 )
 
 /* Bounds of a content (the policy bounds devices, lines and the batch below these). */
@@ -77,9 +77,9 @@ type Content struct {
 /* Kind is restore when the content restores versions, else lines. */
 func (c Content) Kind() string {
 	if len(c.Restore) > 0 {
-		return KindRestore
+		return ContentRestore
 	}
-	return KindLines
+	return ContentLines
 }
 
 var (
@@ -152,7 +152,7 @@ func (c Content) Check(p execpolicy.Policy) error {
 	if c.SettleS < 0 || c.SettleS > maxSettleS {
 		return bad("settle_s: 0..%d", maxSettleS)
 	}
-	if c.Kind() == KindRestore {
+	if c.Kind() == ContentRestore {
 		if len(c.Restore) != len(c.Devices) || len(c.Vars) > 0 {
 			return bad("restore: one version per device, no variables")
 		}

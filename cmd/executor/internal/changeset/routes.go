@@ -247,7 +247,7 @@ func (m *Manager) checkDevices(ctx context.Context, ws workspace, c Content) err
 	if err != nil {
 		return viewErr(err)
 	}
-	if c.Kind() != KindLines {
+	if c.Kind() != ContentLines {
 		return nil
 	}
 	for _, id := range c.Devices {

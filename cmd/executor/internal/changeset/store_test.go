@@ -78,7 +78,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Rev != 2 || got.Content.Title != "two" || got.Author != 42 || got.AuthorName != "alice" || got.Kind != changeset.KindLines ||
+	if got.Rev != 2 || got.Content.Title != "two" || got.Author != 42 || got.AuthorName != "alice" || got.Kind != changeset.ContentLines ||
 		len(got.Events) != 1 || got.Events[0].Device != 3 || *got.Events[0].Session != sid {
 		t.Fatalf("loaded %+v", got)
 	}

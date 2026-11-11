@@ -142,6 +142,7 @@ var matrix = map[string]map[string]int{
 	"POST /api/executor/freeze":                               {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 403, "operatorA": 403, "auditor": 403, "admin": 202, "adminA": 403},
 	"GET /api/executor/status":                                {"anon": 401, "viewer": 403, "viewerA": 403, "operator": 200, "operatorA": 403, "auditor": 403, "admin": 200, "adminA": 403},
 	"GET /api/devices/{id}/sessions":                          {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
+	"GET /api/executor/changesets":                            {"anon": 401, "viewer": 200, "viewerA": 200, "operator": 200, "operatorA": 200, "auditor": 403, "admin": 200, "adminA": 200},
 }
 
 /*
@@ -217,6 +218,7 @@ var foreignMatrix = map[string]map[string]int{
 	"GET /api/stats/top-interfaces":                           {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/stats/config-drift":                             {"viewerA": 200, "operatorA": 200, "adminA": 200},
 	"GET /api/devices/{id}/sessions":                          {"viewerA": 404, "operatorA": 404, "adminA": 404},
+	"GET /api/executor/changesets":                            {"viewerA": 200, "operatorA": 200, "adminA": 200},
 }
 
 /* subject is a logged-in user (nil for anon) whose session holds a fresh step-up. */
@@ -459,6 +461,8 @@ func (m *matrixEnv) deviceRequest(key string) (req, bool) {
 		return req{method: "GET", path: dev("/api/devices/%d/export/interfaces")}, true
 	case "GET /api/devices/{id}/sessions":
 		return req{method: "GET", path: dev("/api/devices/%d/sessions")}, true
+	case "GET /api/executor/changesets":
+		return req{method: "GET", path: "/api/executor/changesets"}, true
 	case "GET /api/search":
 		return req{method: "GET", path: "/api/search?q=" + url.QueryEscape(nextAddr().String())}, true
 	case "GET /api/devices/{id}/metrics/if":

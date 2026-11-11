@@ -50,6 +50,10 @@ const (
 	SystemRecordingTamper       = "executor_recording_tamper"
 	SystemUnmaskViews           = "executor_unmask_views"
 	SystemConfigTamper          = "executor_config_tamper"
+	SystemChangesetFailed       = "changeset_failed"
+	SystemChangesetRollback     = "changeset_rollback_failed"
+	SystemChangesetInterrupted  = "changeset_interrupted"
+	SystemChangesetTamper       = "executor_changeset_tamper"
 	SystemExecutorAlert         = "executor_alert"
 	SystemExecutorUnreachable   = "executor_unreachable"
 	executorUnfrozen            = "executor_unfrozen"
@@ -63,6 +67,7 @@ var executorSeverity = map[string]string{
 	SystemExecutorPassword:     "high", SystemExecutorLineMismatch: "high", SystemExecutorRollback: "high",
 	SystemRecordingFailed: "high", SystemRecordingFull: "warning", SystemRecordingViews: "high",
 	SystemSessionTamper: "high", SystemRecordingTamper: "high", SystemUnmaskViews: "high", SystemConfigTamper: "high",
+	SystemChangesetFailed: "high", SystemChangesetRollback: "high", SystemChangesetInterrupted: "high", SystemChangesetTamper: "high",
 }
 
 /*
@@ -176,6 +181,14 @@ func systemName(kind string) string {
 		return "Too many unmasked configurations viewed by one user"
 	case SystemConfigTamper:
 		return "Configuration version fails its hash check; not shown"
+	case SystemChangesetFailed:
+		return "Changeset stopped on an error; the changed devices are rolled back"
+	case SystemChangesetRollback:
+		return "Changeset rollback did not restore a device's configuration"
+	case SystemChangesetInterrupted:
+		return "Changeset interrupted by an executor restart; nothing rolled back"
+	case SystemChangesetTamper:
+		return "Changeset row fails its integrity check"
 	case SystemRecordingTamper:
 		return "Change session recording fails its integrity check"
 	case SystemExecutorAlert:

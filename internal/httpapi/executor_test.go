@@ -3,7 +3,9 @@ package httpapi_test
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -111,7 +113,7 @@ func clearExecpub(t *testing.T, f *fixture) {
 	t.Helper()
 	wipe := func() {
 		if _, err := f.env.Pool("postgres").Exec(context.Background(),
-			`DELETE FROM execpub.freeze_request; DELETE FROM execpub.status; DELETE FROM execpub.session_summary`); err != nil {
+			`DELETE FROM execpub.freeze_request; DELETE FROM execpub.status; DELETE FROM execpub.session_summary; DELETE FROM execpub.changeset_summary`); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -177,7 +179,7 @@ only POST.
 */
 func TestNoRouteLiftsFreeze(t *testing.T) {
 	want := map[string]bool{"POST /api/executor/ticket": true, "POST /api/executor/freeze": true,
-		"GET /api/executor/status": true, "GET /api/devices/{id}/sessions": true}
+		"GET /api/executor/status": true, "GET /api/devices/{id}/sessions": true, "GET /api/executor/changesets": true}
 	for _, r := range httpapi.Routes() {
 		k := r.Method + " " + r.Pattern
 		lower := strings.ToLower(k)
@@ -310,5 +312,57 @@ func TestDeviceSessions(t *testing.T) {
 	wantError(t, f.do(v.authed(req{method: "GET", path: "/api/devices/999999999/sessions"})), http.StatusNotFound, "not_found")
 	for _, q := range []string{"limit=0", "limit=201", "limit=x", "limit=1&limit=2"} {
 		wantError(t, f.do(v.authed(req{method: "GET", path: fmt.Sprintf("/api/devices/%d/sessions?%s", dev, q)})), http.StatusBadRequest, "bad_request")
+	}
+}
+
+/*
+GET /api/executor/changesets lists only changesets whose every device is in
+the caller's scope (one device outside, or gone from core, hides it), and
+only metadata: nothing of the lines or configurations reaches the api.
+*/
+func TestExecutorChangesets(t *testing.T) {
+	f := newFixture(t, nil)
+	clearExecpub(t, f)
+	ga, gb := f.newGroup(), f.newGroup()
+	a1, a2, b1 := f.newDevice(ga), f.newDevice(ga), f.newDevice(gb)
+	v := f.login(false, rbac.Binding{Role: rbac.RoleViewer, GroupID: &ga})
+	exe := f.env.Pool("nms_executor")
+	for _, row := range []struct {
+		id      string
+		devices []int64
+		status  string
+	}{
+		{"00000000-0000-0000-0000-0000000000c1", []int64{a1, a2}, "done"},
+		{"00000000-0000-0000-0000-0000000000c2", []int64{a1, b1}, "running"},
+		{"00000000-0000-0000-0000-0000000000c3", []int64{a2, 999999999}, "draft"},
+	} {
+		if _, err := exe.Exec(context.Background(), `INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status,
+			device_count, device_ids, created_at, updated_at) VALUES ($1, $2, 'lines', 'vlan 30', $3, $4, $5, now(), now())`,
+			row.id, v.uid, row.status, len(row.devices), row.devices); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp := f.do(v.authed(req{method: "GET", path: "/api/executor/changesets"}))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Items) != 1 || got.Items[0]["changeset_id"] != "00000000-0000-0000-0000-0000000000c1" || got.Items[0]["status"] != "done" ||
+		got.Items[0]["author"] == nil {
+		t.Fatalf("items %s", body)
+	}
+	for _, k := range []string{"device_ids", "content", "lines", "steps"} {
+		if _, ok := got.Items[0][k]; ok {
+			t.Errorf("the list carries %s", k)
+		}
+	}
+	for _, q := range []string{"limit=0", "limit=201", "limit=x"} {
+		wantError(t, f.do(v.authed(req{method: "GET", path: "/api/executor/changesets?" + q})), http.StatusBadRequest, "bad_request")
 	}
 }

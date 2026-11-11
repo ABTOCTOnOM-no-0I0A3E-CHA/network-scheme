@@ -606,6 +606,10 @@
       "executor_recording_tamper": "Запись сессии изменений не прошла проверку целостности",
       "executor_unmask_views": "Слишком много просмотров конфигов без маскирования одним пользователем",
       "executor_config_tamper": "Версия конфига не прошла проверку хеша и не показана",
+      "changeset_failed": "Changeset остановлен на ошибке; применённые устройства откатываются",
+      "changeset_rollback_failed": "Откат changeset'а не восстановил конфигурацию устройства",
+      "changeset_interrupted": "Changeset прерван перезапуском executor'а; автоматического отката не было",
+      "executor_changeset_tamper": "Строка changeset'а не прошла проверку целостности",
       "executor_alert": "Сообщение executor'а",
       "executor_unreachable": "Executor не публикует своё состояние"
     },

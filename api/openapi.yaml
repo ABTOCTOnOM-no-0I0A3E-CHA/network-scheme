@@ -2793,6 +2793,47 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/executor/changesets:
+    get:
+      summary: Changesets whose every device is in the caller's scope, newest change first
+      description: |
+        From execpub.changeset_summary (written by the executor): metadata only. The lines,
+        the dry-runs and the configurations stay in the executor (/x on its own origin).
+        author is the author's current name in the panel (null once deleted).
+      x-permission: devices.read
+      x-scoped: true
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: Changesets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [changeset_id, author_id, author, kind, title, status, device_count, created_at, updated_at, failed_device_id]
+                      properties:
+                        changeset_id: { type: string, format: uuid }
+                        author_id: { type: integer, format: int64 }
+                        author: { type: [string, "null"] }
+                        kind: { type: string, enum: [lines, restore] }
+                        title: { type: string }
+                        status:
+                          type: string
+                          enum: [draft, dry_run_ok, dry_run_failed, approved, running, done, rolled_back, rollback_failed, interrupted, discarded]
+                        device_count: { type: integer }
+                        created_at: { type: string, format: date-time }
+                        updated_at: { type: string, format: date-time }
+                        failed_device_id: { type: [integer, "null"], format: int64 }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     session:

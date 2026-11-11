@@ -63,8 +63,8 @@ var (
 	previewLines = 40 /* lines of a context block shown */
 )
 
-/* Kind of the policy alert (as session's). */
-const kindPolicyInvalid = "executor_policy_invalid"
+/* KindPolicyInvalid is the policy's alert (as session's: the policy's rules do not fit a line's grammar). */
+const KindPolicyInvalid = "executor_policy_invalid"
 
 /* DeviceResult is one device's outcome of a dry-run. */
 type DeviceResult struct {
@@ -208,7 +208,7 @@ func (m *Manager) dryRunOp(ctx context.Context, ws workspace, params json.RawMes
 		return nil, refuse(CodeState)
 	case p.Rev != cs.Rev:
 		return nil, refuse(CodeConflict)
-	case cs.Kind == KindRestore && (m.cfg.BackupPriv == nil || m.cfg.BackupPub == nil):
+	case cs.Kind == ContentRestore && (m.cfg.BackupPriv == nil || m.cfg.BackupPub == nil):
 		return nil, refuse("restore_unavailable")
 	case m.cfg.Reader == nil || m.cfg.Locks == nil:
 		return nil, refuse("dry_run_unavailable")
@@ -391,7 +391,7 @@ func (m *Manager) dryDevice(ctx context.Context, ws workspace, cs [16]byte, c Co
 	rules, err := core.NewRules(drv.Grammar(), string(line), pol.ClassOverrides)
 	if err != nil {
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opTime)
-		_ = m.cfg.Pub.Alert(actx, kindPolicyInvalid, "high", id, "the policy's class overrides do not fit the "+string(line)+" grammar: "+err.Error())
+		_ = m.cfg.Pub.Alert(actx, KindPolicyInvalid, "high", id, "the policy's class overrides do not fit the "+string(line)+" grammar: "+err.Error())
 		cancel()
 		return refusalOf(res, "policy_invalid", "")
 	}
@@ -402,7 +402,7 @@ func (m *Manager) dryDevice(ctx context.Context, ws workspace, cs [16]byte, c Co
 	cctx := core.Context{Mgmt: mgmt, Rules: rules}
 	var plan []Rendered
 	diff := ""
-	if c.Kind() == KindRestore {
+	if c.Kind() == ContentRestore {
 		item, _ := restoreItem(c, id)
 		v, code := m.openVersion(ctx, cs, id, item.Version, "")
 		if code != "" {

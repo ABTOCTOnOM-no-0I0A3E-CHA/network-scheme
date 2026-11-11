@@ -319,6 +319,42 @@ var trace = []struct {
 		{"cmd/executor/internal/terminal", "TestConfirmationMarkersFailClosed"},
 		{"cmd/executor/internal/session", "TestAbortedOpenLeavesAReplayableRecording"},
 	}},
+	/* Phase 5 (plan 2026-11-11-phase-5-changesets, criteria K1..K6) */
+	{"K1", "a changeset runs canary first, then in batches, on every line: done, every device saved", []ref{
+		{"cmd/executor/internal/changeset", "TestRunCanaryThenBatches"},
+	}},
+	{"K2", "an error on the fifth device stops the run and rolls back every device that got a line", []ref{
+		{"cmd/executor/internal/changeset", "TestRunStopsAndRollsBackOnFifthDevice"},
+		{"cmd/executor/internal/changeset", "TestRunStop"},
+	}},
+	{"K3", "a configuration changed after the dry-run refuses that device before its first line", []ref{
+		{"cmd/executor/internal/changeset", "TestRunRefusesDrift"},
+		{"cmd/executor/internal/changeset", "TestApproveRefusesWhatChangedAfterTheChallenge"},
+	}},
+	{"K4", "the content an approval runs is the one its H covers: the api has no right on the rows, a superuser's swap fails the MACs (alert), the panel's summary decides nothing", []ref{
+		{"cmd/executor/internal/changeset", "TestC2kChangesetContent"},
+		{"cmd/executor/internal/changeset", "TestStoreRefusesTamperedRows"},
+		{"cmd/executor/internal/changeset", "TestApproveRefusesWhatChangedAfterTheChallenge"},
+		{"internal/httpapi", "TestExecutorChangesets"},
+	}},
+	{"K5", "two persons: the author never approves alone; the second person needs a live author approval of the same H, write on every group, another id and name; sessions alike", []ref{
+		{"cmd/executor/internal/changeset", "TestTwoPersonAuthorCannotApprove"},
+		{"cmd/executor/internal/changeset", "TestSecondPersonNeedsALiveApprovalOfTheSameH"},
+		{"cmd/executor/internal/session", "TestTwoPersonSessionNeedsApproval"},
+		{"cmd/executor/internal/approval", "TestApprovalLifecycle"},
+	}},
+	{"K6", "a wrong device count refuses and spends the challenge", []ref{
+		{"cmd/executor/internal/changeset", "TestApproveDeviceCountAndStart"},
+	}},
+	{"5.3", "dry-run: read-only, Safe lines only (the C4 table, the management interface), MES 6.x inverse required, busy devices refused", []ref{
+		{"cmd/executor/internal/changeset", "TestWalkRefusesEveryDangerousLine"},
+		{"cmd/executor/internal/changeset", "TestDryRunOnEveryLine"},
+		{"cmd/executor/internal/changeset", "TestDryRunRefusals"},
+	}},
+	{"5.6", "restore of a backup version through a changeset: the version's own device, its envelope and hash checked, the running configuration hashes as the version after the run", []ref{
+		{"cmd/executor/internal/changeset", "TestRestoreVersionOnEveryLine"},
+		{"cmd/executor/internal/changeset", "TestRestoreRefusals"},
+	}},
 }
 
 /*

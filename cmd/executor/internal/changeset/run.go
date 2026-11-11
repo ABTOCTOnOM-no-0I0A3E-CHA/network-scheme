@@ -199,7 +199,7 @@ func (m *Manager) prepare(ctx context.Context, r *run) (*runDevice, string) {
 		if !ok {
 			return d, "plan_changed"
 		}
-		if r.st.Content.Kind() == KindRestore {
+		if r.st.Content.Kind() == ContentRestore {
 			v, code := m.openVersion(ctx, r.st.ID, d.plan.ID, d.plan.Version, d.plan.VersionSHA)
 			if code != "" {
 				return d, code

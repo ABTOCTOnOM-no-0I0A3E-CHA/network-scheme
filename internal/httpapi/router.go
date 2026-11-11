@@ -315,6 +315,7 @@ func (s *server) handler() http.Handler {
 	s.route(r, http.MethodPost, "/api/executor/freeze", Policy{Perm: rbac.PermExecutorFreeze, StepUp: true}, s.executorFreeze)
 	s.route(r, http.MethodGet, "/api/executor/status", Policy{Perm: rbac.PermSystemRead}, s.executorStatusGet)
 	s.route(r, http.MethodGet, "/api/devices/{id}/sessions", read, s.deviceSessions)
+	s.route(r, http.MethodGet, "/api/executor/changesets", read, s.executorChangesets)
 	return r
 }
 
