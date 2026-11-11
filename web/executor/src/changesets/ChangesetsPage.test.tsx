@@ -294,9 +294,10 @@ describe("the run", () => {
 
 describe("helpers", () => {
   it("parses the panel's fragment strictly", () => {
-    expect(parseChangesetPreset(`#changeset=${ID}`)).toEqual({ changeset: ID, restore: undefined });
-    expect(parseChangesetPreset("#restore=12:345")).toEqual({ changeset: undefined, restore: { device: 12, version: 345 } });
-    expect(parseChangesetPreset("#changeset=../x&restore=0:1")).toEqual({ changeset: undefined, restore: undefined });
+    expect(parseChangesetPreset(`#changeset=${ID}`)).toEqual({ section: true, changeset: ID, restore: undefined });
+    expect(parseChangesetPreset("#restore=12:345")).toEqual({ section: true, changeset: undefined, restore: { device: 12, version: 345 } });
+    expect(parseChangesetPreset("#view=changesets")).toEqual({ section: true, changeset: undefined, restore: undefined });
+    expect(parseChangesetPreset("#changeset=../x&restore=0:1")).toEqual({ section: false, changeset: undefined, restore: undefined });
   });
   it("groups the run like the executor and finds the variables", () => {
     expect(stages([1, 2, 3, 4, 5], 2)).toEqual([[1], [2, 3], [4, 5]]);

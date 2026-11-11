@@ -223,13 +223,16 @@ export function storedDryRun(d: Detail): { ok: boolean; plan: string; devices: D
 }
 
 /*
- * What the panel may preselect through the URL fragment: a changeset to open (#changeset=<id>) or a restore of a
- * version (#restore=<device>:<version>). Untrusted: only prefills what the user still checks, saves and confirms.
+ * What the panel may preselect through the URL fragment: the section (#view=changesets), a changeset to open
+ * (#changeset=<id>) or a restore of a version (#restore=<device>:<version>). Untrusted: only prefills what the user
+ * still checks, saves and confirms.
  */
-export type ChangesetPreset = { changeset?: string; restore?: { device: number; version: number } };
+export type ChangesetPreset = { section?: boolean; changeset?: string; restore?: { device: number; version: number } };
 export function parseChangesetPreset(hash: string): ChangesetPreset {
   const p = new URLSearchParams(hash.replace(/^#/, ""));
   const c = p.get("changeset") ?? "";
   const r = /^([1-9]\d{0,17}):([1-9]\d{0,17})$/.exec(p.get("restore") ?? "");
-  return { changeset: CHANGESET_ID.test(c) ? c : undefined, restore: r ? { device: Number(r[1]), version: Number(r[2]) } : undefined };
+  const changeset = CHANGESET_ID.test(c) ? c : undefined;
+  const restore = r ? { device: Number(r[1]), version: Number(r[2]) } : undefined;
+  return { section: p.get("view") === "changesets" || !!changeset || !!restore, changeset, restore };
 }

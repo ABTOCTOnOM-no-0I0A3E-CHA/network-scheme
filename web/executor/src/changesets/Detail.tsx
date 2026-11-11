@@ -112,7 +112,9 @@ export function Detail({ poster, token, me, id, onBack, onEdit, onRestore, onGon
             <h2 className="text-lg font-semibold break-words" data-testid="cs-title">
               {d.title}
             </h2>
-            <p className="mt-0.5 font-mono text-xs text-muted-foreground">{d.changeset_id}</p>
+            <p className="mt-0.5 font-mono text-xs text-muted-foreground" data-testid="cs-id">
+              {d.changeset_id}
+            </p>
           </div>
           <StatusBadge status={d.status} />
         </div>

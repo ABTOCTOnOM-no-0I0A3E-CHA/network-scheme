@@ -5109,6 +5109,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/executor/changesets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Changesets whose every device is in the caller's scope, newest change first
+         * @description From execpub.changeset_summary (written by the executor): metadata only. The lines,
+         *     the dry-runs and the configurations stay in the executor (/x on its own origin).
+         *     author is the author's current name in the panel (null once deleted).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Changesets */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: {
+                                /** Format: uuid */
+                                changeset_id: string;
+                                /** Format: int64 */
+                                author_id: number;
+                                author: string | null;
+                                /** @enum {string} */
+                                kind: "lines" | "restore";
+                                title: string;
+                                /** @enum {string} */
+                                status: "draft" | "dry_run_ok" | "dry_run_failed" | "approved" | "running" | "done" | "rolled_back" | "rollback_failed" | "interrupted" | "discarded";
+                                device_count: number;
+                                /** Format: date-time */
+                                created_at: string;
+                                /** Format: date-time */
+                                updated_at: string;
+                                /** Format: int64 */
+                                failed_device_id: number | null;
+                            }[];
+                        };
+                    };
+                };
+                400: components["responses"]["Error"];
+                401: components["responses"]["Error"];
+                403: components["responses"]["Error"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {

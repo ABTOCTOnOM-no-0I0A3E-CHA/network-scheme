@@ -39,7 +39,7 @@ export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<Exec
   const { t } = useTranslation();
   const [preset] = useState(() => parsePreset(window.location.hash));
   const [csPreset] = useState(() => parseChangesetPreset(window.location.hash));
-  const [view, setView] = useState<View>(preset.replay ? "recordings" : csPreset.changeset || csPreset.restore ? "changesets" : "session");
+  const [view, setView] = useState<View>(preset.replay ? "recordings" : csPreset.section ? "changesets" : "session");
   const [replay, setReplay] = useState(preset.replay);
   const [sessionOpen, setSessionOpen] = useState(false);
   const compact = useCompact();

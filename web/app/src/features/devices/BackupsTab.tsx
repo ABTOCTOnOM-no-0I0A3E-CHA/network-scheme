@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorKey, thrownKey } from "@/features/auth/errors";
 import { ApiError, StepUpCancelled } from "@/features/common/stepup";
+import { useSessionHost } from "@/features/executor/SessionHost";
 import { safeText } from "@/lib/text";
 import { cn } from "@/lib/utils";
 import { BACKUP_WATCH_MS, downloadUrl, useBackupDiff, useBackupNow, useBackups, useBackupState, type BackupVersion, type BackupWatch } from "./backups";
@@ -123,7 +124,7 @@ export function BackupsTab({ deviceId, canBackup }: { deviceId: number; canBacku
         <p className="text-sm text-muted-foreground">{t("backup.none")}</p>
       ) : (
         <>
-          <VersionTable deviceId={deviceId} list={list} a={a} b={b} onA={setA} onB={setB} fmt={fmt} />
+          <VersionTable deviceId={deviceId} list={list} a={a} b={b} onA={setA} onB={setB} fmt={fmt} onBusy={() => setNote({ ok: false, text: t("backup.restoreBusy") })} />
           <div className="flex flex-wrap items-center gap-2">
             {versions.hasNextPage && (
               <Button type="button" variant="outline" size="sm" disabled={versions.isFetchingNextPage} onClick={() => void versions.fetchNextPage()}>
@@ -141,10 +142,21 @@ export function BackupsTab({ deviceId, canBackup }: { deviceId: number; canBacku
   );
 }
 
-type TableProps = { deviceId: number; list: BackupVersion[]; a?: number; b?: number; onA: (id: number) => void; onB: (id: number) => void; fmt: (s: string) => string };
+type TableProps = {
+  deviceId: number;
+  list: BackupVersion[];
+  a?: number;
+  b?: number;
+  onA: (id: number) => void;
+  onB: (id: number) => void;
+  fmt: (s: string) => string;
+  onBusy: () => void;
+};
 
-function VersionTable({ deviceId, list, a, b, onA, onB, fmt }: TableProps) {
+function VersionTable({ deviceId, list, a, b, onA, onB, fmt, onBusy }: TableProps) {
   const { t, i18n } = useTranslation();
+  /* «Восстановить» opens a restore changeset of the version in the executor (FR-UI-DEV-6): a prefill, the executor decides */
+  const host = useSessionHost();
   return (
     <div className="overflow-x-auto rounded-md border">
       <table className="w-full min-w-[40rem] text-left text-sm" aria-label={t("backup.versions")}>
@@ -171,6 +183,11 @@ function VersionTable({ deviceId, list, a, b, onA, onB, fmt }: TableProps) {
             <th scope="col" className="px-3 py-2 font-medium">
               {t("backup.export")}
             </th>
+            {host && (
+              <th scope="col" className="px-3 py-2 font-medium">
+                {t("backup.restore")}
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -196,6 +213,13 @@ function VersionTable({ deviceId, list, a, b, onA, onB, fmt }: TableProps) {
                     {t("backup.download")}
                   </a>
                 </td>
+                {host && (
+                  <td className="px-3 py-2">
+                    <Button type="button" variant="outline" size="sm" aria-label={t("backup.restoreNamed", { when })} onClick={() => host.restore(deviceId, v.id) || onBusy()}>
+                      {t("backup.restore")}
+                    </Button>
+                  </td>
+                )}
               </tr>
             );
           })}
