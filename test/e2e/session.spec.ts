@@ -61,6 +61,16 @@ const term = (f: FrameLocator, device: number) => f.getByTestId(`device-term-${d
 
 /* the device's write credential, sealed by the executor's page to its write key and stored under confirm(H) */
 async function storeCredential(page: Page, device: number) {
+  /* what the executor page asked for and got, for the error below (a refusal or a hang shows up here) */
+  const net: string[] = [];
+  page.on("request", (r) => {
+    if (/\/x\/|\/api\/executor\/ticket/.test(r.url())) net.push(`-> ${r.method()} ${new URL(r.url()).pathname}`);
+  });
+  page.on("response", (r) => {
+    if (/\/x\/|\/api\/executor\/ticket/.test(r.url())) net.push(`<- ${r.status()} ${new URL(r.url()).pathname}`);
+  });
+  page.on("requestfailed", (r) => net.push(`xx ${r.method()} ${r.url()} ${r.failure()?.errorText ?? ""}`));
+  page.on("console", (m) => net.push(`console.${m.type()}: ${m.text().slice(0, 300)}`));
   await page.goto(`/devices/${device}?tab=session`);
   await page.getByRole("button", { name: "Открыть сессию для этого устройства" }).click();
   const f = frame(page);
@@ -77,8 +87,11 @@ async function storeCredential(page: Page, device: number) {
     await expect(f.getByTestId("done").or(f.getByTestId("failure"))).toBeVisible({ timeout: 20_000 });
   } catch (e) {
     /* neither outcome: show what the executor page says instead (the step it is waiting on) */
-    throw new Error(`write credential of device ${device}: no outcome; the page shows:
-${(await f.locator("body").innerText()).slice(0, 3000)}`, { cause: e });
+    throw new Error(`write credential of device ${device}: no outcome; requests:
+${net.join("
+")}
+the page shows:
+${(await f.locator("body").innerText()).slice(0, 2000)}`, { cause: e });
   }
   const failure = f.getByTestId("failure");
   if (await failure.isVisible()) throw new Error(`write credential of device ${device}: ${await failure.innerText()}`);
