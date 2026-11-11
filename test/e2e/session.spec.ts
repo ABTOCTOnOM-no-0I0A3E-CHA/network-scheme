@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FrameLocator, Page } from "@playwright/test";
 import { generate } from "otplib";
@@ -39,11 +39,20 @@ const dir = process.env.NMS_E2E_DIR ?? "/tmp/nms-e2e";
  * used, so every code here waits for a step after the previous one (one worker, in order).
  */
 const PERIOD = 30;
-let lastStep = 0;
+/* the last step used, in a file: Playwright restarts the worker after a failed test, and a step used before the
+   restart must not be sent again (the executor refuses a replayed code and counts it as a failure) */
+const STEP_FILE = "/tmp/nms-e2e-change-totp-step";
 async function changeCode(): Promise<string> {
   const now = () => Math.floor(Date.now() / 1000 / PERIOD);
+  let lastStep = 0;
+  try {
+    lastStep = Number(readFileSync(STEP_FILE, "utf8")) || 0;
+  } catch {
+    /* first code of the run */
+  }
   while (now() <= lastStep) await new Promise((r) => setTimeout(r, 1000));
   lastStep = now();
+  writeFileSync(STEP_FILE, String(lastStep));
   return generate({ secret: readFileSync(join(dir, "change-totp-secret"), "utf8").trim(), epoch: lastStep * PERIOD });
 }
 
@@ -115,7 +124,12 @@ async function openSession(page: Page, device: number): Promise<FrameLocator> {
   await expect(f.locator("#ss-devices")).toHaveValue(String(device));
   await f.locator("#ss-code").fill(await changeCode());
   await f.getByRole("button", { name: "Открыть сессию" }).click();
-  await expect(f.getByTestId("session-view")).toBeVisible();
+  try {
+    await expect(f.getByTestId("session-view")).toBeVisible({ timeout: 30_000 });
+  } catch (e) {
+    /* the refusal the start screen shows (or the step it waits on), instead of a bare timeout */
+    throw new Error(`open session on device ${device}: the page shows:${String.fromCharCode(10)}${(await f.locator("body").innerText()).slice(0, 2000)}`, { cause: e });
+  }
   await expect(f.getByTestId("timer")).toContainText("Осталось");
   return f;
 }

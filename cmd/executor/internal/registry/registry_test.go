@@ -591,7 +591,12 @@ func TestStallAtPendingSettles(t *testing.T) {
 		t.Run(fmt.Sprintf("resumed late %v", late), func(t *testing.T) {
 			env, r := fresh(t)
 			ctx := context.Background()
-			r.opTimeout, r.settleFor = 3*time.Second, 20*time.Second /* the settle must outlast a resumed backend on a loaded runner */
+			/*
+				The write's deadline must outlast the stall itself (COPY TO PROGRAM kill -STOP inside the hook): on a loaded
+				runner a 3 s deadline was spent before the COMMIT was sent, so it never reached the server and the write
+				failed as it should, but not as this case means to test. The settle must outlast a resumed backend.
+			*/
+			r.opTimeout, r.settleFor = 10*time.Second, 20*time.Second
 			if late {
 				r.settleFor = time.Second
 			}
