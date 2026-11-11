@@ -181,3 +181,54 @@ func TestSaveRefusals(t *testing.T) {
 		t.Fatalf("%d changesets stored", n)
 	}
 }
+
+/*
+The editor's pickers: devices lists only the devices save would take (writable
+now, in a group the user holds write on), versions only the metadata of a
+device the user may restore, newest first; the workspace token tells the UI
+whose it is.
+*/
+func TestPickers(t *testing.T) {
+	f := newFx(t, "mes6", "esr")
+	f.device(t, "mes10", 2210, "edge")
+	ctx := context.Background()
+	alice := f.user(t, "core")
+	o, err := f.m.Open(ctx, f.req(t, alice))
+	if err != nil || o.UserID != alice.id || o.Username != alice.name {
+		t.Fatalf("open: %+v %v", o, err)
+	}
+	off := f.devs[1].row
+	off["writes_enabled"] = false
+	f.put(t, "write_device", off)
+	res, err := f.op(t, o.Token, "devices", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.([]changeset.Writable); len(got) != 1 || got[0].ID != f.devs[0].id || got[0].Address != "192.0.2.10:2200" ||
+		got[0].Group != "core" || got[0].Line != "mes6" {
+		t.Fatalf("devices: %+v", got)
+	}
+	for _, sql := range []string{`'schedule', now() - interval '1 day'`, `'manual', now()`} {
+		if _, err := f.env.Pool("postgres").Exec(ctx, `INSERT INTO backups.config_version (device_id, source, taken_at, sha256, size, masked, full_ct, full_dek_ct)
+			VALUES ($1, `+sql+`, decode(repeat('ab', 32), 'hex'), 7, 'masked', '\x00', '\x00')`, f.devs[0].id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err = f.op(t, o.Token, "versions", map[string]any{"device_id": f.devs[0].id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.([]changeset.VersionItem); len(got) != 2 || got[0].Source != "manual" || got[1].Source != "schedule" ||
+		got[0].SHA256 != strings.Repeat("ab", 32) || got[0].Size != 7 {
+		t.Fatalf("versions: %+v", got)
+	}
+	if _, err := f.op(t, o.Token, "versions", map[string]any{"device_id": f.devs[1].id}); code(err) != "writes_disabled" {
+		t.Fatalf("writes off: %v", err)
+	}
+	if _, err := f.op(t, o.Token, "versions", map[string]any{"device_id": f.devs[2].id}); code(err) != "no_grant" {
+		t.Fatalf("other group: %v", err)
+	}
+	if _, err := f.op(t, o.Token, "versions", map[string]any{"device_id": f.devs[0].id, "x": 1}); err == nil {
+		t.Fatal("unknown parameter taken")
+	}
+}

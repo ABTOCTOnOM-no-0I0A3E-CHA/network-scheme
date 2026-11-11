@@ -5,14 +5,16 @@ import { StatusWidget } from "./StatusWidget";
 import type { ExecutorBridge } from "./bridge";
 import type { Poster } from "./client";
 import { AuditPage } from "./audit/AuditPage";
+import { parseChangesetPreset } from "./changesets/api";
+import { ChangesetsPage } from "./changesets/ChangesetsPage";
 import { ConfigsPage } from "./configs/ConfigsPage";
 import { DevicesPage } from "./devices/DevicesPage";
 import { RecordingsPage } from "./recordings/RecordingsPage";
 import { parsePreset } from "./session/api";
 import { SessionApp } from "./session/SessionApp";
 
-type View = "session" | "recordings" | "configs" | "audit" | "devices";
-const VIEWS: View[] = ["session", "recordings", "configs", "audit", "devices"];
+type View = "session" | "changesets" | "recordings" | "configs" | "audit" | "devices";
+const VIEWS: View[] = ["session", "changesets", "recordings", "configs", "audit", "devices"];
 
 /* The panel's dock shows this page as a strip of this height or less: the session's compact indicator only. */
 const COMPACT = "(max-height: 160px)";
@@ -29,14 +31,15 @@ function useCompact(): boolean {
 }
 
 /*
- * The executor UI: the change session (default), the session recordings, the unmasked configurations, the executor's
- * audit and the write device administration. The panel may preselect devices or a recording through the fragment of
- * the frame's URL (parsePreset: prefill only).
+ * The executor UI: the change session (default), the changesets, the session recordings, the unmasked configurations,
+ * the executor's audit and the write device administration. The panel may preselect devices, a recording, a changeset
+ * or a restore through the fragment of the frame's URL (parsePreset, parseChangesetPreset: prefill only).
  */
 export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<ExecutorBridge | null> }) {
   const { t } = useTranslation();
   const [preset] = useState(() => parsePreset(window.location.hash));
-  const [view, setView] = useState<View>(preset.replay ? "recordings" : "session");
+  const [csPreset] = useState(() => parseChangesetPreset(window.location.hash));
+  const [view, setView] = useState<View>(preset.replay ? "recordings" : csPreset.changeset || csPreset.restore ? "changesets" : "session");
   const [replay, setReplay] = useState(preset.replay);
   const [sessionOpen, setSessionOpen] = useState(false);
   const compact = useCompact();
@@ -96,6 +99,15 @@ export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<Exec
         <main className={compact ? "min-h-0 flex-1" : "min-h-0 flex-1 overflow-auto p-4"}>
           {/* the session stays mounted on the other views: its terminals keep their connections */}
           <div className={view === "session" || compact ? "h-full" : "hidden"}>{session}</div>
+          {/* the changesets stay mounted on the other views: the workspace token lives in their memory */}
+          {poster && (
+            <div className={view === "changesets" && !compact ? "mx-auto max-w-6xl" : "hidden"}>
+              <ChangesetsPage poster={poster} preset={csPreset} onRecordings={(s, d) => {
+                setReplay({ session: s, device: d });
+                setView("recordings");
+              }} />
+            </div>
+          )}
           {poster && !compact && view === "recordings" && (
             <div className="mx-auto max-w-5xl">
               <RecordingsPage key={replay ? `${replay.session}/${replay.device}` : "-"} poster={poster} initial={replay} />

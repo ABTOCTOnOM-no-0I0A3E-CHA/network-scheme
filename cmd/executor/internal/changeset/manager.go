@@ -182,11 +182,13 @@ const (
 /* noGroup is the group of a device the registry does not have: no grant can name it. */
 const noGroup = "-unregistered"
 
-/* Opened is the answer of open: the workspace's bearer token and its times. */
+/* Opened is the answer of open: the workspace's bearer token, its times and its user (the UI tells the author from a second person). */
 type Opened struct {
 	Token       string    `json:"token"`
 	Expires     time.Time `json:"expires"`
 	IdleSeconds int       `json:"idle_seconds"`
+	UserID      int64     `json:"user_id"`
+	Username    string    `json:"username"`
 }
 
 /*
@@ -264,7 +266,7 @@ func (m *Manager) Open(ctx context.Context, req authz.Request) (Opened, error) {
 		return Opened{}, refuse(CodeTooMany)
 	}
 	m.tokens[sha256.Sum256([]byte(token))] = ws
-	return Opened{Token: token, Expires: ws.expires.UTC(), IdleSeconds: int(ws.idle / time.Second)}, nil
+	return Opened{Token: token, Expires: ws.expires.UTC(), IdleSeconds: int(ws.idle / time.Second), UserID: ws.user, Username: ws.username}, nil
 }
 
 /* lookup returns the workspace of token and counts it as used. */

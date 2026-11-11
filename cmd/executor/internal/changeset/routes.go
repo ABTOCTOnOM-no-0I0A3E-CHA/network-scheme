@@ -7,17 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"time"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/devices"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/strategy"
 )
 
 /* Ops are the workspace routes /x/changesets/{op} (web.Changesets). */
-var Ops = []string{"list", "get", "save", "discard", "dry-run", "progress", "stop"}
+var Ops = []string{"list", "get", "save", "discard", "dry-run", "progress", "stop", "devices", "versions"}
 
 /*
 Op runs one workspace route with the workspace's token: the token, the
@@ -47,6 +50,10 @@ func (m *Manager) Op(ctx context.Context, token, op string, params json.RawMessa
 		return m.dryRunOp(ctx, ws, params)
 	case "stop":
 		return m.stopOp(ctx, ws, params)
+	case "devices":
+		return m.devicesOp(ctx, ws, params)
+	case "versions":
+		return m.versionsOp(ctx, ws, params)
 	}
 	return nil, refuse(CodeBadParams)
 }
@@ -297,4 +304,91 @@ func (m *Manager) discard(ctx context.Context, ws workspace, params json.RawMess
 	m.publish(ctx, cs)
 	m.cfg.Log.Info("changeset discarded", slog.String("changeset", p.ID))
 	return map[string]bool{"discarded": true}, nil
+}
+
+/* Writable is a device the user may put in a changeset now, as the editor's picker shows it (the registry's data only). */
+type Writable struct {
+	ID      int64  `json:"device_id"`
+	Address string `json:"address"` /* address:port */
+	Group   string `json:"write_group"`
+	Line    string `json:"line"`
+}
+
+/* devicesOp lists the devices writable now (save would take them) in a group the user holds write on. */
+func (m *Manager) devicesOp(ctx context.Context, ws workspace, params json.RawMessage) (any, error) {
+	if err := strict(params, &struct{}{}); err != nil {
+		return nil, err
+	}
+	out := []Writable{}
+	err := m.cfg.Gate.View(ctx, func(s *registry.Snapshot) error {
+		for _, d := range devices.All(s) {
+			if deviceRefusal(s, d.ID) != nil || !granted(s, ws, []string{d.Group}) || !d.Address.IsValid() || d.Port < 1 || d.Port > 65535 {
+				continue
+			}
+			out = append(out, Writable{ID: d.ID, Address: netip.AddrPortFrom(d.Address, uint16(d.Port)).String(), // #nosec G115 -- checked above
+				Group: d.Group, Line: d.Driver})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, viewErr(err)
+	}
+	return out, nil
+}
+
+/* VersionItem is a configuration version of a device as the restore editor's picker shows it (metadata only, never the text). */
+type VersionItem struct {
+	ID      int64     `json:"version_id"`
+	TakenAt time.Time `json:"taken_at"`
+	Source  string    `json:"source"`
+	SHA256  string    `json:"sha256"`
+	Size    int64     `json:"size"`
+}
+
+/* versionsMost is the versions a picker lists, newest first. */
+const versionsMost = 100
+
+type deviceParams struct {
+	Device int64 `json:"device_id"`
+}
+
+/* versionsOp lists the newest configuration versions of a device the user may restore now (writable, write on its group). */
+func (m *Manager) versionsOp(ctx context.Context, ws workspace, params json.RawMessage) (any, error) {
+	var p deviceParams
+	if err := strict(params, &p); err != nil {
+		return nil, err
+	}
+	if err := m.cfg.Gate.View(ctx, func(s *registry.Snapshot) error {
+		if r := deviceRefusal(s, p.Device); r != nil {
+			return r
+		}
+		if !granted(s, ws, groupsOf(s, []int64{p.Device})) {
+			return &Refusal{Code: "no_grant", Device: p.Device}
+		}
+		return nil
+	}); err != nil {
+		return nil, viewErr(err)
+	}
+	qctx, cancel := context.WithTimeout(ctx, opTime)
+	defer cancel()
+	rows, err := m.cfg.Store.Pool.Query(qctx, `SELECT id, taken_at, source, sha256, size FROM backups.config_version
+		WHERE device_id = $1 ORDER BY taken_at DESC, id DESC LIMIT $2`, p.Device, versionsMost)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
+	}
+	defer rows.Close()
+	out := []VersionItem{}
+	for rows.Next() {
+		var v VersionItem
+		var sum []byte
+		if err := rows.Scan(&v.ID, &v.TakenAt, &v.Source, &sum, &v.Size); err != nil {
+			return nil, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
+		}
+		v.SHA256, v.TakenAt = hex.EncodeToString(sum), v.TakenAt.UTC()
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
+	}
+	return out, nil
 }
