@@ -46,9 +46,9 @@ describe("ExecutorFrame", () => {
     renderFrame();
     const f = await screen.findByTitle("Executor");
     expect(f).toHaveAttribute("src", EXECUTOR + "/");
-    expect(f).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
+    expect(f).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
     expect(f).toHaveAttribute("referrerpolicy", "no-referrer");
-    expect(f.getAttribute("sandbox")).not.toMatch(/allow-(forms|popups|modals|top-navigation|downloads|pointer-lock|presentation)/);
+    expect(f.getAttribute("sandbox")).not.toMatch(/allow-(forms|popups|modals|top-navigation|pointer-lock|presentation)/);
   });
 
   it("does not embed anything when the published panel origin is not the one this page runs on", async () => {

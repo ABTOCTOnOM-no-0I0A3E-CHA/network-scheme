@@ -48,6 +48,8 @@ const (
 	SystemRecordingViews        = "executor_recording_views"
 	SystemSessionTamper         = "executor_session_tamper"
 	SystemRecordingTamper       = "executor_recording_tamper"
+	SystemUnmaskViews           = "executor_unmask_views"
+	SystemConfigTamper          = "executor_config_tamper"
 	SystemExecutorAlert         = "executor_alert"
 	SystemExecutorUnreachable   = "executor_unreachable"
 	executorUnfrozen            = "executor_unfrozen"
@@ -60,7 +62,7 @@ var executorSeverity = map[string]string{
 	SystemSessionOutsideWindow: "warning",
 	SystemExecutorPassword:     "high", SystemExecutorLineMismatch: "high", SystemExecutorRollback: "high",
 	SystemRecordingFailed: "high", SystemRecordingFull: "warning", SystemRecordingViews: "high",
-	SystemSessionTamper: "high", SystemRecordingTamper: "high",
+	SystemSessionTamper: "high", SystemRecordingTamper: "high", SystemUnmaskViews: "high", SystemConfigTamper: "high",
 }
 
 /*
@@ -170,6 +172,10 @@ func systemName(kind string) string {
 		return "Too many change session recordings viewed"
 	case SystemSessionTamper:
 		return "Change session row fails its integrity check"
+	case SystemUnmaskViews:
+		return "Too many unmasked configurations viewed by one user"
+	case SystemConfigTamper:
+		return "Configuration version fails its hash check; not shown"
 	case SystemRecordingTamper:
 		return "Change session recording fails its integrity check"
 	case SystemExecutorAlert:

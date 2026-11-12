@@ -4,13 +4,15 @@ import { FrameContext } from "./frame";
 import { StatusWidget } from "./StatusWidget";
 import type { ExecutorBridge } from "./bridge";
 import type { Poster } from "./client";
+import { AuditPage } from "./audit/AuditPage";
+import { ConfigsPage } from "./configs/ConfigsPage";
 import { DevicesPage } from "./devices/DevicesPage";
 import { RecordingsPage } from "./recordings/RecordingsPage";
 import { parsePreset } from "./session/api";
 import { SessionApp } from "./session/SessionApp";
 
-type View = "session" | "recordings" | "devices";
-const VIEWS: View[] = ["session", "recordings", "devices"];
+type View = "session" | "recordings" | "configs" | "audit" | "devices";
+const VIEWS: View[] = ["session", "recordings", "configs", "audit", "devices"];
 
 /* The panel's dock shows this page as a strip of this height or less: the session's compact indicator only. */
 const COMPACT = "(max-height: 160px)";
@@ -27,8 +29,9 @@ function useCompact(): boolean {
 }
 
 /*
- * The executor UI: the change session (default), the session recordings and the write device administration. The
- * panel may preselect devices or a recording through the fragment of the frame's URL (parsePreset: prefill only).
+ * The executor UI: the change session (default), the session recordings, the unmasked configurations, the executor's
+ * audit and the write device administration. The panel may preselect devices or a recording through the fragment of
+ * the frame's URL (parsePreset: prefill only).
  */
 export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<ExecutorBridge | null> }) {
   const { t } = useTranslation();
@@ -96,6 +99,16 @@ export function App({ poster, bridge }: { poster?: Poster; bridge?: Promise<Exec
           {poster && !compact && view === "recordings" && (
             <div className="mx-auto max-w-5xl">
               <RecordingsPage key={replay ? `${replay.session}/${replay.device}` : "-"} poster={poster} initial={replay} />
+            </div>
+          )}
+          {poster && !compact && view === "configs" && (
+            <div className="mx-auto max-w-5xl">
+              <ConfigsPage poster={poster} />
+            </div>
+          )}
+          {poster && !compact && view === "audit" && (
+            <div className="mx-auto max-w-6xl">
+              <AuditPage poster={poster} />
             </div>
           )}
           {poster && !compact && view === "devices" && (

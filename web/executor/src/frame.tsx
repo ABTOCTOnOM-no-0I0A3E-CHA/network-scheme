@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@nms/shared/ui/button";
 import { useUnobscured } from "./useUnobscured";
@@ -28,6 +28,10 @@ export function useConfirmGate() {
     },
     [observe],
   );
+  /* a confirmation that appears below the fold is gated as covered until scrolled to: bring it into view once */
+  useEffect(() => {
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [el]);
   useEffect(() => {
     if (!el) return;
     const check = () => setTooTall(el.getBoundingClientRect().height > window.innerHeight);
@@ -40,12 +44,16 @@ export function useConfirmGate() {
       ro?.disconnect();
     };
   }, [el]);
-  /* the latest answer, for the re-check at the click */
+  /*
+   * The answer of the last render, for the re-check at the click. Set in a layout effect (before the enabled
+   * button is painted), not a passive effect: that one runs after paint, so a click right after the button turned
+   * enabled (the dock growing for a dialog) read the previous "covered" answer and was dropped without a word.
+   */
   const seen = useRef(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     seen.current = unobscured && !tooTall;
   }, [unobscured, tooTall]);
-  /* read at the click, never during render */
+  /* read at the click only */
   const visibleNow = useCallback(() => seen.current, []);
   return { ref, unobscured: unobscured && !tooTall, supported, tooTall, visibleNow };
 }

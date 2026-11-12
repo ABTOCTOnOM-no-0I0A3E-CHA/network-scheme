@@ -286,7 +286,7 @@ func TestChallengeBindsUserAndGrant(t *testing.T) {
 		t.Fatalf("audit %+v", r)
 	}
 	/* The action needs unmask, which alice lacks: a request claiming write does not help. */
-	c = f.issue(t, alice, authz.Need{Kind: "unmask"}, hostkey)
+	c = f.issue(t, alice, authz.Need{Kind: "unmask", Groups: []string{"core"}}, hostkey)
 	req := f.req(t, alice)
 	req.Need = writeCore
 	if _, _, err := f.store.Confirm(context.Background(), c.ID, c.H[:], req); err != authz.ErrDenied {

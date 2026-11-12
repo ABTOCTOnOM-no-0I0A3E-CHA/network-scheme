@@ -162,7 +162,7 @@ func TestAPICannotLearnTheChangeTOTPSecret(t *testing.T) {
 	if err := ask(code, granted); !errors.Is(err, authz.ErrDenied) {
 		t.Fatalf("replayed code: %v", err)
 	}
-	if err := ask(code, authz.Need{Kind: "unmask"}); !errors.Is(err, authz.ErrDenied) {
+	if err := ask(code, authz.Need{Kind: "unmask", Groups: []string{"core"}}); !errors.Is(err, authz.ErrDenied) {
 		t.Fatalf("grant the victim lacks: %v", err)
 	}
 

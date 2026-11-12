@@ -258,6 +258,17 @@ func (s *Store) Discard(id string) {
 }
 
 /*
+Action returns the action of the pending challenge id without spending it
+(web routes a challenge to the only route that may confirm it).
+*/
+func (s *Store) Action(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[id]
+	return p.c.Action, ok
+}
+
+/*
 Confirm runs the confirmation of challenge id with hash h: the challenge is
 spent by this attempt whatever its outcome (one-time), it must not have
 expired, h must be its H, and then authz decides req as the challenge's

@@ -88,6 +88,7 @@ type Authorizer interface {
 /* Confirmer is what the server needs of confirm.Store. */
 type Confirmer interface {
 	Issue(user int64, need authz.Need, d confirm.Description) (confirm.Challenge, error)
+	Action(id string) (string, bool)
 	Confirm(ctx context.Context, id string, h []byte, req authz.Request) (confirm.Challenge, authz.Decision, error)
 }
 
@@ -95,7 +96,8 @@ type Confirmer interface {
 Action is one action confirmed with confirm(H). Describe builds, from the
 executor's own data and the client's params, what the user confirms (its
 Action must be the action's name) and the grant it needs; Run executes the
-confirmed description. The client never chooses the grant or the text.
+confirmed description. The client never chooses the grant or the text. An
+action without Run is confirmed only on its own route (Confirmed).
 */
 type Action struct {
 	Describe func(ctx context.Context, by authz.Decision, params json.RawMessage) (authz.Need, confirm.Description, error)
@@ -144,6 +146,8 @@ type Config struct {
 	State   func() (enabled, frozen bool)
 	Actions map[string]Action
 	Reads   map[string]Read /* authorized reads (ticket + change TOTP) by path, POST routes of their own (read.go) */
+	/* Confirmed are actions confirmed on routes of their own (confirmed.go). */
+	Confirmed []Confirmed
 	/* Sessions, if set, serves the change session routes (sessions.go). */
 	Sessions *Sessions
 	/* Terminal, if set, serves GET /x/ws (terminal.Terminal.Serve: its own Origin check and timeouts). */
@@ -204,6 +208,9 @@ func New(cfg Config) (*Server, error) {
 		s.routes = append(s.routes, route{http.MethodGet, "/x/ws", cfg.Terminal, nil})
 	}
 	if err := s.addReads(); err != nil {
+		return nil, err
+	}
+	if err := s.addConfirmed(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -629,6 +636,11 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, ip string) {
 	if !s.admit(w, req.Ticket) {
 		return
 	}
+	/* An action confirmed on a route of its own (Confirmed) is not confirmed here: its challenge is left unspent. */
+	if a, ok := s.c.Confirm.Action(req.ChallengeID); ok && s.c.Actions[a].Run == nil {
+		fail(w, http.StatusNotFound, "use_route")
+		return
+	}
 	c, by, err := s.c.Confirm.Confirm(r.Context(), req.ChallengeID, h, authz.Request{Ticket: req.Ticket, Code: req.Code,
 		IP: ip, UA: r.UserAgent()})
 	if err != nil {
@@ -636,7 +648,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	act, ok := s.c.Actions[c.Action]
-	if !ok {
+	if !ok || act.Run == nil {
 		s.c.Log.Error("web: a confirmed challenge names no action", slog.String("action", c.Action))
 		fail(w, http.StatusInternalServerError, "internal")
 		return

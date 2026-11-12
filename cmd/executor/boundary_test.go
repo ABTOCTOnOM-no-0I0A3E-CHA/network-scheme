@@ -30,7 +30,7 @@ func violations(dir, text string) []string {
 		out = append(out, "names a registry table; use registry.View / registry.Write")
 	}
 	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dir != "internal/pub" && dir != "internal/backups" &&
-		dir != "internal/session" && dir != "internal/recording" && dbAccess.MatchString(text) {
+		dir != "internal/session" && dir != "internal/recording" && dir != "internal/unmask" && dbAccess.MatchString(text) {
 		out = append(out, "opens or holds a database connection; decisions go through the registry")
 	}
 	if dir == "internal/pub" && execSQL.MatchString(text) {
@@ -53,6 +53,9 @@ func violations(dir, text string) []string {
 	if dir == "internal/backups" && execSQL.MatchString(text) {
 		out = append(out, "names schema exec; backups reads its devices through the registry only")
 	}
+	if dir == "internal/unmask" && execSQL.MatchString(text) {
+		out = append(out, "names schema exec; unmask reads configuration versions only, its devices through the registry")
+	}
 	if dir != "internal/attacktest" && strings.Contains(text, "internal/attacktest") {
 		out = append(out, "imports attacktest outside tests")
 	}
@@ -70,7 +73,8 @@ later code in cmd/executor:
     execpub.backup_taken; never schema exec), session (its own append-only
     rows exec.session, session_device and session_event only), recording
     (its own append-only rows exec.recording_chunk and recording_manifest,
-    reading the session's) and main holds or opens a database connection,
+    reading the session's), unmask (backups.config_version, read; never
+    schema exec) and main holds or opens a database connection,
     so decision code cannot run its own queries;
   - attacktest (superuser tampering) is imported by tests only.
 */

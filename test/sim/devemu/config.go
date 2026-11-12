@@ -17,6 +17,8 @@ type node struct {
 	mode     string /* sub-mode of a context line; "" for a plain line */
 	children []*node
 	exitRaw  string /* printed exit line; empty: the profile's */
+	ind      string /* indentation of the children as read (a fixture may print a context's lines at column 0) */
+	read     bool   /* ind was read from a child */
 }
 
 /* parseConfig reads a configuration: context lines open sub-modes, the profile's exit line closes them. */
@@ -34,6 +36,9 @@ func parseConfig(p *Profile, text string) (*node, error) {
 			root.children = append(root.children, &node{text: t, raw: raw})
 		default:
 			n := &node{text: t, raw: raw, mode: p.context(t)}
+			if !top.read {
+				top.ind, top.read = raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))], true
+			}
 			top.children = append(top.children, n)
 			if n.mode != "" {
 				stack = append(stack, n)
@@ -60,10 +65,15 @@ func (p *Profile) render(root *node) string {
 	var b strings.Builder
 	var walk func(n *node, depth int)
 	walk = func(n *node, depth int) {
+		/* a typed line is indented as the context's lines were read, else by depth */
+		ind := strings.Repeat(p.Config.Indent.Text, depth)
+		if n.read {
+			ind = n.ind
+		}
 		for _, c := range n.children {
 			raw := c.raw
 			if raw == "" {
-				raw = strings.Repeat(p.Config.Indent.Text, depth) + c.text
+				raw = ind + c.text
 			}
 			b.WriteString(raw + "\n")
 			if c.mode == "" {

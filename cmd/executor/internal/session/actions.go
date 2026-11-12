@@ -55,6 +55,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/drivers"
@@ -454,7 +455,10 @@ is diff ({}), save ({device_id, sha256}), commit ({device_id}), form
 ({device_id, form}: the lines to confirm) and form-apply ({device_id, form,
 lines}). params are decoded strictly.
 */
-func (m *Manager) Act(ctx context.Context, id, token, op string, params json.RawMessage) (any, error) {
+func (m *Manager) Act(ctx context.Context, id, token, op string, params json.RawMessage) (res any, err error) {
+	if op == "save" || op == "commit" || op == "form-apply" {
+		defer func() { m.auditAct(ctx, id, op, params, err) }()
+	}
 	var p struct {
 		Device int64  `json:"device_id"`
 		SHA256 string `json:"sha256"`
@@ -493,6 +497,33 @@ func (m *Manager) Act(ctx context.Context, id, token, op string, params json.Raw
 		return out, err
 	}
 	return nil, ErrNotApplicable
+}
+
+/*
+auditAct writes the executor audit row of a session action that changes a
+device (save, ESR commit, a form's lines): its session, device and outcome
+(security.md 10). The user is the session's, named only when the action ran
+(a refused token proves no one).
+*/
+func (m *Manager) auditAct(ctx context.Context, id, op string, params json.RawMessage, err error) {
+	var p struct {
+		Device int64 `json:"device_id"`
+	}
+	_ = json.Unmarshal(params, &p)
+	ev := audit.Event{Action: "session." + op, Object: "session:" + id, Result: audit.OK, Details: map[string]any{"device_id": p.Device}}
+	if s, ok := m.find(id); ok && err == nil {
+		user := s.User
+		ev.UserID = &user
+	}
+	var r Refusal
+	switch {
+	case err == nil:
+	case errors.As(err, &r):
+		ev.Result, ev.Details["class"] = audit.Denied, string(r)
+	default:
+		ev.Result = audit.Error
+	}
+	m.cfg.Auth.Record(ctx, ev)
 }
 
 func strict(b json.RawMessage, v any) error {
@@ -705,6 +736,13 @@ func (m *Manager) RunRollback(ctx context.Context, c confirm.Challenge, by authz
 		out = append(out, r)
 	}
 	m.event(ctx, s.ID, "rolled_back", map[string]any{"ok": !failed})
+	/* the outcome of the confirmed rollback (the confirmation has its own row, confirm.session.rollback) */
+	ev := audit.Event{UserID: &by.UserID, Action: RollbackAction, Object: "session:" + IDString(s.ID), Result: audit.OK,
+		Details: map[string]any{"devices": out, "challenge": c.ID}}
+	if failed {
+		ev.Result = audit.Error
+	}
+	m.cfg.Auth.Record(ctx, ev)
 	m.mu.Lock()
 	if s.ended && !slices.ContainsFunc(s.Devices, func(d *Device) bool { return d.Session != nil && !d.closed }) {
 		delete(m.interrupted, s.ID)

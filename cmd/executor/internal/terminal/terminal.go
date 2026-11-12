@@ -74,8 +74,11 @@ import (
 	"github.com/beekamai/network-scheme/internal/ticket"
 )
 
-/* LineAction is the confirm(H) action of a dangerous line. */
-const LineAction = "session.line"
+/* LineAction is the confirm(H) action of a dangerous line; CommandAction the audit action of every classified line. */
+const (
+	LineAction    = "session.line"
+	CommandAction = "session.command"
+)
 
 /* Bounds; variables for the tests. */
 var (
@@ -614,6 +617,7 @@ func (c *conn) line(ctx context.Context, text string) error {
 			return errStop
 		}
 		v := d.Session.Classify(text)
+		c.audit(ctx, s, d, v)
 		switch v.Class {
 		case core.Safe:
 			return c.sendLine(ctx, s, d, v)
@@ -627,6 +631,23 @@ func (c *conn) line(ctx context.Context, text string) error {
 		}
 		return errStop
 	})
+}
+
+/*
+audit writes the executor audit row of a classified line (security.md 10:
+every command with its class): the session, the device, the class and its
+reason, the normalized line masked as the recording has it. A denied line
+is a refusal of the policy (denied); the others are decided (ok): a safe
+line goes to the device, a dangerous one waits for its confirmation (its
+own row, confirm.session.line), a control line goes to its flow.
+*/
+func (c *conn) audit(ctx context.Context, s *session.Session, d *session.Device, v core.Verdict) {
+	user, result := s.User, audit.OK
+	if v.Class != core.Safe && v.Class != core.Dangerous && v.Class != core.Control {
+		result = audit.Denied
+	}
+	c.t.c.Auth.Record(ctx, audit.Event{UserID: &user, IP: c.ip, UA: c.ua, Action: CommandAction, Object: "session:" + c.sid, Result: result,
+		Details: map[string]any{"device_id": d.ID, "class": v.Class.String(), "reason": string(v.Reason), "line": d.Driver.MaskSecrets(v.Line)}})
 }
 
 /*

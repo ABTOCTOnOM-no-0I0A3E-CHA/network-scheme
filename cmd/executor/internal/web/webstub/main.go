@@ -70,6 +70,8 @@ func (refuser) Issue(int64, authz.Need, confirm.Description) (confirm.Challenge,
 	return confirm.Challenge{}, authz.ErrDenied
 }
 
+func (refuser) Action(string) (string, bool) { return "", false }
+
 func (refuser) Confirm(context.Context, string, []byte, authz.Request) (confirm.Challenge, authz.Decision, error) {
 	return confirm.Challenge{}, authz.Decision{}, authz.ErrDenied
 }

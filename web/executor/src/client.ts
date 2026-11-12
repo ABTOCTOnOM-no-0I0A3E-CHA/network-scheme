@@ -24,6 +24,27 @@ async function run<T>(path: string, init: RequestInit, schema: z.ZodType<T>): Pr
   return p.success ? { ok: true, value: p.data } : { ok: false, failure: { kind: "bad_response" } };
 }
 
+/* run for a download (POST /x/download/...): the answer's body as text, never parsed or rendered; a refusal as JSON. */
+async function runText(path: string, init: RequestInit, maxBytes: number): Promise<Result<string>> {
+  let res: Response;
+  try {
+    res = await fetch(path, { ...BASE, ...init });
+  } catch {
+    return { ok: false, failure: { kind: "network" } };
+  }
+  const text = await res.text().catch(() => undefined);
+  if (!res.ok) {
+    let body: unknown;
+    try {
+      body = text === undefined ? undefined : JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    return { ok: false, failure: parseFailure(res.status, body, res.headers.get("Retry-After")) };
+  }
+  return text === undefined || text.length > maxBytes ? { ok: false, failure: { kind: "bad_response" } } : { ok: true, value: text };
+}
+
 const statusBody = z.object({ enabled: z.boolean(), frozen: z.boolean() });
 export type ExecutorStatus = z.infer<typeof statusBody>;
 
@@ -45,6 +66,8 @@ export type Poster = {
    * request at a time, and a code given here counts as sent from now on (the frame carrying it is sent next).
    */
   ticket(code?: string): Promise<Result<string>>;
+  /* post for a download: the same guards, the answer's text (at most maxBytes) instead of JSON. */
+  download(path: string, body: { code: string; ticket?: never } & Record<string, unknown>, maxBytes: number): Promise<Result<string>>;
 };
 
 const REMEMBERED_CODES = 16;
@@ -84,6 +107,17 @@ export function createPoster(bridge: Pick<ExecutorBridge, "requestTicket">): Pos
       inFlight = true;
       try {
         return await take(code);
+      } finally {
+        inFlight = false;
+      }
+    },
+    async download(path, body, maxBytes) {
+      if (inFlight) return { ok: false, failure: { kind: "local", code: "busy" } };
+      inFlight = true;
+      try {
+        const t = await take(body.code);
+        if (!t.ok) return t;
+        return await runText(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ticket: t.value }) }, maxBytes);
       } finally {
         inFlight = false;
       }

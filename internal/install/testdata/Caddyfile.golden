@@ -187,6 +187,28 @@
 		error @foreign_host 421
 		respond @sw 403
 
+		# Downloads (unmasked configurations, 4d.1) are plain-text attachments, never JSON or anything a browser
+		# renders: the type and the disposition are forced here whatever the upstream says. Otherwise as /x/*.
+		handle /x/download/* {
+			reverse_proxy https://172.30.2.2:8444 {
+				header_up -Cookie
+				header_up Host {http.request.hostport}
+				header_up X-Forwarded-For {remote_host}
+				header_down -Set-Cookie
+				header_down -Service-Worker-Allowed
+				header_down -Content-Security-Policy
+				header_down Content-Type "text/plain; charset=utf-8"
+				header_down Content-Disposition "attachment"
+				header_down Cache-Control "no-store"
+				transport http {
+					tls_client_auth /certs/gateway_client.crt /certs/gateway_client.key
+					tls_trust_pool file /certs/ca.crt
+					tls_server_name executor
+					versions 1.1
+				}
+			}
+		}
+
 		# Cookies are dropped (a cookie set on :443 is sent to :8443 too; the executor never reads one) and never
 		# set. X-Forwarded-For is written here with the browser's address, replacing whatever the browser sent:
 		# the executor takes the client address from it alone.

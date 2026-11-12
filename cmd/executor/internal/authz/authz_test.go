@@ -380,7 +380,7 @@ func TestC2bTicketWithoutGrant(t *testing.T) {
 	for _, need := range []authz.Need{
 		{Kind: "write", Groups: []string{"edge"}},
 		{Kind: "write", Groups: []string{"core", "edge"}},
-		{Kind: "write-admin"}, {Kind: "unmask"}, {Kind: "audit-read"},
+		{Kind: "write-admin"}, {Kind: "unmask", Groups: []string{"core"}}, {Kind: "audit-read"},
 	} {
 		f.oneAudit(t, "denied", "no_grant", func() {
 			if err := f.ask(f.ticketFor(t, u), f.code(t, u), need); err != authz.ErrDenied {
@@ -388,7 +388,7 @@ func TestC2bTicketWithoutGrant(t *testing.T) {
 			}
 		})
 	}
-	for _, need := range []authz.Need{{Kind: "write"}, {Kind: "unmask", Groups: []string{"core"}}, {Kind: "root"}} {
+	for _, need := range []authz.Need{{Kind: "write"}, {Kind: "unmask"}, {Kind: "audit-read", Groups: []string{"core"}}, {Kind: "root"}} {
 		f.oneAudit(t, "denied", "bad_need", func() {
 			if err := f.ask(f.ticketFor(t, u), f.code(t, u), need); err != authz.ErrDenied {
 				t.Fatalf("%+v: %v", need, err)
@@ -400,14 +400,23 @@ func TestC2bTicketWithoutGrant(t *testing.T) {
 		t.Fatalf("row %+v", got)
 	}
 	f.host(t, execadmin.Request{Cmd: execadmin.CmdGrant, User: u.name, Kind: "unmask"})
-	if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask"}); err != nil {
+	if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask", Groups: []string{"core"}}); err != nil {
 		t.Fatal(err)
 	}
+	/* unmask is scoped to the user's write groups: a device of edge stays closed to a user without write on edge. */
+	f.oneAudit(t, "denied", "no_grant", func() {
+		if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask", Groups: []string{"edge"}}); err != authz.ErrDenied {
+			t.Fatalf("unmask on edge: %v", err)
+		}
+	})
 	/* A revoked grant refuses again. */
 	f.clk.Advance(30 * time.Second)
 	f.host(t, execadmin.Request{Cmd: execadmin.CmdRevoke, User: u.name, Kind: "write", Group: "core"})
 	if err := f.try(t, u, f.code(t, u)); err != authz.ErrDenied {
 		t.Fatalf("revoked: %v", err)
+	}
+	if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask", Groups: []string{"core"}}); err != authz.ErrDenied {
+		t.Fatalf("unmask after write on core was revoked: %v", err)
 	}
 }
 
@@ -496,7 +505,7 @@ func TestPanelUserDenyOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.oneAudit(t, "denied", "grant_snapshot_mismatch", func() {
-		if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask"}); err != authz.ErrDenied {
+		if err := f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask", Groups: []string{"core"}}); err != authz.ErrDenied {
 			t.Fatal(err)
 		}
 	})
@@ -885,7 +894,7 @@ func TestRefusalsAreUniform(t *testing.T) {
 	for _, err := range []error{
 		f.try(t, ghost, "123456"),
 		f.try(t, plain, "123456"),
-		f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask"}),
+		f.ask(f.ticketFor(t, u), f.code(t, u), authz.Need{Kind: "unmask", Groups: []string{"core"}}),
 		f.try(t, u, f.wrong(t, u)),
 		f.ask("garbage", f.code(t, u), writeCore),
 	} {

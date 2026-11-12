@@ -13,7 +13,7 @@ configuration modes; typed in a configuration mode they are an unknown
 command, not a configuration line (MES "write" there: [R §2b, assumptions]).
 */
 var execOnly = map[string][]string{
-	"esr":   {"commit", "confirm", "restore", "rollback", "save", "show", "copy", "reload", "terminal", "configure"},
+	"esr":   {"commit", "confirm", "restore", "rollback", "save", "show", "copy", "delete", "reload", "terminal", "configure"},
 	"mes6":  {"write", "copy", "show", "reload", "terminal", "delete", "boot", "configure"},
 	"mes10": {"write", "copy", "show", "reload", "set", "replace", "clear", "configure"},
 }
@@ -275,6 +275,12 @@ func (s *Session) esr(t string) string {
 			return s.msg("copy_done")
 		}
 		return s.err("invalid")
+	case len(f) == 2 && f[0] == "delete": /* delete <file> [R §6]: no confirmation documented */
+		if _, ok := d.files[f[1]]; !ok {
+			return s.err("invalid")
+		}
+		delete(d.files, f[1])
+		return ""
 	case t == "reload system":
 		return s.ask(d.P.Confirm["reload"].Text, false, func() string { d.reboot(); return "" }, nil)
 	}
