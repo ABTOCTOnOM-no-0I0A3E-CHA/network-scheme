@@ -187,6 +187,7 @@ func TestExecutorUsageAndHostOnly(t *testing.T) {
 		{"enroll"}, {"enroll", "--replace"}, {"device", "writes", "maybe"}, {"device", "writes", "on"}, {"device", "writes", "on", "7"},
 		{"device", "add", "--address", "10.1.2.3"}, {"device", "list", "--device", "7"}, {"device", "add", "--device", "7", "--yes"},
 		{"device", "add", "--device", "7", "--fingerprint", "MD5:x"}, {"device", "remove", "--device", "7"}, {"enable", "now"}, {"grant", "bad\x01name", "unmask"},
+		{"init"}, {"init", "--image-tag", "1.0.0", "extra"},
 	} {
 		sys := &daemon{}
 		if code, _ := execRun(t, sys, "", args...); code == 0 || len(sys.cmds) != 0 {

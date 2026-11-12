@@ -39,6 +39,9 @@ const (
 	DefaultEdgeSubnet = "172.30.3.0/24"
 )
 
+/* dbName is the application database. */
+const dbName = "nms"
+
 /* initDBScript is shipped as-is next to compose.yaml and mounted into postgres. */
 const initDBScript = "postgres/initdb/10-roles.sh"
 
@@ -257,7 +260,7 @@ func prepare(in RenderInput) (view, error) {
 	if in.ExecutorPort != DefaultHTTPSPort {
 		exAuthority += ":" + strconv.Itoa(in.ExecutorPort)
 	}
-	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: "nms", APIListenPort: 8080,
+	return view{RenderInput: in, Authority: authority, CoreIPRange: ipRange.String(), DBName: dbName, APIListenPort: 8080,
 		ReadKeyVersion: keys.InitialKeyVersion, ExecutorAuthority: exAuthority, ExecutorIP: xnet.Addr().Next().Next().String(),
 		XnetIPRange: netip.PrefixFrom(upperHalf(xnet), xnet.Bits()+1).String(), ExecutorListenPort: 8444,
 		GatewayEdgeIP: edge.Addr().Next().Next().String(), EdgeIPRange: netip.PrefixFrom(upperHalf(edge), edge.Bits()+1).String()}, nil
