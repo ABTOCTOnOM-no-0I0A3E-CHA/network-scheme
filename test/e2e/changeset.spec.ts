@@ -128,7 +128,15 @@ test.describe("changesets on the write emulators", () => {
     await expect(f.getByTestId(`run-${DEVICES.mes6}`)).toHaveAttribute("data-state", "applied", { timeout: 180_000 });
     await f.getByTestId("cs-stop").click();
     await expect(f.getByTestId("stop-dialog")).toContainText("будут откачены к конфигурации до changeset'а");
-    await f.getByTestId("cs-stop-confirm").click();
+    /* the stop is gated like a confirm (a click right after the frame moved is dropped): click until the dialog closes */
+    for (let i = 0; i < 5 && (await f.getByTestId("stop-dialog").count()) > 0; i++) {
+      const stop = f.getByTestId("cs-stop-confirm");
+      await expect(stop).toBeEnabled({ timeout: 10_000 });
+      await new Promise((r) => setTimeout(r, 1_000));
+      await stop.click();
+      await expect.poll(() => f.getByTestId("stop-dialog").count(), { timeout: 3_000 }).toBe(0).catch(() => {});
+    }
+    await expect(f.getByTestId("stop-dialog")).toHaveCount(0);
     await expect(f.getByTestId("cs-status")).toHaveAttribute("data-status", "rolled_back", { timeout: 300_000 });
     await expect(f.getByTestId("run-outcome")).toContainText("Остановлен пользователем");
     await expect(f.getByTestId(`run-${DEVICES.mes6}`)).toHaveAttribute("data-state", "rolled_back");
