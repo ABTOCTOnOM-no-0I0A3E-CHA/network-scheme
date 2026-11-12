@@ -268,6 +268,8 @@ func TestPanelCannotLiftFreeze(t *testing.T) {
 				sql = strings.Replace(sql, "SET at", "SET since", 1)
 			} else if strings.HasSuffix(tb, "session_summary") {
 				sql = strings.Replace(sql, "SET at", "SET closed_at", 1)
+			} else if strings.HasSuffix(tb, "changeset_summary") {
+				sql = strings.Replace(sql, "SET at", "SET updated_at", 1)
 			}
 			var pe *pgconn.PgError
 			if _, err := api.Exec(ctx, sql); !errors.As(err, &pe) || pe.Code != "42501" {
