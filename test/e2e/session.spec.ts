@@ -184,6 +184,8 @@ function watch(page: Page, diag: string[]) {
 for (const line of ["mes6", "esr"] as const) {
   test.describe(`change session on ${line}`, () => {
     test.skip(!DEVICES[line], `NMS_E2E_SESSION_DEVICES names no ${line} device (the write emulators are not wired into this run)`);
+    /* a desktop-sized window: a confirmation is accepted only when its whole panel is in view (IntersectionObserver v2, threshold 1) */
+    test.use({ viewport: { width: 1440, height: 1000 } });
     /* nine change TOTP codes, each waiting for a new 30 s step */
     test.setTimeout(15 * 60_000);
     /* the terminal's WebSocket and the page's errors, printed when the test fails (CI keeps no browser trace) */
