@@ -259,7 +259,7 @@ func TestPanelCannotLiftFreeze(t *testing.T) {
 		t.Fatal(err)
 	}
 	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(tables) != 6 {
+	if err != nil || len(tables) != 7 {
 		t.Fatalf("execpub tables %v, %v", tables, err)
 	}
 	for _, tb := range tables {

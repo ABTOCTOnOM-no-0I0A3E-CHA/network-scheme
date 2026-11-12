@@ -1,5 +1,6 @@
 import type { FrameLocator, Page } from "@playwright/test";
 import { changeCode } from "./change-totp";
+import { confirmCode } from "./gated";
 import { expect, ORIGIN, testWith } from "./guard";
 
 /*
@@ -42,7 +43,7 @@ async function storeCredential(page: Page, device: number) {
   await f.locator("#wc-secret").fill(WRITE.password);
   await f.getByRole("button", { name: "Зашифровать и проверить" }).click();
   await f.locator("#cp-code").fill(await changeCode());
-  await f.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await confirmCode(f, "Сохранить");
   await expect(f.getByTestId("done")).toContainText(`Учётка устройства ${device} сохранена`);
 }
 
@@ -85,7 +86,7 @@ async function approve(f: FrameLocator) {
   await expect(dlg.getByTestId("field-canary")).toHaveText(String(DEVICES.mes6));
   await dlg.locator("#cs-count").fill("2");
   await dlg.locator("#cp-code").fill(await changeCode());
-  await dlg.getByRole("button", { name: "Подтвердить changeset" }).click();
+  await confirmCode(dlg, "Подтвердить changeset");
   await expect(dlg).toHaveCount(0);
 }
 
@@ -93,6 +94,8 @@ test.describe("changesets on the write emulators", () => {
   test.skip(!DEVICES.mes6 || !DEVICES.esr, "NMS_E2E_SESSION_DEVICES names no mes6 and esr devices (the write emulators are not wired into this run)");
   /* five change TOTP codes, each waiting for a new 30 s step, and two runs */
   test.setTimeout(15 * 60_000);
+  /* a ConfirmPanel confirms only when wholly in view: a desktop-sized window, as in session.spec.ts */
+  test.use({ viewport: { width: 1440, height: 1000 } });
 
   test("draft → dry-run → approval with the device count → canary and batch → done; a stopped run rolls back its canary", async ({ page }) => {
     await storeCredential(page, DEVICES.mes6);
