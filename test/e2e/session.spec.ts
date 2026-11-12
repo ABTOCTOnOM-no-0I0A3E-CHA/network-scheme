@@ -213,7 +213,9 @@ for (const line of ["mes6", "esr"] as const) {
       const sessionId = await f.getByTestId("session-id").textContent();
       await page.getByRole("link", { name: "Проблемы" }).click();
       await expect(page).toHaveURL(/\/problems/);
-      await page.goBack();
+      /* back through the app's own history: a page-level back waits for a load that the open session's beforeunload guard cancels */
+      await page.evaluate(() => history.back());
+      await expect(page).toHaveURL(/\/devices\//);
       await expect(f.getByTestId("session-id")).toHaveText(sessionId ?? "");
       await expect(f.getByTestId("session-view")).toBeVisible();
 
