@@ -58,6 +58,26 @@ func TestRollbackInverseJournal(t *testing.T) {
 	}
 }
 
+/* A community added in the session (a dangerous line) is removed again by the rollback. */
+func TestRollbackRemovesANewCommunity(t *testing.T) {
+	tm, s, al := open(t, drivers.Strategies{})
+	ctx := context.Background()
+	typeLines(t, s, "conf")
+	if _, err := s.Send(ctx, s.d.Classify("snmp-server community e2e-ro ro", s.Mode(), s.Opt.Context)); err != nil {
+		t.Fatal(err)
+	}
+	typeLines(t, s, "end")
+	if err := s.Rollback(ctx, s.Pre()); err != nil {
+		t.Fatalf("rollback: %v\n%q", err, tm.Lines())
+	}
+	if !slices.Contains(tm.Lines(), "no snmp-server community e2e-ro") {
+		t.Fatalf("the community was not removed: %q", tm.Lines())
+	}
+	if snap(t, s) != s.Pre().SHA256 || len(al.List()) != 0 {
+		t.Fatalf("not the pre-session configuration (alerts %v):\n%s", al.List(), tm.D.Running())
+	}
+}
+
 /* A line without an inverse refuses the rollback before anything is sent; a forged target is refused. */
 func TestRollbackRefusals(t *testing.T) {
 	tm, s, _ := open(t, drivers.Strategies{})

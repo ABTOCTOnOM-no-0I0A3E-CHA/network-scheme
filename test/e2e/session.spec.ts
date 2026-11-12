@@ -325,7 +325,8 @@ for (const line of ["mes6", "esr"] as const) {
 
       /* end, then the recording of this device in the executor's player */
       await f.getByRole("button", { name: "Завершить" }).first().click();
-      await f.getByTestId("end-dialog").getByRole("button", { name: "Завершить сессию" }).click();
+      /* the end button is gated like a confirm: a click right after the frame moved is dropped, so click until it ends */
+      await clickGated(f.getByTestId("end-dialog").getByRole("button", { name: "Завершить сессию" }), f.getByTestId("session-ended"), "Завершить сессию");
       await expect(f.getByTestId("session-ended")).toBeVisible();
       await page.getByRole("button", { name: "Свернуть" }).click();
       await page.goto(`/devices/${id}?tab=journal`);
