@@ -211,11 +211,17 @@ for (const line of ["mes6", "esr"] as const) {
 
       /* navigation in the panel does not tear the session down (FR-CHG-7) */
       const sessionId = await f.getByTestId("session-id").textContent();
-      await page.getByRole("link", { name: "Проблемы" }).click();
+      /* the expanded dock covers the lower part of the page: collapse it first, as an operator would to use the panel */
+      await page.getByTestId("session-dock").getByRole("button", { name: "Свернуть" }).click();
+      /* the sidebar remembers its collapsed state in a cookie; open it if an earlier step left it collapsed */
+      const problems = page.getByRole("link", { name: "Проблемы" });
+      if (!(await problems.isVisible())) await page.getByRole("button", { name: "Показать или скрыть меню" }).first().click();
+      await problems.click();
       await expect(page).toHaveURL(/\/problems/);
       /* back through the app's own history: a page-level back waits for a load that the open session's beforeunload guard cancels */
       await page.evaluate(() => history.back());
       await expect(page).toHaveURL(/\/devices\//);
+      await page.getByRole("button", { name: "Развернуть окно сессии" }).click();
       await expect(f.getByTestId("session-id")).toHaveText(sessionId ?? "");
       await expect(f.getByTestId("session-view")).toBeVisible();
 
