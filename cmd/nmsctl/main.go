@@ -44,6 +44,7 @@ const usage = `usage:
   nmsctl audit anchor [--anchors F]
   nmsctl backup [--out DIR] [--passphrase-file F]
   nmsctl restore --data F --keys F [--passphrase-file F]
+  nmsctl update [--sig F] BUNDLE
   nmsctl executor ... (nmsctl executor for its commands)`
 
 /* printf writes CLI output; a failing stdout or stderr cannot be reported anywhere better. */
@@ -109,6 +110,9 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 	if args[0] == "executor" {
 		return executorCmd(ctx, args[1:], d)
 	}
+	if args[0] == "update" && !d.sys.InContainer() {
+		return updateCmd(ctx, args[1:], d)
+	}
 	if args[0] == "backup" || (args[0] == "restore" && !d.sys.InContainer()) {
 		if d.sys.InContainer() {
 			return errors.New("backup runs on the host, not in a container")
@@ -139,7 +143,7 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return err
 	}
 	switch cmd {
-	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor", "restore record":
+	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor", "restore record", "update record":
 	default:
 		return errors.New(usage)
 	}
