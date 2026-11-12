@@ -42,6 +42,8 @@ const usage = `usage:
   nmsctl user unlock U
   nmsctl audit verify [--anchors F]
   nmsctl audit anchor [--anchors F]
+  nmsctl backup [--out DIR] [--passphrase-file F]
+  nmsctl restore --data F --keys F [--passphrase-file F]
   nmsctl executor ... (nmsctl executor for its commands)`
 
 /* printf writes CLI output; a failing stdout or stderr cannot be reported anywhere better. */
@@ -107,6 +109,15 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 	if args[0] == "executor" {
 		return executorCmd(ctx, args[1:], d)
 	}
+	if args[0] == "backup" || (args[0] == "restore" && !d.sys.InContainer()) {
+		if d.sys.InContainer() {
+			return errors.New("backup runs on the host, not in a container")
+		}
+		if args[0] == "backup" {
+			return backupCmd(ctx, args[1:], d)
+		}
+		return restoreCmd(ctx, args[1:], d)
+	}
 	if len(args) < 2 {
 		return errors.New(usage)
 	}
@@ -128,7 +139,7 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return err
 	}
 	switch cmd {
-	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor":
+	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor", "restore record":
 	default:
 		return errors.New(usage)
 	}
@@ -259,6 +270,11 @@ readPassword returns the password from file ("-": stdin, one trailing newline
 trimmed) or, without a file, from a no-echo prompt on the terminal.
 */
 func readPassword(file string, d deps) (secret.Secret, error) {
+	return readSecret(file, "--password-file", d, "New password: ", "Repeat password: ")
+}
+
+/* readSecret is readPassword for any secret: flag names its file option, every prompt must get the same answer. */
+func readSecret(file, flag string, d deps, prompts ...string) (secret.Secret, error) {
 	switch file {
 	case "-":
 		raw, err := io.ReadAll(io.LimitReader(d.in, maxPasswordInput))
@@ -276,10 +292,10 @@ func readPassword(file string, d deps) (secret.Secret, error) {
 	}
 	f, ok := d.in.(*os.File)
 	if !ok || !term.IsTerminal(int(f.Fd())) { // #nosec G115 -- a file descriptor fits in int
-		return secret.Secret{}, errors.New("no terminal for a password prompt: use --password-file")
+		return secret.Secret{}, errors.New("no terminal for a prompt: use " + flag)
 	}
-	var pws [2]string
-	for i, prompt := range []string{"New password: ", "Repeat password: "} {
+	pws := make([]string, len(prompts))
+	for i, prompt := range prompts {
 		if _, err := fmt.Fprint(d.errw, prompt); err != nil {
 			return secret.Secret{}, err
 		}
@@ -290,8 +306,10 @@ func readPassword(file string, d deps) (secret.Secret, error) {
 		}
 		pws[i] = string(b)
 	}
-	if pws[0] != pws[1] {
-		return secret.Secret{}, errors.New("passwords do not match")
+	for _, p := range pws[1:] {
+		if p != pws[0] {
+			return secret.Secret{}, errors.New("passwords do not match")
+		}
 	}
 	return secret.New(pws[0]), nil
 }

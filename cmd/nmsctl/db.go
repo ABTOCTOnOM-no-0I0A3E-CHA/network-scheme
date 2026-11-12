@@ -100,6 +100,8 @@ func dbCmd(ctx context.Context, cmd string, args []string, pool *pgxpool.Pool, k
 			return err
 		}
 		return userUnlock(ctx, pool, user, d.out)
+	case "restore record":
+		return restoreRecord(ctx, pool, args, d)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

@@ -152,17 +152,59 @@ func randomPassword() (string, error) {
 }
 
 func start() (*Env, error) {
+	env, c, err := startWith(map[string]string{}, true)
+	container = c
+	return env, err
+}
+
+/*
+Fresh starts a database container of the test's own (terminated at its
+cleanup) with the given role passwords (a missing role gets a random one
+and the map is filled in), migrated when migrate is set: a second, clean
+server for restore tests. It is skipped or failed as New is.
+*/
+func Fresh(t *testing.T, passwords map[string]string, migrate bool) (*Env, testcontainers.Container) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("testdb: skipped in -short mode (needs Docker)")
+	}
+	env, c, err := startWith(passwords, migrate)
+	if c != nil {
+		t.Cleanup(func() {
+			env.close()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			_ = c.Terminate(ctx)
+		})
+	}
+	if err != nil {
+		_, ci := os.LookupEnv("CI")
+		unavailable(t, ci, err)
+	}
+	return env, c
+}
+
+/* close closes the pools of e (nil-safe). */
+func (e *Env) close() {
+	if e == nil {
+		return
+	}
+	for _, p := range e.pools {
+		p.Close()
+	}
+}
+
+func startWith(passwords map[string]string, migrate bool) (*Env, testcontainers.Container, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	if err := checkDocker(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root, err := repoRoot()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	passwords := map[string]string{}
 	var files []testcontainers.ContainerFile
 	/* Mirror production: every password is a file under /run/secrets. */
 	for role, secretName := range map[string]string{
@@ -174,11 +216,13 @@ func start() (*Env, error) {
 		"nms_eventd":   "db_eventd_password",
 		"nms_executor": "db_executor_password",
 	} {
-		pw, err := randomPassword()
-		if err != nil {
-			return nil, err
+		pw := passwords[role]
+		if pw == "" {
+			if pw, err = randomPassword(); err != nil {
+				return nil, nil, err
+			}
+			passwords[role] = pw
 		}
-		passwords[role] = pw
 		files = append(files, testcontainers.ContainerFile{
 			Reader:            bytes.NewReader([]byte(pw)),
 			ContainerFilePath: "/run/secrets/" + secretName,
@@ -214,35 +258,37 @@ func start() (*Env, error) {
 		Started: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("start container: %w", err)
+		return nil, c, fmt.Errorf("start container: %w", err)
 	}
-	container = c
 
 	host, err := c.Host(ctx)
 	if err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	if host == "localhost" {
 		host = "127.0.0.1" /* avoid the IPv6 loopback, which Docker Desktop on Windows may not publish */
 	}
 	port, err := c.MappedPort(ctx, "5432/tcp")
 	if err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	dbCfg := func(user string) config.DB {
 		return config.DB{Host: host, Port: int(port.Num()), Name: dbName, User: user}
 	}
 
-	if err := store.Migrate(ctx, dbCfg("nms_migrator"), secret.New(passwords["nms_migrator"])); err != nil {
-		return nil, err
+	if migrate {
+		if err := store.Migrate(ctx, dbCfg("nms_migrator"), secret.New(passwords["nms_migrator"])); err != nil {
+			return nil, c, err
+		}
 	}
 	env := &Env{pools: map[string]*pgxpool.Pool{}, cfg: dbCfg, passwords: passwords}
 	for _, role := range roles {
 		p, err := store.Open(ctx, dbCfg(role), secret.New(passwords[role]))
 		if err != nil {
-			return nil, fmt.Errorf("open pool %s: %w", role, err)
+			env.close()
+			return nil, c, fmt.Errorf("open pool %s: %w", role, err)
 		}
 		env.pools[role] = p
 	}
-	return env, nil
+	return env, c, nil
 }
