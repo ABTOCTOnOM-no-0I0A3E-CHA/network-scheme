@@ -100,8 +100,24 @@ func sealingRotate(ctx context.Context, d deps, args []string) error {
 	return nil
 }
 
+const keysUsage = "usage: nmsctl keys rotate ticket|read|write"
+
+/* keysCmd is "nmsctl keys rotate ticket|read|write" (on the host). */
+func keysCmd(ctx context.Context, d deps, args []string) error {
+	if len(args) != 1 {
+		return errors.New(keysUsage)
+	}
+	switch args[0] {
+	case "ticket":
+		return ticketRotate(ctx, d)
+	case "read", "write":
+		return domainRotate(ctx, d, args[0])
+	}
+	return errors.New(keysUsage)
+}
+
 /*
-keysCmd is "nmsctl keys rotate ticket": a new Ed25519 pair for the session
+ticketRotate is "nmsctl keys rotate ticket": a new Ed25519 pair for the session
 tickets. ticket.pub (executor) is replaced before ticket.key (api), both by
 rename from staged files, then both services restart: a ticket signed with
 the old key no longer verifies, and the executor refuses tickets issued
@@ -109,10 +125,7 @@ before its start anyway (no overlap: a ticket lives 60 s, the panel asks
 for a new one). Interrupted, the command run again resumes from the staged
 key.
 */
-func keysCmd(ctx context.Context, d deps, args []string) error {
-	if len(args) != 2 || args[0] != "rotate" || args[1] != "ticket" {
-		return errors.New("usage: nmsctl keys rotate ticket")
-	}
+func ticketRotate(ctx context.Context, d deps) error {
 	keyP, pubP := filepath.Join(secretsDir, "ticket.key"), filepath.Join(secretsDir, "ticket.pub")
 	seedB64, err := staged(keyP, install.ContainerUID, d, func() ([]byte, error) {
 		_, priv, err := ed25519.GenerateKey(rand.Reader)
