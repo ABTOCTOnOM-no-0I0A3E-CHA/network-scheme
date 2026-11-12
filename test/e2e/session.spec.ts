@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { FrameLocator, Page } from "@playwright/test";
+import type { FrameLocator, Locator, Page } from "@playwright/test";
 import { generate } from "otplib";
 import { expect, ORIGIN, testWith } from "./guard";
 
@@ -68,6 +68,24 @@ const WRITE = { username: "e2e-write", password: "e2e-write-session-pw" };
 const frame = (page: Page) => page.frameLocator('iframe[title="Сессия изменений"]');
 const term = (f: FrameLocator, device: number) => f.getByTestId(`device-term-${device}`).getByTestId("terminal");
 
+/*
+ * Clicks the confirm of a ConfirmPanel in scope until the panel takes the code. Its gate follows IntersectionObserver
+ * v2, which may report the panel covered for a moment (the dock resizing, a toast of the panel): the button is
+ * disabled then and a click on it does nothing. The panel clears its code field when it sends, so a field that
+ * still holds the code means nothing was sent and the click may be repeated; a sent code is never sent again.
+ */
+async function confirmCode(scope: FrameLocator | Locator, name: string) {
+  const button = scope.getByRole("button", { name, exact: true });
+  const held = () => scope.locator("#cp-code").evaluateAll((els) => els.some((e) => (e as HTMLInputElement).value !== ""));
+  for (let i = 0; i < 5; i++) {
+    await expect(button).toBeEnabled();
+    await button.click();
+    if (await expect.poll(held, { timeout: 2_000 }).toBe(false).then(() => true, () => false)) return;
+    mark(`"${name}" did not take the code (attempt ${i + 1}), clicking again`);
+  }
+  throw new Error(`"${name}" never took the code`);
+}
+
 /* the device's write credential, sealed by the executor's page to its write key and stored under confirm(H) */
 async function storeCredential(page: Page, device: number) {
   /* what the executor page asked for and got, for the error below (a refusal or a hang shows up here) */
@@ -90,7 +108,7 @@ async function storeCredential(page: Page, device: number) {
   await f.locator("#wc-secret").fill(WRITE.password);
   await f.getByRole("button", { name: "Зашифровать и проверить" }).click();
   await f.locator("#cp-code").fill(await changeCode());
-  await f.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await confirmCode(f, "Сохранить");
   /* either outcome is shown; a refusal fails with the executor's own words instead of a bare timeout */
   try {
     await expect(f.getByTestId("done").or(f.getByTestId("failure"))).toBeVisible({ timeout: 20_000 });
@@ -132,6 +150,10 @@ async function openSession(page: Page, device: number): Promise<FrameLocator> {
     throw new Error(`open session on device ${device}: the page shows:${String.fromCharCode(10)}${(await f.locator("body").innerText()).slice(0, 2000)}`, { cause: e });
   }
   await expect(f.getByTestId("timer")).toContainText("Осталось");
+  /* the devices the session is on, as the registry and the device name them: acknowledged before the terminal is usable */
+  await expect(f.getByTestId(`opened-${device}`)).toBeVisible();
+  await f.getByTestId("opened-on").getByRole("button", { name: "Всё верно" }).click();
+  await expect(f.getByTestId("opened-on")).toHaveCount(0);
   return f;
 }
 
@@ -206,7 +228,7 @@ for (const line of ["mes6", "esr"] as const) {
       await dlg.locator("#cp-code").fill(await changeCode());
       await expect(dlg.getByRole("button", { name: "Отправить команду" })).toBeDisabled();
       await dlg.locator("#dg-name").fill(name);
-      await dlg.getByRole("button", { name: "Отправить команду" }).click();
+      await confirmCode(dlg, "Отправить команду");
       await expect(dlg).toHaveCount(0);
       await expect(term(f, id)).toContainText(L.danger);
       await textOnly(f, id);
@@ -249,7 +271,7 @@ for (const line of ["mes6", "esr"] as const) {
       await expect(rb.getByTestId(`field-address_${id}`)).toHaveText(/^\d+\.\d+\.\d+\.\d+:\d+$/);
       await expect(rb.getByTestId("h")).toContainText(/H: [0-9a-f]{64}/);
       await rb.locator("#cp-code").fill(await changeCode());
-      await rb.getByRole("button", { name: "Откатить" }).click();
+      await confirmCode(rb, "Откатить");
       await expect(rb.getByTestId("rollback-result")).toContainText("совпадает со снимком");
       await rb.getByRole("button", { name: "Закрыть" }).click();
       await f.getByRole("button", { name: "Diff", exact: true }).first().click();
@@ -281,7 +303,7 @@ for (const line of ["mes6", "esr"] as const) {
       await g.locator('[data-testid^="version-"]').first().getByRole("button", { name: "Показать", exact: true }).click();
       await expect(g.getByTestId("field-device_id")).toHaveText(String(id));
       await g.locator("#cp-code").fill(await changeCode());
-      await g.getByRole("button", { name: "Подтвердить", exact: true }).click();
+      await confirmCode(g, "Подтвердить");
       const config = g.getByTestId("config-text");
       await expect(config).toContainText(L.iface);
       await expect(config.locator("*")).toHaveCount(0);
