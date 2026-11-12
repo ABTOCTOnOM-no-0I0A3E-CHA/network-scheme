@@ -28,6 +28,10 @@ export function useConfirmGate() {
     },
     [observe],
   );
+  /* a confirmation that appears below the fold is gated as covered until scrolled to: bring it into view once */
+  useEffect(() => {
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [el]);
   useEffect(() => {
     if (!el) return;
     const check = () => setTooTall(el.getBoundingClientRect().height > window.innerHeight);
