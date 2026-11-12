@@ -70,15 +70,17 @@ const term = (f: FrameLocator, device: number) => f.getByTestId(`device-term-${d
 
 /*
  * Clicks the confirm of a ConfirmPanel in scope until the panel takes the code. Its gate follows IntersectionObserver
- * v2, which may report the panel covered for a moment (the dock resizing, a toast of the panel): the button is
- * disabled then and a click on it does nothing. The panel clears its code field when it sends, so a field that
- * still holds the code means nothing was sent and the click may be repeated; a sent code is never sent again.
+ * v2: the button is enabled only once the panel is fully in view and uncovered. Chrome also discards input to a
+ * cross-origin frame that moved in the last ~500 ms (the dock resizing, the panel scrolled into view), so the click
+ * waits for the frame to settle. The panel clears its code field when it sends, so a field that still holds the code
+ * means nothing was sent and the click may be repeated; a sent code is never sent again.
  */
 async function confirmCode(scope: FrameLocator | Locator, name: string) {
   const button = scope.getByRole("button", { name, exact: true });
   const held = () => scope.locator("#cp-code").evaluateAll((els) => els.some((e) => (e as HTMLInputElement).value !== ""));
   for (let i = 0; i < 5; i++) {
-    await expect(button).toBeEnabled();
+    await expect(button).toBeEnabled({ timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 1_000));
     await button.click();
     if (await expect.poll(held, { timeout: 2_000 }).toBe(false).then(() => true, () => false)) return;
     mark(`"${name}" did not take the code (attempt ${i + 1}), clicking again`);
