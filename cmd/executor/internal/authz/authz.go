@@ -117,18 +117,27 @@ const (
 
 var actionRe = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
 
-/* Need is the grant an action requires: write on every group of Groups (one at least), or the user's grant of Kind. */
+/*
+Need is the grant an action requires: write on every group of Groups (one
+at least), or the user's grant of Kind. unmask is scoped to write groups too
+(4d.1): the user's unmask grant and write on every group of Groups (one at
+least, the device's group from the registry), so unmask never reaches a
+device of a group the user holds no grant on.
+*/
 type Need struct {
 	Kind   string
 	Groups []string
 }
 
-/* Valid reports whether n names a grant kind, with groups exactly for write. */
+/* grouped reports whether a Need of kind names groups (write and unmask must, the others must not). */
+func grouped(kind string) bool { return kind == execadmin.KindWrite || kind == execadmin.KindUnmask }
+
+/* Valid reports whether n names a grant kind, with groups exactly for write and unmask. */
 func (n Need) Valid() bool {
 	if !slices.Contains(execadmin.Kinds, n.Kind) || len(n.Groups) > maxGroups {
 		return false
 	}
-	return (n.Kind == execadmin.KindWrite) == (len(n.Groups) > 0)
+	return grouped(n.Kind) == (len(n.Groups) > 0)
 }
 
 /* Request is one action to authorize. */
@@ -714,8 +723,10 @@ func granted(s *registry.Snapshot, c ticket.Claims, need Need) *refusal {
 	keys := [][]any{{c.UserID, need.Kind, nil}}
 	if need.Kind == execadmin.KindWrite {
 		keys = keys[:0]
+	}
+	if grouped(need.Kind) {
 		for _, g := range need.Groups {
-			keys = append(keys, []any{c.UserID, need.Kind, g})
+			keys = append(keys, []any{c.UserID, execadmin.KindWrite, g})
 		}
 	}
 	for _, k := range keys {

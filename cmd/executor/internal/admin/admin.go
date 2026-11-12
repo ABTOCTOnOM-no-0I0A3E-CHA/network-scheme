@@ -917,6 +917,35 @@ func (a *Admin) broken(ctx context.Context, b *audit.Break) error {
 	return fmt.Errorf("%w: %s (only nmsctl executor registry reset gets out of this freeze)", freeze.ErrFrozen, reason)
 }
 
+/*
+WatchAudit verifies the whole audit chain in the background (4d.2) until
+ctx ends: the first time after a minute (at most every), then every every.
+Each run is nmsctl executor audit verify's: the audit tables' catalog, the
+sealed segments and the live chain against the state file's anchor. A break
+freezes with executor_tamper (disaster) as the host's verification does
+(only nmsctl executor registry reset gets out of it); a run that cannot be
+done now is logged and done again at the next tick.
+*/
+func (a *Admin) WatchAudit(ctx context.Context, every time.Duration) {
+	wait := min(every, time.Minute)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = every
+		res, _, err := a.chain(ctx)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			a.Log.Warn("admin: background audit verification not done", slog.String("err", err.Error()))
+		case err == nil && res.Break != nil:
+			a.Log.Error("admin: executor audit chain broken", slog.Int64("id", res.Break.ID), slog.String("reason", res.Break.Reason))
+			_ = a.broken(ctx, res.Break)
+		}
+	}
+}
+
 /* auditVerify verifies the whole audit chain against the anchor of the state file; a break freezes (security.md 10). */
 func (a *Admin) auditVerify(ctx context.Context, req execadmin.Request) execadmin.Response {
 	res, anchor, err := a.chain(ctx)

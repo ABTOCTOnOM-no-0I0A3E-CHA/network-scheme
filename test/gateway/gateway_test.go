@@ -28,6 +28,7 @@ import (
 
 	"github.com/beekamai/network-scheme/internal/install"
 	"github.com/beekamai/network-scheme/internal/pki"
+	"syscall"
 )
 
 /* caddyImage is the same Caddy release the gateway image is built from. */
@@ -495,8 +496,31 @@ func TestUploadBodyLimit(t *testing.T) {
 		t.Errorf("21 MiB + 1 upload = %d, want 413", resp.StatusCode)
 	}
 	only(t, resp.Header, "Content-Security-Policy", panelHeaders["Content-Security-Policy"])
+	/*
+		A body far over the limit may be cut off by the gateway while the client still writes it: then the client sees
+		the closed connection (broken pipe, reset) before it reads the 413. Both mean the body was refused.
+	*/
+	refused := func(path string, n int) int {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, s.base+path, strings.NewReader(strings.Repeat("a", n)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range closing {
+			req.Header.Set(k, v)
+		}
+		resp, err := s.client.Do(req)
+		if err != nil {
+			if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+				return http.StatusRequestEntityTooLarge
+			}
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
 	for _, p := range []string{"/api/users", "/api/map/views", "/api/map/backgrounds/1", "/api/map/backgrounds/"} {
-		if c := post(p, 2<<20); c != http.StatusRequestEntityTooLarge {
+		if c := refused(p, 2<<20); c != http.StatusRequestEntityTooLarge {
 			t.Errorf("2 MiB body to %s = %d, want 413", p, c)
 		}
 	}

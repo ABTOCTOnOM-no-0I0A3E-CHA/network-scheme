@@ -58,6 +58,26 @@ func TestRollbackInverseJournal(t *testing.T) {
 	}
 }
 
+/* A community added in the session (a dangerous line) is removed again by the rollback. */
+func TestRollbackRemovesANewCommunity(t *testing.T) {
+	tm, s, al := open(t, drivers.Strategies{})
+	ctx := context.Background()
+	typeLines(t, s, "conf")
+	if _, err := s.Send(ctx, s.d.Classify("snmp-server community e2e-ro ro", s.Mode(), s.Opt.Context)); err != nil {
+		t.Fatal(err)
+	}
+	typeLines(t, s, "end")
+	if err := s.Rollback(ctx, s.Pre()); err != nil {
+		t.Fatalf("rollback: %v\n%q", err, tm.Lines())
+	}
+	if !slices.Contains(tm.Lines(), "no snmp-server community e2e-ro") {
+		t.Fatalf("the community was not removed: %q", tm.Lines())
+	}
+	if snap(t, s) != s.Pre().SHA256 || len(al.List()) != 0 {
+		t.Fatalf("not the pre-session configuration (alerts %v):\n%s", al.List(), tm.D.Running())
+	}
+}
+
 /* A line without an inverse refuses the rollback before anything is sent; a forged target is refused. */
 func TestRollbackRefusals(t *testing.T) {
 	tm, s, _ := open(t, drivers.Strategies{})
@@ -119,11 +139,7 @@ func TestSaveAndSafetyNet(t *testing.T) {
 	}
 }
 
-/*
-The VLAN database inverse: the session's new VLANs go, the snapshot's VLAN
-lines come back as printed. The emulator re-indents a re-added line (its
-fixture prints them at column 0), so this checks the VLAN set, not the hash.
-*/
+/* The VLAN database inverse: the session's new VLANs go, the snapshot's VLAN lines come back as printed and the hash check passes. */
 func TestRollbackVLANDatabase(t *testing.T) {
 	tm, s, _ := open(t, drivers.Strategies{})
 	typeLines(t, s, "conf", "vlan database", "vlan 20,30", "no vlan 10", "end")
@@ -134,20 +150,12 @@ func TestRollbackVLANDatabase(t *testing.T) {
 	if want := []string{"configure", "vlan database", "no vlan 30", "vlan 10,20,99", "exit", "end"}; !slices.Equal(plan, want) {
 		t.Fatalf("plan %q", plan)
 	}
-	_ = s.Rollback(context.Background(), s.Pre())
-	if got := parseConfig(tm.D.Running()); !slices.Equal(vlanSet(got), vlanSet(parseConfig(s.Pre().Text))) {
-		t.Fatalf("vlans %v", vlanSet(got))
+	if err := s.Rollback(context.Background(), s.Pre()); err != nil {
+		t.Fatalf("rollback: %v\n%q\n%q", err, s.Pre().Text, tm.D.Running())
 	}
-}
-
-func vlanSet(s snapshot) []int {
-	c, _ := s.find(New(), "line:vlan database")
-	var out []int
-	for v := range vlans(c.lines) {
-		out = append(out, v)
+	if snap(t, s) != s.Pre().SHA256 {
+		t.Fatal("not the pre-session configuration")
 	}
-	slices.Sort(out)
-	return out
 }
 
 func snap(t *testing.T, s drivers.Session) [32]byte {

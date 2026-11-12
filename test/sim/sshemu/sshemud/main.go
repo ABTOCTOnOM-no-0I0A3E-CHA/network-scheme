@@ -11,7 +11,8 @@ With -profile (a line of test/fixtures/devices, e.g. "esr", or a fixture
 directory) the stateful emulator of package devemu serves the shell instead:
 modes, prompts from the fixture (-prompt is ignored), echo, pager,
 confirmations, commit timers on the wall clock, and the profile's SSH
-algorithms and host-key type. -dir, when given, still overrides outputs: a
+algorithms and host-key type (its fingerprint is logged at start). -dir,
+when given, still overrides outputs: a
 command line with a file there is answered from it. Every line received is
 logged as "command" with the mode it was typed in.
 */
@@ -116,7 +117,8 @@ func runProfile(listen, profile, user, password, dir string) error {
 	if err != nil {
 		return err
 	}
-	log.Info("sshemud listening", "addr", ln.Addr().String(), "profile", line)
+	/* the host key's fingerprint, as a device console shows it: the e2e job registers the emulator with it (no TOFU) */
+	log.Info("sshemud listening", "addr", ln.Addr().String(), "profile", line, "hostkey", gossh.FingerprintSHA256(cfg.HostKey.PublicKey()))
 	return sshemu.Serve(ln, cfg, nil)
 }
 

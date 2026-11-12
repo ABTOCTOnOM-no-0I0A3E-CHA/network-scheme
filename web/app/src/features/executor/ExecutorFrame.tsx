@@ -7,11 +7,14 @@ import { api } from "@/lib/api";
 
 /*
  * The executor UI (origin :8443) in an iframe. The executor origin comes from the gateway's /origins.json, never from
- * the build. sandbox="allow-scripts allow-same-origin" is the tightest set that works: the executor page needs scripts,
+ * the build. sandbox="allow-scripts allow-same-origin allow-downloads" is the tightest set that works: the executor
+ * page needs scripts,
  * and it needs its own origin (without allow-same-origin the frame gets an opaque origin: the executor refuses its
  * requests, whose Origin is then "null", and the CSP 'self' matches nothing). Both flags together are only unsafe
  * when the framed page shares the origin of the embedder; it never does here (a different port is a different
- * origin). Everything else stays off: no forms, popups, modals, downloads, top navigation, pointer lock.
+ * origin). allow-downloads lets the executor save an unmasked configuration it exported (4d.1: its own code, a data:
+ * URL of the text it fetched; device data is rendered as text only and never runs). Everything else stays off: no
+ * forms, popups, modals, top navigation, pointer lock.
  *
  * The executor asks, per request, for one fresh session ticket (`ticket_needed`); the panel gets it from
  * POST /api/executor/ticket with its own session and hands it over by postMessage to the executor origin only.
@@ -80,5 +83,5 @@ export function ExecutorFrame({ title, className, hash, onSession, onExpand, onD
       </p>
     );
   }
-  return <iframe ref={frame} title={title} src={`${o.executor}/${hash ? `#${hash}` : ""}`} sandbox="allow-scripts allow-same-origin" referrerPolicy="no-referrer" allow="" className={className ?? "h-full w-full border-0"} />;
+  return <iframe ref={frame} title={title} src={`${o.executor}/${hash ? `#${hash}` : ""}`} sandbox="allow-scripts allow-same-origin allow-downloads" referrerPolicy="no-referrer" allow="" className={className ?? "h-full w-full border-0"} />;
 }

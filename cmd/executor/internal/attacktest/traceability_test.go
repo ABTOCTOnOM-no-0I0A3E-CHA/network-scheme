@@ -261,9 +261,48 @@ var trace = []struct {
 		{"cmd/executor/internal/recording", "TestOpenerHidesNoLaterLine"},
 		{"cmd/executor/internal/recording", "TestReplayCleansAgain"},
 	}},
-	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert (unmask: 4d.1)", []ref{
+	{"C2h", "recordings only with the audit-read grant and a change TOTP code (every other grant refused), each view audited, views per hour bounded with an alert; a swapped, deleted, truncated or duplicated chunk, a changed or missing manifest, a wrong AAD or a foreign session's chunk refuse the replay with a high alert; configurations only with unmask (C9)", []ref{
 		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP"},
 		{"cmd/executor/internal/recording", "TestReplayRefusesTampering"},
+		{"cmd/executor/internal/unmask", "TestC9UnmaskNeedsGrantGroupAndTOTP"},
+	}},
+	{"C9", "unmasked configurations only through the executor: unmask + write on the registry's group of the device + confirm(H) over (device, version) + the user's own change TOTP code (no grant, other group, no/wrong/other's code, forged or other's ticket, a device moved after the challenge: refused); /x/confirm and the other route leave the challenge unspent; sha256(normalize(Open)) checked against the version row before anything is shown (mismatch: refused, high alert); per-user hourly limit (refused, alert) and mass alert; every view and export audited, refusals too; text only, cleaned; the download a plain-text attachment forced by the gateway; the api never reads the envelope", []ref{
+		{"cmd/executor/internal/unmask", "TestC9UnmaskNeedsGrantGroupAndTOTP"},
+		{"cmd/executor/internal/unmask", "TestUnmaskLimitAndMassAlert"},
+		{"cmd/executor/internal/unmask", "TestUnmaskRefusesTamperedVersions"},
+		{"cmd/executor/internal/unmask", "TestUnmaskedTextIsCleaned"},
+		{"cmd/executor/internal/unmask", "TestDescribeFromTheExecutorsData"},
+		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
+		{"cmd/executor/internal/web", "TestConfirmedRoutes"},
+		{"cmd/executor/internal/web", "TestReadNeedFor"},
+		{"internal/install", "TestCaddyExecutorSite"},
+		{"internal/store", "TestAPIRoleHasNoExecRights"},
+		{"internal/triggers", "TestEveryExecutorAlertKindIsKnown"},
+		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("lists with one code, confirms the view with the next one and shows the configuration as text only"`},
+		{"web/executor/src/configs/ConfigsPage.test.tsx", `it("exports through a fetch with the code in the body and saves the executor's text"`},
+	}},
+	{"4d.2", "the executor's audit: viewed only with audit-read + a change TOTP code, every view itself audited and bounded per hour, filters and pages bounded, text cleaned; the whole chain (catalog of the audit tables, sealed segments, anchor) verified in the background, a break or truncation freezes with the executor_tamper disaster alert; every event of security.md 10 has its row (coverage table)", []ref{
+		{"cmd/executor/internal/auditview", "TestAuditViewNeedsAuditReadAndTOTP"},
+		{"cmd/executor/internal/auditview", "TestAuditViewFiltersAndPages"},
+		{"cmd/executor/internal/auditview", "TestAuditViewCleansText"},
+		{"cmd/executor/internal/auditview", "TestAuditViewLimit"},
+		{"cmd/executor/internal/admin", "TestBackgroundAuditVerificationFreezesOnABreak"},
+		{"cmd/executor/internal/admin", "TestAuditVerifyCatchesBreakAndTruncation"},
+		{"cmd/executor/internal/attacktest", "TestAuditCoverage"},
+		{"cmd/executor/internal/session", "TestAuditCoversTheSessionLifecycle"},
+		{"cmd/executor/internal/terminal", "TestEveryLineIsAudited"},
+		{"cmd/executor/internal/wcreds", "TestStoredCredentialIsBoundInside"},
+		{"web/executor/src/audit/AuditPage.test.tsx", `it("reads a page with the filters and one code, shows it as text only and continues by the cursor"`},
+		{"web/executor/src/audit/AuditPage.test.tsx", `it("sends nothing for a malformed filter and names the executor's refusals"`},
+	}},
+	{"4d.4", "end to end on the installed stack: write emulators registered from the host (device add with the console fingerprint, writes on, model-verify, grants), the write credential through the executor's page, then the full change session on mes6 and esr, its replay, the unmasked pre-session configuration and its audit row; the executor's chain verifies after the run; ZAP baseline on :8443", []ref{
+		{".github/workflows/ci.yml", "- name: Register the write emulators with the executor (session e2e)"},
+		{".github/workflows/ci.yml", "-e NMS_E2E_SESSION_DEVICES -w /e2e"},
+		{".github/workflows/ci.yml", "- name: The change sessions ran on the write emulators, and the executor's audit chain verifies"},
+		{".github/workflows/ci.yml", "target: https://localhost:8443"},
+		{"test/e2e/session.spec.ts", "await storeCredential(page, id);"},
+		{"test/e2e/session.spec.ts", `await g.getByTestId("nav-configs").click();`},
+		{"test/e2e/session.spec.ts", `await expect(audit).toContainText("config.view");`},
 	}},
 	{"4c.5", "recording fails closed: a failed or full recording sends no further line (terminal and forms), chunk size bound, volume limit, the manifest at the session's end and after a restart", []ref{
 		{"cmd/executor/internal/terminal", "TestRecorderFailureSendsNothing"},
@@ -353,7 +392,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4d.4", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}

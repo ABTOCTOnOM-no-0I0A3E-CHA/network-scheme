@@ -205,8 +205,15 @@ func TestCaddyExecutorSite(t *testing.T) {
 			t.Errorf("executor site lacks %q", want)
 		}
 	}
-	if n := strings.Count(site, "reverse_proxy"); n != 1 || strings.Contains(site, "api:") {
+	/* /x/download/* (4d.1) and /x/*, in that order (a route's handles are tried as written), both only to the executor */
+	if n := strings.Count(site, "reverse_proxy"); n != 2 || strings.Count(site, "reverse_proxy https://10.77.3.2:8444 {") != 2 || strings.Contains(site, "api:") {
 		t.Errorf("executor site: %d reverse_proxy, api mentioned %v; want only the executor", n, strings.Contains(site, "api:"))
+	}
+	dl, x := strings.Index(site, "handle /x/download/* {"), strings.Index(site, "handle /x/* {")
+	if dl < 0 || dl > x || !strings.Contains(site[dl:x], `header_down Content-Type "text/plain; charset=utf-8"`) ||
+		!strings.Contains(site[dl:x], `header_down Content-Disposition "attachment"`) || !strings.Contains(site[dl:x], "header_up -Cookie") ||
+		strings.Count(site[x:], `header_down Content-Type "application/json; charset=utf-8"`) != 1 {
+		t.Error("downloads are not forced to plain-text attachments before /x/*, or /x/* lost its JSON type")
 	}
 	if strings.Contains(site, "tls_insecure_skip_verify") {
 		t.Error("executor upstream verification is off")

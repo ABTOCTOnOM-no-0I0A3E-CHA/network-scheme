@@ -22,7 +22,13 @@ grant comes from the executor's code, never from the client.
 type Read struct {
 	Action string
 	Need   authz.Need
-	Run    func(ctx context.Context, by authz.Decision, params json.RawMessage) (any, error)
+	/*
+		NeedFor, instead of Need, is the grant of a read about one object (e.g.
+		unmask on a device's write group): from the executor's own data and the
+		params, before authz. A refusal of its own answers as Run's.
+	*/
+	NeedFor func(ctx context.Context, params json.RawMessage) (authz.Need, error)
+	Run     func(ctx context.Context, by authz.Decision, params json.RawMessage) (any, error)
 }
 
 var readPath = regexp.MustCompile(`^/x/[a-z0-9-]{1,32}(/[a-z0-9-]{1,32})?$`)
@@ -37,7 +43,7 @@ func (s *Server) addReads() error {
 	for _, p := range paths {
 		rd := s.c.Reads[p]
 		taken := slices.ContainsFunc(s.routes, func(r route) bool { return r.path == p }) || strings.HasPrefix(p, "/x/confirm")
-		if !readPath.MatchString(p) || taken || rd.Run == nil || !rd.Need.Valid() {
+		if !readPath.MatchString(p) || taken || rd.Run == nil || rd.Need.Valid() == (rd.NeedFor != nil) {
 			return fmt.Errorf("web: bad read %q", p)
 		}
 		s.routes = append(s.routes, route{http.MethodPost, p, func(w http.ResponseWriter, r *http.Request, ip string) { s.read(w, r, ip, p, rd) }, nil})
@@ -65,7 +71,15 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, ip, path string, r
 	if !s.admit(w, req.Ticket) {
 		return
 	}
-	by, err := s.c.Auth.Authorize(r.Context(), authz.Request{Ticket: req.Ticket, Code: req.Code, Need: rd.Need, Action: rd.Action,
+	need := rd.Need
+	if rd.NeedFor != nil {
+		var err error
+		if need, err = rd.NeedFor(r.Context(), req.Params); err != nil {
+			s.readFailed(w, path, err)
+			return
+		}
+	}
+	by, err := s.c.Auth.Authorize(r.Context(), authz.Request{Ticket: req.Ticket, Code: req.Code, Need: need, Action: rd.Action,
 		Object: path, IP: ip, UA: r.UserAgent()})
 	if err != nil {
 		refused(w, err)
@@ -73,11 +87,16 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, ip, path string, r
 	}
 	res, err := rd.Run(r.Context(), by, req.Params)
 	if err != nil {
-		s.c.Log.Info("web: read refused or failed", slog.String("path", path), slog.Any("err", err))
-		if !actionRefused(w, err) {
-			fail(w, http.StatusServiceUnavailable, "unavailable")
-		}
+		s.readFailed(w, path, err)
 		return
 	}
 	reply(w, http.StatusOK, map[string]any{"result": res})
+}
+
+/* readFailed answers a read's own refusal (422, or its status), a freeze (503 frozen) or anything else (503 unavailable). */
+func (s *Server) readFailed(w http.ResponseWriter, path string, err error) {
+	s.c.Log.Info("web: read refused or failed", slog.String("path", path), slog.Any("err", err))
+	if !actionRefused(w, err) {
+		fail(w, http.StatusServiceUnavailable, "unavailable")
+	}
 }

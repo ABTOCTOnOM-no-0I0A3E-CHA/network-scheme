@@ -173,7 +173,66 @@ const (
 	ReasonSealedMismatch  = "sealed segment changed"
 	ReasonNoAnchor        = "no anchor (state file unreadable)"
 	ReasonUnvouched       = "rows before it are not vouched by a trusted hash (rewritten)"
+	ReasonCatalog         = "audit tables changed"
 )
+
+/*
+expectedTriggers are the only triggers of the audit tables (migration
+00024), as pg_get_triggerdef prints them under the pinned search_path, each
+with its enabled state ('O': fires always).
+*/
+var expectedTriggers = map[string]string{
+	"audit_event": "CREATE TRIGGER audit_event_append_only BEFORE DELETE OR UPDATE OR TRUNCATE ON exec.audit_event FOR EACH STATEMENT EXECUTE FUNCTION exec.reject_modification() O; " +
+		"CREATE TRIGGER audit_event_guard_id_insert BEFORE INSERT ON exec.audit_event FOR EACH ROW EXECUTE FUNCTION core.guard_identity_id() O",
+	"audit_head": "CREATE TRIGGER audit_head_keep_row BEFORE DELETE OR TRUNCATE ON exec.audit_head FOR EACH STATEMENT EXECUTE FUNCTION exec.reject_modification() O",
+}
+
+/*
+catalog checks the audit tables are the plain tables the migration made: an
+ordinary table without children, rules, row-level security or policies,
+with exactly its triggers, all enabled. An AFTER trigger rewriting a row
+after Append read it back, or a disabled append-only trigger, is a change
+the chain alone may not show yet (security.md 10). It returns what differs.
+*/
+func catalog(ctx context.Context, tx pgx.Tx) (string, error) {
+	rows, err := tx.Query(ctx, `SELECT c.relname::text, c.relkind = 'r' AND NOT c.relispartition AND NOT c.relhassubclass
+			AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_rewrite w WHERE w.ev_class = c.oid)
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid)
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid),
+			COALESCE((SELECT pg_catalog.string_agg(pg_catalog.pg_get_triggerdef(g.oid) || ' ' || g.tgenabled::text, '; ' ORDER BY g.tgname COLLATE "C")
+				FROM pg_catalog.pg_trigger g WHERE g.tgrelid = c.oid AND NOT g.tgisinternal), '')
+		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'exec' AND c.relname IN ('audit_event', 'audit_head')`)
+	if err != nil {
+		return "", fmt.Errorf("audit: read catalog: %w", err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var (
+			name, triggers string
+			plain          bool
+		)
+		if err := rows.Scan(&name, &plain, &triggers); err != nil {
+			return "", fmt.Errorf("audit: read catalog: %w", err)
+		}
+		switch {
+		case !plain:
+			return "exec." + name + " is not a plain table (rule, policy, row-level security, inheritance or kind)", nil
+		case triggers != expectedTriggers[name]:
+			return "the triggers of exec." + name + " changed: " + triggers, nil
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("audit: read catalog: %w", err)
+	}
+	if seen != len(expectedTriggers) {
+		return "an audit table is missing", nil
+	}
+	return "", nil
+}
 
 /* Break is the first row at which the chain fails verification. */
 type Break struct {
@@ -300,7 +359,8 @@ func stats(ctx context.Context, tx pgx.Tx, after int64) (state.AuditHead, int64,
 
 /*
 Verify checks the audit chain inside tx (one snapshot) against c (the state
-file's view, registry.AuditChain): every sealed segment again, then the live
+file's view, registry.AuditChain): the audit tables' catalog (catalog: a
+change is a break at #0), every sealed segment again, then the live
 chain from its base up to and including the anchor, the head committed in
 the state file. The chain may extend past the anchor (a change in flight:
 reported as Unanchored, not counted as verified) but never end before it
@@ -310,6 +370,12 @@ reported in Result.Break with a nil error; err is for database failures.
 */
 func Verify(ctx context.Context, tx pgx.Tx, c state.Chain) (Result, error) {
 	var res Result
+	if what, err := catalog(ctx, tx); err != nil || what != "" {
+		if what != "" {
+			res.Break = &Break{Reason: ReasonCatalog + ": " + what}
+		}
+		return res, err
+	}
 	var headID int64
 	var headHash []byte
 	if err := tx.QueryRow(ctx, `SELECT last_id, hash FROM exec.audit_head`).Scan(&headID, &headHash); err != nil {

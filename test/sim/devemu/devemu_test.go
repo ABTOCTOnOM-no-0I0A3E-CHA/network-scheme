@@ -189,6 +189,19 @@ func TestESRSharedCandidate(t *testing.T) {
 	}
 }
 
+/* TestESRDeleteFile: the executor's snapshot file is copied, deleted at Close without a question, and gone [R §6]. */
+func TestESRDeleteFile(t *testing.T) {
+	d := NewLine(t, "esr", Options{})
+	c := d.Dial("admin")
+	c.Do("copy system:running-config flash:data/nms-pre-1")
+	if out := c.Do("delete flash:data/nms-pre-1"); out != "" {
+		t.Fatalf("delete: %q", out)
+	}
+	if out := c.Do("delete flash:data/nms-pre-1"); !strings.Contains(out, "% Invalid input") {
+		t.Fatalf("second delete: %q", out)
+	}
+}
+
 /* TestESRConfirmTimeoutFromConfig: system config-confirm timeout sets the default timer [R §1]. */
 func TestESRConfirmTimeoutFromConfig(t *testing.T) {
 	d := NewLine(t, "esr", Options{})
