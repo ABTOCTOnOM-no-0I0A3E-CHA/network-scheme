@@ -56,10 +56,14 @@ async function changeCode(): Promise<string> {
   return generate({ secret: readFileSync(join(dir, "change-totp-secret"), "utf8").trim(), epoch: lastStep * PERIOD });
 }
 
-/* per line: a dangerous config line harmless to the emulator, the command of its config mode, a VLAN for the form and a line of its configuration */
+/*
+ * per line: a dangerous config line harmless to the emulator, the same line as the diff and the recording show it (the
+ * community is a secret: masked there, its value only through the unmask grant), the command of its config mode, a VLAN
+ * for the form and a line of its configuration
+ */
 const LINES = {
-  mes6: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3077, iface: "interface vlan 99" },
-  esr: { danger: "snmp-server community e2e-ro ro", config: "configure", vlan: 3078, iface: "interface gigabitethernet 1/0/1" },
+  mes6: { danger: "snmp-server community e2e-ro ro", masked: "snmp-server ***", config: "configure", vlan: 3077, iface: "interface vlan 99" },
+  esr: { danger: "snmp-server community e2e-ro ro", masked: "snmp-server ***", config: "configure", vlan: 3078, iface: "interface gigabitethernet 1/0/1" },
 } as const;
 
 /* test values of the emulators' write account, the same as in the CI step that starts them */
@@ -86,6 +90,26 @@ async function confirmCode(scope: FrameLocator | Locator, name: string) {
     mark(`"${name}" did not take the code (attempt ${i + 1}), clicking again`);
   }
   throw new Error(`"${name}" never took the code`);
+}
+
+/*
+ * Clicks a gated button (useConfirmGate: the form's apply, commit, save) until done is visible, for the same reasons as
+ * confirmCode. A click that went through disables the button at once (busy) and then removes it, so a button still
+ * enabled after the click was dropped and nothing was sent: only then is it clicked again.
+ */
+async function clickGated(button: Locator, done: Locator, name: string) {
+  for (let i = 0; i < 5; i++) {
+    await expect(button).toBeEnabled({ timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 1_000));
+    await button.click();
+    const dropped = () => button.isEnabled({ timeout: 500 }).catch(() => false);
+    if (await expect.poll(async () => (await done.isVisible()) || !(await dropped()), { timeout: 3_000 }).toBe(true).then(() => true, () => false)) {
+      await expect(done).toBeVisible({ timeout: 60_000 });
+      return;
+    }
+    mark(`"${name}" was not taken (attempt ${i + 1}), clicking again`);
+  }
+  throw new Error(`"${name}" was never taken`);
 }
 
 /* the device's write credential, sealed by the executor's page to its write key and stored under confirm(H) */
@@ -176,8 +200,11 @@ function watch(page: Page, diag: string[]) {
     if (m.type() === "error" || m.type() === "warning") diag.push(`${at()} console.${m.type()}: ${m.text().slice(0, 300)}`);
   });
   page.on("pageerror", (e) => diag.push(`${at()} pageerror: ${String(e).slice(0, 300)}`));
-  page.on("response", (r) => {
-    if (r.url().includes("/x/") && r.status() >= 400) diag.push(`${r.status()} ${new URL(r.url()).pathname}`);
+  /* every executor POST with its status; a refusal with its body (the executor's error code) */
+  page.on("response", async (r) => {
+    if (!r.url().includes("/x/") || r.request().method() !== "POST") return;
+    const body = r.status() >= 400 ? ` ${(await r.text().catch(() => "")).slice(0, 300)}` : "";
+    diag.push(`${at()} ${r.status()} POST ${new URL(r.url()).pathname}${body}`);
   });
 }
 
@@ -252,28 +279,34 @@ for (const line of ["mes6", "esr"] as const) {
       await f.getByRole("button", { name: "Показать команды" }).click();
       const lines = f.getByTestId("equivalent-line");
       await expect(lines.filter({ hasText: String(L.vlan) })).not.toHaveCount(0);
-      await f.getByRole("button", { name: /Применить/ }).click();
-      await expect(f.getByText(/Отправлено строк: \d+/)).toBeVisible();
+      await clickGated(f.getByRole("button", { name: /Применить/ }), f.getByText(/Отправлено строк: \d+/), "Применить");
 
-      /* the diff shows both changes */
-      await f.getByRole("button", { name: "Diff", exact: true }).first().click();
-      const diff = f.getByTestId("diff-dialog");
-      await expect(diff).toContainText("e2e-ro");
-      await expect(diff).toContainText(String(L.vlan));
-      await diff.getByRole("button", { name: "Закрыть" }).click();
+      /* the diff shows both changes, the community masked (ESR: once committed, the candidate is not the running configuration) */
+      const showsBoth = async () => {
+        await f.getByRole("button", { name: "Diff", exact: true }).first().click();
+        const diff = f.getByTestId("diff-dialog");
+        await expect(diff).toContainText(L.masked);
+        await expect(diff).not.toContainText("e2e-ro");
+        await expect(diff).toContainText(String(L.vlan));
+        await diff.getByRole("button", { name: "Закрыть" }).click();
+      };
 
       if (line === "esr") {
         /* ESR: commit (confirm timer of the policy), the banner counts down, then the confirm */
-        await f.getByRole("button", { name: "Commit" }).click();
+        await f.getByRole("button", { name: "Commit", exact: true }).click();
         const banner = f.getByTestId(`esr-banner-${id}`);
+        await clickGated(f.getByTestId("commit-dialog").getByRole("button", { name: "Выполнить commit" }), banner, "Выполнить commit");
         await expect(banner).toContainText(/не подтверждена, автооткат через \d+ с/);
+        await showsBoth();
         await banner.getByRole("button", { name: "Подтвердить" }).click();
-        await f.getByTestId("save-dialog").getByRole("button", { name: "Подтвердить конфигурацию" }).click();
+        await clickGated(f.getByTestId("save-dialog").getByRole("button", { name: "Подтвердить конфигурацию" }),
+          f.getByText(`Конфигурация устройства ${id} подтверждена.`), "Подтвердить конфигурацию");
         await expect(banner).toHaveCount(0);
       } else {
+        await showsBoth();
         await f.getByTestId("save-button").click();
-        await f.getByTestId("save-dialog").getByRole("button", { name: "Сохранить в startup-config" }).click();
-        await expect(f.getByText(`Конфигурация устройства ${id} сохранена в startup-config.`)).toBeVisible();
+        await clickGated(f.getByTestId("save-dialog").getByRole("button", { name: "Сохранить в startup-config" }),
+          f.getByText(`Конфигурация устройства ${id} сохранена в startup-config.`), "Сохранить в startup-config");
       }
 
       /* the whole session rolls back under confirm(H): every field shown, the registry address of the device */
@@ -303,7 +336,7 @@ for (const line of ["mes6", "esr"] as const) {
       await g.getByTestId("play-initial").click();
       await g.getByRole("button", { name: "Показать всё" }).click();
       const player = g.getByTestId("player").getByTestId("terminal");
-      await expect(player).toContainText(L.danger);
+      await expect(player).toContainText(L.masked);
       await expect(player).toContainText("dangerous line confirmed");
       await expect(player.locator("*")).toHaveCount(0);
 
