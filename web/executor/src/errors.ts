@@ -5,15 +5,19 @@ import { z } from "zod";
  * from our own dictionary: nothing of the response body is displayed except a validated lock end.
  */
 export type Failure =
-  | { kind: "http"; status: number; code: string; until?: Date; permanent?: boolean; retryAfter?: number }
+  | { kind: "http"; status: number; code: string; until?: Date; permanent?: boolean; retryAfter?: number; detail?: Detail }
   | { kind: "network" }
   | { kind: "bad_response" }
   | { kind: "local"; code: "no_panel" | "no_ticket" | "busy" | "code_reused" };
 
 export type Message = { key: string; params?: Record<string, string | number> };
 
+/* What a refusal is about (a changeset's device, step, and the executor's reason): executor text, shown as text only. */
+const detailBody = z.object({ device_id: z.number().int().nonnegative(), step: z.number().int().nonnegative(), reason: z.string().max(512) });
+export type Detail = z.infer<typeof detailBody>;
+
 const errorBody = z.object({
-  error: z.object({ code: z.string().max(64), until: z.iso.datetime().optional(), permanent: z.boolean().optional() }),
+  error: z.object({ code: z.string().max(64), until: z.iso.datetime().optional(), permanent: z.boolean().optional(), detail: z.unknown().optional() }),
 });
 
 /* Reads an error answer: unknown or unparsable bodies give an empty code (the status alone decides). */
@@ -21,7 +25,8 @@ export function parseFailure(status: number, body: unknown, retryAfter: string |
   const p = errorBody.safeParse(body);
   const e = p.success ? p.data.error : undefined;
   const secs = retryAfter !== null && /^\d{1,6}$/.test(retryAfter) ? Number(retryAfter) : undefined;
-  return { kind: "http", status, code: e?.code ?? "", until: e?.until ? new Date(e.until) : undefined, permanent: e?.permanent, retryAfter: secs };
+  const d = detailBody.safeParse(e?.detail);
+  return { kind: "http", status, code: e?.code ?? "", until: e?.until ? new Date(e.until) : undefined, permanent: e?.permanent, retryAfter: secs, detail: d.success ? d.data : undefined };
 }
 
 const when = new Intl.DateTimeFormat("ru", { dateStyle: "short", timeStyle: "medium" });

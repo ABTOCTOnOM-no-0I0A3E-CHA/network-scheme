@@ -19,7 +19,8 @@ max_devices_per_session: 5
 max_config_lines_per_hour: 500
 
 # Change windows in this IANA time zone. No window: changes at any time.
-# Outside every window: deny, or second_person (refused until Phase 5).
+# Outside every window: deny, or second_person (another user with write on
+# the groups approves, with their own change TOTP).
 timezone: UTC
 windows: []
 #  - days: [mon, tue, wed, thu, fri]
@@ -27,8 +28,10 @@ windows: []
 #    end: "18:00"
 outside_window: deny
 
-# Write groups whose sessions need a second person (refused until Phase 5).
+# Write groups whose sessions and changesets need a second person, and how
+# long an approval waits for it (minutes, 5..240).
 two_person_groups: []
+second_person_minutes: 30
 
 # Command classes overriding the driver's (driver mes6|mes10|esr|any, the
 # normalized command prefix, class safe|dangerous|denied).
@@ -58,3 +61,11 @@ mass_unmask_alert: 20
 # and replays of recordings per user and hour (more: refused, alert).
 recording_max_mib: 16
 recording_views_per_hour: 20
+
+# Changesets: devices per changeset (1..200), devices per batch (1..50),
+# lines per changeset (1..1000) and dry-runs per user and hour. Only safe
+# lines go out in a changeset; max_config_lines_per_hour does not count them.
+changeset_max_devices: 50
+changeset_max_batch: 10
+changeset_max_lines: 200
+changeset_dry_runs_per_hour: 20

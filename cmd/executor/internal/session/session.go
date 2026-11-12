@@ -5,8 +5,9 @@ max_devices_per_session devices, held under a bearer token that the
 executor UI keeps in memory. Opening checks, in this order, on the verified
 registry and the host's policy only (the api's data never allows anything):
 the policy enables the executor, nothing is frozen, the policy's windows,
-device limit and two-person groups allow it (Phase 4: a two-person group or
-a window that needs a second person refuses, D9), the user's change TOTP and
+device limit and two-person groups allow it (a two-person group or a window
+that needs a second person opens only with a second person's approval,
+approve.go; Phase 4 refused it), the user's change TOTP and
 write grants on every device's group (authz), then per device
 writes_enabled, a model profile of its line, a pinned host key and a write
 credential.
@@ -50,6 +51,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/beekamai/network-scheme/cmd/executor/internal/approval"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
@@ -171,8 +173,10 @@ type Config struct {
 	BackupPriv, BackupPub *[32]byte
 	/* Recordings records every device of a session (*recording.Store); without it no device opens. */
 	Recordings Recordings
-	Log        *slog.Logger
-	Now        func() time.Time
+	/* Approvals holds the second persons' approvals (in memory); nil: a session that needs one is refused (two_person). */
+	Approvals *approval.Store
+	Log       *slog.Logger
+	Now       func() time.Time
 }
 
 /* Manager holds the open sessions. */
@@ -185,6 +189,8 @@ type Manager struct {
 	stopped     bool /* Run has ended: no session registers any more */
 	/* lastOpen is when a session last began opening each device, in this process: the superseded check's second source beside exec */
 	lastOpen map[int64]time.Time
+	/* runs are the service sessions of changeset runs (run.go): no token, ended by their run */
+	runs map[[16]byte]*Session
 }
 
 /* openedAfter reports whether a session of this process began opening device after t. */
@@ -202,7 +208,8 @@ func New(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}, lastOpen: map[int64]time.Time{}}
+	return &Manager{cfg: cfg, sessions: map[[16]byte]*Session{}, interrupted: map[[16]byte]*Session{}, lastOpen: map[int64]time.Time{},
+		runs: map[[16]byte]*Session{}}
 }
 
 /*
@@ -326,6 +333,16 @@ refused by authz like a missing grant. See the package comment for the
 order of the checks after authz.
 */
 func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Opened, error) {
+	return m.OpenApproved(ctx, req, ids, "")
+}
+
+/*
+OpenApproved is Open with the id of a second person's approval (approve.go):
+a session that needs a second person (a group of two_person_groups, or
+outside every window with outside_window: second_person) opens only with
+it, spent here whatever the outcome; without it, two_person as in Phase 4.
+*/
+func (m *Manager) OpenApproved(ctx context.Context, req authz.Request, ids []int64, approvalID string) (Opened, error) {
 	obj := object(ids)
 	if len(ids) == 0 || len(ids) > maxDevices || slices.ContainsFunc(ids, func(id int64) bool { return id <= 0 }) ||
 		len(slices.Compact(slices.Sorted(slices.Values(ids)))) != len(ids) {
@@ -362,17 +379,20 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 		return Opened{}, err
 	}
 	p := pol.Policy
-	switch {
-	case len(ids) > p.MaxDevicesPerSession:
+	if len(ids) > p.MaxDevicesPerSession {
 		return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrTooManyDevices, "too_many_devices")
-	case !inWindow(m.cfg.Now(), p):
-		m.alert(ctx, KindOutsideWindow, "warning", 0, fmt.Sprintf("user %d asked for a change session on %s outside the change windows; refused", by.UserID, obj))
-		return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrOutsideWindow, "outside_window")
 	}
-	for _, g := range groups {
-		if slices.Contains(p.TwoPersonGroups, g) {
-			return Opened{}, m.refuse(ctx, req, by.UserID, obj, ErrTwoPerson, "two_person")
+	reason, err := m.secondReason(ctx, by.UserID, obj, p, req.Need.Groups)
+	if err != nil {
+		return Opened{}, m.refuse(ctx, req, by.UserID, obj, err, "outside_window")
+	}
+	var appr *approval.Approval
+	if reason != "" {
+		a, err := m.takeApproval(ctx, approvalID, by, ids, reason)
+		if err != nil {
+			return Opened{}, m.refuse(ctx, req, by.UserID, obj, err, refusalCode(err))
 		}
+		appr = &a
 	}
 	if err := m.preflight(ctx, ids, pol.Policy); err != nil {
 		if r := Refusal(""); errors.As(err, &r) {
@@ -380,11 +400,19 @@ func (m *Manager) Open(ctx context.Context, req authz.Request, ids []int64) (Ope
 		}
 		return Opened{}, err
 	}
-	return m.open(ctx, req, by, ids, pol)
+	o, err := m.open(ctx, req, by, ids, pol)
+	if err == nil && appr != nil {
+		sid, _ := ParseID(o.ID)
+		m.event(ctx, sid, "approved", map[string]any{"by": appr.By, "request": appr.ID, "reason": reason, "challenge": appr.ByChal})
+	}
+	return o, err
 }
 
 /* noGroup is the group of a device the registry does not have: no grant can name it (write groups start with a letter or digit). */
 const noGroup = "-unregistered"
+
+/* InWindow is inWindow for changesets (Phase 5): the windows of the sessions. */
+func InWindow(t time.Time, p execpolicy.Policy) bool { return inWindow(t, p) }
 
 /* inWindow reports whether t is in a change window of p (no window: always); a zone that does not load is outside (fail closed). */
 func inWindow(t time.Time, p execpolicy.Policy) bool {

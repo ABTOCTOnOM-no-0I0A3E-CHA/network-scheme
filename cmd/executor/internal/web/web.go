@@ -107,7 +107,10 @@ type Action struct {
 /*
 Refusal is an action's own refusal with a code the UI has a text for: a
 Describe or Run error that implements it answers 422 with that code, or the
-status of its HTTPStatus method when it has one (e.g. 503 outcome_unknown).
+status of its HTTPStatus method when it has one (e.g. 503 outcome_unknown),
+and the detail of its RefusalDetail method when it has one (e.g. which
+device and line a changeset refuses: the executor's own data, never a
+secret).
 */
 type Refusal interface {
 	error
@@ -124,7 +127,13 @@ func actionRefused(w http.ResponseWriter, err error) bool {
 		if errors.As(err, &st) {
 			status = st.HTTPStatus()
 		}
-		fail(w, status, rf.RefusalCode())
+		var b errorBody
+		b.Error.Code = rf.RefusalCode()
+		var dt interface{ RefusalDetail() any }
+		if errors.As(err, &dt) {
+			b.Error.Detail = dt.RefusalDetail()
+		}
+		reply(w, status, b)
 	case errors.Is(err, authz.ErrFrozen):
 		refused(w, err)
 	default:
@@ -150,6 +159,8 @@ type Config struct {
 	Confirmed []Confirmed
 	/* Sessions, if set, serves the change session routes (sessions.go). */
 	Sessions *Sessions
+	/* Changesets, if set, serves the changeset workspace routes (changesets.go). */
+	Changesets *Changesets
 	/* Terminal, if set, serves GET /x/ws (terminal.Terminal.Serve: its own Origin check and timeouts). */
 	Terminal func(w http.ResponseWriter, r *http.Request, ip string)
 	Log      *slog.Logger
@@ -204,6 +215,7 @@ func New(cfg Config) (*Server, error) {
 		{http.MethodPost, "/x/confirm", s.confirm, nil},
 	}
 	s.addSessions()
+	s.addChangesets()
 	if cfg.Terminal != nil {
 		s.routes = append(s.routes, route{http.MethodGet, "/x/ws", cfg.Terminal, nil})
 	}
@@ -322,6 +334,7 @@ type errorBody struct {
 		Code      string     `json:"code"`
 		Until     *time.Time `json:"until,omitempty"`
 		Permanent bool       `json:"permanent,omitempty"`
+		Detail    any        `json:"detail,omitempty"`
 	} `json:"error"`
 }
 
@@ -484,16 +497,19 @@ decode reads a JSON body of at most maxBody bytes into v strictly: the
 content type must be JSON, unknown fields and trailing data are refused.
 It answers the error itself and reports whether to go on.
 */
-func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+func decode(w http.ResponseWriter, r *http.Request, v any) bool { return decodeLimit(w, r, v, maxBody) }
+
+/* decodeLimit is decode with a body of at most limit bytes. */
+func decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		fail(w, http.StatusUnsupportedMediaType, "unsupported_media_type")
 		return false
 	}
-	if r.ContentLength > maxBody {
+	if r.ContentLength > limit {
 		fail(w, http.StatusRequestEntityTooLarge, "too_large")
 		return false
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
 	err := dec.Decode(v)
 	if err == nil {

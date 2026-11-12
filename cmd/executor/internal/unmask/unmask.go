@@ -32,12 +32,10 @@ package unmask
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -45,17 +43,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/backups"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/confirm"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/policy"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
-	"github.com/beekamai/network-scheme/internal/backup"
-	"github.com/beekamai/network-scheme/internal/backup/open"
-	rdrivers "github.com/beekamai/network-scheme/internal/drivers"
 	"github.com/beekamai/network-scheme/internal/execadmin"
 )
 
@@ -103,8 +98,6 @@ func (busy) HTTPStatus() int     { return 503 }
 
 /* Bounds (variables for the tests). */
 var (
-	maxConfig   = 4 << 20            /* backups.config_version.size and full_ct are bounded to 4 MiB (+1 KiB) */
-	rowMessage  = maxConfig + 64<<10 /* the version row's read: above registry.MaxMessage, on its own connection */
 	listMost    = 100
 	maxShows    = 2 /* configurations opened at once: each holds up to 4 MiB a few times */
 	readTimeout = 10 * time.Second
@@ -387,46 +380,16 @@ opens the envelope under AAD(device, hash) and checks sha256(normalize(text))
 against the row before anything leaves; the text is then cleaned.
 */
 func (st *Store) open(ctx context.Context, device, version int64, want string) (string, time.Time, error) {
-	cc := st.c.Pool.Config().ConnConfig.Copy()
-	cc.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
-		f := pgproto3.NewFrontend(r, w)
-		f.SetMaxBodyLen(rowMessage)
-		return f
-	}
-	qctx, cancel := context.WithTimeout(ctx, readTimeout)
-	defer cancel()
-	conn, err := pgx.ConnectConfig(qctx, cc)
-	if err != nil {
+	v, err := backups.OpenVersion(ctx, st.c.Pool, st.c.Priv, st.c.Pub, device, version, want)
+	switch {
+	case errors.Is(err, backups.ErrVersionUnknown):
+		return "", time.Time{}, st.tampered(ctx, device, version, "the confirmed version row is gone")
+	case errors.Is(err, backups.ErrVersionTampered):
+		return "", time.Time{}, st.tampered(ctx, device, version, strings.TrimPrefix(err.Error(), backups.ErrVersionTampered.Error()+": "))
+	case err != nil:
 		return "", time.Time{}, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
 	}
-	defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
-	var (
-		sum, ct, dek []byte
-		takenAt      time.Time
-	)
-	err = conn.QueryRow(qctx, `SELECT sha256, full_ct, full_dek_ct, taken_at FROM backups.config_version WHERE id = $1 AND device_id = $2`,
-		version, device).Scan(&sum, &ct, &dek, &takenAt)
-	var big *pgproto3.ExceededMaxBodyLenErr
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return "", takenAt, st.tampered(ctx, device, version, "the confirmed version row is gone")
-	case errors.As(err, &big):
-		return "", takenAt, st.tampered(ctx, device, version, "the version row is larger than any configuration")
-	case err != nil:
-		return "", takenAt, fmt.Errorf("%w: %w", authz.ErrUnavailable, err)
-	}
-	if hex.EncodeToString(sum) != want {
-		return "", takenAt, st.tampered(ctx, device, version, "the version row's hash is not the confirmed one")
-	}
-	pt, err := open.Open(st.c.Priv, st.c.Pub, ct, dek, backup.AAD(device, want))
-	if err != nil {
-		return "", takenAt, st.tampered(ctx, device, version, "the envelope does not open under its AAD")
-	}
-	defer clear(pt)
-	if got := sha256.Sum256([]byte(rdrivers.NormalizeText(string(pt)))); len(pt) > maxConfig || hex.EncodeToString(got[:]) != want {
-		return "", takenAt, st.tampered(ctx, device, version, "the opened configuration does not hash to its version row")
-	}
-	return st.clean(string(pt)), takenAt, nil
+	return st.clean(v.Text), v.TakenAt, nil
 }
 
 /* clean cleans each line on its own (an unterminated escape sequence cannot swallow the lines after it). */

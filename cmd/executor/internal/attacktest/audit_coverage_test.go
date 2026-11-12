@@ -14,9 +14,10 @@ import (
 coverage is the table of the executor's audit events (security.md 10, plan
 4d.2): each event and the scripted tests that prove its executor audit row
 is written, each with a needle that the test's own body must contain (the
-audit action or class it counts rows of). Changesets come with Phase 5 (no
-changeset exists yet); automatic freezes are alerts, not rows: the chain
-that would hold them may be what was tampered with.
+audit action or class it counts rows of). Changesets (Phase 5): authoring,
+dry-run, approval, the run and its stop; automatic freezes are alerts, not
+rows: the chain that would hold them may be what was tampered
+with.
 */
 var coverage = []struct {
 	event string
@@ -67,6 +68,18 @@ var coverage = []struct {
 		{"cmd/executor/internal/unmask", "TestUnmaskLimitAndMassAlert", `"view_limit"`}}},
 	{"session recordings viewed", []struct{ dir, test, needle string }{
 		{"cmd/executor/internal/recording", "TestC2hReplayNeedsAuditReadAndTOTP", "recording.view"}}},
+	{"changesets authored, viewed and discarded", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/changeset", "TestSaveReviseDiscard", `"changeset.create", "changeset.revise", "changeset.discard", "changeset.view"`}}},
+	{"changeset dry-runs", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/changeset", "TestDryRunOnEveryLine", `"changeset.dry_run", "ok"`}}},
+	{"changeset approvals, second persons and wrong device counts", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/changeset", "TestApproveDeviceCountAndStart", `f.audits(t, changeset.ApproveAction, "denied")`},
+		{"cmd/executor/internal/changeset", "TestTwoPersonAuthorCannotApprove", `f.audits(t, changeset.ApproveAction, "ok")`}}},
+	{"changeset runs and their stop", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/changeset", "TestRunCanaryThenBatches", `"changeset.run", "ok"`},
+		{"cmd/executor/internal/changeset", "TestRunStop", `"changeset.stop", "ok"`}}},
+	{"two-person session requests and approvals", []struct{ dir, test, needle string }{
+		{"cmd/executor/internal/session", "TestTwoPersonSessionNeedsApproval", `{"session.request", "ok"}, {"session.approve", "ok"}, {"confirm.session.approve", "ok"}`}}},
 	{"executor audit viewed", []struct{ dir, test, needle string }{
 		{"cmd/executor/internal/auditview", "TestAuditViewNeedsAuditReadAndTOTP", "audit.view"},
 		{"cmd/executor/internal/auditview", "TestAuditViewLimit", "audit.view"}}},

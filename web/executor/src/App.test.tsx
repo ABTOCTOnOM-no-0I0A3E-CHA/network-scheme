@@ -41,4 +41,11 @@ describe("App", () => {
     expect(await screen.findByTestId("play-initial")).toHaveTextContent("3f2a9c1e");
     expect(screen.getByTestId("nav-recordings")).toHaveAttribute("aria-selected", "true");
   });
+
+  it("opens «Изменения» on the changeset or restore the panel names", async () => {
+    window.location.hash = "#restore=12:345";
+    render(<App poster={poster()} bridge={bridge().p} />);
+    expect(await screen.findByTestId("cs-open")).toBeVisible();
+    expect(screen.getByTestId("nav-changesets")).toHaveAttribute("aria-selected", "true");
+  });
 });

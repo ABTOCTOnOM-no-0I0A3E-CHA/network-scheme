@@ -64,7 +64,7 @@ func (m *Manager) RecordMark(ctx context.Context, s *Session, device int64, labe
 func (m *Manager) Live(id [16]byte) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.sessions[id] != nil
+	return m.sessions[id] != nil || m.runs[id] != nil
 }
 
 /*

@@ -59,7 +59,8 @@ func TestExecutorAlertProblems(t *testing.T) {
 		"hostkey_mismatch_write": "high", "mass_unmask": "high", "session_interrupted": "high", "session_outside_window": "warning",
 		"executor_recording_failed": "high", "executor_recording_full": "warning", "executor_recording_views": "high",
 		"executor_session_tamper": "high", "executor_recording_tamper": "high", "executor_unmask_views": "high", "executor_config_tamper": "high",
-		"executor_password_expired": "high", "executor_line_mismatch": "high", "executor_rollback_mismatch": "high"}
+		"executor_password_expired": "high", "executor_line_mismatch": "high", "executor_rollback_mismatch": "high",
+		"changeset_failed": "high", "changeset_rollback_failed": "high", "changeset_interrupted": "high", "executor_changeset_tamper": "high"}
 	for kind := range want {
 		h.alert(kind, "info", 0, "first "+kind, time.Minute)
 		h.alert(kind, "info", 0, "second "+kind, 0)

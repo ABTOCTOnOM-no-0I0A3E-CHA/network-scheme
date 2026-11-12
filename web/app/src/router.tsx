@@ -3,6 +3,7 @@ import { stepUpStore } from "@/features/common/stepup";
 import { setUnauthorizedHandler } from "@/lib/api";
 import { queryClient } from "@/lib/query";
 import { rootRoute } from "@/routes/__root";
+import { changesRoute } from "@/routes/changes";
 import { dashboardsRoute } from "@/routes/dashboards";
 import { discoveryRoute } from "@/routes/discovery";
 import { devicesRoute } from "@/routes/devices";
@@ -16,7 +17,7 @@ import { problemsRoute } from "@/routes/problems";
 import { templatesRoute } from "@/routes/templates";
 import { systemRoute } from "@/routes/system";
 
-const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren([...sectionRoutes, dashboardsRoute, mapRoute, devicesRoute, deviceRoute, discoveryRoute, problemsRoute, templatesRoute, maintenanceRoute, logsRoute, systemRoute])]);
+const routeTree = rootRoute.addChildren([loginRoute, shellRoute.addChildren([...sectionRoutes, dashboardsRoute, mapRoute, devicesRoute, deviceRoute, discoveryRoute, problemsRoute, templatesRoute, maintenanceRoute, logsRoute, systemRoute, changesRoute])]);
 
 /** Builds the application router (history is injectable for tests) and wires the global 401 handler. */
 export function buildRouter(history?: RouterHistory) {

@@ -190,3 +190,67 @@ func (s *server) deviceSessions(w http.ResponseWriter, r *http.Request) {
 		Items []sessionSummary `json:"items"`
 	}{items})
 }
+
+/* Bounds of GET /api/executor/changesets. */
+const (
+	defaultChangesetPage = 50
+	maxChangesetPage     = 200
+)
+
+type changesetSummary struct {
+	ChangesetID    string    `json:"changeset_id"`
+	AuthorID       int64     `json:"author_id"`
+	Author         *string   `json:"author"`
+	Kind           string    `json:"kind"`
+	Title          string    `json:"title"`
+	Status         string    `json:"status"`
+	DeviceCount    int       `json:"device_count"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	FailedDeviceID *int64    `json:"failed_device_id"`
+}
+
+/*
+executorChangesets lists the changesets (execpub.changeset_summary, newest
+change first) whose every device is in the caller's scope: metadata only,
+the lines and configurations stay in the executor. author is the panel's
+current name of the author (null once deleted).
+*/
+func (s *server) executorChangesets(w http.ResponseWriter, r *http.Request) {
+	limit, ok := queryInt(r.URL.Query(), "limit", defaultChangesetPage, 1, maxChangesetPage)
+	if !ok {
+		writeError(w, errBadRequest)
+		return
+	}
+	sc, err := s.scope(r, rbac.PermDevicesRead)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	ids := sc.ids
+	if ids == nil {
+		ids = []int64{}
+	}
+	rows, err := s.pool.Query(r.Context(), `
+		SELECT c.changeset_id::text, c.author_id, u.username, c.kind, c.title, c.status, c.device_count, c.created_at, c.updated_at,
+		       c.failed_device_id
+		FROM execpub.changeset_summary c LEFT JOIN core."user" u ON u.id = c.author_id
+		WHERE $2 OR NOT EXISTS (SELECT 1 FROM unnest(c.device_ids) AS x (id) LEFT JOIN core.device d ON d.id = x.id
+		                        WHERE d.id IS NULL OR NOT (d.group_id = ANY ($3)))
+		ORDER BY c.updated_at DESC, c.changeset_id LIMIT $1`, limit, sc.all, ids)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	items, err := pgx.CollectRows(rows, pgx.RowToStructByPos[changesetSummary])
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if items == nil {
+		items = []changesetSummary{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []changesetSummary `json:"items"`
+	}{items})
+}

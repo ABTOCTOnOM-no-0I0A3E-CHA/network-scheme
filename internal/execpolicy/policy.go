@@ -33,7 +33,7 @@ const (
 	ConfirmFIDO2 = "fido2" /* Phase 4: confirmed actions are refused (fail closed, security.md 5.2) */
 
 	OutsideDeny         = "deny"
-	OutsideSecondPerson = "second_person" /* Phase 4: refused (fail closed) */
+	OutsideSecondPerson = "second_person" /* a second person approves (Phase 5, security.md 5.4 D4/D5) */
 
 	ClassSafe      = "safe"
 	ClassDangerous = "dangerous"
@@ -65,6 +65,17 @@ type Policy struct {
 	MassUnmaskAlert       int             `yaml:"mass_unmask_alert" json:"mass_unmask_alert"`
 	RecordingMaxMiB       int             `yaml:"recording_max_mib" json:"recording_max_mib"`
 	RecordingViewsPerHour int             `yaml:"recording_views_per_hour" json:"recording_views_per_hour"`
+	/*
+		Phase 5 (security.md 5.4 D4, D7). omitempty: a valid policy never has
+		0 here, and a policy snapshot stored before these keys existed
+		(exec.session.policy_snapshot, MACed over Go's encoding) must encode
+		as it did.
+	*/
+	SecondPersonMinutes     int `yaml:"second_person_minutes" json:"second_person_minutes,omitempty"`
+	ChangesetMaxDevices     int `yaml:"changeset_max_devices" json:"changeset_max_devices,omitempty"`
+	ChangesetMaxBatch       int `yaml:"changeset_max_batch" json:"changeset_max_batch,omitempty"`
+	ChangesetMaxLines       int `yaml:"changeset_max_lines" json:"changeset_max_lines,omitempty"`
+	ChangesetDryRunsPerHour int `yaml:"changeset_dry_runs_per_hour" json:"changeset_dry_runs_per_hour,omitempty"`
 }
 
 /*
@@ -92,6 +103,12 @@ type ClassOverride struct {
 /* MaxRecordingMiB bounds recording_max_mib: a replay reads at most this and one answer per recording. */
 const MaxRecordingMiB = 64
 
+/* Upper bounds of changeset_max_devices and changeset_max_lines (the stored content is sized for them). */
+const (
+	MaxChangesetDevices = 200
+	MaxChangesetLines   = 1000
+)
+
 /* Default is the policy of a fresh install (security.md 5.5). */
 func Default() Policy {
 	return Policy{
@@ -108,6 +125,12 @@ func Default() Policy {
 		MassUnmaskAlert:       20,
 		RecordingMaxMiB:       16,
 		RecordingViewsPerHour: 20,
+
+		SecondPersonMinutes:     30,
+		ChangesetMaxDevices:     50,
+		ChangesetMaxBatch:       10,
+		ChangesetMaxLines:       200,
+		ChangesetDryRunsPerHour: 20,
 	}
 }
 
@@ -238,6 +261,11 @@ func (p Policy) Validate() error {
 		inRange("mass_unmask_alert", p.MassUnmaskAlert, 1, 10000),
 		inRange("recording_max_mib", p.RecordingMaxMiB, 1, MaxRecordingMiB),
 		inRange("recording_views_per_hour", p.RecordingViewsPerHour, 1, 1000),
+		inRange("second_person_minutes", p.SecondPersonMinutes, 5, 240),
+		inRange("changeset_max_devices", p.ChangesetMaxDevices, 1, MaxChangesetDevices),
+		inRange("changeset_max_batch", p.ChangesetMaxBatch, 1, 50),
+		inRange("changeset_max_lines", p.ChangesetMaxLines, 1, MaxChangesetLines),
+		inRange("changeset_dry_runs_per_hour", p.ChangesetDryRunsPerHour, 1, 1000),
 	); err != nil {
 		return err
 	}

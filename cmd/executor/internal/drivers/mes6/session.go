@@ -66,8 +66,10 @@ func (d Driver) open(ctx context.Context, sh drivers.Shell, o drivers.Options) (
 	return s, nil
 }
 
-func (s *session) record(line string, before core.Mode) {
-	after := s.Mode()
+func (s *session) record(line string, before core.Mode) { s.note(line, before, s.Mode()) }
+
+/* note journals a line the device accepted in mode before, which left the session in after. */
+func (s *session) note(line string, before, after core.Mode) {
 	if before.Unsure() || after.Unsure() {
 		s.broken = true
 	}
@@ -85,6 +87,25 @@ func (s *session) record(line string, before core.Mode) {
 }
 
 func (s *session) Pre() drivers.Config { return s.Core.Pre }
+
+/*
+Reversible reports whether lines, typed from the privileged prompt of a
+device whose configuration is pre (in context c) and all accepted, would
+leave a journal Rollback can invert: ErrNoInverse otherwise. A changeset's
+dry-run (Phase 5) refuses a MES 6.x device on it before anything is sent,
+since a stopped run must roll back every device it reached.
+*/
+func (d Driver) Reversible(pre string, lines []string, c core.Context) error {
+	s := &session{Core: &drivers.Core{G: d.G, D: d, Opt: drivers.Options{Context: c}}, d: d}
+	m := d.G.Root()
+	for _, l := range lines {
+		before := m
+		m = d.G.Next(l, m)
+		s.note(l, before, m)
+	}
+	_, err := s.inverse(parseConfig(pre))
+	return err
+}
 
 /* Save leaves the configuration and writes the startup configuration: write + Y, or copy [R §2a, §9.4]. */
 func (s *session) Save(ctx context.Context) error {

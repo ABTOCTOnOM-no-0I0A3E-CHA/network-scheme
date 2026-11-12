@@ -14,8 +14,12 @@ import (
 /*
 Sessions are the change session routes (session.Manager, 4c.2):
 
-  - POST /x/sessions {ticket, totp, device_ids}: open, the answer carries
-    the bearer token of the session (the UI keeps it in memory only);
+  - POST /x/sessions {ticket, totp, device_ids, approval?}: open, the
+    answer carries the bearer token of the session (the UI keeps it in
+    memory only); approval is the id of a second person's approval, for a
+    session that needs one;
+  - POST /x/sessions/request {ticket, totp, device_ids}: ask for a second
+    person's approval (session.approve, confirmed with confirm(H));
   - POST /x/sessions/{id}/attach {ticket, totp}: a new token for the
     session's own user (the old one stops working);
   - POST /x/sessions/{id}/extend {ticket, totp}: session_minutes from now;
@@ -27,11 +31,12 @@ A refusal of the session's own rules answers 422 with its code (Refusal),
 authz's as everywhere (refused).
 */
 type Sessions struct {
-	Open   func(ctx context.Context, req authz.Request, devices []int64) (any, error)
-	Attach func(ctx context.Context, id string, req authz.Request) (any, error)
-	Extend func(ctx context.Context, id string, req authz.Request) (any, error)
-	Close  func(ctx context.Context, id, token string) error
-	Act    func(ctx context.Context, id, token, op string, params json.RawMessage) (any, error)
+	Open    func(ctx context.Context, req authz.Request, devices []int64, approval string) (any, error)
+	Request func(ctx context.Context, req authz.Request, devices []int64) (any, error)
+	Attach  func(ctx context.Context, id string, req authz.Request) (any, error)
+	Extend  func(ctx context.Context, id string, req authz.Request) (any, error)
+	Close   func(ctx context.Context, id, token string) error
+	Act     func(ctx context.Context, id, token, op string, params json.RawMessage) (any, error)
 }
 
 var sessionRe = regexp.MustCompile(`^/x/sessions/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(attach|extend|close|diff|save|commit|form|form-apply)$`)
@@ -42,6 +47,9 @@ func (s *Server) addSessions() {
 		return
 	}
 	s.routes = append(s.routes, route{method: http.MethodPost, path: "/x/sessions", handle: s.openSession})
+	if s.c.Sessions.Request != nil {
+		s.routes = append(s.routes, route{method: http.MethodPost, path: "/x/sessions/request", handle: s.requestSession})
+	}
 	for _, op := range []string{"attach", "extend", "close", "diff", "save", "commit", "form", "form-apply"} {
 		re := regexp.MustCompile(`^/x/sessions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/` + op + `$`)
 		s.routes = append(s.routes, route{method: http.MethodPost, path: "/x/sessions/{id}/" + op, re: re, handle: s.sessionOp})
@@ -49,9 +57,10 @@ func (s *Server) addSessions() {
 }
 
 type sessionRequest struct {
-	Ticket  string  `json:"ticket"`
-	TOTP    string  `json:"totp"`
-	Devices []int64 `json:"device_ids"`
+	Ticket   string  `json:"ticket"`
+	TOTP     string  `json:"totp"`
+	Devices  []int64 `json:"device_ids"`
+	Approval string  `json:"approval,omitempty"`
 }
 
 type sessionAuth struct {
@@ -74,7 +83,24 @@ func (s *Server) openSession(w http.ResponseWriter, r *http.Request, ip string) 
 	if !decode(w, r, &req) || !s.admit(w, req.Ticket) {
 		return
 	}
-	res, err := s.c.Sessions.Open(r.Context(), authz.Request{Ticket: req.Ticket, Code: req.TOTP, IP: ip, UA: r.UserAgent()}, req.Devices)
+	if len(req.Approval) > 64 {
+		fail(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	res, err := s.c.Sessions.Open(r.Context(), authz.Request{Ticket: req.Ticket, Code: req.TOTP, IP: ip, UA: r.UserAgent()}, req.Devices, req.Approval)
+	sessionAnswer(w, res, err)
+}
+
+func (s *Server) requestSession(w http.ResponseWriter, r *http.Request, ip string) {
+	var req sessionRequest
+	if !decode(w, r, &req) || !s.admit(w, req.Ticket) {
+		return
+	}
+	if req.Approval != "" {
+		fail(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	res, err := s.c.Sessions.Request(r.Context(), authz.Request{Ticket: req.Ticket, Code: req.TOTP, IP: ip, UA: r.UserAgent()}, req.Devices)
 	sessionAnswer(w, res, err)
 }
 

@@ -26,6 +26,14 @@ var (
 )
 
 /*
+MgmtTargets is mgmtTargets for a changeset's dry-run (Phase 5): the same
+management context a session would have on the device.
+*/
+func MgmtTargets(d drivers.WriteDriver, config string, device, self netip.Addr, arp, macs string) ([]core.Target, error) {
+	return mgmtTargets(d, config, device, self, arp, macs)
+}
+
+/*
 mgmtTargets is the management context of a session (security.md 5.3, [R §6
 "Общее правило"]), from the configuration just read and the device's tables:
   - the interface carrying the registry address (an SVI "interface vlan N"

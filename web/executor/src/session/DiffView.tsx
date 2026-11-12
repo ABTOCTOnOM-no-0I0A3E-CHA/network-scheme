@@ -22,15 +22,20 @@ export function DiffView({ diff, title, maxHeight = "max-h-[50vh]" }: { diff: De
       </p>
       {diff.too_large && <p className="text-amber-700 dark:text-amber-300">{t("executor.session.diff.tooLarge")}</p>}
       {!diff.too_large && lines.length === 0 && <p className="text-muted-foreground">{t("executor.session.diff.none")}</p>}
-      {lines.length > 0 && (
-        <pre className={`${maxHeight} overflow-auto rounded-md border bg-muted/30 py-2 font-mono text-[12.5px] leading-5`}>
-          {lines.map((l, i) => (
-            <div key={i} className={`px-3 whitespace-pre-wrap break-all ${tone(l)}`}>
-              {l === "" ? " " : l}
-            </div>
-          ))}
-        </pre>
-      )}
+      {lines.length > 0 && <DiffLines lines={lines} maxHeight={maxHeight} />}
     </section>
+  );
+}
+
+/* The lines of a unified diff, each a text node coloured by its first character. */
+export function DiffLines({ lines, maxHeight = "max-h-[50vh]" }: { lines: string[]; maxHeight?: string }) {
+  return (
+    <pre className={`${maxHeight} overflow-auto rounded-md border bg-muted/30 py-2 font-mono text-[12.5px] leading-5`}>
+      {lines.map((l, i) => (
+        <div key={i} className={`px-3 whitespace-pre-wrap break-all ${tone(l)}`}>
+          {l === "" ? " " : l}
+        </div>
+      ))}
+    </pre>
   );
 }

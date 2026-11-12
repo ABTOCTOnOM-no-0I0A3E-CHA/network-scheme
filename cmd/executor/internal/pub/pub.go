@@ -161,6 +161,38 @@ func (p *Publisher) SessionClosed(ctx context.Context, session [16]byte, deviceI
 	return err
 }
 
+/* ChangesetSummary is a changeset as the panel lists it (execpub.changeset_summary): metadata only. */
+type ChangesetSummary struct {
+	ID      [16]byte
+	Author  int64
+	Kind    string
+	Title   string
+	Status  string
+	Devices []int64
+	Created time.Time
+	Failed  int64 /* the device a run stopped on (0: none) */
+}
+
+/* ChangesetSummary records the panel's row of a changeset, stamped by the database clock. */
+func (p *Publisher) ChangesetSummary(ctx context.Context, s ChangesetSummary) error {
+	var failed *int64
+	if s.Failed > 0 {
+		failed = &s.Failed
+	}
+	devs := s.Devices
+	if devs == nil {
+		devs = []int64{}
+	}
+	_, err := p.exec(ctx, `INSERT INTO execpub.changeset_summary (changeset_id, author_id, kind, title, status, device_count, device_ids,
+			created_at, updated_at, failed_device_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, greatest(now(), $8), $9)
+		ON CONFLICT (changeset_id) DO UPDATE SET kind = excluded.kind, title = excluded.title, status = excluded.status,
+			device_count = excluded.device_count, device_ids = excluded.device_ids, updated_at = excluded.updated_at,
+			failed_device_id = excluded.failed_device_id`,
+		s.ID, s.Author, s.Kind, freeze.CleanText(s.Title), s.Status, len(devs), devs, s.Created, failed)
+	return err
+}
+
 /*
 Recover runs at the start of a process, before any session opens: every
 device_busy row is a previous process's (the executor is one process), so all

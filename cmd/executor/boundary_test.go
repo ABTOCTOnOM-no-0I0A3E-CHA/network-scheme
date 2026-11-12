@@ -21,6 +21,8 @@ var (
 	sessionTables = map[string]bool{"session": true, "session_device": true, "session_event": true, "session_event_id_seq": true}
 	/* The exec names the recordings may use: their own append-only rows, and the session rows they belong to (read). */
 	recordingTables = map[string]bool{"recording_chunk": true, "recording_manifest": true, "session": true, "session_device": true}
+	/* The exec names the changesets may use: their own append-only rows (each with its own MAC). */
+	changesetTables = map[string]bool{"changeset": true, "changeset_revision": true, "changeset_event": true, "changeset_event_id_seq": true}
 )
 
 /* violations lists what the source text of a non-test file in dir (relative to cmd/executor) does against the boundary. */
@@ -30,7 +32,8 @@ func violations(dir, text string) []string {
 		out = append(out, "names a registry table; use registry.View / registry.Write")
 	}
 	if dir != "." && dir != "internal/registry" && dir != "internal/freeze" && dir != "internal/pub" && dir != "internal/backups" &&
-		dir != "internal/session" && dir != "internal/recording" && dir != "internal/unmask" && dbAccess.MatchString(text) {
+		dir != "internal/session" && dir != "internal/recording" && dir != "internal/unmask" && dir != "internal/changeset" &&
+		dbAccess.MatchString(text) {
 		out = append(out, "opens or holds a database connection; decisions go through the registry")
 	}
 	if dir == "internal/pub" && execSQL.MatchString(text) {
@@ -47,6 +50,13 @@ func violations(dir, text string) []string {
 		for _, m := range execTable.FindAllStringSubmatch(text, -1) {
 			if !recordingTables[strings.ToLower(m[1])] {
 				out = append(out, "names exec."+m[1]+"; recordings use only their own rows (exec.recording_*) and read their session's")
+			}
+		}
+	}
+	if dir == "internal/changeset" {
+		for _, m := range execTable.FindAllStringSubmatch(text, -1) {
+			if !changesetTables[strings.ToLower(m[1])] {
+				out = append(out, "names exec."+m[1]+"; a changeset uses only its own append-only rows (exec.changeset*)")
 			}
 		}
 	}
@@ -73,7 +83,8 @@ later code in cmd/executor:
     execpub.backup_taken; never schema exec), session (its own append-only
     rows exec.session, session_device and session_event only), recording
     (its own append-only rows exec.recording_chunk and recording_manifest,
-    reading the session's), unmask (backups.config_version, read; never
+    reading the session's), changeset (its own append-only rows
+    exec.changeset, changeset_revision and changeset_event only), unmask (backups.config_version, read; never
     schema exec) and main holds or opens a database connection,
     so decision code cannot run its own queries;
   - attacktest (superuser tampering) is imported by tests only.
@@ -149,6 +160,14 @@ func TestRegistryBoundaryCatchesBypasses(t *testing.T) {
 	}
 	if v := violations("internal/session", "var p *pgxpool.Pool; q := `INSERT INTO exec.session_event (id) VALUES (nextval('exec.session_event_id_seq'))`; r := `SELECT 1 FROM exec.session_device`"); len(v) != 0 {
 		t.Errorf("session: false positive %v", v)
+	}
+	for _, src := range []string{"q := `SELECT * FROM exec.session_event`", "q := `SELECT * FROM exec.write_grant`", "q := `INSERT INTO exec.audit_event`"} {
+		if len(violations("internal/changeset", src)) == 0 {
+			t.Errorf("changeset: not caught: %s", src)
+		}
+	}
+	if v := violations("internal/changeset", "var p *pgxpool.Pool; q := `INSERT INTO exec.changeset_event (id) VALUES (nextval('exec.changeset_event_id_seq'))`; r := `SELECT 1 FROM exec.changeset_revision`"); len(v) != 0 {
+		t.Errorf("changeset: false positive %v", v)
 	}
 	for _, src := range []string{"q := `SELECT * FROM exec.write_grant`", "q := `INSERT INTO exec.audit_event`", "q := `SELECT * FROM exec.session_event`"} {
 		if len(violations("internal/recording", src)) == 0 {

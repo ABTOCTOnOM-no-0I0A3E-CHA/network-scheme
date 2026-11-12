@@ -606,6 +606,10 @@
       "executor_recording_tamper": "Запись сессии изменений не прошла проверку целостности",
       "executor_unmask_views": "Слишком много просмотров конфигов без маскирования одним пользователем",
       "executor_config_tamper": "Версия конфига не прошла проверку хеша и не показана",
+      "changeset_failed": "Changeset остановлен на ошибке; применённые устройства откатываются",
+      "changeset_rollback_failed": "Откат changeset'а не восстановил конфигурацию устройства",
+      "changeset_interrupted": "Changeset прерван перезапуском executor'а; автоматического отката не было",
+      "executor_changeset_tamper": "Строка changeset'а не прошла проверку целостности",
       "executor_alert": "Сообщение executor'а",
       "executor_unreachable": "Executor не публикует своё состояние"
     },
@@ -989,7 +993,10 @@
       "event": "по событию",
       "manual": "вручную",
       "pre_session": "перед сессией изменений"
-    }
+    },
+    "restore": "Восстановить",
+    "restoreNamed": "Восстановить версию от {{when}}",
+    "restoreBusy": "Открыта сессия изменений: восстановление откроется после её завершения."
   },
   "data": {
     "search": "Поиск",
@@ -1213,6 +1220,42 @@
       "timeout": "истёк срок",
       "interrupted": "прервана",
       "rolled_back": "откачена"
+    }
+  },
+  "changes": {
+    "hint": "Changeset — изменение многих устройств, которое составляют, проверяют dry-run, подтверждают кодом TOTP изменений и исполняют в executor'е (отдельный защищённый адрес). Здесь — только список и статусы; строки и конфигурации видны только в executor'е.",
+    "create": "Создать changeset",
+    "open": "Открыть",
+    "openNamed": "Открыть changeset «{{title}}» в executor'е",
+    "table": "Changeset'ы",
+    "empty": "Changeset'ов пока нет",
+    "emptyHint": "Создайте changeset в executor'е или восстановите версию конфигурации на вкладке «Бэкапы» окна устройства.",
+    "sessionOpen": "Открыта сессия изменений: executor откроет «Изменения» после её завершения.",
+    "failedOn": "остановлен на устройстве {{id}}",
+    "deletedUser": "пользователь {{id}} (удалён)",
+    "col": {
+      "title": "Название",
+      "status": "Статус",
+      "kind": "Вид",
+      "devices": "Устройств",
+      "author": "Автор",
+      "updated": "Обновлён"
+    },
+    "kind": {
+      "lines": "Строки",
+      "restore": "Восстановление"
+    },
+    "status": {
+      "draft": "Черновик",
+      "dry_run_ok": "Dry-run пройден",
+      "dry_run_failed": "Dry-run: отказ",
+      "approved": "Ждёт второе лицо",
+      "running": "Исполняется",
+      "done": "Выполнен",
+      "rolled_back": "Остановлен, откачен",
+      "rollback_failed": "Откат не удался",
+      "interrupted": "Прерван",
+      "discarded": "Отменён"
     }
   }
 }

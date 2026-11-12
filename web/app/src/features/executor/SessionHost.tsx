@@ -11,10 +11,10 @@ import { ExecutorFrame } from "./ExecutorFrame";
  * stays mounted) and closing the device window it was opened from. Moving an iframe in the DOM reloads it, which would
  * drop the session's in-memory token, so the frame never moves: the dock is expanded or collapsed to the executor's
  * compact strip (timer, devices, Diff / Сохранить / Откатить / Завершить), never hidden while a session is open.
- * The frame's fragment only preselects (device ids, a recording); a new one reloads the frame, so it is changed only
- * while no session is open. While the executor shows a dialog (a confirmation), the dock takes the whole viewport
- * and cannot be collapsed: a confirmation is accepted only fully visible (review 4c.6 I1). While a session is open,
- * leaving the page asks first (the devices would stay busy until the session's idle timeout).
+ * The frame's fragment only preselects (device ids, a recording, a changeset, a restore); a new one reloads the frame,
+ * so it is changed only while no session is open. While the executor shows a dialog (a confirmation), the dock takes
+ * the whole viewport and cannot be collapsed: a confirmation is accepted only fully visible (review 4c.6 I1). While a
+ * session is open, leaving the page asks first (the devices would stay busy until the session's idle timeout).
  */
 export type SessionHost = {
   /* a session is open in the frame (the executor says so through the bridge) */
@@ -23,6 +23,10 @@ export type SessionHost = {
   open: (deviceId: number) => void;
   /* opens the executor's player for one session of one device (only while no session is open) */
   replay: (session: string, deviceId: number) => boolean;
+  /* opens the executor's «Изменения» on one changeset, or the section (only while no session is open) */
+  changeset: (id?: string) => boolean;
+  /* opens a restore changeset of one backup version in the executor (prefill only; only while no session is open) */
+  restore: (deviceId: number, versionId: number) => boolean;
 };
 
 const Ctx = createContext<SessionHost | null>(null);
@@ -67,7 +71,21 @@ export function SessionHostProvider({ children }: { children: ReactNode }) {
     },
     [sessionOpen, load],
   );
-  const host = useMemo(() => ({ sessionOpen, open, replay }), [sessionOpen, open, replay]);
+  /* a new fragment reloads the frame: never while a session is open (its token lives in the frame's memory) */
+  const preset = useCallback(
+    (hash: string) => {
+      if (sessionOpen) {
+        setExpanded(true);
+        return false;
+      }
+      load(hash);
+      return true;
+    },
+    [sessionOpen, load],
+  );
+  const changeset = useCallback((id?: string) => preset(id ? `changeset=${id}` : "view=changesets"), [preset]);
+  const restore = useCallback((deviceId: number, versionId: number) => preset(`restore=${deviceId}:${versionId}`), [preset]);
+  const host = useMemo(() => ({ sessionOpen, open, replay, changeset, restore }), [sessionOpen, open, replay, changeset, restore]);
   const onExpand = useCallback(() => setExpanded(true), []);
 
   return (
