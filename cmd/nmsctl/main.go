@@ -42,6 +42,7 @@ const usage = `usage:
   nmsctl user unlock U
   nmsctl audit verify [--anchors F]
   nmsctl audit anchor [--anchors F]
+  nmsctl keys rotate ticket
   nmsctl executor ... (nmsctl executor for its commands)`
 
 /* printf writes CLI output; a failing stdout or stderr cannot be reported anywhere better. */
@@ -106,6 +107,12 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 	}
 	if args[0] == "executor" {
 		return executorCmd(ctx, args[1:], d)
+	}
+	if args[0] == "keys" {
+		if d.sys.InContainer() {
+			return errors.New("nmsctl keys runs on the host, not in a container")
+		}
+		return keysCmd(ctx, d, args[1:])
 	}
 	if len(args) < 2 {
 		return errors.New(usage)
