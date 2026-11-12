@@ -10,7 +10,7 @@ import { join } from "node:path";
 import sodium from "libsodium-wrappers";
 
 const RUN = join(import.meta.dir, ".run");
-const BASE = "https://localhost";
+const BASE = process.env.DEMO_BASE ?? "https://localhost";
 const GROUP = "Демо-стенд";
 const DASHBOARD = "Демо";
 /*
