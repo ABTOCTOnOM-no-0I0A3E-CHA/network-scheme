@@ -142,4 +142,5 @@ func (k *Keys) Wipe() {
 	clear(k.mac[:])
 	clear(k.state[:])
 	clear(k.id[:])
+	k.version = 0
 }

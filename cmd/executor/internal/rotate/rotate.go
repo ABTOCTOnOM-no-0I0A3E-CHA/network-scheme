@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/authz"
@@ -28,9 +27,9 @@ import (
 	"github.com/beekamai/network-scheme/cmd/executor/internal/session"
 )
 
-/* Config is one rotation: the current and the next key, the state directory, the host operator (for the audit). */
+/* Config is one rotation: the registry (under the current key Old), the next key, the state directory, the host operator (for the audit). */
 type Config struct {
-	Pool      *pgxpool.Pool
+	Reg       *registry.Registry
 	Old, Next *seal.Keys
 	StateDir  string
 	Operator  string
@@ -38,10 +37,9 @@ type Config struct {
 
 /* Sealing runs (or resumes) the rotation of c. */
 func Sealing(ctx context.Context, c Config) (registry.RotateReport, error) {
-	reg := registry.New(c.Pool, c.Old, filepath.Join(c.StateDir, "state"))
 	ev := audit.Event{UA: "nmsctl", Action: "admin.key-rotate", Object: "sealing-key", Result: audit.OK,
 		Details: map[string]any{"operator": c.Operator}}
-	rep, err := reg.Rotate(ctx, c.Next, audit.Append(ev), Rekey())
+	rep, err := c.Reg.Rotate(ctx, c.Next, audit.Append(ev), Rekey())
 	if err != nil {
 		return rep, err
 	}

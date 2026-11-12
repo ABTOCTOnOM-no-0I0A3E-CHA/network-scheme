@@ -73,8 +73,8 @@ func (f fixture) store(k *seal.Keys) *changeset.Store {
 
 func (f fixture) run(t *testing.T) (registry.RotateReport, error) {
 	t.Helper()
-	return rotate.Sealing(context.Background(), rotate.Config{Pool: f.env.Pool("nms_executor"), Old: f.old, Next: f.next,
-		StateDir: f.dir, Operator: "root"})
+	reg := registry.New(f.env.Pool("nms_executor"), f.old, filepath.Join(f.dir, "state"))
+	return rotate.Sealing(context.Background(), rotate.Config{Reg: reg, Old: f.old, Next: f.next, StateDir: f.dir, Operator: "root"})
 }
 
 /*
