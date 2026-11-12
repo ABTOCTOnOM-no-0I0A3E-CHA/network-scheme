@@ -591,7 +591,12 @@ func TestStallAtPendingSettles(t *testing.T) {
 		t.Run(fmt.Sprintf("resumed late %v", late), func(t *testing.T) {
 			env, r := fresh(t)
 			ctx := context.Background()
-			r.opTimeout, r.settleFor = 3*time.Second, 20*time.Second /* the settle must outlast a resumed backend on a loaded runner */
+			/*
+				The write's deadline must outlast the stall itself (COPY TO PROGRAM kill -STOP inside the hook): on a loaded
+				runner a 3 s deadline was spent before the COMMIT was sent, so it never reached the server and the write
+				failed as it should, but not as this case means to test. The settle must outlast a resumed backend.
+			*/
+			r.opTimeout, r.settleFor = 10*time.Second, 20*time.Second
 			if late {
 				r.settleFor = time.Second
 			}
@@ -612,8 +617,24 @@ func TestStallAtPendingSettles(t *testing.T) {
 			within(t, time.Minute, "stalled write", func() { err = grant(ctx, r, 1) })
 			r.hook = nil
 			if !late {
-				if err != nil {
+				/*
+					Resumed while the settle waits, the COMMIT usually goes through and the write reports success.
+					On a loaded runner the client's timeout may also cancel the COMMIT before the stopped backend
+					reads it: then the transaction aborts and the settle reports "not applied". Either outcome is
+					right as long as the state matches it; what must never happen is tampering or a stuck pending.
+				*/
+				if errors.Is(err, ErrTampered) {
 					t.Fatalf("write: %v", err)
+				}
+				if err != nil {
+					if f := loadState(t, r); f.Pending != nil || f.Committed.HWM != 1 {
+						t.Fatalf("aborted write left state %+v", f)
+					}
+					if rep := verify(t, r); rep.Seq != 1 || count(t, env, `SELECT count(*) FROM exec.write_grant`) != 0 {
+						t.Fatalf("aborted write not settled as not applied: %+v", rep)
+					}
+					t.Logf("the COMMIT was cancelled by the timeout before the backend resumed: settled as not applied (%v)", err)
+					return
 				}
 			} else {
 				if err == nil || errors.Is(err, ErrTampered) {

@@ -288,7 +288,7 @@ repeats. After the host's freeze off a pending request freezes again at
 once (it was never dropped).
 */
 func TestFreezeRequestFlood(t *testing.T) {
-	defer pub.SetPace(500*time.Millisecond, time.Hour)()
+	t.Cleanup(pub.SetPace(500*time.Millisecond, time.Hour))
 	e := fresh(t)
 	e.run(t)
 	e.request(t, 1)
@@ -536,7 +536,7 @@ func TestFailedFreezeWriteKeepsTheRequest(t *testing.T) {
 
 /* The status row is rewritten every heartbeat even when nothing changes, so its "at" tells the panel the executor is alive. */
 func TestStatusHeartbeat(t *testing.T) {
-	defer pub.SetTiming(300*time.Millisecond, time.Hour)()
+	t.Cleanup(pub.SetTiming(300*time.Millisecond, time.Hour))
 	e := fresh(t)
 	e.run(t)
 	at := func() (ts time.Time) {
@@ -553,7 +553,7 @@ func TestStatusHeartbeat(t *testing.T) {
 
 /* A flood of wake-ups (anyone may NOTIFY) reads freeze_request at most once every minProbe. */
 func TestWakeFloodIsBounded(t *testing.T) {
-	defer pub.SetPace(time.Hour, time.Hour)()
+	t.Cleanup(pub.SetPace(time.Hour, time.Hour))
 	e := fresh(t)
 	e.run(t)
 	time.Sleep(500 * time.Millisecond)
@@ -571,8 +571,8 @@ func TestWakeFloodIsBounded(t *testing.T) {
 
 /* A lost LISTEN connection is opened again: with polling off, a request still freezes through the new one. */
 func TestListenReconnects(t *testing.T) {
-	defer pub.SetPace(time.Hour, time.Hour)()
-	defer pub.SetTiming(30*time.Second, 200*time.Millisecond)()
+	t.Cleanup(pub.SetPace(time.Hour, time.Hour))
+	t.Cleanup(pub.SetTiming(30*time.Second, 200*time.Millisecond))
 	e := fresh(t)
 	e.run(t)
 	listener := func() (pid int) {

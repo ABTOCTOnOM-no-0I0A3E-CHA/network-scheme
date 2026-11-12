@@ -21,5 +21,8 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
     storageState: STATE_FILE,
     locale: "ru-RU",
+    /* a stuck click or navigation fails within a minute and prints its diagnostics, not at the test's own timeout */
+    actionTimeout: 60_000,
+    navigationTimeout: 60_000,
   },
 });

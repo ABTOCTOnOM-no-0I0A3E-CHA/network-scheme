@@ -247,7 +247,8 @@ var settings = map[string][]struct {
 	words string
 	n     int
 }{
-	"config":    {{"hostname", 1}, {"logging host", 3}, {"sntp server", 3}, {"snmp-server location", 2}, {"snmp-server contact", 2}},
+	"config": {{"hostname", 1}, {"logging host", 3}, {"sntp server", 3}, {"snmp-server location", 2}, {"snmp-server contact", 2},
+		{"snmp-server community", 3}},
 	"config-if": {{"description", 1}, {"shutdown", 1}, {"switchport access vlan", 3}, {"name", 1}},
 }
 
