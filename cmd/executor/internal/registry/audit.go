@@ -76,15 +76,24 @@ anchored head first (else ErrTampered: freeze). As for Write, an error other
 than ErrTampered does not mean the rows were not appended.
 */
 func (r *Registry) Append(ctx context.Context, a Appender) error {
-	return oversized(r.appendAlone(ctx, a))
+	return oversized(r.appendAlone(ctx, a, r.opTimeout))
 }
 
-func (r *Registry) appendAlone(ctx context.Context, a Appender) error {
+/*
+AppendLong is Append bounded by RotateTimeout on both sides: for a key
+rotation whose rewrite of rows outside the registry runs in its appender,
+in the transaction of its audit row.
+*/
+func (r *Registry) AppendLong(ctx context.Context, a Appender) error {
+	return oversized(r.appendAlone(ctx, a, RotateTimeout))
+}
+
+func (r *Registry) appendAlone(ctx context.Context, a Appender, d time.Duration) error {
 	if err := r.lock(ctx); err != nil {
 		return err
 	}
 	defer r.unlock()
-	ctx, cancel := context.WithTimeout(ctx, r.opTimeout)
+	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	f, err := r.load()
 	if err != nil {
@@ -100,6 +109,11 @@ func (r *Registry) appendAlone(ctx context.Context, a Appender) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := pinSession(ctx, tx); err != nil {
 		return err
+	}
+	if d != r.opTimeout {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", d.Milliseconds())); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE exec.audit_head IN EXCLUSIVE MODE`); err != nil {
 		return err
