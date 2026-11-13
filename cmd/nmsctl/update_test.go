@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -53,6 +54,10 @@ func (f *updateFake) Run(ctx context.Context, c install.Cmd) error {
 	switch {
 	case strings.Contains(a, "run --rm migrate"):
 		f.schema = "31"
+		/* the anchor timer runs during the update: a rollback must put the backup's file back */
+		if err := os.WriteFile(filepath.Join(varDir, "anchors", "anchors.log"), []byte("anchor\nlater anchor\n"), 0o600); err != nil {
+			return err
+		}
 	case strings.Contains(a, "volume rm"):
 		f.schema = "30"
 	case strings.Contains(a, "goose_db_version"):
@@ -124,11 +129,12 @@ func goodEntries(t *testing.T, edit func(*bundleManifest)) []bundleEntry {
 	return append([]bundleEntry{{"manifest.json", string(raw)}}, images...)
 }
 
-/* updateHost makes an install at 0.9.0 with schema 30 and a running executor. */
+/* updateHost makes an install at 0.9.0 with schema 30, an anchors file and a running executor. */
 func updateHost(t *testing.T) *updateFake {
 	t.Helper()
 	host(t)
 	write(t, filepath.Join(etcDir, "secrets", "db_cli_password"), "pw")
+	write(t, filepath.Join(varDir, "anchors", "anchors.log"), "anchor\n")
 	write(t, filepath.Join(etcDir, "compose.yaml"), oldCompose)
 	return &updateFake{stackFake: stackFake{state: stateTar(t, `{"v":1,"committed":{"hwm":5},"pending":null,"frozen":false}`)}, schema: "30"}
 }
@@ -158,6 +164,20 @@ func inOrder(t *testing.T, f *updateFake, want ...string) {
 			t.Fatalf("%q missing or out of order in %q", s, f.argv())
 		}
 		last = i
+	}
+}
+
+/* noWriterStart fails if a command in argv[from:end] starts a writer. */
+func noWriterStart(t *testing.T, f *updateFake, from, end int) {
+	t.Helper()
+	a := f.argv()
+	if from < 0 || end < from {
+		t.Fatalf("bad range %d..%d in %q", from, end, a)
+	}
+	for _, s := range a[from:end] {
+		if strings.Contains(s, " start") || (strings.Contains(s, " up ") && !strings.Contains(s, " postgres") && !strings.Contains(s, "--no-start")) {
+			t.Fatalf("%q runs a writer during the update: %q", s, a)
+		}
 	}
 }
 
@@ -247,8 +267,9 @@ func TestUpdateBacksUpLoadsMigratesAndRecords(t *testing.T) {
 	if code, msg := runWith(sys, "", "update", makeBundle(t, &priv, goodEntries(t, nil)...)); code != 0 {
 		t.Fatalf("update: %s\n%q", msg, sys.argv())
 	}
-	inOrder(t, sys, "goose_db_version", " stop executor", "pg_dump", " start executor", "load", "load", "load",
+	inOrder(t, sys, "goose_db_version", " stop executor api poller eventd", "pg_dump", "load", "load", "load",
 		"image inspect --format {{.Id}} nms/executor:1.0.0", "run --rm migrate", "goose_db_version", "up -d --wait --wait-timeout 600", "nmsctl update record")
+	noWriterStart(t, sys, sys.index(" stop executor api poller eventd"), sys.index("up -d --wait --wait-timeout 600"))
 	if sys.index("volume rm") >= 0 {
 		t.Fatalf("rolled back: %q", sys.argv())
 	}
@@ -278,8 +299,18 @@ func TestUpdateRollsBackABrokenUpdate(t *testing.T) {
 			if code == 0 || !strings.Contains(msg, "rolled back to 0.9.0") {
 				t.Fatalf("code %d %s", code, msg)
 			}
-			inOrder(t, sys, fail, " stop", "rm -f postgres executor", "volume rm nms_pgdata nms_executor-state", "up -d --wait postgres",
-				"pg_restore", "up --no-start executor", "cp -a - "+testCID+":/var/lib", "up -d --wait --wait-timeout 600", "nmsctl update record")
+			inOrder(t, sys, " stop executor api poller eventd", "pg_dump", fail, " stop", "rm -f postgres executor", "volume rm nms_pgdata nms_executor-state",
+				"up -d --wait postgres", "pg_restore", "up --no-start executor", "cp -a - "+testCID+":/var/lib", "up -d --wait --wait-timeout 600", "nmsctl update record")
+			/* the writers stay stopped from the backup to the start with the new images, and from the rollback's stop to its final up */
+			failed := slices.IndexFunc(sys.argv(), func(a string) bool { return strings.Contains(a, fail) })
+			noWriterStart(t, sys, sys.index(" stop executor api poller eventd"), failed)
+			noWriterStart(t, sys, failed+1, sys.index("cp -a - "+testCID))
+			if sys.index("restored-from-backup") >= 0 {
+				t.Fatalf("a rollback marked the executor as restored: %q", sys.argv())
+			}
+			if b, err := os.ReadFile(filepath.Join(varDir, "anchors", "anchors.log")); err != nil || string(b) != "anchor\n" {
+				t.Fatalf("anchors not rolled back: %q %v", b, err)
+			}
 			if compose(t) != oldCompose {
 				t.Fatalf("compose not rolled back: %s", compose(t))
 			}
@@ -305,6 +336,19 @@ func TestUpdateStopsOnALoadFailure(t *testing.T) {
 	if code == 0 || !strings.Contains(msg, "not changed") || sys.index("migrate") >= 0 || sys.index("volume rm") >= 0 || compose(t) != oldCompose {
 		t.Fatalf("code %d %s %q", code, msg, sys.argv())
 	}
+	inOrder(t, sys, " stop executor api poller eventd", "pg_dump", "image inspect", " start executor api poller eventd")
+}
+
+/* A failed backup changes nothing either: the stopped services start again. */
+func TestUpdateRestartsTheServicesOnABackupFailure(t *testing.T) {
+	priv := signer(t)
+	sys := updateHost(t)
+	sys.fail = "pg_dump"
+	code, msg := runWith(sys, "", "update", makeBundle(t, &priv, goodEntries(t, nil)...))
+	if code == 0 || !strings.Contains(msg, "nothing was changed") || sys.index("load") >= 0 {
+		t.Fatalf("code %d %s %q", code, msg, sys.argv())
+	}
+	inOrder(t, sys, " stop executor api poller eventd", "pg_dump", " start executor api poller eventd")
 }
 
 func TestUpdateRecordAppendsToTheAudit(t *testing.T) {
