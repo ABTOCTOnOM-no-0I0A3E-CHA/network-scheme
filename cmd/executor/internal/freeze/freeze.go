@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +24,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	execaudit "github.com/beekamai/network-scheme/cmd/executor/internal/audit"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
+	"github.com/beekamai/network-scheme/internal/execadmin"
 )
 
 /* alertRetryEvery spaces the background retries of a failed alert (a variable for the tests). */
@@ -144,6 +147,33 @@ func (g *Guard) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+/*
+FreezeRestored runs right after Start, before anything is served: if nmsctl
+restore left execadmin.RestoredMarker at marker, the executor freezes as the
+host's freeze on does (sticky in the state file, exec_state, alert, a row in
+its audit) with execadmin.RestoredReason. A backup may be of any age (grants,
+host keys, write flags), so only the host lifts it (nmsctl executor freeze
+off). The marker is removed once the freeze is sticky; until then every start
+freezes again. Only a marker that cannot be checked is an error.
+*/
+func (g *Guard) FreezeRestored(ctx context.Context, marker string) error {
+	if _, err := os.Lstat(marker); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("restore marker: %w", err)
+	}
+	g.Trigger(ctx, KindHostFreeze, execadmin.RestoredReason)
+	if err := g.reg.Append(ctx, execaudit.Append(execaudit.Event{UA: "nmsctl", Action: "admin." + execadmin.CmdFreezeOn,
+		Object: "executor", Result: execaudit.OK, Details: map[string]any{"reason": execadmin.RestoredReason}})); err != nil {
+		g.log.Error("executor audit: cannot record the restore's freeze", slog.Any("err", err))
+	}
+	if sticky, err := g.reg.StickyFrozen(); err != nil || !sticky {
+		g.log.Error("state file: the restore's freeze is not sticky, the marker stays", slog.Any("err", err))
+		return nil
+	}
+	return os.Remove(marker)
 }
 
 /*

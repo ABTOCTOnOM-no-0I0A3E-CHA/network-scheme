@@ -156,3 +156,23 @@ func (a *Authorizer) saveGuards(ctx context.Context, over *pessimism) error {
 	}
 	return err
 }
+
+/*
+RekeyGuards moves the guards file from the state subkey old to next (a
+sealing key rotation, with the daemon stopped): a file that opens under old
+is written again under next; one that opens under next already (a resumed
+rotation) or no file at all is left; anything else is an error.
+*/
+func RekeyGuards(path string, old, next *[32]byte) error {
+	body, err := state.LoadSealed(path, old, guardsLabel, maxGuardsBytes)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err == nil:
+		return state.SaveSealed(path, next, guardsLabel, body)
+	}
+	if _, nerr := state.LoadSealed(path, next, guardsLabel, maxGuardsBytes); nerr == nil {
+		return nil
+	}
+	return fmt.Errorf("authz: guards file %s: %w", path, err)
+}

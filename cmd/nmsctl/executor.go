@@ -25,6 +25,8 @@ import (
 )
 
 const executorUsage = `usage:
+  nmsctl executor init --image-tag TAG [--xnet-subnet CIDR] [--edge-subnet CIDR]
+      (adds the executor to an installation made before it; refused once done)
   nmsctl executor enable|disable
   nmsctl executor policy show|check|edit [--file F]
   nmsctl executor enroll U [--replace] [--yes] [--totp-secret-out F]
@@ -37,6 +39,8 @@ const executorUsage = `usage:
       (RE matches the whole model or firmware string: stored as ^(?:RE)$)
   nmsctl executor registry verify | reset [--i-understand] [--drop-panel-request]
   nmsctl executor audit verify
+  nmsctl executor key rotate [--yes]
+      (stops the executor, re-seals its registry under a new sealing key, starts it again)
 ` + deviceLines + `(U: a panel user name or #id)`
 
 const deviceLines = `  nmsctl executor device add --device ID --address A --group G --driver mes6|mes10|esr [--port P]
@@ -79,10 +83,12 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 		return errors.New(executorUsage)
 	}
 	cmd, rest := args[0], args[1:]
-	if len(rest) > 0 && (cmd == "policy" || cmd == "freeze" || cmd == "registry" || cmd == "audit" || cmd == "device") {
+	if len(rest) > 0 && (cmd == "policy" || cmd == "freeze" || cmd == "registry" || cmd == "audit" || cmd == "device" || cmd == "key") {
 		cmd, rest = cmd+" "+rest[0], rest[1:]
 	}
 	switch cmd {
+	case "init":
+		return executorInit(ctx, d, rest)
 	case "enable", "disable":
 		if len(rest) > 0 {
 			return errors.New(executorUsage)
@@ -132,6 +138,8 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 			return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryVerify})
 		}
 		return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryReset, IUnderstand: *sure, DropPanel: *drop})
+	case "key rotate":
+		return sealingRotate(ctx, d, rest)
 	case "audit verify":
 		if len(rest) > 0 {
 			return errors.New(executorUsage)
@@ -141,6 +149,19 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 		return deviceCmd(ctx, d, strings.TrimPrefix(cmd, "device "), rest)
 	}
 	return errors.New(executorUsage)
+}
+
+/* executorInit runs install.InitExecutor with the operator's image tag and the new networks' subnets. */
+func executorInit(ctx context.Context, d deps, args []string) error {
+	o := install.Options{Out: d.out, PortFree: install.ListenFree}
+	fs := newFlags("executor init")
+	fs.StringVar(&o.ImageTag, "image-tag", "", "tag of the images (with the executor) to run")
+	fs.StringVar(&o.XnetSubnet, "xnet-subnet", install.DefaultXnetSubnet, "IPv4 subnet of the internal gateway-executor network")
+	fs.StringVar(&o.EdgeSubnet, "edge-subnet", install.DefaultEdgeSubnet, "IPv4 subnet of the gateway's published-port network")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 || o.ImageTag == "" {
+		return errors.New("usage: nmsctl executor init --image-tag TAG [--xnet-subnet CIDR] [--edge-subnet CIDR]")
+	}
+	return install.InitExecutor(ctx, o, d.sys)
 }
 
 /*

@@ -38,9 +38,11 @@ import (
 /* runFor is how long the poller runs; CI uses the default, a local smoke may pass -args -load.duration=2m. */
 var runFor = flag.Duration("load.duration", 10*time.Minute, "how long the poller polls the simulated devices")
 
+/* numDevices is 1 000 in CI; NFR-PERF-1 is measured with -args -load.devices=5000. */
+var numDevices = flag.Int("load.devices", 1000, "how many simulated devices the poller polls (1..9999)")
+
 const (
-	numDevices = 1000
-	firstPort  = 20000
+	firstPort = 20000
 	pollerID   = "load"
 	/* p95Limit is the target: an availability run starts at most 30 s after it was due. */
 	p95Limit = 30 * time.Second
@@ -123,21 +125,24 @@ func (u *usage) sample(pool *pgxpool.Pool) {
 	w.waits = u.waits
 }
 
-func TestAvailabilityCycle1000Devices(t *testing.T) {
+func TestAvailabilityCycle(t *testing.T) {
 	if *runFor < 2*availEvery {
 		t.Fatalf("-load.duration %v: at least %v", *runFor, 2*availEvery)
+	}
+	if *numDevices < 1 || *numDevices > 9999 { /* community() has four digits */
+		t.Fatalf("-load.devices %d: 1..9999", *numDevices)
 	}
 	env := testdb.New(t)
 	dir := filepath.Join(t.TempDir(), "data")
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := generate(dir, numDevices); err != nil {
+	if err := generate(dir, *numDevices); err != nil {
 		t.Fatal(err)
 	}
 	setupStart := time.Now()
 	addrs := startAgents(t, dir)
-	t.Logf("simulator with %d UDP ports ready in %v (first %v)", numDevices, time.Since(setupStart).Round(time.Millisecond), addrs[0])
+	t.Logf("simulator with %d UDP ports ready in %v (first %v)", *numDevices, time.Since(setupStart).Round(time.Millisecond), addrs[0])
 
 	cfg, pub, priv := pollerConfig(t, env)
 	ids := addDevices(t, env, addrs, pub)
@@ -163,6 +168,7 @@ func TestAvailabilityCycle1000Devices(t *testing.T) {
 		Pool: pool, Priv: priv, Pub: pub, Pinger: okPinger{},
 		Logger:              slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		AvailabilityStarted: rec.record,
+		CheckAddr:           func(netip.Addr) error { return nil }, /* the agents are on loopback, which production refuses */
 	})
 
 	var u usage
@@ -208,13 +214,13 @@ port (the Python snmpsim starves on the 4 vCPUs of a CI runner, the poller then 
 */
 func startAgents(t *testing.T, dir string) []netip.AddrPort {
 	t.Helper()
-	addrs := make([]netip.AddrPort, numDevices)
+	addrs := make([]netip.AddrPort, *numDevices)
 	for i := range addrs {
 		mib, err := snmpgo.LoadSnmprec(filepath.Join(dir, community(i)+".snmprec"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(firstPort+i)) //nolint:gosec // numDevices ports from firstPort
+		addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(firstPort+i)) //nolint:gosec // at most 9999 ports from firstPort
 		a, err := snmpgo.Listen(addr, community(i), mib)
 		if err != nil {
 			t.Fatal(err)

@@ -100,6 +100,15 @@ func dbCmd(ctx context.Context, cmd string, args []string, pool *pgxpool.Pool, k
 			return err
 		}
 		return userUnlock(ctx, pool, user, d.out)
+	case "restore record":
+		return restoreRecord(ctx, pool, args, d)
+	case "update record":
+		return updateRecord(ctx, pool, args, d)
+	case "keys reencrypt":
+		if len(args) == 0 || args[0] != "read" {
+			return errors.New("usage: nmsctl keys reencrypt read --version V")
+		}
+		return reencryptRead(ctx, pool, args[1:], d)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

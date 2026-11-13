@@ -26,6 +26,12 @@ func TestMain(m *testing.M) { testdb.Main(m) }
 /* writeConfig writes executor.yaml over a fresh secrets directory and the nms_executor role of the test database. */
 func writeConfig(t *testing.T) (cfgPath, secrets string) {
 	t.Helper()
+	return writeConfigWith(t, func(string) {})
+}
+
+/* writeConfigWith is writeConfig with edit applied to the secrets directory before the config is written. */
+func writeConfigWith(t *testing.T, edit func(secrets string)) (cfgPath, secrets string) {
+	t.Helper()
 	env := testdb.New(t)
 	attacktest.Reset(t, env) /* a fresh install: each test has a new state directory */
 	dir := t.TempDir()
@@ -33,6 +39,7 @@ func writeConfig(t *testing.T) (cfgPath, secrets string) {
 	if err := install.WriteSecrets(secrets, install.SecretsInput{PublicHost: "nms.example.org", Chown: func(string, int, int) error { return nil }}); err != nil {
 		t.Fatal(err)
 	}
+	edit(secrets)
 	db, pw := env.Config("nms_executor")
 	state := filepath.Join(dir, "state")
 	for p, body := range map[string]string{
@@ -120,6 +127,57 @@ func gatewayClient(t *testing.T, secrets, addr string) *http.Client {
 		},
 		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "executor", Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
 	}}
+}
+
+/*
+An installation from before the executor, given its secrets by nmsctl
+executor init (InitSecrets over the CA and keys it had), starts the executor
+on a fresh state volume: healthy, disabled and not frozen.
+*/
+func TestRunStartsUnfrozenAfterExecutorInit(t *testing.T) {
+	cfgPath, secrets := writeConfigWith(t, func(secrets string) {
+		for _, f := range []string{"db_executor_password", "ticket.key", "ticket.pub", "executor_tls.crt", "executor_tls.key", "gateway_client.crt", "gateway_client.key"} {
+			if err := os.Remove(filepath.Join(secrets, f)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := install.InitSecrets(secrets, func(string, int, int) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"run", "--config", cfgPath}) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run after cancel: %v", err)
+		}
+	}()
+	var call listenCall
+	select {
+	case call = <-listened:
+	case err := <-done:
+		done <- nil /* for the deferred wait */
+		t.Fatalf("run: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not listen")
+	}
+	if err := run(context.Background(), []string{"healthcheck", "--config", cfgPath}); err != nil {
+		t.Fatalf("healthcheck: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://executor/x/status", nil)
+	req.Host = "nms.example.org:8443"
+	req.Header.Set("X-Forwarded-For", "192.0.2.7")
+	resp, err := gatewayClient(t, secrets, call.real).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"enabled":false,"frozen":false}` {
+		t.Fatalf("GET /x/status = %d %s", resp.StatusCode, body)
+	}
 }
 
 /*

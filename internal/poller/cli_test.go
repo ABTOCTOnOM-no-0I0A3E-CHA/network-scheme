@@ -75,6 +75,7 @@ func newCLIEnv(t *testing.T) *cliEnv {
 	h.profile(id, "ssh_read", credstest.Seal(h.pub, owner, "ssh_read", map[string]string{"username": "u", "password": "twelve-chars-x"}, time.Now().Add(-time.Minute)))
 	e.p = h.poller(Intervals{Availability: time.Hour, Metrics: time.Hour, Inventory: time.Hour})
 	e.p.sshPort = uint16(ln.Addr().(*net.TCPAddr).Port)
+	e.p.checkAddr = func(netip.Addr) error { return nil } /* the emulator is on loopback, which production refuses */
 	devs, err := e.p.loadDevices(context.Background())
 	if err != nil || len(devs) != 1 {
 		t.Fatalf("devices %v, %v", devs, err)

@@ -133,6 +133,10 @@ func TestRenderedPollerConfigLoads(t *testing.T) {
 		c.ReadPubKeyFile != "/etc/nms/domain_read.pub" || c.BackupPubKeyFile != "/etc/nms/domain_backup.pub" {
 		t.Errorf("unexpected config: %+v", c)
 	}
+	/* The poller refuses device addresses in the stack's own networks (pentest F1). */
+	if fmt.Sprint(c.DenySubnets) != "[172.30.0.0/24 172.30.2.0/24 172.30.3.0/24]" {
+		t.Errorf("deny_subnets = %v", c.DenySubnets)
+	}
 }
 
 func TestRenderNonDefaultPortAndSubnet(t *testing.T) {

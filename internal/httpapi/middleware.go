@@ -131,9 +131,21 @@ func (s *server) withClientIP(next http.Handler) http.Handler {
 	})
 }
 
+/*
+limitKey is the per-IP limit key: the address, for IPv6 its /64, so a client
+rotating addresses within its own prefix does not get a fresh budget for each
+(as the executor's ipKey).
+*/
+func limitKey(a netip.Addr) string {
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
+}
+
 func newLimiter(perMinute int) *httprate.RateLimiter {
 	return httprate.NewRateLimiter(perMinute, time.Minute,
-		httprate.WithKeyFuncs(func(r *http.Request) (string, error) { return clientIP(r.Context()).String(), nil }),
+		httprate.WithKeyFuncs(func(r *http.Request) (string, error) { return limitKey(clientIP(r.Context())), nil }),
 		httprate.WithLimitHandler(func(w http.ResponseWriter, _ *http.Request) { writeError(w, errRateLimited) }),
 		httprate.WithErrorHandler(func(w http.ResponseWriter, _ *http.Request, _ error) { writeError(w, errInternal) }),
 	)

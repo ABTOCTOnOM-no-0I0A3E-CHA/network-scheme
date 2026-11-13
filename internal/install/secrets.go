@@ -163,7 +163,6 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("db_cli_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_poller_password", nil, ContainerUID, PostgresUID, 0o440)
 	add("db_eventd_password", nil, ContainerUID, PostgresUID, 0o440)
-	add("db_executor_password", nil, ExecutorUID, PostgresUID, 0o440)
 	for i := range files {
 		b, err := keys.NewSymmetricKey()
 		if err != nil {
@@ -172,17 +171,11 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 		files[i].data = []byte(base64.RawURLEncoding.EncodeToString(b[:]))
 	}
 
-	for _, name := range []string{"api_data_key", "executor_sealing_key"} {
-		k, err := keys.NewSymmetricKey()
-		if err != nil {
-			return nil, err
-		}
-		uid := ExecutorUID
-		if name == "api_data_key" {
-			uid = ContainerUID
-		}
-		add(name, []byte(base64.StdEncoding.EncodeToString(k[:])), uid, uid, 0o400)
+	k, err := keys.NewSymmetricKey()
+	if err != nil {
+		return nil, err
 	}
+	add("api_data_key", []byte(base64.StdEncoding.EncodeToString(k[:])), ContainerUID, ContainerUID, 0o400)
 	for _, d := range []string{"read", "write", "backup"} {
 		k, err := keys.NewDomainKey()
 		if err != nil {
@@ -204,27 +197,11 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	add("ca.crt", caCrt, 0, 0, 0o444)
 	add("ca.key", caKey, 0, 0, 0o400)
 
-	/* Session tickets: the api signs (ticket.key), the executor only verifies (ticket.pub). */
-	tpub, tpriv, err := ed25519.GenerateKey(rand.Reader)
+	ex, err := executorSecrets(caCrt, caKey)
 	if err != nil {
-		return nil, fmt.Errorf("install: ticket key: %w", err)
+		return nil, err
 	}
-	add("ticket.key", []byte(base64.StdEncoding.EncodeToString(tpriv.Seed())), ContainerUID, ContainerUID, 0o400)
-	add("ticket.pub", []byte(base64.StdEncoding.EncodeToString(tpub)), ExecutorUID, ExecutorUID, 0o400)
-
-	/* xnet: mutual TLS between the gateway and the executor, both issued by the internal CA. */
-	exCrt, exKey, err := pki.IssueServerCert(caCrt, caKey, []string{executorServerName}, nil, webValidity)
-	if err != nil {
-		return nil, fmt.Errorf("install: executor certificate: %w", err)
-	}
-	add("executor_tls.crt", exCrt, ExecutorUID, ExecutorUID, 0o400)
-	add("executor_tls.key", exKey, ExecutorUID, ExecutorUID, 0o400)
-	gwCrt, gwKey, err := pki.IssueClientCert(caCrt, caKey, gatewayClientCN, webValidity)
-	if err != nil {
-		return nil, fmt.Errorf("install: gateway client certificate: %w", err)
-	}
-	add("gateway_client.crt", gwCrt, ContainerUID, ContainerUID, 0o400)
-	add("gateway_client.key", gwKey, ContainerUID, ContainerUID, 0o400)
+	files = append(files, ex...)
 
 	var dns []string
 	var ips []net.IP
@@ -261,5 +238,51 @@ func generateSecrets(in SecretsInput) ([]secretFile, error) {
 	}
 	add("syslog.crt", sysCrt, ContainerUID, ContainerUID, 0o400)
 	add("syslog.key", sysKey, ContainerUID, ContainerUID, 0o400)
+	return files, nil
+}
+
+/*
+executorSecrets builds the secrets that came with the executor (Phase 4):
+db_executor_password, executor_sealing_key, the session ticket pair and the
+xnet certificates issued by the CA caCrt/caKey. Shared by install and
+executor init, which adds them to an installation made before.
+*/
+func executorSecrets(caCrt, caKey []byte) ([]secretFile, error) {
+	var files []secretFile
+	add := func(name string, data []byte, uid, gid int, mode os.FileMode) {
+		files = append(files, secretFile{name, data, uid, gid, mode})
+	}
+	pw, err := keys.NewSymmetricKey()
+	if err != nil {
+		return nil, err
+	}
+	add("db_executor_password", []byte(base64.RawURLEncoding.EncodeToString(pw[:])), ExecutorUID, PostgresUID, 0o440)
+	seal, err := keys.NewSymmetricKey()
+	if err != nil {
+		return nil, err
+	}
+	add("executor_sealing_key", []byte(base64.StdEncoding.EncodeToString(seal[:])), ExecutorUID, ExecutorUID, 0o400)
+
+	/* Session tickets: the api signs (ticket.key), the executor only verifies (ticket.pub). */
+	tpub, tpriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("install: ticket key: %w", err)
+	}
+	add("ticket.key", []byte(base64.StdEncoding.EncodeToString(tpriv.Seed())), ContainerUID, ContainerUID, 0o400)
+	add("ticket.pub", []byte(base64.StdEncoding.EncodeToString(tpub)), ExecutorUID, ExecutorUID, 0o400)
+
+	/* xnet: mutual TLS between the gateway and the executor, both issued by the internal CA. */
+	exCrt, exKey, err := pki.IssueServerCert(caCrt, caKey, []string{executorServerName}, nil, webValidity)
+	if err != nil {
+		return nil, fmt.Errorf("install: executor certificate: %w", err)
+	}
+	add("executor_tls.crt", exCrt, ExecutorUID, ExecutorUID, 0o400)
+	add("executor_tls.key", exKey, ExecutorUID, ExecutorUID, 0o400)
+	gwCrt, gwKey, err := pki.IssueClientCert(caCrt, caKey, gatewayClientCN, webValidity)
+	if err != nil {
+		return nil, fmt.Errorf("install: gateway client certificate: %w", err)
+	}
+	add("gateway_client.crt", gwCrt, ContainerUID, ContainerUID, 0o400)
+	add("gateway_client.key", gwKey, ContainerUID, ContainerUID, 0o400)
 	return files, nil
 }

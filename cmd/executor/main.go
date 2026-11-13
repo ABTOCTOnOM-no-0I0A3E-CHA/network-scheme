@@ -1,7 +1,9 @@
 /*
 Command executor is the only service that may change devices: run (the
-daemon), healthcheck (container health check) and admin (host-only
-administration, reached through docker compose exec).
+daemon), healthcheck (container health check), admin (host-only
+administration, reached through docker compose exec), rotate-key,
+reseal-write and reseal-backup (the sealing, write- and backup-domain key rotations, one-shot
+containers started by nmsctl).
 */
 package main
 
@@ -67,7 +69,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: executor run|healthcheck [--config executor.yaml] | admin")
+		return errors.New("usage: executor run|healthcheck|rotate-key|reseal-write|reseal-backup [--config executor.yaml] | admin")
 	}
 	if args[0] == "admin" {
 		if len(args) > 1 {
@@ -89,6 +91,12 @@ func run(ctx context.Context, args []string) error {
 		return serve(ctx, cfg)
 	case "healthcheck":
 		return healthcheck(ctx, cfg)
+	case "rotate-key":
+		return rotateKey(ctx, cfg, os.Stdin, os.Stdout)
+	case "reseal-write":
+		return resealWrite(ctx, cfg, os.Stdin, os.Stdout)
+	case "reseal-backup":
+		return resealBackup(ctx, cfg, os.Stdin, os.Stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -131,9 +139,13 @@ func serve(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer keys.Wipe()
+	keyVersion(keys, cfg.StateDir)
 	reg := registry.New(pool, keys, filepath.Join(cfg.StateDir, "state"))
 	guard := freeze.New(reg, pool, log)
 	if err := guard.Start(ctx); err != nil {
+		return err
+	}
+	if err := guard.FreezeRestored(ctx, filepath.Join(cfg.StateDir, execadmin.RestoredMarker)); err != nil {
 		return err
 	}
 	pol := policy.New(cfg.PolicyFile)

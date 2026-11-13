@@ -674,7 +674,7 @@ func (a *Authorizer) evaluate(ctx context.Context, s *registry.Snapshot, c ticke
 	if r := granted(s, c, req.Need); r != nil {
 		return outcome{refuse: r}
 	}
-	if kv, _ := row.Get("key_version").(int64); kv != seal.KeyVersion {
+	if kv, _ := row.Get("key_version").(int64); kv != int64(a.c.Keys.Version()) {
 		return outcome{refuse: &refusal{"key_version", ErrUnavailable}}
 	}
 	/* Everything that can refuse comes before the code is looked at: an evaluated code is always recorded. */
@@ -683,7 +683,7 @@ func (a *Authorizer) evaluate(ctx context.Context, s *registry.Snapshot, c ticke
 		return outcome{refuse: &refusal{"window_unreadable", ErrUnavailable}}
 	}
 	ct, _ := row.Get("ciphertext").([]byte)
-	pt, err := a.c.Keys.OpenTOTP(c.UserID, seal.KeyVersion, ct)
+	pt, err := a.c.Keys.OpenTOTP(c.UserID, a.c.Keys.Version(), ct)
 	if err != nil {
 		return outcome{tamper: fmt.Sprintf("the change TOTP secret of user #%d does not open under its AAD", c.UserID)}
 	}

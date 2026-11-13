@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"time"
 
@@ -66,6 +67,8 @@ type Config struct {
 	SNMPRetries       *int      `yaml:"snmp_retries"`
 	DefaultIntervals  Intervals `yaml:"default_intervals"`
 	HeavyCPUThreshold float64   `yaml:"heavy_cpu_threshold"`
+	/* DenySubnets are the stack's own networks (core, xnet, edge): no device or scan address inside them is contacted. */
+	DenySubnets []netip.Prefix `yaml:"deny_subnets"`
 }
 
 /*
@@ -140,6 +143,11 @@ func (c Config) validate() error {
 		return fmt.Errorf("snmp_retries must be 0..%d", maxSNMPRetries)
 	case c.HeavyCPUThreshold <= 0 || c.HeavyCPUThreshold > 100:
 		return errors.New("heavy_cpu_threshold must be in (0, 100]")
+	}
+	for _, p := range c.DenySubnets {
+		if !p.IsValid() || p != p.Masked() {
+			return fmt.Errorf("deny_subnets: %s is not a network address with prefix", p)
+		}
 	}
 	for name, d := range map[string]time.Duration{
 		"availability": c.DefaultIntervals.Availability, "metrics": c.DefaultIntervals.Metrics, "inventory": c.DefaultIntervals.Inventory,

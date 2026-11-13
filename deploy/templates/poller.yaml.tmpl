@@ -9,3 +9,5 @@ db:
 read_key_file: "/run/secrets/domain_read_key"
 read_pub_key_file: "/etc/nms/domain_read.pub"
 backup_pub_key_file: "/etc/nms/domain_backup.pub"
+# The stack's own networks: no device or scan address inside them is contacted (the egress rules filter only the devices network).
+deny_subnets: ["{{.CoreSubnet}}", "{{.XnetSubnet}}", "{{.EdgeSubnet}}"]

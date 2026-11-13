@@ -244,7 +244,7 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 	readPub, backupPub := pubs["read"], pubs["backup"]
 	p.files[readPubFile] = []byte(base64.StdEncoding.EncodeToString(readPub[:]) + "\n")
 	p.files[backupPubFile] = []byte(base64.StdEncoding.EncodeToString(backupPub[:]) + "\n")
-	if err := writeRendered(etc, p.files); err != nil {
+	if err := writeRendered(etc, p.files, writeExcl); err != nil {
 		return err
 	}
 	anchors := filepath.Join(vr, "anchors")
@@ -291,9 +291,9 @@ func install(ctx context.Context, o Options, sys System, p prepared) error {
 writeRendered writes the rendered project files (0644: containers read them
 through bind mounts that keep the host mode). The init script and its
 directory, which is bind-mounted and listed by the postgres user, are 0755
-whatever the umask.
+whatever the umask. put writes one file (install: writeExcl).
 */
-func writeRendered(etc string, files map[string][]byte) error {
+func writeRendered(etc string, files map[string][]byte, put func(p string, data []byte, mode os.FileMode) error) error {
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
@@ -317,7 +317,7 @@ func writeRendered(etc string, files map[string][]byte) error {
 				return fmt.Errorf("install: %w", err)
 			}
 		}
-		if err := writeExcl(p, files[n], mode); err != nil {
+		if err := put(p, files[n], mode); err != nil {
 			return err
 		}
 	}
