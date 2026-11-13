@@ -532,6 +532,20 @@ func TestAuthRateLimit(t *testing.T) {
 	wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, remote: "198.18.0.1:1"}), http.StatusUnauthorized, "invalid_credentials")
 }
 
+/* Pentest F2: an IPv6 client rotating addresses inside its /64 shares one budget; another /64 keeps its own. */
+func TestAuthRateLimitIPv6Prefix(t *testing.T) {
+	f := newFixture(t, func(d *httpapi.Deps) { d.AuthRateLimit = 0 })
+	bad := map[string]string{"username": uniqueName("rl6"), "password": "wrong-password-123"}
+	for i := range 10 {
+		remote := fmt.Sprintf("[2001:db8:6:1::%x]:1", i+1)
+		if resp := f.do(req{method: "POST", path: "/api/auth/login", body: bad, remote: remote}); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status %d", i+1, resp.StatusCode)
+		}
+	}
+	wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, remote: "[2001:db8:6:1:ffff::1]:1"}), http.StatusTooManyRequests, "rate_limited")
+	wantError(t, f.do(req{method: "POST", path: "/api/auth/login", body: bad, remote: "[2001:db8:6:2::1]:1"}), http.StatusUnauthorized, "invalid_credentials")
+}
+
 func TestRequestValidation(t *testing.T) {
 	f := newFixture(t, nil)
 	resp := f.do(req{method: "GET", path: "/api/health"})
