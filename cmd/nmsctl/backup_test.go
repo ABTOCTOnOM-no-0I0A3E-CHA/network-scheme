@@ -213,7 +213,7 @@ func TestRestorePutsTheInstallBack(t *testing.T) {
 		t.Fatalf("restore: %s\n%q", msg, sys.argv())
 	}
 	order := []string{"-C FORWARD -j DOCKER-USER", "up -d --wait postgres", "pg_restore", "up --no-start executor", "cp -a - " + testCID + ":/var/lib",
-		"up -d --wait --wait-timeout", "nmsctl restore record", "nmsctl audit anchor", "nms-audit-anchor.timer", "/executor admin"}
+		"cp -a - " + testCID + ":/var/lib/executor", "up -d --wait --wait-timeout", "nmsctl restore record", "nmsctl audit anchor", "nms-audit-anchor.timer", "/executor admin"}
 	last := -1
 	for _, s := range order {
 		i := sys.index(s)
@@ -224,6 +224,9 @@ func TestRestorePutsTheInstallBack(t *testing.T) {
 	}
 	if got := sys.stdins[sys.index("cp -a")]; !strings.Contains(got, `"hwm":5`) {
 		t.Fatalf("state %q", got)
+	}
+	if got := sys.stdins[sys.index("cp -a - "+testCID+":/var/lib/executor")]; !strings.Contains(got, "restored-from-backup") {
+		t.Fatalf("no restore marker: %q", got)
 	}
 	if got := sys.stdins[sys.index("pg_restore")]; got != "PGDMP a dump" {
 		t.Fatalf("dump %q", got)

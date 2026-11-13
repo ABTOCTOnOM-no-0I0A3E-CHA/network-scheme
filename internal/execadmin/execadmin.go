@@ -63,6 +63,17 @@ const (
 /* Kinds lists the grant kinds. */
 var Kinds = []string{KindWrite, KindWriteAdmin, KindUnmask, KindAuditRead}
 
+/*
+RestoredMarker is the file nmsctl restore puts into the executor's state
+directory next to the state file; the executor, at its next start, turns it
+into a sticky freeze with RestoredReason (its audit and status show it) and
+removes it. It can only ask for a freeze, so it needs no MAC.
+*/
+const (
+	RestoredMarker = "restored-from-backup"
+	RestoredReason = "host: restored from backup"
+)
+
 /* Drivers are the write driver lines (exec.write_device.write_driver). */
 var Drivers = []string{"mes6", "mes10", "esr"}
 

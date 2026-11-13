@@ -3,8 +3,9 @@ Package restoretest checks nmsctl backup and restore against the executor
 (nmsctl links nothing of the executor, so the check lives here): a server
 with registry changes, audit rows on both chains and TimescaleDB data is
 backed up as nmsctl does it (the state directory of the stopped executor,
-then pg_dump), restored onto a clean server, and the executor there starts
-not frozen, with its registry and its audit chain verified.
+then pg_dump), restored onto a clean server with nmsctl's restore marker,
+and the executor there starts frozen (sticky, "restored from backup"), with
+its registry and its audit chain verified; the host's freeze off lifts it.
 */
 package restoretest
 
@@ -15,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +29,12 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 
 	execaudit "github.com/beekamai/network-scheme/cmd/executor/internal/audit"
+	"github.com/beekamai/network-scheme/cmd/executor/internal/freeze"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/registry"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/seal"
 	"github.com/beekamai/network-scheme/cmd/executor/internal/state"
 	"github.com/beekamai/network-scheme/internal/audit"
+	"github.com/beekamai/network-scheme/internal/execadmin"
 	"github.com/beekamai/network-scheme/internal/sysbackup"
 	"github.com/beekamai/network-scheme/internal/testdb"
 )
@@ -222,6 +226,51 @@ func TestBackupRestoreKeepsTheExecutorConsistent(t *testing.T) {
 	if after.Seq != before.Seq || after.Frozen {
 		t.Fatalf("restored registry %+v, backed up %+v", after, before)
 	}
+
+	/* nmsctl restore's marker: the executor starts frozen, sticky across a restart, until the host's freeze off. */
+	marker := filepath.Join(dstDir, execadmin.RestoredMarker)
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startGuard := func() *freeze.Guard {
+		g := freeze.New(registry.New(dst.Pool("nms_executor"), keys, filepath.Join(dstDir, "state")), dst.Pool("nms_executor"),
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err := g.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.FreezeRestored(ctx, marker); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	g := startGuard()
+	if frozen, reason := g.Frozen(); !frozen || reason != execadmin.RestoredReason {
+		t.Fatalf("restored executor frozen %v (%q)", frozen, reason)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker left: %v", err)
+	}
+	if rep := verifyExecutor(t, dst, keys, dstDir); !rep.Frozen || rep.Reason != execadmin.RestoredReason {
+		t.Fatalf("not sticky: %+v", rep)
+	}
+	var audited int
+	if err := dst.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM exec.audit_event WHERE action = 'admin.freeze-on' AND convert_from(payload, 'UTF8') LIKE '%restored from backup%'`).Scan(&audited); err != nil || audited != 1 {
+		t.Fatalf("restore's freeze audited %d times: %v", audited, err)
+	}
+	g = startGuard()
+	if frozen, _ := g.Frozen(); !frozen {
+		t.Fatal("a restart lifted the restore's freeze")
+	}
+	if err := g.FreezeOff(ctx, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if frozen, _ := g.Frozen(); frozen {
+		t.Fatal("freeze off did not lift the restore's freeze")
+	}
+	unfrozen := verifyExecutor(t, dst, keys, dstDir)
+	if unfrozen.Frozen {
+		t.Fatalf("after freeze off %+v", unfrozen)
+	}
 	var rows int
 	if err := dst.Pool("postgres").QueryRow(ctx, `SELECT count(*) FROM metrics.availability`).Scan(&rows); err != nil || rows != 4 {
 		t.Fatalf("hypertable rows %d: %v", rows, err)
@@ -239,7 +288,7 @@ func TestBackupRestoreKeepsTheExecutorConsistent(t *testing.T) {
 	if err := reg2.Write(ctx, grant(4)); err != nil {
 		t.Fatal(err)
 	}
-	if rep := verifyExecutor(t, dst, keys, dstDir); rep.Seq != before.Seq+1 || rep.Frozen {
+	if rep := verifyExecutor(t, dst, keys, dstDir); rep.Seq != unfrozen.Seq+1 || rep.Frozen {
 		t.Fatalf("after a write %+v", rep)
 	}
 }

@@ -42,12 +42,13 @@ while its signature is checked (a bad or missing signature, or no release
 key, refuses before any other step; only that copy is read afterwards) →
 the copy is checked against its manifest (structure, every image's SHA-256)
 → current image tag and schema version against the manifest's range →
+the writing services stopped until the end (writers) →
 backup (the executor's state and pg_dump, as nmsctl backup; read back to its
 authenticated end) and a copy of compose.yaml → docker load → compose.yaml
 retagged → migrations → docker compose up --wait (every health check). Any
 failure from the retag on rolls back: the previous compose.yaml, a fresh
-postgres volume restored from the backup, the executor's state volume put
-back, the stack up again. The outcome is appended to the panel audit
+postgres volume restored from the backup, the executor's state volume and
+the anchors file put back, the stack up again. The outcome is appended to the panel audit
 (cli.update) by the tools container.
 */
 
@@ -295,25 +296,30 @@ func update(ctx context.Context, s stack, m bundleManifest, bundle, dir string, 
 	if err != nil {
 		return fmt.Errorf("backup identity: %w", err)
 	}
+	/* Maintenance window: from here until the update succeeded or was rolled back, nothing writes what a rollback would discard. */
+	printf(d.out, "Stopping the services for the update…\n")
+	if err := s.compose(ctx, nil, d.out, append([]string{"stop"}, writers...)...); err != nil {
+		return resume(ctx, s, d, fmt.Errorf("stop the services: %w; nothing was changed", err))
+	}
 	backup := filepath.Join(dir, "backup.age")
 	var bm sysbackup.Manifest
 	err = newArchive(backup, func(w io.Writer) (err error) {
-		bm, err = snapshot(ctx, s, w, id.Recipient(), d)
+		bm, err = snapshot(ctx, s, w, id.Recipient(), d, false)
 		return err
 	})
 	if err == nil {
 		err = verifyBackup(backup, id)
 	}
 	if err != nil {
-		return fmt.Errorf("backup before the update: %w; nothing was changed", err)
+		return resume(ctx, s, d, fmt.Errorf("backup before the update: %w; nothing was changed", err))
 	}
 	if err := writeNewFile(filepath.Join(dir, "compose.yaml"), old); err != nil {
-		return err
+		return resume(ctx, s, d, err)
 	}
 	printf(d.out, "Backup %s written to %s.\n", bm.ID, backup)
 
 	if err := loadImages(ctx, s, bundle, m, d); err != nil {
-		return fmt.Errorf("load the images: %w; the running services were not changed", err)
+		return resume(ctx, s, d, fmt.Errorf("load the images: %w; the running services were not changed", err))
 	}
 	rec := updateSummary{From: from, To: m.ImageTag, Backup: bm.ID, Result: "success"}
 	if err = apply(ctx, s, composePath, retag(old, from, m.ImageTag), m, d); err != nil {
@@ -433,13 +439,36 @@ func apply(ctx context.Context, s stack, composePath string, compose []byte, m b
 	return nil
 }
 
+/*
+writers are the services that write the database or the executor's state.
+update stops them before its backup and starts them only with the new
+images (apply) or after a rollback, so a rollback discards nothing written
+in between: no lifted freeze, revived grant or lost audit of a device write.
+The gateway writes nothing and stays up (the panel shows its api as
+unavailable).
+*/
+var writers = []string{"executor", "api", "poller", "eventd"}
+
+/* resume starts the writers again after an update that changed nothing. */
+func resume(ctx context.Context, s stack, d deps, err error) error {
+	if serr := s.compose(context.WithoutCancel(ctx), nil, d.out, append([]string{"start"}, writers...)...); serr != nil {
+		return errors.Join(err, fmt.Errorf("start the services again: %w", serr))
+	}
+	return err
+}
+
 /* composeWait bounds docker compose up --wait, in seconds. */
 const composeWait = "600"
 
 /*
 rollback puts back the previous compose.yaml, then the backup's database
-into a fresh postgres volume and its executor state into a fresh state
-volume (as restore does), and starts the stack.
+into a fresh postgres volume, its executor state into a fresh state volume
+and its audit anchors file (as restore does), and starts the stack.
+
+Unlike restore it does not leave the executor frozen (restoredMarker): the
+writers stayed stopped since the backup was taken (writers), so the backup
+is the last state they wrote and the rollback discards no freeze, grant
+change or audit row.
 */
 func rollback(ctx context.Context, s stack, composePath string, old []byte, backup string, bm sysbackup.Manifest, id age.Identity, d deps) error {
 	if err := install.ReplaceFile(composePath, old); err != nil {
@@ -447,6 +476,9 @@ func rollback(ctx context.Context, s stack, composePath string, old []byte, back
 	}
 	if err := s.compose(ctx, nil, d.out, "stop"); err != nil {
 		return err
+	}
+	if err := restoreAnchors(bm, d.sys); err != nil {
+		return fmt.Errorf("restore the audit anchors: %w", err)
 	}
 	if err := s.compose(ctx, nil, d.out, "rm", "-f", "postgres", "executor"); err != nil {
 		return err
@@ -476,6 +508,22 @@ func rollback(ctx context.Context, s stack, composePath string, old []byte, back
 		return fmt.Errorf("restore the executor state: %w", err)
 	}
 	return s.compose(ctx, nil, d.out, "up", "-d", "--wait", "--wait-timeout", composeWait)
+}
+
+/* restoreAnchors puts the backup's anchors file back (removes it if the backup had none): every anchor then names an event of the restored audit. */
+func restoreAnchors(bm sysbackup.Manifest, sys install.System) error {
+	p := filepath.Join(varDir, "anchors", "anchors.log")
+	b, ok := bm.Files["anchors/anchors.log"]
+	if !ok {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := install.ReplaceFile(p, b); err != nil {
+		return err
+	}
+	return errors.Join(os.Chmod(p, 0o600), sys.Chown(p, install.ContainerUID, install.ContainerUID))
 }
 
 func truncate(s string, n int) string {

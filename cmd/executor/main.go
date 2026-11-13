@@ -145,6 +145,9 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err := guard.Start(ctx); err != nil {
 		return err
 	}
+	if err := guard.FreezeRestored(ctx, filepath.Join(cfg.StateDir, execadmin.RestoredMarker)); err != nil {
+		return err
+	}
 	pol := policy.New(cfg.PolicyFile)
 	/* execpub (set before anything runs concurrently): the status for the panel and the panel's only request, "freeze on". */
 	publisher := pub.New(pool, log)
