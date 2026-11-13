@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -37,8 +38,8 @@ lets it finish: the state file is final), copies its state directory
 (docker cp reads a stopped container's volume), takes the pg_dump (one
 snapshot) and starts the executor again. The state file and the exec schema
 are then of the same point, so after a restore the executor's hwm,
-state_hash and audit head match the restored schema: not frozen, and the
-registry verifies. A state file still holding a pending record (the
+state_hash and audit head match the restored schema: the registry
+verifies (the restored executor is still frozen on purpose, restoredMarker). A state file still holding a pending record (the
 executor died inside a change) is refused: that record names a transaction
 of this database cluster, which a restored cluster does not know; the
 executor settles it at its next start. Only the executor stops; the panel
@@ -151,7 +152,7 @@ func backupCmd(ctx context.Context, args []string, d deps) error {
 	}
 	var m sysbackup.Manifest
 	err = newArchive(dataPath, func(w io.Writer) (err error) {
-		m, err = snapshot(ctx, stack{d.sys, d.errw}, w, id.Recipient(), d)
+		m, err = snapshot(ctx, stack{d.sys, d.errw}, w, id.Recipient(), d, true)
 		return err
 	})
 	if err != nil {
@@ -176,8 +177,13 @@ func newArchive(p string, write func(io.Writer) error) error {
 	return err
 }
 
-/* snapshot writes the data archive: host files, then the executor stopped while its state and the dump are taken. */
-func snapshot(ctx context.Context, s stack, w io.Writer, to age.Recipient, d deps) (m sysbackup.Manifest, err error) {
+/*
+snapshot writes the data archive: host files, then the executor stopped while
+its state and the dump are taken. With restart it starts the executor again
+afterwards (backup); update passes false: its services stay stopped until
+the update succeeded or was rolled back.
+*/
+func snapshot(ctx context.Context, s stack, w io.Writer, to age.Recipient, d deps, restart bool) (m sysbackup.Manifest, err error) {
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {
 		return m, err
@@ -209,11 +215,13 @@ func snapshot(ctx context.Context, s stack, w io.Writer, to age.Recipient, d dep
 		if err := s.compose(ctx, nil, d.errw, "stop", "executor"); err != nil {
 			return m, err
 		}
-		defer func() {
-			if serr := s.compose(context.WithoutCancel(ctx), nil, d.errw, "start", "executor"); serr != nil {
-				err = errors.Join(err, fmt.Errorf("start the executor again: %w", serr))
-			}
-		}()
+		if restart {
+			defer func() {
+				if serr := s.compose(context.WithoutCancel(ctx), nil, d.errw, "start", "executor"); serr != nil {
+					err = errors.Join(err, fmt.Errorf("start the executor again: %w", serr))
+				}
+			}()
+		}
 	}
 	var st stateLimit
 	if err := s.docker(ctx, nil, &st, "cp", cid+":"+executorStateDir, "-"); err != nil {
@@ -311,7 +319,8 @@ restoreAll puts the install back once both archives verified: the install
 directory and host files, install's host steps (egress rules before any
 container), the database into a fresh postgres, the executor's state
 volume into its created container, the stack, the audit record of the
-restore with a new anchor, and finally the executor's registry verify.
+restore with a new anchor, and finally the executor's registry verify. The
+executor starts frozen (restoredMarker).
 */
 func restoreAll(ctx context.Context, s stack, entries []sysbackup.Entry, m sysbackup.Manifest, id age.Identity, data io.ReadSeeker, d deps) error {
 	var files []sysbackup.Entry /* without the installed marker: it is written last */
@@ -349,6 +358,13 @@ func restoreAll(ctx context.Context, s stack, entries []sysbackup.Entry, m sysba
 	if err := s.docker(ctx, bytes.NewReader(m.ExecutorState), d.out, "cp", "-a", "-", cid+":"+path.Dir(executorStateDir)); err != nil {
 		return fmt.Errorf("restore the executor state: %w", err)
 	}
+	marker, err := restoredMarker()
+	if err != nil {
+		return err
+	}
+	if err := s.docker(ctx, bytes.NewReader(marker), d.out, "cp", "-a", "-", cid+":"+executorStateDir); err != nil {
+		return fmt.Errorf("mark the executor state as restored: %w", err)
+	}
 	printf(d.out, "Starting services…\n")
 	if err := s.compose(ctx, nil, d.out, "up", "-d", "--wait", "--wait-timeout", "600"); err != nil {
 		return err
@@ -366,7 +382,25 @@ func restoreAll(ctx context.Context, s stack, entries []sysbackup.Entry, m sysba
 	if err := install.FinishRestoredHost(ctx, d.sys, hostRoot, d.out); err != nil {
 		return err
 	}
-	return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryVerify})
+	if err := show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryVerify}); err != nil {
+		return err
+	}
+	printf(d.out, "The executor starts frozen (%s): review its grants, devices and host keys, then lift it with nmsctl executor freeze off.\n",
+		execadmin.RestoredReason)
+	return nil
+}
+
+/*
+restoredMarker is docker cp's tar of execadmin.RestoredMarker for the state
+directory: the restored executor starts frozen (a backup may be of any age)
+until the host lifts the freeze.
+*/
+func restoredMarker() ([]byte, error) {
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	err := tw.WriteHeader(&tar.Header{Name: execadmin.RestoredMarker, Typeflag: tar.TypeReg, Mode: 0o600,
+		Uid: install.ExecutorUID, Gid: install.ExecutorUID})
+	return b.Bytes(), errors.Join(err, tw.Close())
 }
 
 /* writeVarFiles puts back the host files of varDir with install's owners and modes. */
