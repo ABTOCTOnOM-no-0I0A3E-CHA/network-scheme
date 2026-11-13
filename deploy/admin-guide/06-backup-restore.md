@@ -51,8 +51,12 @@ sudo nmsctl restore --data nms-backup-20261101T020000Z.age --keys nms-keys-20261
 
 ## 6.3. Проверка после восстановления
 
+После восстановления executor намеренно в freeze с причиной `host: restored from backup`: бэкап мог быть
+старым (отозванные гранты, снятый freeze). Проверьте, затем снимите freeze осознанно.
+
 ```sh
-sudo nmsctl executor registry verify     # реестр проходит, executor не в freeze
+sudo nmsctl executor registry verify     # реестр проходит
+sudo nmsctl executor freeze off          # после проверки грантов и политики
 sudo nmsctl audit verify                 # цепочка аудита панели и якоря
 sudo nmsctl executor policy show
 ```
