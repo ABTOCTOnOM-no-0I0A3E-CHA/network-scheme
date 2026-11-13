@@ -60,6 +60,8 @@ type Deps struct {
 		scheduling delay with it. It must return quickly.
 	*/
 	AvailabilityStarted func(deviceID int64, due, started time.Time)
+	/* CheckAddr refuses an address before any SNMP or SSH contact; nil: the production guard over Config.DenySubnets (tests on loopback replace it). */
+	CheckAddr func(netip.Addr) error
 }
 
 // Poller polls the devices of one poller id.
@@ -84,6 +86,7 @@ type Poller struct {
 	runShowCmd     func(ctx context.Context, d device, cache *devCache, drv drivers.Driver, cmd ssh.ShowCommand) (string, error) /* sshShow; replaced in tests */
 	pinger         Pinger
 	dial           DialFunc
+	checkAddr      func(netip.Addr) error /* SSRF guard before every SNMP and SSH contact */
 	reg            *drivers.Registry
 	now            func() time.Time
 	log            *slog.Logger
@@ -129,6 +132,17 @@ func New(cfg Config, d Deps) *Poller {
 	}
 	if p.dial == nil {
 		p.dial = snmp.Dial
+	}
+	p.checkAddr = d.CheckAddr
+	if p.checkAddr == nil {
+		p.checkAddr = newAddrGuard(cfg.DenySubnets)
+	}
+	dial := p.dial
+	p.dial = func(ctx context.Context, addr netip.AddrPort, c creds.Credential, o snmp.Options) (snmp.Reader, io.Closer, error) {
+		if err := p.checkAddr(addr.Addr()); err != nil {
+			return nil, nil, err
+		}
+		return dial(ctx, addr, c, o)
 	}
 	if p.reg == nil {
 		p.reg = drivers.Default()

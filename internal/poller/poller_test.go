@@ -105,7 +105,8 @@ func (h *harness) poller(iv Intervals) *Poller {
 	return New(h.config(iv), Deps{
 		Pool: h.env.Pool("nms_poller"), Priv: h.priv, Pub: h.pub,
 		Pinger: fakePinger{ok: true}, DialSNMP: h.dialer.dial,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		CheckAddr: func(netip.Addr) error { return nil }, /* the simulator's port is published on loopback */
 	})
 }
 

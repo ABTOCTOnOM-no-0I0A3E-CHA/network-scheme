@@ -168,6 +168,7 @@ func TestAvailabilityCycle(t *testing.T) {
 		Pool: pool, Priv: priv, Pub: pub, Pinger: okPinger{},
 		Logger:              slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		AvailabilityStarted: rec.record,
+		CheckAddr:           func(netip.Addr) error { return nil }, /* the agents are on loopback, which production refuses */
 	})
 
 	var u usage

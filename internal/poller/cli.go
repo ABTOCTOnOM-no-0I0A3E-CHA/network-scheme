@@ -44,6 +44,9 @@ another address of the same switch gets no login either.
 */
 func (p *Poller) dialSSH(ctx context.Context, d device, c creds.Credential, dl ssh.Dialect) (*ssh.Runner, error) {
 	addr := d.Addr.Addr().Unmap().WithZone("")
+	if err := p.checkAddr(d.Addr.Addr()); err != nil {
+		return nil, err
+	}
 	if err := p.checkNotInSession(ctx, d.ID, addr); err != nil {
 		return nil, err
 	}
