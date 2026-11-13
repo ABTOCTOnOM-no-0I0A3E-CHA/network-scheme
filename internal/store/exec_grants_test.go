@@ -873,7 +873,7 @@ func TestChangesetMigrationOnPhase4Database(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, sql := range []string{`UPDATE exec.changeset_revision SET mac = mac`, `DELETE FROM exec.changeset_event`, `TRUNCATE exec.changeset CASCADE`} {
+		for _, sql := range []string{`UPDATE exec.changeset_revision SET content = content`, `DELETE FROM exec.changeset_event`, `TRUNCATE exec.changeset CASCADE`} {
 			_, err := p.Exec(ctx, sql)
 			requireCode(t, err, "42501", role+": "+sql)
 		}
