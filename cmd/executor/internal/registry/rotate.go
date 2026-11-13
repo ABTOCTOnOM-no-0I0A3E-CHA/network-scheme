@@ -283,10 +283,23 @@ func RekeyTable(ctx context.Context, tx pgx.Tx, table, query, update string,
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("rekey %s: %w", table, err)
 	}
-	for i := 0; i < len(all); i += rekeyBatch {
+	args := make([][]any, len(all))
+	for i, c := range all {
+		args[i] = append(append([]any{c.mNext}, c.key...), c.stored)
+	}
+	return len(all), UpdateEach(ctx, tx, table, update, args)
+}
+
+/*
+UpdateEach runs update once per argument list in tx, in batches; each must
+change exactly one row (it matches the old value it replaces), any other
+outcome is tampering.
+*/
+func UpdateEach(ctx context.Context, tx pgx.Tx, table, update string, args [][]any) error {
+	for i := 0; i < len(args); i += rekeyBatch {
 		b := &pgx.Batch{}
-		for _, c := range all[i:min(i+rekeyBatch, len(all))] {
-			b.Queue(update, append(append([]any{c.mNext}, c.key...), c.stored)...)
+		for _, a := range args[i:min(i+rekeyBatch, len(args))] {
+			b.Queue(update, a...)
 		}
 		res := tx.SendBatch(ctx, b)
 		for range b.Len() {
@@ -296,14 +309,14 @@ func RekeyTable(ctx context.Context, tx pgx.Tx, table, query, update string,
 			}
 			if err != nil {
 				_ = res.Close()
-				return 0, err
+				return err
 			}
 		}
 		if err := res.Close(); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	return len(all), nil
+	return nil
 }
 
 const rekeyBatch = 500

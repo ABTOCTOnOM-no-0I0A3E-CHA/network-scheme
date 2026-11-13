@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,10 +23,11 @@ import (
 	"github.com/beekamai/network-scheme/internal/keys"
 )
 
-/* Paths of the published keys.json and of api.yaml on the host; tests point them elsewhere. */
+/* Paths of the published keys.json, api.yaml and the poller's backup public key on the host; tests point them elsewhere. */
 var (
-	keysJSONPath = filepath.Join(install.DefaultVar, "gateway", "keys.json")
-	apiYAMLPath  = filepath.Join(install.DefaultEtc, "config", "api.yaml")
+	keysJSONPath  = filepath.Join(install.DefaultVar, "gateway", "keys.json")
+	apiYAMLPath   = filepath.Join(install.DefaultEtc, "config", "api.yaml")
+	backupPubPath = filepath.Join(install.DefaultEtc, "config", "domain_backup.pub")
 )
 
 var readVersionRe = regexp.MustCompile(`(?m)^read_key_version: [0-9]+$`)
@@ -84,13 +86,19 @@ retired key to the next one and records the version per row (one
 transaction, audited); then the key file is replaced and the poller and
 eventd restart. write: the executor is stopped, the one-shot executor
 re-seals every write credential of its registry, keys.json takes the next
-version, the key file is replaced and the executor starts. The retired
-private key is gone afterwards: a ciphertext still sealed to it never opens
-again. Interrupted, the command run again resumes from the staged key.
+version, the key file is replaced and the executor starts. backup: the
+poller's public key and keys.json take the next key and the poller
+restarts (new backups are sealed to it), the executor is stopped and the
+one-shot executor re-seals every backup DEK from the retired key to the
+next one (rotate.BackupDomain: config versions, pre-session backups,
+recordings), then the key file is replaced and the executor starts. The
+retired private key is gone afterwards: a ciphertext still sealed to it
+never opens again. Interrupted, the command run again resumes from the
+staged key.
 */
 func domainRotate(ctx context.Context, d deps, domain string) error {
 	uid := install.ContainerUID
-	if domain == "write" {
+	if domain != "read" {
 		uid = install.ExecutorUID
 	}
 	p := filepath.Join(secretsDir, install.DomainKeyFiles[domain])
@@ -152,6 +160,42 @@ func domainRotate(ctx context.Context, d deps, domain string) error {
 		if err := install.Compose(ctx, d.sys, install.DefaultEtc, d.errw, "up", "-d", "executor"); err != nil {
 			return fmt.Errorf("start the executor: %w", err)
 		}
+	case "backup":
+		if v, err = publish(domain, pub); err != nil {
+			return err
+		}
+		if err := install.ReplaceFile(backupPubPath, []byte(base64.StdEncoding.EncodeToString(pub[:])+"\n")); err != nil {
+			return err
+		}
+		if err := install.Compose(ctx, d.sys, install.DefaultEtc, d.errw, "restart", "poller"); err != nil {
+			return fmt.Errorf("restart the poller: %w", err)
+		}
+		if err := install.Compose(ctx, d.sys, install.DefaultEtc, d.errw, "stop", "executor"); err != nil {
+			return fmt.Errorf("stop the executor: %w", err)
+		}
+		stdin := append(append(append([]byte{}, nextB64...), '\n'), hostOperator()+"\n"...)
+		defer clear(stdin)
+		var out limited
+		if err := install.RunExecutorOnce(ctx, d.sys, install.DefaultEtc, []string{"reseal-backup"}, bytes.NewReader(stdin), &out, d.errw); err != nil {
+			return fmt.Errorf("re-seal the backups (the executor stays stopped; run the command again to resume): %w", err)
+		}
+		var res struct {
+			Backups    int `json:"backups"`
+			Unreadable int `json:"unreadable"`
+			Sessions   int `json:"sessions"`
+			Chunks     int `json:"chunks"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			return fmt.Errorf("executor reseal-backup: malformed result (the executor stays stopped; run the command again to resume): %v", err)
+		}
+		if err := install.PromoteSecret(p); err != nil {
+			return err
+		}
+		if err := install.Compose(ctx, d.sys, install.DefaultEtc, d.errw, "up", "-d", "executor"); err != nil {
+			return fmt.Errorf("start the executor: %w", err)
+		}
+		printf(d.out, "re-sealed %d config versions, %d pre-session backups, %d recording chunks; opening under neither key (left as they are): %d\n",
+			res.Backups, res.Sessions, res.Chunks, res.Unreadable)
 	default:
 		return errors.New(keysUsage)
 	}

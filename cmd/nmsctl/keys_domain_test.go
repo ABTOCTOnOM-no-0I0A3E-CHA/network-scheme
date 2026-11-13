@@ -154,3 +154,71 @@ func TestReadDomainRotation(t *testing.T) {
 		t.Fatalf("keys.json publishes the next key at %d", v)
 	}
 }
+
+/*
+The backup rotation stages the key, publishes the next public key to the
+poller and keys.json and restarts the poller before the executor is
+stopped and the one-shot reseal-backup gets the next key on stdin; only
+after it succeeded is the key file replaced and the executor started. A
+failed re-seal leaves the key file and the executor stopped; run again it
+resumes with the staged key and does not bump the version twice.
+*/
+func TestBackupDomainRotation(t *testing.T) {
+	cur := domainKey(t)
+	dir := withSecrets(t, map[string]string{"domain_backup.key": base64.StdEncoding.EncodeToString(cur.Private[:])})
+	doc, err := keys.BuildKeysJSON(map[string][32]byte{"read": domainKey(t).Public, "write": domainKey(t).Public, "backup": cur.Public})
+	if err != nil {
+		t.Fatal(err)
+	}
+	etc := t.TempDir()
+	kj, bp := filepath.Join(etc, "keys.json"), filepath.Join(etc, "domain_backup.pub")
+	for p, b := range map[string][]byte{kj: doc, bp: []byte(base64.StdEncoding.EncodeToString(cur.Public[:]) + "\n")} {
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldKJ, oldBP := keysJSONPath, backupPubPath
+	keysJSONPath, backupPubPath = kj, bp
+	t.Cleanup(func() { keysJSONPath, backupPubPath = oldKJ, oldBP })
+
+	sys := &rotator{fail: errExit}
+	if code, _ := hostRun(t, sys, "keys", "rotate", "backup"); code == 0 {
+		t.Fatal("a failed re-seal passed")
+	}
+	staged := read(t, filepath.Join(dir, "domain_backup.key.next"))
+	if read(t, filepath.Join(dir, "domain_backup.key")) != base64.StdEncoding.EncodeToString(cur.Private[:]) {
+		t.Fatal("the key file was replaced after a failed re-seal")
+	}
+	if strings.Contains(strings.Join(sys.argv(), "\n"), "up -d executor") {
+		t.Fatal("the executor started after a failed re-seal")
+	}
+	sys = &rotator{result: `{"backups":3,"unreadable":1,"sessions":1,"chunks":4,"manifests":1}`}
+	if code, out := hostRun(t, sys, "keys", "rotate", "backup"); code != 0 || !strings.Contains(out, "version 2") || !strings.Contains(out, "re-sealed 3 config versions") {
+		t.Fatalf("resumed: %d %s", code, out)
+	}
+	want := []string{
+		"docker compose -f /etc/nms/compose.yaml restart poller",
+		"docker compose -f /etc/nms/compose.yaml stop executor",
+		"docker compose -f /etc/nms/compose.yaml run --rm --no-deps -T executor reseal-backup",
+		"docker compose -f /etc/nms/compose.yaml up -d executor",
+	}
+	if got := strings.Join(sys.argv(), "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n%s", got)
+	}
+	if !strings.HasPrefix(sys.stdins[2], staged+"\n") {
+		t.Fatal("reseal-backup did not get the next key on stdin")
+	}
+	if read(t, filepath.Join(dir, "domain_backup.key")) != staged {
+		t.Fatal("key file not replaced")
+	}
+	var priv [32]byte
+	b, _ := base64.StdEncoding.DecodeString(staged)
+	copy(priv[:], b)
+	pub, _ := keys.PublicOf(&priv)
+	if v := keys.Published([]byte(read(t, kj)), "backup", pub); v != 2 {
+		t.Fatalf("keys.json publishes the next key at %d", v)
+	}
+	if read(t, bp) != base64.StdEncoding.EncodeToString(pub[:])+"\n" {
+		t.Fatal("the poller's backup public key was not replaced")
+	}
+}

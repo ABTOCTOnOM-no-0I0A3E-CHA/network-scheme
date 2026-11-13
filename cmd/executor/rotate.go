@@ -124,3 +124,38 @@ func keyVersion(keys *seal.Keys, stateDir string) {
 		keys.SetVersion(f.SealVersion())
 	}
 }
+
+/*
+resealBackup is "executor reseal-backup": the backup-domain key rotation
+(rotate.BackupDomain), run by nmsctl in a one-shot container while the
+daemon is stopped; stdin as rotate-key's, with the next backup-domain key.
+It prints one JSON line (rotate.BackupReport) for nmsctl.
+*/
+func resealBackup(ctx context.Context, cfg config.Config, in io.Reader, out io.Writer) error {
+	next, operator, err := nextKey(in)
+	if err != nil {
+		return err
+	}
+	defer clear(next[:])
+	old, err := nmsconfig.ReadKeyFile(cfg.BackupKeyFile)
+	if err != nil {
+		return err
+	}
+	defer clear(old[:])
+	sk, err := seal.Load(cfg.SealingKeyFile)
+	if err != nil {
+		return err
+	}
+	defer sk.Wipe()
+	keyVersion(sk, cfg.StateDir)
+	pool, err := openPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	rep, err := rotate.BackupDomain(ctx, registry.New(pool, sk, filepath.Join(cfg.StateDir, "state")), sk.MAC(), old, next, operator)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(rep)
+}

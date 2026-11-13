@@ -100,9 +100,9 @@ func sealingRotate(ctx context.Context, d deps, args []string) error {
 	return nil
 }
 
-const keysUsage = "usage: nmsctl keys rotate ticket|read|write"
+const keysUsage = "usage: nmsctl keys rotate ticket|read|write|backup"
 
-/* keysCmd is "nmsctl keys rotate ticket|read|write" (on the host). */
+/* keysCmd is "nmsctl keys rotate ticket|read|write|backup" (on the host). */
 func keysCmd(ctx context.Context, d deps, args []string) error {
 	if len(args) != 1 {
 		return errors.New(keysUsage)
@@ -110,7 +110,7 @@ func keysCmd(ctx context.Context, d deps, args []string) error {
 	switch args[0] {
 	case "ticket":
 		return ticketRotate(ctx, d)
-	case "read", "write":
+	case "read", "write", "backup":
 		return domainRotate(ctx, d, args[0])
 	}
 	return errors.New(keysUsage)

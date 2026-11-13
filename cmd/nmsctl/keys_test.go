@@ -26,7 +26,7 @@ func (f *rotator) Run(ctx context.Context, c install.Cmd) error {
 	if err := f.fakeSys.Run(ctx, c); err != nil {
 		return err
 	}
-	if strings.Contains(strings.Join(c.Args, " "), "rotate-key") {
+	if a := strings.Join(c.Args, " "); strings.Contains(a, "rotate-key") || strings.Contains(a, "reseal-backup") {
 		if f.fail != nil {
 			return f.fail
 		}

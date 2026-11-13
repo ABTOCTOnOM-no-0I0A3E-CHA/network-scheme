@@ -157,13 +157,19 @@ func TestExecutorRoleGrants(t *testing.T) {
 		"execpub.backup_taken": dml, "execpub.changeset_summary": dml,
 		"core.device":            "SELECT(address,driver,firmware,group_id,id,model,name)",
 		`core."user"`:            "SELECT(created_at,disabled,id,username)",
-		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
+		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job) UPDATE(full_dek_ct)",
 		"backups.backup_state":   "SELECT INSERT UPDATE",
 	}
-	/* The append-only rows: only their MAC may be rewritten (a sealing key rotation); the audit chain not even that. */
+	/*
+		The append-only rows: only their MAC may be rewritten (a sealing key rotation), and a
+		backup DEK with what covers it (a backup-domain rotation); the audit chain not even that.
+	*/
 	for _, rel := range execImmutable {
 		want[rel] = "SELECT INSERT UPDATE(mac)"
 	}
+	want["exec.session_device"] = "SELECT INSERT UPDATE(mac,pre_dek_ct)"
+	want["exec.recording_chunk"] = "SELECT INSERT UPDATE(dek_ct,mac)"
+	want["exec.recording_manifest"] = "SELECT INSERT UPDATE(mac,sha256)"
 	want["exec.audit_event"] = "SELECT INSERT"
 	/* Every relation of every schema the executor can reach: exactly the list, nothing else. */
 	requireGrants(t, "nms_executor", want, "exec", "execpub", "core", "backups")
@@ -444,7 +450,7 @@ func TestExecImmutableTablesRejectModificationForEveryRole(t *testing.T) {
 	before := count()
 	/* A column other than mac (a rotation rewrites only the MAC: TestExecAppendOnlyRowsTakeOnlyAMACRewrite); audit_event: not even that. */
 	col := map[string]string{"exec.audit_event": "hash", "exec.session": "user_id", "exec.session_device": "pre_ct",
-		"exec.session_event": "payload", "exec.recording_chunk": "ct", "exec.recording_manifest": "sha256",
+		"exec.session_event": "payload", "exec.recording_chunk": "ct", "exec.recording_manifest": "chunks",
 		"exec.changeset": "kind", "exec.changeset_revision": "content", "exec.changeset_event": "kind"}
 	for _, rel := range execImmutable {
 		c := col[rel]
@@ -1011,4 +1017,54 @@ func TestExecAppendOnlyRowsTakeOnlyAMACRewrite(t *testing.T) {
 		requireDenied(t, "nms_executor", sql)
 	}
 	requireDenied(t, "nms_executor", `UPDATE exec.audit_event SET hash = hash`)
+}
+
+/*
+Migration 00033 (backup-domain rotation): only the executor may rewrite a
+sealed backup DEK (config_version.full_dek_ct, session_device.pre_dek_ct,
+recording_chunk.dek_ct) and what covers it (the MACs, a manifest's sha256);
+no other role may, and no role, the superuser included, may change any
+other column of these rows, delete or truncate them, or touch the audit
+chains.
+*/
+func TestBackupDEKRewriteOnlyByExecutor(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	insertSession(t, "6f1d0000-0000-4000-8000-0000000000bb", 910002)
+	if _, err := env.Pool("nms_executor").Exec(ctx, `INSERT INTO backups.config_version (device_id, source, sha256, size, masked, full_ct, full_dek_ct)
+		VALUES (910002, 'executor', `+mac32+`, 0, '', '\x01', '\x01')`); err != nil {
+		t.Fatal(err)
+	}
+	allowed := []string{
+		`UPDATE backups.config_version SET full_dek_ct = '\x02'`,
+		`UPDATE exec.session_device SET pre_dek_ct = '\x02', mac = mac`,
+		`UPDATE exec.recording_chunk SET dek_ct = '\x02', mac = mac`,
+		`UPDATE exec.recording_manifest SET sha256 = sha256, mac = mac`,
+	}
+	for _, sql := range allowed {
+		if _, err := env.Pool("nms_executor").Exec(ctx, sql); err != nil {
+			t.Errorf("executor %q: %v", sql, err)
+		}
+		for _, role := range []string{"nms_api", "nms_poller", "nms_eventd", "nms_cli"} {
+			requireDenied(t, role, sql)
+		}
+	}
+	for _, sql := range []string{
+		`UPDATE backups.config_version SET full_ct = full_ct, full_dek_ct = full_dek_ct`,
+		`UPDATE backups.config_version SET sha256 = sha256`,
+		`UPDATE backups.config_version SET masked = masked`,
+		`DELETE FROM backups.config_version`,
+		`TRUNCATE backups.config_version CASCADE`,
+		`UPDATE exec.session_device SET pre_ct = pre_ct, pre_dek_ct = pre_dek_ct`,
+		`UPDATE exec.recording_chunk SET ct = ct, dek_ct = dek_ct`,
+		`UPDATE exec.recording_manifest SET chunks = chunks, sha256 = sha256`,
+		`UPDATE exec.audit_event SET hash = hash`,
+		`DELETE FROM exec.audit_event`,
+		`UPDATE audit.event SET hash = hash`,
+		`DELETE FROM audit.event`,
+	} {
+		for _, role := range []string{"nms_migrator", "postgres", "nms_executor", "nms_api", "nms_poller", "nms_eventd", "nms_cli"} {
+			requireDenied(t, role, sql)
+		}
+	}
 }
