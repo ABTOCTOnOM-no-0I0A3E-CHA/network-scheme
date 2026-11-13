@@ -85,7 +85,8 @@ later code in cmd/executor:
     (its own append-only rows exec.recording_chunk and recording_manifest,
     reading the session's), changeset (its own append-only rows
     exec.changeset, changeset_revision and changeset_event only), unmask (backups.config_version, read; never
-    schema exec) and main holds or opens a database connection,
+    schema exec) and main holds or opens a database connection (rotate,
+    the key rotations, works through the registry it is handed),
     so decision code cannot run its own queries;
   - attacktest (superuser tampering) is imported by tests only.
 */

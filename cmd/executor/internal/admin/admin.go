@@ -433,7 +433,7 @@ func (a *Admin) enroll(ctx context.Context, req execadmin.Request) execadmin.Res
 		return a.refuse(ctx, req, obj, err, details)
 	}
 	defer sec.Wipe()
-	ct, err := a.Keys.SealTOTP(u.ID, seal.KeyVersion, []byte(sec.Reveal()))
+	ct, err := a.Keys.SealTOTP(u.ID, a.Keys.Version(), []byte(sec.Reveal()))
 	if err != nil {
 		return a.refuse(ctx, req, obj, err, details)
 	}
@@ -445,7 +445,7 @@ func (a *Admin) enroll(ctx context.Context, req execadmin.Request) execadmin.Res
 		details["existed"] = existed
 		tx.Audit(audit.Append(a.event(req, obj, audit.OK, details)))
 		return tx.Put("change_totp", map[string]any{"user_id": u.ID, "username_snapshot": u.Username, "ciphertext": ct,
-			"key_version": seal.KeyVersion, "last_step": 0, "failures": 0, "lock_until": nil, "lock_count": 0})
+			"key_version": a.Keys.Version(), "last_step": 0, "failures": 0, "lock_until": nil, "lock_count": 0})
 	})
 	resp := execadmin.Response{OK: true}
 	if err != nil {

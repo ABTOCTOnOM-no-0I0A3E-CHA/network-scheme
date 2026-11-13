@@ -39,6 +39,8 @@ const executorUsage = `usage:
       (RE matches the whole model or firmware string: stored as ^(?:RE)$)
   nmsctl executor registry verify | reset [--i-understand] [--drop-panel-request]
   nmsctl executor audit verify
+  nmsctl executor key rotate [--yes]
+      (stops the executor, re-seals its registry under a new sealing key, starts it again)
 ` + deviceLines + `(U: a panel user name or #id)`
 
 const deviceLines = `  nmsctl executor device add --device ID --address A --group G --driver mes6|mes10|esr [--port P]
@@ -81,7 +83,7 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 		return errors.New(executorUsage)
 	}
 	cmd, rest := args[0], args[1:]
-	if len(rest) > 0 && (cmd == "policy" || cmd == "freeze" || cmd == "registry" || cmd == "audit" || cmd == "device") {
+	if len(rest) > 0 && (cmd == "policy" || cmd == "freeze" || cmd == "registry" || cmd == "audit" || cmd == "device" || cmd == "key") {
 		cmd, rest = cmd+" "+rest[0], rest[1:]
 	}
 	switch cmd {
@@ -136,6 +138,8 @@ func executorCmd(ctx context.Context, args []string, d deps) error {
 			return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryVerify})
 		}
 		return show(ctx, d, execadmin.Request{Cmd: execadmin.CmdRegistryReset, IUnderstand: *sure, DropPanel: *drop})
+	case "key rotate":
+		return sealingRotate(ctx, d, rest)
 	case "audit verify":
 		if len(rest) > 0 {
 			return errors.New(executorUsage)

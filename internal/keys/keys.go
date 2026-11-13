@@ -2,6 +2,8 @@
 package keys
 
 import (
+	"bytes"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -89,4 +91,65 @@ func BuildKeysJSON(pubs map[string][32]byte) ([]byte, error) {
 		}
 	}
 	return json.Marshal(doc)
+}
+
+/* PublicOf is the X25519 public key of the private key priv. */
+func PublicOf(priv *[32]byte) ([32]byte, error) {
+	k, err := ecdh.X25519().NewPrivateKey(priv[:])
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return [32]byte(k.PublicKey().Bytes()), nil
+}
+
+/* ErrNotSealedToKey means a ciphertext does not open under the key a re-seal was given. */
+var ErrNotSealedToKey = errors.New("keys: ciphertext does not open under this key")
+
+/*
+Reseal opens the anonymous sealed box ct with the private key priv and seals
+its plaintext, unchanged, to the public key next (a domain key rotation);
+the plaintext is wiped.
+*/
+func Reseal(ct []byte, priv, next *[32]byte) ([]byte, error) {
+	pub, err := PublicOf(priv)
+	if err != nil {
+		return nil, err
+	}
+	pt, ok := box.OpenAnonymous(nil, ct, &pub, priv)
+	if !ok {
+		return nil, ErrNotSealedToKey
+	}
+	defer clear(pt)
+	return box.SealAnonymous(nil, pt, next, rand.Reader)
+}
+
+/*
+Rotate returns the keys.json doc with domain's public key replaced by pub at
+the next key version, and that version. doc must be a keys.json of exactly
+the three domains.
+*/
+func Rotate(doc []byte, domain string, pub [32]byte) ([]byte, int, error) {
+	var k KeysJSON
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&k); err != nil || k.Version != 1 || len(k.Domains) != len(domains) {
+		return nil, 0, errors.New("keys.json: malformed")
+	}
+	cur, ok := k.Domains[domain]
+	if !ok || cur.KeyVersion < InitialKeyVersion {
+		return nil, 0, fmt.Errorf("keys.json: no domain %q", domain)
+	}
+	v := cur.KeyVersion + 1
+	k.Domains[domain] = PublicDomain{KeyVersion: v, PublicKey: base64.StdEncoding.EncodeToString(pub[:]), Fingerprint: Fingerprint(pub)}
+	out, err := json.Marshal(k)
+	return out, v, err
+}
+
+/* Published reports the key version under which keys.json doc publishes pub for domain (0: it does not). */
+func Published(doc []byte, domain string, pub [32]byte) int {
+	var k KeysJSON
+	if json.Unmarshal(doc, &k) != nil || k.Domains[domain].PublicKey != base64.StdEncoding.EncodeToString(pub[:]) {
+		return 0
+	}
+	return k.Domains[domain].KeyVersion
 }

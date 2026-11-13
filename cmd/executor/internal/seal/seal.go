@@ -24,6 +24,7 @@ const (
 	infoEnc   = "nms/executor/v1/enc"
 	infoMAC   = "nms/executor/v1/mac"
 	infoState = "nms/executor/v1/state"
+	infoID    = "nms/executor/v1/id"
 )
 
 /*
@@ -34,7 +35,8 @@ copies made by their users (the ipad/opad state inside an HMAC, an AEAD's
 key schedule) are not reachable from here.
 */
 type Keys struct {
-	enc, mac, state [32]byte
+	enc, mac, state, id [32]byte
+	version             int32
 }
 
 /* Derive derives the subkeys from the 32-byte sealing key; master is left untouched. */
@@ -43,7 +45,7 @@ func Derive(master *[32]byte) (*Keys, error) {
 	for _, d := range []struct {
 		info string
 		dst  *[32]byte
-	}{{infoEnc, &k.enc}, {infoMAC, &k.mac}, {infoState, &k.state}} {
+	}{{infoEnc, &k.enc}, {infoMAC, &k.mac}, {infoState, &k.state}, {infoID, &k.id}} {
 		b, err := hkdf.Key(sha256.New, master[:], nil, d.info, len(d.dst))
 		if err != nil {
 			k.Wipe()
@@ -52,6 +54,7 @@ func Derive(master *[32]byte) (*Keys, error) {
 		copy(d.dst[:], b)
 		clear(b)
 	}
+	k.version = KeyVersion
 	return k, nil
 }
 
@@ -74,6 +77,15 @@ func (k *Keys) MAC() *[32]byte { return &k.mac }
 /* State is the HMAC-SHA-256 key of the state file. */
 func (k *Keys) State() *[32]byte { return &k.state }
 
+/* ID names the key without revealing it (a rotation in flight records the ID of the key it moves to). */
+func (k *Keys) ID() []byte { return append([]byte(nil), k.id[:]...) }
+
+/* Version is the key's version (the state file's key_version; KeyVersion until SetVersion). */
+func (k *Keys) Version() int32 { return k.version }
+
+/* SetVersion sets the key's version once it is known (from the state file, before anything runs concurrently). */
+func (k *Keys) SetVersion(v int32) { k.version = v }
+
 /* String, GoString and LogValue never render key material. */
 func (*Keys) String() string { return "***" }
 
@@ -83,7 +95,7 @@ func (*Keys) GoString() string { return "***" }
 /* LogValue implements slog.LogValuer. */
 func (*Keys) LogValue() slog.Value { return slog.StringValue("***") }
 
-/* KeyVersion is the version of the sealing key the change TOTP secrets are sealed under (key_version of their registry rows). */
+/* KeyVersion is the version of the first sealing key; every rotation adds one (the change TOTP rows' key_version follows it). */
 const KeyVersion = 1
 
 /* totpAAD binds a change TOTP secret to its user and key version (security.md 5.2). */
@@ -129,4 +141,6 @@ func (k *Keys) Wipe() {
 	clear(k.enc[:])
 	clear(k.mac[:])
 	clear(k.state[:])
+	clear(k.id[:])
+	k.version = 0
 }

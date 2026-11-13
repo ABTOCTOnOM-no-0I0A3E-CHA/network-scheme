@@ -45,6 +45,7 @@ const usage = `usage:
   nmsctl backup [--out DIR] [--passphrase-file F]
   nmsctl restore --data F --keys F [--passphrase-file F]
   nmsctl update [--sig F] BUNDLE
+  nmsctl keys rotate ticket|read|write
   nmsctl executor ... (nmsctl executor for its commands)`
 
 /* printf writes CLI output; a failing stdout or stderr cannot be reported anywhere better. */
@@ -143,7 +144,7 @@ func dispatch(ctx context.Context, args []string, d deps) error {
 		return err
 	}
 	switch cmd {
-	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor", "restore record", "update record":
+	case "admin create", "user reset", "user unlock", "audit verify", "audit anchor", "restore record", "update record", "keys reencrypt":
 	default:
 		return errors.New(usage)
 	}
@@ -196,6 +197,8 @@ func hostCmd(ctx context.Context, cmd string, args []string, d deps) error {
 			return err
 		}
 		return install.RunInTools(ctx, d.sys, install.DefaultEtc, []string{"user", "unlock", user}, strings.NewReader(""), d.out, d.errw)
+	case "keys rotate":
+		return keysCmd(ctx, d, args)
 	case "audit verify", "audit anchor":
 		fwd := append(strings.Fields(cmd), args...)
 		return install.RunInTools(ctx, d.sys, install.DefaultEtc, fwd, strings.NewReader(""), d.out, d.errw)

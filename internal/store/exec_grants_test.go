@@ -130,6 +130,7 @@ func TestAPIRoleHasNoExecRights(t *testing.T) {
 		requireDenied(t, role, `UPDATE exec.write_device SET writes_enabled = true`)
 		requireDenied(t, role, `DELETE FROM exec.write_grant`)
 		requireDenied(t, role, `SELECT exec.reject_modification()`)
+		requireDenied(t, role, `UPDATE exec.session_event SET mac = mac`)
 		requireDenied(t, role, `SELECT 1 FROM exec.changeset_revision`)
 		requireDenied(t, role, `INSERT INTO exec.changeset_event (changeset_id, rev, at, kind, payload, mac) VALUES (gen_random_uuid(), 1, now(), 'x', '{}', '\x00')`)
 	}
@@ -159,9 +160,11 @@ func TestExecutorRoleGrants(t *testing.T) {
 		"backups.config_version": "SELECT INSERT(device_id,drift,full_ct,full_dek_ct,masked,sha256,size,source,taken_by_job)",
 		"backups.backup_state":   "SELECT INSERT UPDATE",
 	}
+	/* The append-only rows: only their MAC may be rewritten (a sealing key rotation); the audit chain not even that. */
 	for _, rel := range execImmutable {
-		want[rel] = "SELECT INSERT"
+		want[rel] = "SELECT INSERT UPDATE(mac)"
 	}
+	want["exec.audit_event"] = "SELECT INSERT"
 	/* Every relation of every schema the executor can reach: exactly the list, nothing else. */
 	requireGrants(t, "nms_executor", want, "exec", "execpub", "core", "backups")
 
@@ -439,12 +442,12 @@ func TestExecImmutableTablesRejectModificationForEveryRole(t *testing.T) {
 		return strings.Join(parts, " ")
 	}
 	before := count()
-	col := map[string]string{"exec.audit_event": "hash"}
+	/* A column other than mac (a rotation rewrites only the MAC: TestExecAppendOnlyRowsTakeOnlyAMACRewrite); audit_event: not even that. */
+	col := map[string]string{"exec.audit_event": "hash", "exec.session": "user_id", "exec.session_device": "pre_ct",
+		"exec.session_event": "payload", "exec.recording_chunk": "ct", "exec.recording_manifest": "sha256",
+		"exec.changeset": "kind", "exec.changeset_revision": "content", "exec.changeset_event": "kind"}
 	for _, rel := range execImmutable {
 		c := col[rel]
-		if c == "" {
-			c = "mac"
-		}
 		for _, sql := range []string{
 			fmt.Sprintf("UPDATE %s SET %s = %s", rel, c, c),
 			fmt.Sprintf("UPDATE %s SET %s = %s WHERE false", rel, c, c),
@@ -870,7 +873,7 @@ func TestChangesetMigrationOnPhase4Database(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, sql := range []string{`UPDATE exec.changeset_revision SET mac = mac`, `DELETE FROM exec.changeset_event`, `TRUNCATE exec.changeset CASCADE`} {
+		for _, sql := range []string{`UPDATE exec.changeset_revision SET content = content`, `DELETE FROM exec.changeset_event`, `TRUNCATE exec.changeset CASCADE`} {
 			_, err := p.Exec(ctx, sql)
 			requireCode(t, err, "42501", role+": "+sql)
 		}
@@ -977,4 +980,35 @@ func TestDeviceBusyHostKey(t *testing.T) {
 		}
 		requireDenied(t, role, `UPDATE execpub.device_busy SET hostkey_fp = NULL`)
 	}
+}
+
+/*
+The append-only exec rows (security.md 5.4 D1) take an UPDATE of their mac
+column only, and only that: a rotation rewrites the MAC, nobody (not even
+the owner or a superuser) changes another column, deletes or truncates.
+*/
+func TestExecAppendOnlyRowsTakeOnlyAMACRewrite(t *testing.T) {
+	env := testdb.New(t)
+	ctx := context.Background()
+	root := env.Pool("postgres")
+	if _, err := root.Exec(ctx, `INSERT INTO exec.session (id, user_id, opened_at, policy_snapshot, mac)
+		VALUES ('00000000-0000-0000-0000-0000000000aa', 1, now(), '{}', `+mac32+`)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Pool("nms_executor").Exec(ctx, `UPDATE exec.session SET mac = decode(repeat('11', 32), 'hex')
+		WHERE id = '00000000-0000-0000-0000-0000000000aa'`); err != nil {
+		t.Fatalf("mac rewrite: %v", err)
+	}
+	for _, sql := range []string{
+		`UPDATE exec.session SET user_id = 2 WHERE false`,
+		`UPDATE exec.session SET user_id = 2, mac = ` + mac32,
+		`DELETE FROM exec.session`,
+		`TRUNCATE exec.session CASCADE`,
+	} {
+		if _, err := root.Exec(ctx, sql); err == nil {
+			t.Errorf("superuser %q succeeded", sql)
+		}
+		requireDenied(t, "nms_executor", sql)
+	}
+	requireDenied(t, "nms_executor", `UPDATE exec.audit_event SET hash = hash`)
 }

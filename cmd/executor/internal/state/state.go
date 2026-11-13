@@ -74,6 +74,21 @@ type File struct {
 	FreezeReason string     `json:"freeze_reason"`
 	AuditBase    *AuditHead `json:"audit_base,omitempty"`
 	AuditSealed  []Segment  `json:"audit_sealed,omitempty"`
+	/*
+		KeyVersion is the version of the sealing key this file is MACed with (0: the
+		first, 1); PendingKey is set with Pending while a rotation to another key is
+		in flight: the ID of that key, so only the rotation itself settles it.
+	*/
+	KeyVersion int32  `json:"key_version,omitempty"`
+	PendingKey []byte `json:"pending_key,omitempty"`
+}
+
+/* SealVersion is the version of the sealing key the file is MACed with. */
+func (f File) SealVersion() int32 {
+	if f.KeyVersion == 0 {
+		return 1
+	}
+	return f.KeyVersion
 }
 
 /* MaxSealed bounds the sealed segments (one per registry reset that moved the base). */
@@ -164,6 +179,7 @@ func Load(path string, key *[32]byte) (File, error) {
 		return File{}, ErrInvalid
 	}
 	if f.V != Version || !f.Committed.valid() || (f.Pending != nil && !f.Pending.valid()) || (f.Pending == nil) != (f.PendingXID == 0) || len(f.FreezeReason) > MaxReason ||
+		f.KeyVersion < 0 || (f.PendingKey != nil && (f.Pending == nil || len(f.PendingKey) != sha256.Size)) ||
 		(f.AuditBase != nil && (f.AuditBase.LastID < 0 || len(f.AuditBase.Hash) != sha256.Size)) || !sealedValid(f.AuditSealed, f.Base()) {
 		return File{}, ErrInvalid
 	}

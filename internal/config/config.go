@@ -170,6 +170,15 @@ func ReadKeyFile(path string) (*[32]byte, error) {
 		return nil, fmt.Errorf("read key file: %w", err)
 	}
 	defer clear(raw)
+	key, err := ParseKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("key file %s: %w", path, err)
+	}
+	return key, nil
+}
+
+/* ParseKey reads a 32-byte key given as raw bytes or base64 (any of its four alphabets, surrounding space ignored). */
+func ParseKey(raw []byte) (*[32]byte, error) {
 	key := new([32]byte)
 	if len(raw) == len(key) {
 		copy(key[:], raw)
@@ -188,5 +197,5 @@ func ReadKeyFile(path string) (*[32]byte, error) {
 			return key, nil
 		}
 	}
-	return nil, fmt.Errorf("key file %s: want 32 raw bytes or base64 of 32 bytes", path)
+	return nil, errors.New("want 32 raw bytes or base64 of 32 bytes")
 }

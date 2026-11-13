@@ -564,6 +564,10 @@ func (r *Registry) settle(ctx context.Context, f state.File) (state.File, error)
 	if f.Pending == nil {
 		return f, nil
 	}
+	if f.PendingKey != nil {
+		/* Only the rotation, holding both keys, settles it (Rotate): its rows may be under the next key already. */
+		return f, tampered("a sealing key rotation is in flight: finish it with nmsctl executor key rotate")
+	}
 	st, err := r.xactStatus(ctx, f.PendingXID)
 	switch {
 	case err != nil:
@@ -896,6 +900,12 @@ with ops applied, appends the declared audit rows to the chain from head
 through the state file.
 */
 func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snapshot, ops []op, seq int64, head state.AuditHead, audit []Appender) error {
+	return r.applyWith(ctx, tx, f, pre, ops, seq, head, audit, r.keys.MAC(), r.commit)
+}
+
+/* applyWith is apply with the rows MACed under macKey and the change recorded by commit (a rotation: Rotate). */
+func (r *Registry) applyWith(ctx context.Context, tx pgx.Tx, f state.File, pre *Snapshot, ops []op, seq int64, head state.AuditHead, audit []Appender,
+	macKey *[32]byte, commit func(ctx context.Context, tx pgx.Tx, f state.File, next state.Record) error) error {
 	type want struct {
 		canonical, mac []byte
 	}
@@ -920,7 +930,7 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 			params = append(params, v.param)
 		}
 		canonical := Canonical(o.t.name, o.pk, content, seq)
-		mac := macOf(r.keys.MAC(), canonical)
+		mac := macOf(macKey, canonical)
 		if _, err := tx.Exec(ctx, o.t.upsertSQL(), append(params, seq, mac)...); err != nil {
 			return err
 		}
@@ -930,7 +940,7 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if err := checkCatalog(ctx, tx); err != nil {
 		return err
 	}
-	post, err := scan(ctx, tx, r.keys.MAC())
+	post, err := scan(ctx, tx, macKey)
 	if err != nil {
 		return err
 	}
@@ -956,7 +966,7 @@ func (r *Registry) apply(ctx context.Context, tx pgx.Tx, f state.File, pre *Snap
 	if head, err = appendAudit(ctx, tx, head, audit); err != nil {
 		return err
 	}
-	return r.commit(ctx, tx, f, state.Record{HWM: seq, StateHash: hash, AuditHead: head})
+	return commit(ctx, tx, f, state.Record{HWM: seq, StateHash: hash, AuditHead: head})
 }
 
 /*
