@@ -15,3 +15,12 @@ tar -xOf "$bundle" manifest.json >/dev/null # it is a bundle
 minisign -S -s "$seckey" -m "$bundle" -t "nms update bundle $(basename "$bundle")"
 sed -n 2p "$bundle.minisig" | grep -q '^RU' || { echo "not a prehashed signature: upgrade minisign" >&2; exit 1; }
 minisign -V -p "$pubkey" -m "$bundle"
+
+# The host nmsctl carries the release key that checks every later bundle, so it must be verifiable
+# itself: sign the release's SHA256SUMS (nmsctl and the bundle) when it lies next to the bundle.
+# Operators check it before installing nmsctl: minisign -V -p minisign.pub -m SHA256SUMS && sha256sum -c SHA256SUMS
+sums="$(dirname "$bundle")/SHA256SUMS"
+if [ -f "$sums" ]; then
+  minisign -S -s "$seckey" -m "$sums" -t "nms release checksums $(basename "$bundle")"
+  minisign -V -p "$pubkey" -m "$sums"
+fi
