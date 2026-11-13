@@ -355,6 +355,41 @@ var trace = []struct {
 		{"cmd/executor/internal/changeset", "TestRestoreVersionOnEveryLine"},
 		{"cmd/executor/internal/changeset", "TestRestoreRefusals"},
 	}},
+	/* The threat scenarios of security.md 3 that the Phase 6 pentest checks (test/pentest/asvs-l2.md). */
+	{"N2", "stolen panel password and login TOTP: no change and no unmasked configuration without an executor grant and the separate change TOTP; the panel grants nothing of the executor, carries no device secret, and bulk reads need a fresh step-up; guessing locks", []ref{
+		{"cmd/executor/internal/authz", "TestC2aNoOrWrongTOTP"},
+		{"cmd/executor/internal/authz", "TestC2bTicketWithoutGrant"},
+		{"cmd/executor/internal/unmask", "TestC9UnmaskNeedsGrantGroupAndTOTP"},
+		{"internal/httpapi", "TestNoRouteLiftsFreeze"},
+		{"internal/httpapi", "TestBackupResponsesCarryNoSecrets"},
+		{"internal/httpapi", "TestPutProfileStoresOpaqueCiphertext"},
+		{"internal/httpapi", "TestStepUpEnforced"},
+		{"internal/httpapi", "TestAuthRateLimit"},
+		{"internal/auth", "TestAccountLockoutEscalates"},
+		{"internal/auth", "TestTOTPReplayRejected"},
+	}},
+	{"N3", "RCE in the api or its database role: no exec rights, forged tickets need the user's change TOTP, changed addresses or flags are not believed by the executor nor contacted by the poller in the stack's networks, its HTML and service workers are stripped by the gateway", []ref{
+		{"internal/store", "TestAPIRoleHasNoExecRights"},
+		{"cmd/executor/internal/attacktest", "TestAPICannotLearnTheChangeTOTPSecret"},
+		{"cmd/executor/internal/authz", "TestPanelUserDenyOnly"},
+		{"cmd/executor/internal/devices", "TestC2cAPIChangesAddressAndGroup"},
+		{"cmd/executor/internal/admin", "TestBindingRefusesWhatTheAPIChanged"},
+		{"internal/poller", "TestAddrGuard"},
+		{"internal/poller", "TestDeniedAddressGetsNoContact"},
+		{"internal/install", "TestRenderedPollerConfigLoads"},
+		{"test/gateway", "TestAPIResponsesForcedJSON"},
+		{"test/gateway", "TestServiceWorkerRequestRejected"},
+		{"test/gateway", "TestSetCookieAllowedOnlyForAuth"},
+	}},
+	{"N4", "malware on the admin's workstation: an intercepted change code or ticket works once, dangerous lines need a new code, sessions end by time, the panel cookie is worthless on :8443, step-up expires", []ref{
+		{"cmd/executor/internal/authz", "TestAcceptOnceAndAudit"},
+		{"cmd/executor/internal/authz", "TestTicketRefusals"},
+		{"cmd/executor/internal/terminal", "TestC4DangerousLineNeedsNameAndNewCode"},
+		{"cmd/executor/internal/session", "TestTimeouts"},
+		{"cmd/executor/internal/web", "TestCookieIgnored"},
+		{"internal/auth", "TestStepUpRotatesTokenAndExpires"},
+		{"internal/auth", "TestSessionIdleAndAbsoluteExpiry"},
+	}},
 }
 
 /*
@@ -428,7 +463,7 @@ func TestTraceability(t *testing.T) {
 		}
 	}
 	/* The scenarios 4a, 4b and 4c must prove (the plan's table rows owned by them, the 4a.7 attack, the 4a review focus items). */
-	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4d.4", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5"} {
+	for _, id := range []string{"C1", "C2a", "C2b", "C2c", "C2d", "C2e", "C2f", "C2g", "C2i", "C2j", "C2k", "C3", "C4", "C5", "C6", "C7", "C8", "C2h", "C9", "4d.2", "4d.4", "4a.7", "4c.2", "4c.3", "4c.4", "4c.5", "RF1", "RF2", "RF3", "RF4", "RF5", "N2", "N3", "N4"} {
 		if !ids[id] {
 			t.Errorf("scenario %s is not in the index", id)
 		}
